@@ -24203,6 +24203,7 @@ pub const InferenceEngine = struct {
         );
         self.decode_cmd.computeBarrier();
 
+        const attn_proj_phase = self.beginProfilePhase();
         // Batched Q (or packed Q+gate) / K / V / (separate attn_gate)
         // projections — each weight tensor is read once per chunk. On the
         // Qwen3.6-27B RDNA path, reuse the dense/SSM DP4a projection kernels
@@ -24317,6 +24318,8 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
         }
 
+        self.endProfilePhase(.attention_qkv, attn_proj_phase);
+        const attn_rope_phase = self.beginProfilePhase();
         // Per-head Q / K norms — one RMS row per (token, head).
         if (!self.spec_kv_only) {
             if (q_norm_t_opt) |q_norm_t| {
@@ -24381,6 +24384,8 @@ pub const InferenceEngine = struct {
         );
         self.decode_cmd.computeBarrier();
 
+        self.endProfilePhase(.attention_rope, attn_rope_phase);
+        const attn_kv_write_phase = self.beginProfilePhase();
         // Batched KV cache write — one dispatch writes all n_tokens K/V into
         // paged slots [base_token, base_token + n_tokens).
         try self.dispatchKvCacheWriteBatched(
@@ -24400,12 +24405,14 @@ pub const InferenceEngine = struct {
             base_token,
         );
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.attention_kv_write, attn_kv_write_phase);
         if (self.spec_kv_only) {
             // NextN catch-up: K/V rows are written; nothing downstream is consumed.
             self.endProfilePhase(.attention, attention_phase);
             return;
         }
 
+        const flash_phase = self.beginProfilePhase();
         // Batched causal flash attention: n_tokens queries over prefix KV +
         // own freshly-written K/V slots.
         const sink_offset = layer * cfg.n_heads;
@@ -24433,6 +24440,7 @@ pub const InferenceEngine = struct {
         );
         self.decode_cmd.computeBarrier();
 
+        self.endProfilePhase(.flash_attn_kernel, flash_phase);
         // attn_out *= sigmoid(attn_gate). Linear element count covers all
         // n_tokens × layer_q_dim floats in one dispatch. Skip when the layer
         // has no gate (neither packed nor separate) — matches the per-token
@@ -24450,6 +24458,7 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
         }
 
+        const attn_o_phase = self.beginProfilePhase();
         // O projection batched: scratch_attn_out → scratch_down (residual src).
         // Quantize the post-attention activation separately; it has K=o_cols,
         // not hidden_dim like the Q/K/V/gate inputs above.
@@ -24469,6 +24478,7 @@ pub const InferenceEngine = struct {
             try self.dispatchProjectionBatched(o_t, scratch_attn_out, scratch_down, hidden_dim, o_cols, n_tokens);
         }
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.attention_o_proj, attn_o_phase);
 
         self.endProfilePhase(.attention, attention_phase);
 
