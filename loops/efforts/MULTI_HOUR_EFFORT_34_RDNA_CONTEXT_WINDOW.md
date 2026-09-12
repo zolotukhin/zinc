@@ -1068,3 +1068,10 @@ Not ALU-bound (stage 25), not load-bound (this): the remaining suspects are
 the 48 dependent cross-lane score reductions and 20 exps per 32-key step. Next:
 timing-only variants that strip each.
 
+**Correction to stage 39:** the LDS variant (and the two timing hacks after
+it) never ran — the prefill path picks the tile pipeline directly in
+forward.zig and bypasses the attention.zig record function that held the
+switch. "Bit-identical, no speedup" was the production kernel measured against
+itself. The rescale-skip result (stage 25) is unaffected (it edited the
+production kernels). Selection fixed; re-measuring.
+
