@@ -866,3 +866,11 @@ correct). Attention kernels are exonerated. Stage 20 (after 19) disables the
 checkpoint (`ZINC_CHAT_CHECKPOINT=0`, transcript reuse): if q1 then answers,
 the checkpoint take/restore itself is numerically off.
 
+**Stage 18c: the f16 cache does not change it either** (order 1,2,5: q1
+`PLUM-4417-`, q2/q5 correct). Four numeric configurations (int8-dot, f32-dot,
+suffix through the tile kernel, f16 cache) give the identical cut, so the miss
+is not numeric noise; something discrete about "q1 first after the turn-0
+prefill through reuse" decides it. Stage 19 (order 1,1,2,1), stage 20
+(transcript reuse instead of the checkpoint) and stage 21 (top-2 logit
+margins at each generated token) are queued.
+
