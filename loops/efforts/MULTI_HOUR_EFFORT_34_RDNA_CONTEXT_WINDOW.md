@@ -874,3 +874,14 @@ prefill through reuse" decides it. Stage 19 (order 1,1,2,1), stage 20
 (transcript reuse instead of the checkpoint) and stage 21 (top-2 logit
 margins at each generated token) are queued.
 
+**Stage 19: order 1,1,2,1 → MISS, MISS, OK, MISS.** Once the cut answer is in
+the history the model repeats it, and one correct answer in between does not
+undo it; stage 17's full answers came after four complete answers. So "asked
+later" was in-context priming, not a first-restore effect. Every checkpoint-flow
+configuration cuts q1 identically, while the old transcript-reuse flow (the
+previous turn carrying its empty think scaffold) answered it in full — the
+model's decision on this farthest fact sits on an edge that the rendering of
+the previous turn moves. Stage 20b: a barrier-ordered checkpoint copy first
+(the take had no barrier against the prefill's dispatches), then the top-2
+margins at each generated token, then transcript reuse on the same build.
+
