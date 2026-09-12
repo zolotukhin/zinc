@@ -698,3 +698,19 @@ either way, ~48 chunks at 100K vs ~10 at 20K) is the leading candidate, and it
 is code this session changed. Stage 12 (splice vs monolithic vs llama.cpp) and
 then a chunk-count sweep decide it.
 
+**Stage 12: the identical transcript decodes correctly everywhere.** doc + q1–q3
++ clean answers + q4, fed at 100K: ZINC monolithic, ZINC "spliced", and
+llama.cpp monolithic all answer `88-Q-3105` (9 tokens). So ZINC decodes that
+exact 100K context as well as llama.cpp — not an engine gap, not genuine model
+behaviour on that context. Caveat: the "spliced" run used a fresh session_id, so
+it had no resident prefix to splice against and was really a second monolithic
+prefill. The truncation appears only in a *live* multi-turn session, where the
+engine's stored sequence (the model's own generated answers + end-of-turn tails,
+carried across turns) is what later turns continue — so the splice/reuse path is
+building a context that differs from the canonical one. Stage 10's log hints at
+it: `engine_only_tokens=20` and `=24` on the later turns, where the first turn
+was `=4` (just the empty think scaffold). Stage 13 runs the live five-fact flow
+at 100K with reuse **off** (full re-prefill each turn): 5/5 pins it on the splice
+path; a miss means the model's own multi-turn history truncates it and llama.cpp
+on the same live flow says whether that is shared.
+
