@@ -1028,4 +1028,6 @@ ones fell through to the batched DMMV chunks because the qkv DP4a path only
 took Q6_K/Q5_K. Routing them through the Q4_K z-projection DP4a GEMM (generic
 in M): 0.302 → 0.083 ms/token; 17K prefill 432 → **475 tok/s**. Cumulative
 today: 404 → 475 (+17.5%). 20K five-fact 5/5.
+The exact 20,031-token comparison prompt: **470.4 tok/s vs llama.cpp 459**
+(was 414.6). ZINC now leads the 20K prefill. 100K/197K re-measure queued.
 
