@@ -1050,3 +1050,12 @@ kernel is 20% of the whole prefill at 17K and the majority at depth. Its Of
 accumulators are 4 rows × 8 vec4 = 128 VGPRs per lane before anything else,
 which is the occupancy problem behind "latency-bound".
 
+**Stage 38: RADV shader stats for the tile attention kernel**
+(`RADV_DEBUG=shaderstats`): 252 VGPRs, 0 spills, 6 subgroups per SIMD, 3,798
+instructions (3,234 VALU, 72 VMEM), LDS 4,608 B. Six waves per SIMD is the
+latency wall, and each of a workgroup's 4 waves fetches the same 32-key K/V
+tile from memory itself (4× redundant, 36-byte per-lane gathers). Next: stage
+the tile through LDS once per workgroup with coalesced cooperative loads
+(behind ZINC_FA_TILE_LDS for A/B; the per-lane math and accumulation order stay
+identical, so outputs should be bit-identical).
+
