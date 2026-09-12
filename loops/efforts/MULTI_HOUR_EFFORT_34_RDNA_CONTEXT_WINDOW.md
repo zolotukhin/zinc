@@ -1031,3 +1031,15 @@ today: 404 → 475 (+17.5%). 20K five-fact 5/5.
 The exact 20,031-token comparison prompt: **470.4 tok/s vs llama.cpp 459**
 (was 414.6). ZINC now leads the 20K prefill. 100K/197K re-measure queued.
 
+**Stage 36: depth re-measure with the three GEMM fixes** (q8 cache,
+speculation priming on):
+
+| prefill | before | now | llama.cpp |
+|---|---:|---:|---:|
+| 20,031 tokens | 414.6 tok/s | **470.4** | 459 |
+| 87,592 tokens | 289 | **323.7** | ~290 |
+| 197,239 tokens | 1015 s (194 tok/s) | **918 s (214.9)** | 893 s (221) |
+
+ZINC now leads the prefill at 20K and 100K; at 197K the gap is 2.7% (was 12%),
+and 6% of that prefill is the NextN priming that llama.cpp does not do.
+
