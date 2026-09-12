@@ -567,3 +567,21 @@ depth, so lanes 16–63 wrote past them. Fixed (`MAX_CHUNKS = 64`, matching
 depth A/Bs. llama.cpp's numbers stand: correct at every depth, 1-second turns
 through its prompt cache, 18.5 tok/s with 197K resident.
 
+## Decode at depth: occupancy confirmed (2026-09-12)
+
+100K resident tokens, f16, speculation off, 8-token generations after a reused
+prefix, merge fixed:
+
+| decode at 100K depth | tok/s |
+|---|---:|
+| per-head kernel, 4 split-K chunks (old default) | 14.6 |
+| per-head kernel, depth-scaled chunks (48) | **24.1** |
+| grouped kernel, depth-scaled chunks | 23.9 |
+
+Same kernel, same bytes: 1.65x from workgroups in flight alone. The grouped
+kernel adds nothing once occupancy is fixed, so it stays opt-in. (These runs'
+needle check missed on all three variants alike — the "vault access code"
+phrasing draws a refusal with thinking off; the depth prompts now use the
+neutral "project codename" fact, and correctness at depth is judged by the
+five-fact eval rerun.)
+
