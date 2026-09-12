@@ -3047,6 +3047,8 @@ pub const InferenceEngine = struct {
         const force_cpu_argmax = blk: {
             if (std.posix.getenv("ZINC_FORCE_CPU_ARGMAX")) |raw| break :blk !std.mem.eql(u8, raw, "0");
             if (std.posix.getenv("ZINC_CPU_ARGMAX")) |raw| break :blk !std.mem.eql(u8, raw, "0");
+            // Diagnostics: log the top-2 logits and their margin per greedy token.
+            if (std.posix.getenv("ZINC_LOG_TOPK")) |raw| break :blk !std.mem.eql(u8, raw, "0");
             break :blk false;
         };
         if (force_cpu_argmax) {
@@ -30785,10 +30787,22 @@ pub const InferenceEngine = struct {
 
         var max_val: f32 = logits[0];
         var max_idx: u32 = 0;
+        var second_val: f32 = -std.math.inf(f32);
+        var second_idx: u32 = 0;
         for (logits[1..], 1..) |val, i| {
             if (val > max_val) {
+                second_val = max_val;
+                second_idx = max_idx;
                 max_val = val;
                 max_idx = @intCast(i);
+            } else if (val > second_val) {
+                second_val = val;
+                second_idx = @intCast(i);
+            }
+        }
+        if (std.posix.getenv("ZINC_LOG_TOPK")) |raw| {
+            if (!std.mem.eql(u8, raw, "0")) {
+                log.info("topk: top={d} logit={d:.3} second={d} logit={d:.3} margin={d:.3}", .{ max_idx, max_val, second_idx, second_val, max_val - second_val });
             }
         }
         return max_idx;
