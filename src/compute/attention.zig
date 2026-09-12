@@ -103,6 +103,8 @@ pub const AttentionDispatch = struct {
     /// q8-cache prefill kernel with the Q.K^T product on the int8 dot instruction
     /// (flash_attn_batched_tile_q8mmq). Loaded only for a q8 cache; opt-in.
     pipeline_batched_tile_mmq: ?Pipeline,
+    /// LDS-staged sibling of the int8 tile kernel (ZINC_FA_TILE_LDS=1).
+    pipeline_batched_tile_mmq_lds: ?Pipeline,
     /// Split-K variant — same flash_attn.spv specialized with N_I_CHUNKS=fa_split_k_active
     /// so it writes per-chunk partials into partial_attn_out_buf instead of the
     /// final normalized output. Enabled by default (N=4); disabled when ZINC_FA_SPLIT_K is 0 or 1.
@@ -202,6 +204,11 @@ pub const AttentionDispatch = struct {
             log.warn("flash_attn_batched_tile_q8mmq shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+        const attn_mmq_lds_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched_tile_q8mmq_lds.spv", .{shader_dir}) catch unreachable;
+        const pipeline_batched_tile_mmq_lds: ?Pipeline = if (!kv_dtype.isQ8()) null else pipeline_mod.createFromSpirvWithOptions(instance, attn_mmq_lds_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+            log.warn("flash_attn_batched_tile_q8mmq_lds shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
 
         // Split-K variant. The pipeline reuses flash_attn.spv with the
         // N_I_CHUNKS spec const set; its "output" binding (4) is wired to
@@ -272,6 +279,7 @@ pub const AttentionDispatch = struct {
             .pipeline_batched_gqa = pipeline_batched_gqa,
             .pipeline_batched_tile = pipeline_batched_tile,
             .pipeline_batched_tile_mmq = pipeline_batched_tile_mmq,
+            .pipeline_batched_tile_mmq_lds = pipeline_batched_tile_mmq_lds,
             .pipeline_split = pipeline_split,
             .pipeline_split_merge = pipeline_split_merge,
             .fa_split_k_active = fa_split_k_active,
@@ -361,7 +369,8 @@ pub const AttentionDispatch = struct {
         attn_scale: f32,
         sink_offset: u32,
     ) !void {
-        const pip = if (self.pipeline_batched_tile_mmq) |*p| p else return error.ShaderNotLoaded;
+        const want_lds = if (std.posix.getenv("ZINC_FA_TILE_LDS")) |v| !std.mem.eql(u8, v, "0") else false;
+        const pip = if (want_lds and self.pipeline_batched_tile_mmq_lds != null) &self.pipeline_batched_tile_mmq_lds.? else if (self.pipeline_batched_tile_mmq) |*p| p else return error.ShaderNotLoaded;
         const push = FlashAttnBatchedPush{
             .head_dim = head_dim,
             .n_heads = n_heads,
@@ -604,6 +613,7 @@ pub const AttentionDispatch = struct {
         if (self.pipeline_batched_gqa) |*p| p.deinit();
         if (self.pipeline_batched_tile) |*p| p.deinit();
         if (self.pipeline_batched_tile_mmq) |*p| p.deinit();
+        if (self.pipeline_batched_tile_mmq_lds) |*p| p.deinit();
         if (self.pipeline_gqa_split) |*p| p.deinit();
         if (self.pipeline_split_mmq) |*p| p.deinit();
         if (self.pipeline_split) |*p| p.deinit();

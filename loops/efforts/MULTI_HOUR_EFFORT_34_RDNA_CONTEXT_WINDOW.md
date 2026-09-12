@@ -1059,3 +1059,12 @@ the tile through LDS once per workgroup with coalesced cooperative loads
 (behind ZINC_FA_TILE_LDS for A/B; the per-lane math and accumulation order stay
 identical, so outputs should be bit-identical).
 
+**Stage 39: LDS-staged K/V changes nothing either.** Bit-identical (91 greedy
+tokens with identical top-2 logits, 20K five-fact 5/5), flash phase 0.473 →
+0.476 ms per token of the last chunk. Note: the profiler's "per-tok" numbers
+are per token of the *last* chunk (800 tokens at ~17K depth here), which is
+why the flash share is larger than the whole-prefill length curve suggests.
+Not ALU-bound (stage 25), not load-bound (this): the remaining suspects are
+the 48 dependent cross-lane score reductions and 20 exps per 32-key step. Next:
+timing-only variants that strip each.
+
