@@ -1043,3 +1043,10 @@ speculation priming on):
 ZINC now leads the prefill at 20K and 100K; at 197K the gap is 2.7% (was 12%),
 and 6% of that prefill is the NextN priming that llama.cpp does not do.
 
+**Stage 37: the attention layer, per sub-phase, at 17K** (ms/token): flash
+attention 0.477, q/k/v/gate projections 0.081, o-projection 0.045, head norms
++ rope 0.002, KV write 0.000. The projections are already on DP4a; the flash
+kernel is 20% of the whole prefill at 17K and the majority at depth. Its Of
+accumulators are 4 rows × 8 vec4 = 128 VGPRs per lane before anything else,
+which is the occupancy problem behind "latency-bound".
+
