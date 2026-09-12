@@ -739,3 +739,39 @@ determines whether the fix is a recompute trigger or a drift correction.
 Decode and prefill at depth are now at or ahead of llama.cpp; the one open gap is
 reuse-path correctness on deep needles.
 
+## The reuse-path truncation is a design tension, not a bug (2026-09-12)
+
+Confirmed in code. With thinking off, `transportAssistantContent` prepends the
+empty `<think>\n\n</think>\n\n` to every stored assistant turn on purpose, so
+the reused token sequence matches the resident KV *and* DeltaNet recurrent state
+— which the model actually decoded with those scaffolds present. That match is
+required for reuse to be correct. A cache hit then sets `state.position` to the
+reused length and prefills only the new tail (`routes.zig` ~2786), carrying the
+recurrent state forward; a fresh request rebuilds it from zero.
+
+The catch is that the canonical multi-turn render — what a fresh prefill and
+llama.cpp feed — drops *past* turns' scaffolds and keeps only the current one.
+So the reuse path replays a sequence that gains one empty think block per turn,
+and the 48 DeltaNet (linear-attention) layers have no softmax to suppress them:
+each spurious segment leaves a persistent bias in the recurrent state. At 20K
+it is harmless (5/5); past ~50% of a 100K context it tips deep-needle answers
+into an early end-of-sequence (3/5). It is identical on q8 and f16 because the
+recurrent state is f32 either way.
+
+No free fix, and the direction is a real tradeoff:
+  - **Canonical reuse:** drop historical scaffolds so the reused sequence
+    matches the standard render. Correct, but the resident recurrent state was
+    built over the scaffolded sequence, so it needs a rebuild — which is the
+    full prefill reuse exists to avoid, exactly at the depth where reuse is most
+    valuable.
+  - **Bounded divergence:** force a clean re-prefill once the accumulated
+    scaffolds at deep context cross a threshold. Keeps reuse for the common case
+    (few turns / short context), pays one full prefill occasionally.
+  - **No per-turn scaffold:** stop injecting the empty scaffold at generation so
+    nothing accumulates. Largest change; touches the tool-calling suppression
+    path the scaffold was added for, needs that regression test.
+
+Left for a deliberate follow-up rather than a rushed patch. The reuse path stays
+on: it is correct at the depths a bot actually runs, and it is what makes 262K
+usable turn to turn.
+
