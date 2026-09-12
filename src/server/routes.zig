@@ -2837,9 +2837,12 @@ fn handleChatCompletions(
         engine_prompt_tokens.len;
     if (reused_prefix_len > 0) {
         if (checkpoint_pos) |cp| {
-            // The entry is a canonical prefix ending at the checkpoint; the
-            // engine must roll back to it before the suffix is prefilled.
-            if (cp == reused_prefix_len and runtime.ssmCheckpointPosition(engine) == cp and spliced_prompt == null and runtime.ssmCheckpointRestore(engine, &state)) {
+            // The entry is the engine's own token prefix ending at the
+            // checkpoint; the engine must roll back to it before the suffix is
+            // prefilled. Matching by text (a session that once carried an
+            // engine-only scaffold) is fine: the reused length is still the
+            // stored entry, and the checkpoint sits exactly at its end.
+            if (cp == reused_prefix_len and runtime.ssmCheckpointPosition(engine) == cp and runtime.ssmCheckpointRestore(engine, &state)) {
                 log.info("chat cache checkpoint restored: session={s} position={d}", .{ parsed.session_id, cp });
             } else {
                 log.info("chat cache checkpoint unavailable: session={s} entry={d} engine={?d}; full prefill", .{ parsed.session_id, cp, runtime.ssmCheckpointPosition(engine) });
@@ -2854,7 +2857,11 @@ fn handleChatCompletions(
     // turn can roll back and re-process the canonical suffix instead of
     // continuing from a transcript that accumulates one scaffold per turn.
     const header_end: usize = if (cacheable_session) (lastAssistantHeaderEnd(allocator, tokenizer, engine_prompt_tokens) orelse engine_prompt_tokens.len) else engine_prompt_tokens.len;
-    const split_at: usize = if (header_end > reused_prefix_len and header_end < engine_prompt_tokens.len) header_end else engine_prompt_tokens.len;
+    // A turn whose canonical history ends exactly at the restored checkpoint
+    // (a client retry of the previous turn) keeps the checkpoint instead of
+    // letting the transcript path replace the entry.
+    const at_checkpoint = checkpoint_pos != null and header_end == reused_prefix_len;
+    const split_at: usize = if ((header_end > reused_prefix_len or at_checkpoint) and header_end < engine_prompt_tokens.len) header_end else engine_prompt_tokens.len;
     if (reused_prefix_len > 0) {
         state.position = @intCast(reused_prefix_len);
         if (reused_prefix_len < split_at) {
@@ -2893,14 +2900,17 @@ fn handleChatCompletions(
         // store the canonical prefix, then prefill this turn's generation
         // prompt and prime it too.
         if (!sampling.requiresLogitsReadback()) {
-            _ = if (reused_prefix_len == 0)
-                runtime.mtpPrime(engine, &state, engine_prompt_tokens[0..split_at])
-            else
-                runtime.mtpPrimeSuffix(engine, &state, engine_prompt_tokens[0..split_at], @intCast(reused_prefix_len));
+            if (reused_prefix_len == 0) {
+                _ = runtime.mtpPrime(engine, &state, engine_prompt_tokens[0..split_at]);
+            } else if (reused_prefix_len < split_at) {
+                _ = runtime.mtpPrimeSuffix(engine, &state, engine_prompt_tokens[0..split_at], @intCast(reused_prefix_len));
+            }
         }
         checkpointed = runtime.ssmCheckpointTake(engine, &state);
         if (checkpointed) {
-            server_state.chat_reuse_cache.storeCheckpointed(parsed.session_id, resources.model_path, prompt_tokens[0..split_at], @intCast(split_at), std.time.nanoTimestamp()) catch |err| {
+            // Store the tokens the engine actually processed: after a text
+            // splice they differ from the canonical prompt and its indices.
+            server_state.chat_reuse_cache.storeCheckpointed(parsed.session_id, resources.model_path, engine_prompt_tokens[0..split_at], @intCast(split_at), std.time.nanoTimestamp()) catch |err| {
                 log.warn("chat cache: could not store checkpointed prefix: {s}", .{@errorName(err)});
                 checkpointed = false;
             };
