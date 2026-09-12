@@ -833,3 +833,16 @@ re-checkpoints a turn that ends at the checkpoint, and stores the tokens the
 engine processed. Stage 16 reruns the 197K five-fact flow with the retry in
 both speculation modes.
 
+**Stage 16 result.** With the retry fixed (7 restores, 0 fallbacks, 1 full
+prefill, 3–4 s per question), the 197K flow scores **4/5 in both speculation
+modes with the identical miss**: q1 (5% depth) → `PLUM-4417-`. Speculation is
+exonerated. The miss belongs to the reuse flow: the same document answered 5/5
+as a single prompt. The 5% fact is also the *farthest* from the question, so it
+is the one with the thinnest attention margin; the reuse flow's only numeric
+difference from a single prompt is that the short appended suffix attends
+through the split-K decode kernel (int8-dot for q8) instead of the prefill tile
+kernel. Stage 17 asks the fact last (order 2,3,4,5,1,1) to separate "first
+restore after the chunked prefill" from "the fact itself"; stage 18 A/Bs
+f32-dot decode attention, suffix attention through the tile kernel, and the
+f16 cache.
+
