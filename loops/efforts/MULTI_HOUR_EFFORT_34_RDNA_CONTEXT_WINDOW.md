@@ -688,3 +688,13 @@ ZINC-monolithic answers and ZINC-spliced truncates it is the splice; if both
 truncate it is how ZINC decodes that exact context, and the llama.cpp run on the
 same tokens says whether that is an engine gap.
 
+**20K control (stage 11): 5/5 on both q8+speculation and f16**, same five-fact
+session flow, same q4/q5 facts that truncate at 100K (`88-Q-3105`, `23.5
+degrees` both answered in full). So the machinery is sound and the facts are
+answerable in-session; the truncation is purely a function of depth. Combined
+with q8 == f16 at 100K, the suspect narrows to something identical across cache
+formats that grows with depth — the split-K online-softmax merge (f32 partials
+either way, ~48 chunks at 100K vs ~10 at 20K) is the leading candidate, and it
+is code this session changed. Stage 12 (splice vs monolithic vs llama.cpp) and
+then a chunk-count sweep decide it.
+
