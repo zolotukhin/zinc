@@ -27964,7 +27964,10 @@ pub const InferenceEngine = struct {
         const per_token = self.batchedScratchBytesPerToken();
         if (per_token == 0) return 0;
         const limit = budget / per_token;
-        return @intCast(@max(limit, prefill_scratch_floor_tokens));
+        // A multiple of 64 lets every full chunk take the 64-row GEMM tiles
+        // (the ragged tail is the last chunk only).
+        const aligned = if (limit >= 64) limit & ~@as(u64, 63) else limit;
+        return @intCast(@max(aligned, prefill_scratch_floor_tokens));
     }
 
     /// Bytes of batched scratch a single prompt token needs. Mirrors the slots

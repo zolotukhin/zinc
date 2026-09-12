@@ -996,3 +996,16 @@ third of the FFN GEMMs' efficiency. At FFN-down efficiency it would take
 ~0.17 ms: −0.31 ms/token = −12% of the 20K prefill (405 → ~460 tok/s, llama.cpp
 459) and ~6% at 197K.
 
+**Stage 30: 64-row tiles for the K=5120 projections: +3.7% at 17K** (404 →
+419 tok/s). The BM64 DP4a variants for the DeltaNet qkv (Q6_K, Q8_1 input) and
+z (Q4_K) projections were routed only when N was exactly 64; now any N that is
+a multiple of 64 takes them, and prefill chunks are sized to a multiple of 64
+so every full chunk qualifies (3,276 → 3,264 tokens). z: 0.134 → 0.092
+ms/token; qkv: 0.483 → 0.431. Correct: 20K five-fact 5/5 (a truncated 226K
+document ties its first fact at 0.090 logits on the previous binary too — not
+the retile). qkv still runs at ~12 TFLOPS against the Q4_K z projection's 33
+with the same K and tile: the Q6_K DP4a kernels read weights with byte loads
+(`uint8_t a_data[]`, 36 loads per 16 elements); Q6_K GEMMs are 45% of the
+prefill (qkv 0.43 + FFN-down 0.30 + gate/up 0.35 ms/token). Next: 16-bit weight
+loads in the four Q6_K DP4a kernels.
+

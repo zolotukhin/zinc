@@ -4904,7 +4904,9 @@ pub const DmmvDispatch = struct {
         a_offset: u32,
         d_offset: u32,
     ) !void {
-        const use_k5120_n64_bm64 = K == 5120 and N == 64 and (M & 63) == 0 and self.pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_bm64 != null;
+        // Any N that is a multiple of 64 takes the 64-row tile (prefill chunks are
+        // sized to a multiple of 64 for this); the ragged tail keeps the 32-row tile.
+        const use_k5120_n64_bm64 = K == 5120 and N >= 64 and (N & 63) == 0 and (M & 63) == 0 and self.pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_bm64 != null;
         const use_ragged_n64 = K == 5120 and N > 64 and (N & 63) != 0 and self.pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_ragged != null;
         const n_tile: u32 = if (use_k5120_n64_bm64)
             64
@@ -5791,7 +5793,7 @@ pub const DmmvDispatch = struct {
         const mmq64_acc_enabled = if (std.posix.getenv("ZINC_QWEN36_27B_MMQ64_DOWN")) |raw| !std.mem.eql(u8, raw, "0") else false;
         const k12288_bk2_enabled = if (std.posix.getenv("ZINC_QWEN35_9B_K12288_BK2")) |raw| !std.mem.eql(u8, raw, "0") else true;
         const k12288_bm64_down_enabled = if (std.posix.getenv("ZINC_QWEN35_9B_BM64_DOWN")) |raw| !std.mem.eql(u8, raw, "0") else true;
-        const use_k5120_n64_bm64 = !accumulate and K == 5120 and N == 64 and (M & 63) == 0 and self.pipeline_mul_mm_q4k_full_dp4a_k5120_n64_bm64 != null;
+        const use_k5120_n64_bm64 = !accumulate and K == 5120 and N >= 64 and (N & 63) == 0 and (M & 63) == 0 and self.pipeline_mul_mm_q4k_full_dp4a_k5120_n64_bm64 != null;
         const use_k5120_ragged_n64 = !accumulate and K == 5120 and N > 64 and (N & 63) != 0 and self.pipeline_mul_mm_q4k_full_dp4a_k5120_n64_ragged != null;
         const use_k12288_ragged_n64_bm64 = k12288_bm64_down_enabled and !accumulate and K == 12288 and N > 64 and (N & 63) != 0 and (M & 63) == 0 and self.pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bm64_ragged != null;
         const use_k12288_ragged_n64_bk2 = !use_k12288_ragged_n64_bm64 and k12288_bk2_enabled and !accumulate and K == 12288 and N > 64 and (N & 63) != 0 and self.pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bk2_ragged != null;
