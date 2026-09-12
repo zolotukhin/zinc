@@ -960,3 +960,8 @@ vectorized loads and a software-pipelined next tile), which is the shape of
 llama.cpp's scalar FA — a kernel-architecture change, deferred. The rescale
 skip stays (exact, harmless).
 
+**Stage 26: the tokenization cache verifies.** 197K, four turns after the
+first, `ZINC_TOKENIZE_CACHE_VERIFY=1`: every cached tokenization equals the
+full encode (197266, 197298, 197323, 197356 tokens). Stage 27 measures the turn
+without the verification encode.
+
