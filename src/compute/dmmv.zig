@@ -346,6 +346,13 @@ pub const MulMmQ4KGateUpDp4aQ8Push = extern struct {
 pub const Q8_1_BLOCK_BYTES: u32 = 36;
 
 /// Manages DMMV pipelines for different quantization types.
+/// The dynamic-K 64x64 GEMM tile used when no K-specialized pipeline matches.
+/// ZINC_GEMM_GENERIC_BM64=0 restores the 32x32 tile for A/B checks.
+fn genericBm64TileEnabled() bool {
+    const raw = std.posix.getenv("ZINC_GEMM_GENERIC_BM64") orelse return true;
+    return !std.mem.eql(u8, raw, "0");
+}
+
 pub const DmmvDispatch = struct {
     /// Q4K pipeline, or null.
     pipeline_q4k: ?Pipeline,
@@ -4664,7 +4671,7 @@ pub const DmmvDispatch = struct {
         // No K-specialized variant for this shape: a 64x64 tile still halves the
         // weight re-reads of the default 32x32 one. K stays dynamic (push
         // constant); BK_STEP is 2 in the bm64 shader, hence the K % 64 guard.
-        const use_generic_n64_bm64 = !accumulate and
+        const use_generic_n64_bm64 = genericBm64TileEnabled() and !accumulate and
             K != 5120 and K != 12288 and K != 17408 and K != 21504 and
             N >= 64 and (N & 63) == 0 and (M & 63) == 0 and (K & 63) == 0 and
             self.pipeline_mul_mm_q6k_full_dp4a_n64_bm64_dynk != null;
@@ -5206,7 +5213,7 @@ pub const DmmvDispatch = struct {
         const use_ragged_n64 = use_k4096_ragged_n64 or use_k5120_ragged_n64;
         // No K-specialized variant: the 64x64 tile still halves weight
         // re-reads vs the default 32x32 one. K stays dynamic (push constant).
-        const use_generic_n64_bm64 = K != 4096 and K != 5120 and
+        const use_generic_n64_bm64 = genericBm64TileEnabled() and K != 4096 and K != 5120 and
             N >= 64 and (N & 63) == 0 and (M & 63) == 0 and (K & 63) == 0 and
             self.pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_n64_bm64_dynk != null;
         const n_tile: u32 = if (use_generic_n64_bm64)
@@ -5541,7 +5548,7 @@ pub const DmmvDispatch = struct {
         const use_ragged_n64 = use_k4096_ragged_n64 or use_k5120_ragged_n64;
         // No K-specialized variant: the 64x64 tile still halves weight
         // re-reads vs the default 32x32 one. K stays dynamic (push constant).
-        const use_generic_n64_bm64 = K != 4096 and K != 5120 and
+        const use_generic_n64_bm64 = genericBm64TileEnabled() and K != 4096 and K != 5120 and
             N >= 64 and (N & 63) == 0 and (M & 63) == 0 and (K & 63) == 0 and
             self.pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_n64_bm64_dynk != null;
         const n_tile: u32 = if (use_generic_n64_bm64)
@@ -5886,7 +5893,7 @@ pub const DmmvDispatch = struct {
         // No K-specialized variant for this shape: a 64x64 tile still halves the
         // weight re-reads of the default 32x32 one. K stays dynamic (push
         // constant); BK_STEP is 2 in the bm64 shader, hence the K % 64 guard.
-        const use_generic_n64_bm64 = !accumulate and
+        const use_generic_n64_bm64 = genericBm64TileEnabled() and !accumulate and
             K != 5120 and K != 12288 and K != 17408 and K != 21504 and
             N >= 64 and (N & 63) == 0 and (M & 63) == 0 and (K & 63) == 0 and
             self.pipeline_mul_mm_q4k_full_dp4a_n64_bm64_dynk != null;

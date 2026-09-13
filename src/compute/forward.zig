@@ -104,10 +104,14 @@ fn qwenDenseDownDp4aAccEligible(
 const gemma_prefill_micro_prompt_guard_tokens: u32 = 8;
 const gemma_prefill_long_draft_prompt_min_tokens: u32 = 49;
 const gemma_prefill_dp4a_max_tokens: u32 = 384;
-/// Muse Glimmer batched prefill: chunk cap (the DP4a padded-token band tops out
-/// at 384) and the layer cadence of intermediate submits.
+/// Muse Glimmer batched prefill chunk cap (the DP4a padded-token band tops out
+/// at 384).
 const muse_prefill_chunk_tokens: u32 = 384;
-const muse_prefill_submit_layers: usize = 16;
+/// Batched prefill submits its command buffer every few layers so one
+/// submission covers at most this many token-layers (Muse's verified 256 x 16)
+/// and never more than prefill_submit_max_layers layers.
+const prefill_submit_token_layers: usize = 4096;
+const prefill_submit_max_layers: usize = 16;
 const gemma_prefill_long_draft_prompt_guard_tokens: u32 = 2;
 const gemma_prefill_shared_skip_max_tokens: u32 = 72;
 const gemma_prefill_tiny_prompt_topk: u32 = 2;
@@ -28484,14 +28488,14 @@ pub const InferenceEngine = struct {
         const freq_buf_handle = self.rope_freq_buf.handle;
         const freq_buf_size = self.rope_freq_buf.size;
 
-        // Muse Glimmer: a single batched command buffer that runs longer than
-        // ~2 s is killed by the R9700's kernel driver (ring timeout, context
-        // lost) although same-length Qwen buffers survive. Chunks are capped at
-        // muse_prefill_chunk_tokens and, as insurance, the layer loop submits
-        // every muse_prefill_submit_layers layers so no submission approaches
-        // the limit. Each split costs one fence wait (~0.2 ms).
-        const muse_split_layers: usize = if (cfg.architecture == .muse_glimmer and n_tokens >= 64)
-            muse_prefill_submit_layers
+        // A compute submission that runs longer than ~2 s is killed by the
+        // R9700's kernel driver (ring timeout, then "context lost" on the next
+        // submit): seen with Muse Glimmer at 243 tokens and dense Gemma 4 31B at
+        // 555 tokens in one buffer. Submit every few layers so each submission
+        // stays within prefill_submit_token_layers. Each split costs one fence
+        // wait (~0.2 ms).
+        const submit_every_layers: usize = if (n_tokens >= 64)
+            std.math.clamp(prefill_submit_token_layers / @as(usize, n_tokens), 1, prefill_submit_max_layers)
         else
             0;
         for (0..cfg.n_layers) |layer_idx| {
@@ -28515,7 +28519,7 @@ pub const InferenceEngine = struct {
                 try self.decode_cmd.reset();
                 try self.decode_cmd.beginOneTime();
             }
-            if (muse_split_layers > 0 and layer_idx > 0 and layer_idx % muse_split_layers == 0) {
+            if (submit_every_layers > 0 and layer_idx > 0 and layer_idx % submit_every_layers == 0) {
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
                 try self.decode_cmd.reset();
