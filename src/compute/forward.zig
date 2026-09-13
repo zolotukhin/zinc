@@ -18709,7 +18709,11 @@ pub const InferenceEngine = struct {
         if (self.validation_diagnostics_enabled) return false;
         if (self.use_qwen36_dense_prefill_validate or self.use_qwen36_ssm_prefill_validate) return false;
         if (!self.isQwen36A3bMoePrefillModel()) return false;
-        if (!isIntelGpuVendor(self.gpu_config.vendor)) return false;
+        // Intel and AMD RDNA: on the R9700 the grouped exact path produced
+        // token ids identical to the reference at 64 and 339 prompt tokens
+        // while prefilling 2.8-6.3x faster than per-token exact MoE.
+        // ZINC_QWEN36_MOE_GROUPED_EXACT=0 disables it.
+        if (!isIntelGpuVendor(self.gpu_config.vendor) and !self.isAmdRdna()) return false;
         if (n_tokens < 16 or n_tokens > qwen_a3b_exact_grouped_moe_prefill_max_tokens) return false;
         if (std.posix.getenv("ZINC_QWEN36_MOE_GROUPED_EXACT")) |env| {
             if (std.mem.eql(u8, env, "0") or
@@ -28309,6 +28313,11 @@ pub const InferenceEngine = struct {
         // (the ragged tail is the last chunk only).
         var aligned = if (limit >= 64) limit & ~@as(u64, 63) else limit;
         if (self.model.config.architecture == .muse_glimmer) aligned = @min(aligned, muse_prefill_chunk_tokens);
+        // Qwen 3.6 A3B: keep every chunk inside the exact grouped MoE prefill
+        // band so long prompts do not fall back to per-token exact MoE.
+        if (self.qwenA3bExactGroupedMoePrefillEnabled(qwen_a3b_exact_grouped_moe_prefill_max_tokens)) {
+            aligned = @min(aligned, qwen_a3b_exact_grouped_moe_prefill_max_tokens);
+        }
         return @intCast(@max(aligned, prefill_scratch_floor_tokens));
     }
 
