@@ -1234,3 +1234,32 @@ tail (int8 activation quantization). Decode is unchanged at 33.6 tok/s = the 17 
 (llama.cpp 33.7). Per-token cost inside a chunk: FFN 2.35 ms (≈16 TFLOPS), attention 0.73 ms; chunk
 boundaries add ~20% wall overhead — the next levers if Muse prefill needs more.
 
+
+## Stage 52 — full RDNA refresh, submission time limit, placement harness (2026-09-13)
+
+**Workstation incident.** A Metal bisect of the gemma4-26b-a4b batched prefill ran ZINC on the developer Mac
+while a llama-server loaded with the same 17 GB model was still alive; WindowServer starved and macOS panicked
+(`userspace watchdog timeout`). AGENTS.md now has a "GPU Workload Placement" section: every model load,
+inference server, llama.cpp binary and benchmark runs on the test node; the workstation is limited to builds,
+model-free tests, git and site deploys; Metal runs need explicit per-run approval; preflight uses `pgrep -x`
+(a `pgrep -f` pattern matches the ssh command line carrying it).
+
+**~2 s submission kill is model-independent.** Before republishing, a greedy check against llama.cpp at a
+555–577-token raw prompt showed dense Gemma 4 31B dying after a 2.04 s single-buffer prefill ("context lost",
+one ring timeout) — Muse's signature. `prefillBatchedImpl` now submits every `clamp(4096 / n_tokens, 1, 16)`
+layers for every model (f15ccdd8): Gemma 31B at 555 tokens completes, Muse stays at 508 tok/s byte-identical.
+The suite's own prompts (≤ ~334 tokens) never crossed the limit.
+
+**Generic 64x64 tile verified.** `ZINC_GEMM_GENERIC_BM64=0` A/B: identical greedy output for Qwen 3.5 9B,
+Qwen 3.6 35B-A3B, Qwen 3.8 27B, Gemma 4 26B-A4B and Gemma 4 31B.
+
+**Qwen 3.6 35B-A3B correctness is open.** On raw prompts ending mid-word llama.cpp completes the word and
+ZINC does not, on both the fast A3B path and the per-token reference (`ZINC_BATCHED_PREFILL=0`); Qwen 3.5 9B
+and 3.8 27B match llama.cpp for 50–70 characters on the same prompt. The chat question "capital of France"
+answers correctly, but the CLI keeps generating past `<|endoftext|>`. Next: tokenization of the mid-word
+prompt, then per-layer residuals against `llama-eval-callback`.
+
+**Suite fixes.** Remote server logs were opened in append mode keyed by port, so a reused port gave Gemma
+26B-A4B Qwen 3.8's NextN acceptance lines and a false MTP flag (51538bf0: truncate at launch). Partial reruns
+overwrote the target provenance for untouched rows (ea391241, 51538bf0: per-model `provenance`/`generated_at`).
+llama.cpp on the node moved to master 5f436dddb.
