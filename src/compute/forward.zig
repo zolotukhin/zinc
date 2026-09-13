@@ -104,6 +104,10 @@ fn qwenDenseDownDp4aAccEligible(
 const gemma_prefill_micro_prompt_guard_tokens: u32 = 8;
 const gemma_prefill_long_draft_prompt_min_tokens: u32 = 49;
 const gemma_prefill_dp4a_max_tokens: u32 = 384;
+/// Muse Glimmer batched prefill: chunk cap (keeps the DP4a token band and the
+/// per-submission GPU time short) and the layer cadence of intermediate submits.
+const muse_prefill_chunk_tokens: u32 = 256;
+const muse_prefill_submit_layers: usize = 16;
 const gemma_prefill_long_draft_prompt_guard_tokens: u32 = 2;
 const gemma_prefill_shared_skip_max_tokens: u32 = 72;
 const gemma_prefill_tiny_prompt_topk: u32 = 2;
@@ -1008,8 +1012,8 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
         const lt = engine.layer_tensors[i];
         // A separate attention gate (Muse Glimmer): the batched path's result is
         // still wrong for Muse (per-token is verified against llama.cpp), so it
-        // stays off unless ZINC_MUSE_BATCHED=1 is set for debugging.
-        if (lt.attn_gate != null and !(cfg.architecture == .muse_glimmer and envFlagEnabled("ZINC_MUSE_BATCHED", false))) return false;
+        // is on by default (ZINC_MUSE_BATCHED=0 falls back to per-token prefill).
+        if (lt.attn_gate != null and !(cfg.architecture == .muse_glimmer and envFlagEnabled("ZINC_MUSE_BATCHED", true))) return false;
         if (lt.attn_q_bias != null or lt.attn_k_bias != null or
             lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
 
@@ -1095,6 +1099,12 @@ fn museEmbedRmsNorm(row: []f32, eps: f32) void {
 /// QK-normed attention). Muse's global layers (every 4th) use NoPE and full
 /// attention; its other layers are sliding-window (the window is not
 /// enforced on Vulkan, same as Gemma here).
+/// Dense models with the Gemma prefill skeleton whose activation-agnostic DP4a
+/// batched paths (attention projections, down GEMM, int8 scratch) apply.
+fn isGemmaStyleDenseArch(arch: loader.Architecture) bool {
+    return arch == .gemma or arch == .muse_glimmer;
+}
+
 fn hasGemmaStylePostNorms(arch: loader.Architecture) bool {
     return arch == .gemma or arch == .muse_glimmer;
 }
@@ -12941,7 +12951,7 @@ pub const InferenceEngine = struct {
             n_tokens >= 16 and
             ((M == qwen_a3b_shared_inter_dim and K == cfg.hidden_dim) or
                 (M == cfg.hidden_dim and K == qwen_a3b_shared_inter_dim));
-        const gemma_dense_q6_projection_shape = cfg.architecture == .gemma and
+        const gemma_dense_q6_projection_shape = isGemmaStyleDenseArch(cfg.architecture) and
             cfg.n_experts == 0 and
             cfg.ssm_d_inner == 0 and
             tensor.info.type_ == .q6_k and
@@ -12981,7 +12991,7 @@ pub const InferenceEngine = struct {
             self.dmmv.pipeline_mul_mm_q4k != null)
         {
             const tail_cols = n_tokens & 31;
-            if (cfg.architecture == .gemma and
+            if (isGemmaStyleDenseArch(cfg.architecture) and
                 cfg.n_experts == 0 and
                 cfg.ssm_d_inner == 0 and
                 tail_cols > 0 and
@@ -13450,7 +13460,7 @@ pub const InferenceEngine = struct {
         if (!self.instance.caps.integer_dot_product) return false;
         if (self.instance.push_descriptor_fn == null) return false;
         const cfg = self.model.config;
-        if (cfg.architecture != .gemma or cfg.ssm_d_inner != 0) return false;
+        if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return false;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
         const padded_tokens = self.gemmaDensePrefillPaddedTokenCount(n_tokens);
         if (padded_tokens < 64 or padded_tokens > gemma_prefill_dp4a_max_tokens) return false;
@@ -13494,7 +13504,7 @@ pub const InferenceEngine = struct {
         if (!self.instance.caps.integer_dot_product) return false;
         if (self.instance.push_descriptor_fn == null) return false;
         const cfg = self.model.config;
-        if (cfg.architecture != .gemma or cfg.ssm_d_inner != 0) return false;
+        if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return false;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
         const padded_tokens = self.gemmaProjectionPrefillPaddedTokenCount(n_tokens);
         return padded_tokens >= 64 and padded_tokens <= gemma_prefill_dp4a_max_tokens;
@@ -14637,6 +14647,90 @@ pub const InferenceEngine = struct {
             );
         }
         return .f32_geglu;
+    }
+
+    /// Muse Glimmer batched FFN gate/up: quantize the normed activations to
+    /// q8_1 once and run the SwiGLU-fused Q4_K DP4a GEMM (the Qwen dense
+    /// kernel) over the padded column band. Writes f32 SwiGLU output for
+    /// `padded_cols` columns into `scratch_swiglu`; the down projection then
+    /// takes the activation-agnostic Gemma DP4a path. Returns false (nothing
+    /// recorded) when a prerequisite is missing so the caller falls back.
+    fn dispatchMuseGateUpSwigluDp4aBatched(
+        self: *InferenceEngine,
+        gate_t: *const LoadedTensor,
+        up_t: *const LoadedTensor,
+        scratch_norm: Buffer,
+        scratch_swiglu: Buffer,
+        hidden_dim: u32,
+        inter_dim: u32,
+        n_tokens: u32,
+        dp4a_cols_out: *u32,
+    ) !bool {
+        dp4a_cols_out.* = 0;
+        if (self.model.config.architecture != .muse_glimmer) return false;
+        if (!self.use_mul_mm_proj) return false;
+        if (gate_t.info.type_ != .q4_k or up_t.info.type_ != .q4_k) return false;
+        if ((hidden_dim & 255) != 0 or (inter_dim & 31) != 0) return false;
+        if (!self.gemmaDenseProjectionDp4aEnabled(n_tokens)) return false;
+        if (self.dmmv.pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a == null or self.dmmv.pipeline_quantize_act_q8_1 == null) return false;
+        const padded_cols = self.gemmaDensePrefillPaddedTokenCount(n_tokens);
+        if (padded_cols < n_tokens or (padded_cols & 31) != 0) return false;
+        const hidden_i8 = self.batched_scratch_hidden_i8 orelse return false;
+        const hidden_sd = self.batched_scratch_hidden_scale_dsum orelse return false;
+        const f32_sz: vk.c.VkDeviceSize = @sizeOf(f32);
+        const cols: vk.c.VkDeviceSize = padded_cols;
+        if (scratch_norm.size < cols * @as(vk.c.VkDeviceSize, hidden_dim) * f32_sz) return false;
+        if (hidden_i8.size < cols * @as(vk.c.VkDeviceSize, hidden_dim / 4) * @sizeOf(u32)) return false;
+        if (hidden_sd.size < cols * @as(vk.c.VkDeviceSize, hidden_dim / 32) * 2 * f32_sz) return false;
+        if (scratch_swiglu.size < cols * @as(vk.c.VkDeviceSize, inter_dim) * f32_sz) return false;
+
+        const quant_phase = self.beginProfilePhase();
+        try self.dmmv.recordQuantizeActQ8_1(
+            &self.decode_cmd,
+            self.instance.push_descriptor_fn,
+            scratch_norm.handle,
+            scratch_norm.size,
+            hidden_i8.handle,
+            hidden_i8.size,
+            hidden_sd.handle,
+            hidden_sd.size,
+            padded_cols,
+            hidden_dim,
+        );
+        const q8_ranges = [_]CommandBuffer.BufferRange{
+            .{ .buffer = hidden_i8.handle, .size = hidden_i8.size },
+            .{ .buffer = hidden_sd.handle, .size = hidden_sd.size },
+        };
+        self.decode_cmd.computeBuffersBarrier(&q8_ranges);
+        self.endProfilePhase(.dense_ffn_gateup_quant, quant_phase);
+
+        const matmul_phase = self.beginProfilePhase();
+        try self.dmmv.recordMulMmQ4KGateUpSwigluFullDp4a(
+            &self.decode_cmd,
+            self.instance.push_descriptor_fn,
+            gate_t.gpu_buffer.handle,
+            gate_t.gpu_buffer.size,
+            up_t.gpu_buffer.handle,
+            up_t.gpu_buffer.size,
+            hidden_i8.handle,
+            hidden_i8.size,
+            hidden_sd.handle,
+            hidden_sd.size,
+            scratch_swiglu.handle,
+            scratch_swiglu.size,
+            inter_dim,
+            padded_cols,
+            hidden_dim,
+            0,
+            0,
+        );
+        const out_ranges = [_]CommandBuffer.BufferRange{
+            .{ .buffer = scratch_swiglu.handle, .size = scratch_swiglu.size },
+        };
+        self.decode_cmd.computeBuffersBarrier(&out_ranges);
+        self.endProfilePhase(.dense_ffn_gateup_matmul_q4, matmul_phase);
+        dp4a_cols_out.* = padded_cols;
+        return true;
     }
 
     fn dispatchGemmaDenseDownDp4aBatched(
@@ -18434,7 +18528,7 @@ pub const InferenceEngine = struct {
 
     fn gemmaDensePrefillPaddedTokenCount(self: *const InferenceEngine, n_tokens: u32) u32 {
         const cfg = self.model.config;
-        if (cfg.architecture != .gemma or cfg.ssm_d_inner != 0) return n_tokens;
+        if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return n_tokens;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return n_tokens;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return n_tokens;
         if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > gemma_prefill_dp4a_max_tokens) return n_tokens;
@@ -18444,7 +18538,7 @@ pub const InferenceEngine = struct {
 
     fn gemmaProjectionPrefillPaddedTokenCount(self: *const InferenceEngine, n_tokens: u32) u32 {
         const cfg = self.model.config;
-        if (cfg.architecture != .gemma or cfg.ssm_d_inner != 0) return n_tokens;
+        if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return n_tokens;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return n_tokens;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return n_tokens;
         if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > gemma_prefill_dp4a_max_tokens) return n_tokens;
@@ -28064,7 +28158,8 @@ pub const InferenceEngine = struct {
         const limit = budget / per_token;
         // A multiple of 64 lets every full chunk take the 64-row GEMM tiles
         // (the ragged tail is the last chunk only).
-        const aligned = if (limit >= 64) limit & ~@as(u64, 63) else limit;
+        var aligned = if (limit >= 64) limit & ~@as(u64, 63) else limit;
+        if (self.model.config.architecture == .muse_glimmer) aligned = @min(aligned, muse_prefill_chunk_tokens);
         return @intCast(@max(aligned, prefill_scratch_floor_tokens));
     }
 
@@ -28267,6 +28362,16 @@ pub const InferenceEngine = struct {
         const freq_buf_handle = self.rope_freq_buf.handle;
         const freq_buf_size = self.rope_freq_buf.size;
 
+        // Muse Glimmer: a single batched command buffer that runs longer than
+        // ~2 s is killed by the R9700's kernel driver (ring timeout, context
+        // lost) although same-length Qwen buffers survive. Chunks are capped at
+        // muse_prefill_chunk_tokens and, as insurance, the layer loop submits
+        // every muse_prefill_submit_layers layers so no submission approaches
+        // the limit. Each split costs one fence wait (~0.2 ms).
+        const muse_split_layers: usize = if (cfg.architecture == .muse_glimmer and n_tokens >= 64)
+            muse_prefill_submit_layers
+        else
+            0;
         for (0..cfg.n_layers) |layer_idx| {
             // ZINC_MUSE_DIAG=1: dump token 0's residual entering layers 1..3
             // (outputs of layers 0..2) in the batched path, for comparison
@@ -28285,6 +28390,12 @@ pub const InferenceEngine = struct {
                 var ss: f64 = 0.0;
                 for (0..hidden_dim) |i| ss += @as(f64, dv[i]) * @as(f64, dv[i]);
                 log.info("MUSE_DIAG(batched): after layer {d}: hidden[0..3]={d:.4},{d:.4},{d:.4} last3={d:.4},{d:.4},{d:.4} rms={d:.4}", .{ layer_idx - 1, dv[0], dv[1], dv[2], dv[hidden_dim - 3], dv[hidden_dim - 2], dv[hidden_dim - 1], @sqrt(ss / @as(f64, @floatFromInt(hidden_dim))) });
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+            }
+            if (muse_split_layers > 0 and layer_idx > 0 and layer_idx % muse_split_layers == 0) {
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
                 try self.decode_cmd.reset();
                 try self.decode_cmd.beginOneTime();
             }
@@ -28615,7 +28726,11 @@ pub const InferenceEngine = struct {
                 @sizeOf(f32);
             var gemma_gateup_dp4a_cols: u32 = 0;
             const gemma_gateup_result = try self.dispatchGemmaGateUpGegluBatched(gate_t, up_t, down_t, scratch_norm, scratch_swiglu, inter_dim, hidden_dim, ffn_n_tokens, &gemma_gateup_dp4a_cols);
+            var muse_swiglu_done = false;
             if (gemma_gateup_result == .not_handled) {
+                muse_swiglu_done = try self.dispatchMuseGateUpSwigluDp4aBatched(gate_t, up_t, scratch_norm, scratch_swiglu, hidden_dim, inter_dim, ffn_n_tokens, &gemma_gateup_dp4a_cols);
+            }
+            if (gemma_gateup_result == .not_handled and !muse_swiglu_done) {
                 try self.dispatchProjectionBatched(gate_t, scratch_norm, scratch_gate, inter_dim, hidden_dim, ffn_n_tokens);
                 try self.dispatchProjectionBatched(up_t, scratch_norm, scratch_up, inter_dim, hidden_dim, ffn_n_tokens);
                 const gateup_ranges = [_]CommandBuffer.BufferRange{
