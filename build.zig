@@ -525,6 +525,21 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(hot_bench);
     }
 
+    // CPU-only tokenizer check (`zig build tokenize-tool`): parses GGUF metadata
+    // and prints ZINC's prompt token ids without opening a GPU device, for
+    // diffing against the reference tokenizer on any machine.
+    const tokenize_tool_mod = b.createModule(.{
+        .root_source_file = b.path("src/tokenize_tool.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const tokenize_tool = b.addExecutable(.{
+        .name = "zinc-tokenize",
+        .root_module = tokenize_tool_mod,
+    });
+    const tokenize_tool_step = b.step("tokenize-tool", "Build the CPU-only GGUF tokenizer check (zig-out/bin/zinc-tokenize)");
+    tokenize_tool_step.dependOn(&b.addInstallArtifact(tokenize_tool, .{}).step);
+
     // --- CUDA primitive-layer smoke (Linux/WSL2 + NVIDIA only) ---
     // Builds & runs src/cuda/smoke.zig standalone — independent of the main exe
     // and the gpu/interface.zig dispatch — so the src/cuda/* primitive layer can

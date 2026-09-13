@@ -7,6 +7,7 @@ const gguf = @import("gguf.zig");
 const tool_format_mod = @import("../server/tool_format.zig");
 
 const log = std.log.scoped(.tokenizer);
+const unicode_classes = @import("unicode_classes.zig");
 
 fn isQwen35LikeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "qwen35") or
@@ -22,6 +23,65 @@ fn resolveSpecialTokenId(declared_id: ?u32, token_to_id: *const std.StringHashMa
 }
 
 /// A native BPE tokenizer backed by vocabulary and merge tables from GGUF metadata.
+/// Token texts the reference implementation treats as end-of-generation.
+const end_of_generation_token_texts = [_][]const u8{
+    "<|eot_id|>",                                      "<|im_end|>", "<|end|>",    "<|return|>",
+    "<|call|>",                                        "<|flush|>",  "<|calls|>",  "<end_of_turn>",
+    "<|endoftext|>",                                   "</s>",       "<|eom_id|>", "<EOT>",
+    "_<EOT>",                                          "[EOT]",      "[EOS]",      "<|end_of_text|>",
+    "<end_of_utterance>",                              "<eos>",      "<turn|>",    "<|tool_response>",
+    "<\u{FF5C}end\u{2581}of\u{2581}sentence\u{FF5C}>", "[e~[",
+};
+
+fn appendUniqueId(list: *std.ArrayList(u32), allocator: std.mem.Allocator, id: u32) !void {
+    for (list.items) |existing| {
+        if (existing == id) return;
+    }
+    try list.append(allocator, id);
+}
+
+fn removeId(list: *std.ArrayList(u32), id: u32) void {
+    var i: usize = 0;
+    while (i < list.items.len) {
+        if (list.items[i] == id) {
+            _ = list.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Build the end-of-generation id set the way the reference implementation
+/// does: every vocabulary token whose text is a known end marker, plus the
+/// declared EOS and EOT ids; `<|end|>` is dropped when `<|return|>` and
+/// `<|call|>` (or `<|calls|>` and `<|flush|>`) exist, because there it only
+/// closes a message, and `</s>` is dropped when `<|tool_response>` exists.
+fn buildEndOfGenerationIds(
+    allocator: std.mem.Allocator,
+    token_to_id: *const std.StringHashMap(u32),
+    eos_id: u32,
+    eot_id: ?u32,
+) ![]u32 {
+    var ids: std.ArrayList(u32) = .{};
+    errdefer ids.deinit(allocator);
+    for (end_of_generation_token_texts) |text| {
+        if (token_to_id.get(text)) |id| try appendUniqueId(&ids, allocator, id);
+    }
+    try appendUniqueId(&ids, allocator, eos_id);
+    if (eot_id) |id| try appendUniqueId(&ids, allocator, id);
+
+    if (token_to_id.get("<|end|>")) |end_id| {
+        const has_call = token_to_id.contains("<|call|>") or token_to_id.contains("<|calls|>");
+        if ((token_to_id.contains("<|return|>") and has_call) or (has_call and token_to_id.contains("<|flush|>"))) {
+            removeId(&ids, end_id);
+        }
+    }
+    if (token_to_id.contains("<|tool_response>")) {
+        if (token_to_id.get("</s>")) |s_id| removeId(&ids, s_id);
+    }
+    return ids.toOwnedSlice(allocator);
+}
+
 pub const Tokenizer = struct {
     /// Vocabulary: token ID → token bytes
     vocab: []const []const u8,
@@ -46,6 +106,14 @@ pub const Tokenizer = struct {
     chat_template: ?[]const u8 = null,
     /// Byte-level BPE pretokenizer style for GPT-2/Qwen-family vocabularies.
     pretokenizer: Pretokenizer = .legacy,
+    /// Per-token flag from `tokenizer.ggml.token_type`: true for control,
+    /// user-defined and unknown tokens, the only ones the reference tokenizer
+    /// matches as special markers. Null when the GGUF has no token types.
+    special_token_mask: ?[]bool = null,
+    /// End-of-generation token ids, built like the reference implementation's
+    /// EOG set: known end tokens by text plus the declared EOS/EOT ids.
+    eog_ids: []const u32 = &.{},
+    eog_ids_owned: bool = false,
     /// Precomputed "first second" → rank lookup used by applyMerges. Built
     /// once at init so each BPE encode (many per prompt) doesn't rebuild a
     /// 151k-entry hashmap — doing that per call cost multi-minute latency on
@@ -72,6 +140,13 @@ pub const Tokenizer = struct {
         /// gpt2_ascii in newline-absorbing punctuation runs, 3-digit caps,
         /// symbol-prefixed words, suffix contractions, and case splitting.
         llama4,
+        /// Reference `qwen35` pretokenizer regex (Qwen 3.5/3.6/3.8): symbol-
+        /// prefixed letter-or-mark runs, single digits, newline-absorbing
+        /// symbol runs, grouped newline whitespace, Unicode classes.
+        qwen35,
+        /// Reference `qwen2` pretokenizer regex: as qwen35 but combining marks
+        /// are symbols rather than part of letter runs.
+        qwen2,
     };
 
     /// Initialize a Tokenizer from an open GGUF file.
@@ -133,6 +208,29 @@ pub const Tokenizer = struct {
         // Read BPE merges if available
         var merges_list: std.ArrayListAligned(Merge, null) = .{};
         errdefer merges_list.deinit(allocator);
+
+        var special_token_mask: ?[]bool = null;
+        errdefer if (special_token_mask) |m| allocator.free(m);
+        if (gf.metadata.get("tokenizer.ggml.token_type")) |types_val| {
+            switch (types_val) {
+                .array => |a| if (a.len == vocab_size) {
+                    const mask = try allocator.alloc(bool, a.len);
+                    for (a, 0..) |v, i| {
+                        const t: i64 = switch (v) {
+                            .int32 => |x| x,
+                            .uint32 => |x| x,
+                            .int8 => |x| x,
+                            .uint8 => |x| x,
+                            else => 1,
+                        };
+                        // 2 = unknown, 3 = control, 4 = user-defined.
+                        mask[i] = t == 2 or t == 3 or t == 4;
+                    }
+                    special_token_mask = mask;
+                },
+                else => {},
+            }
+        }
 
         if (gf.metadata.get("tokenizer.ggml.merges")) |merges_val| {
             switch (merges_val) {
@@ -205,6 +303,10 @@ pub const Tokenizer = struct {
             .gemma4_bpe
         else if (std.mem.eql(u8, pre_name, "llama4") and merges_list.items.len > 0)
             .llama4
+        else if (scores == null and merges_list.items.len > 0 and isQwen35LikeName(pre_name))
+            .qwen35
+        else if (scores == null and merges_list.items.len > 0 and std.mem.eql(u8, pre_name, "qwen2"))
+            .qwen2
         else if (scores == null and merges_list.items.len > 0 and
             (std.mem.eql(u8, model_type, "gpt2") or
                 std.mem.eql(u8, pre_name, "qwen2") or
@@ -238,6 +340,8 @@ pub const Tokenizer = struct {
             try merge_ranks.put(key_copy, merge.rank);
         }
 
+        const eog_ids = try buildEndOfGenerationIds(allocator, &token_to_id, eos_id, eot_id);
+
         return Tokenizer{
             .vocab = vocab,
             .token_to_id = token_to_id,
@@ -250,6 +354,9 @@ pub const Tokenizer = struct {
             .add_eos_token = add_eos_token,
             .chat_template = chat_template,
             .pretokenizer = pretokenizer,
+            .special_token_mask = special_token_mask,
+            .eog_ids = eog_ids,
+            .eog_ids_owned = true,
             .merge_ranks = merge_ranks,
             .merge_ranks_ready = true,
             .allocator = allocator,
@@ -581,6 +688,142 @@ pub const Tokenizer = struct {
         return text[start..i];
     }
 
+    /// A code point decoded for the Qwen pretokenizer and its UTF-8 length.
+    /// Invalid or truncated sequences decode as a one-byte `qwen_invalid_cp`,
+    /// which has no letter, mark, number or space class.
+    const QwenCp = struct { cp: u32, len: usize };
+    const qwen_invalid_cp: u32 = 0xFFFF_FFFF;
+
+    fn qwenDecode(text: []const u8, i: usize) QwenCp {
+        const b0 = text[i];
+        if (b0 < 0x80) return .{ .cp = b0, .len = 1 };
+        const n = std.unicode.utf8ByteSequenceLength(b0) catch return .{ .cp = qwen_invalid_cp, .len = 1 };
+        if (i + n > text.len) return .{ .cp = qwen_invalid_cp, .len = 1 };
+        const cp = std.unicode.utf8Decode(text[i .. i + n]) catch return .{ .cp = qwen_invalid_cp, .len = 1 };
+        return .{ .cp = cp, .len = n };
+    }
+
+    fn qwenIsSpace(cp: u32) bool {
+        if (cp < 0x80) return cp == ' ' or (cp >= 0x09 and cp <= 0x0D);
+        return cp != qwen_invalid_cp and unicode_classes.isSpace(cp);
+    }
+
+    fn qwenIsLetter(cp: u32) bool {
+        if (cp < 0x80) return (cp >= 'a' and cp <= 'z') or (cp >= 'A' and cp <= 'Z');
+        return cp != qwen_invalid_cp and unicode_classes.isLetter(cp);
+    }
+
+    fn qwenIsNumber(cp: u32) bool {
+        if (cp < 0x80) return cp >= '0' and cp <= '9';
+        return cp != qwen_invalid_cp and unicode_classes.isNumber(cp);
+    }
+
+    fn qwenIsMark(cp: u32) bool {
+        return cp >= 0x80 and cp != qwen_invalid_cp and unicode_classes.isMark(cp);
+    }
+
+    fn qwenIsWord(cp: u32, marks_in_words: bool) bool {
+        return qwenIsLetter(cp) or (marks_in_words and qwenIsMark(cp));
+    }
+
+    fn qwenIsSymbol(cp: u32, marks_in_words: bool) bool {
+        return !qwenIsSpace(cp) and !qwenIsLetter(cp) and !qwenIsNumber(cp) and
+            !(marks_in_words and qwenIsMark(cp));
+    }
+
+    /// Qwen-family pretokenizer, matching the reference regex alternative by
+    /// alternative (first match at `pos` wins):
+    ///   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+ | \p{N} |
+    ///    ?[^\s\p{L}\p{M}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+    /// `marks_in_words` selects qwen35 (marks join letter runs); qwen2 matches
+    /// letters alone and treats marks as symbols.
+    fn nextQwenPretokenChunk(text: []const u8, pos: *usize, marks_in_words: bool) []const u8 {
+        if (pos.* >= text.len) return text[text.len..text.len];
+        const start = pos.*;
+
+        const contraction = matchAsciiContraction(text, start);
+        if (contraction > 0) {
+            pos.* = start + contraction;
+            return text[start..pos.*];
+        }
+
+        const c0 = qwenDecode(text, start);
+        const after0 = start + c0.len;
+
+        // [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+
+        const word_start: ?usize = if (qwenIsWord(c0.cp, marks_in_words))
+            start
+        else if (c0.cp != '\r' and c0.cp != '\n' and !qwenIsNumber(c0.cp) and after0 < text.len and
+            qwenIsWord(qwenDecode(text, after0).cp, marks_in_words))
+            after0
+        else
+            null;
+        if (word_start) |ws| {
+            var i = ws;
+            while (i < text.len) {
+                const c = qwenDecode(text, i);
+                if (!qwenIsWord(c.cp, marks_in_words)) break;
+                i += c.len;
+            }
+            pos.* = i;
+            return text[start..i];
+        }
+
+        // \p{N}
+        if (qwenIsNumber(c0.cp)) {
+            pos.* = after0;
+            return text[start..after0];
+        }
+
+        //  ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*
+        const symbol_start: ?usize = if (qwenIsSymbol(c0.cp, marks_in_words))
+            start
+        else if (c0.cp == ' ' and after0 < text.len and qwenIsSymbol(qwenDecode(text, after0).cp, marks_in_words))
+            after0
+        else
+            null;
+        if (symbol_start) |ss| {
+            var i = ss;
+            while (i < text.len) {
+                const c = qwenDecode(text, i);
+                if (!qwenIsSymbol(c.cp, marks_in_words)) break;
+                i += c.len;
+            }
+            while (i < text.len and (text[i] == '\r' or text[i] == '\n')) : (i += 1) {}
+            pos.* = i;
+            return text[start..i];
+        }
+
+        // \s*[\r\n]+ | \s+(?!\S) | \s+ over the maximal whitespace run.
+        var i = start;
+        var last_cp_start = start;
+        var newline_end: ?usize = null;
+        while (i < text.len) {
+            const c = qwenDecode(text, i);
+            if (!qwenIsSpace(c.cp)) break;
+            last_cp_start = i;
+            i += c.len;
+            if (c.cp == '\r' or c.cp == '\n') newline_end = i;
+        }
+        if (newline_end) |end| {
+            pos.* = end;
+            return text[start..end];
+        }
+        if (i > start) {
+            // A run ending the text, or a single space before a non-space, is
+            // one chunk; a longer run leaves its last code point to prefix the
+            // next chunk.
+            const end = if (i == text.len or last_cp_start == start) i else last_cp_start;
+            pos.* = end;
+            return text[start..end];
+        }
+
+        // Every code point is a word, number, symbol or space; keep the loop
+        // advancing regardless.
+        pos.* = after0;
+        return text[start..after0];
+    }
+
     fn nextGemma4PretokenChunk(text: []const u8, pos: *usize) []const u8 {
         if (pos.* >= text.len) return text[text.len..text.len];
 
@@ -629,10 +872,12 @@ pub const Tokenizer = struct {
 
         var pos: usize = 0;
         while (pos < text.len) {
-            const chunk = if (self.pretokenizer == .llama4)
-                nextLlama4PretokenChunk(text, &pos)
-            else
-                nextGpt2PretokenChunk(text, &pos);
+            const chunk = switch (self.pretokenizer) {
+                .llama4 => nextLlama4PretokenChunk(text, &pos),
+                .qwen35 => nextQwenPretokenChunk(text, &pos, true),
+                .qwen2 => nextQwenPretokenChunk(text, &pos, false),
+                else => nextGpt2PretokenChunk(text, &pos),
+            };
             if (chunk.len == 0) break;
             const chunk_tokens = try self.encodeChunk(chunk);
             defer self.allocator.free(chunk_tokens);
@@ -682,6 +927,23 @@ pub const Tokenizer = struct {
         return self.encodeWithSpecialTokens(text, allocator);
     }
 
+    /// Whether a vocabulary match for a `<...>` marker counts as a special token.
+    /// Qwen-family vocabularies hold ordinary BPE tokens shaped like markers
+    /// (`<?>`, `<()>`), which the reference tokenizer encodes as text, so those
+    /// pretokenizers accept only control, user-defined and unknown tokens.
+    fn acceptsSpecialMarker(self: *const Tokenizer, id: u32) bool {
+        const mask = self.special_token_mask orelse return true;
+        if (self.pretokenizer != .qwen35 and self.pretokenizer != .qwen2) return true;
+        return id < mask.len and mask[id];
+    }
+
+    /// Vocabulary id for a special-token marker candidate, or null when the
+    /// text is not a token or is an ordinary token the scan must leave to BPE.
+    fn specialMarkerId(self: *const Tokenizer, candidate: []const u8) ?u32 {
+        const id = self.token_to_id.get(candidate) orelse return null;
+        return if (self.acceptsSpecialMarker(id)) id else null;
+    }
+
     /// Encode text that may contain special token markers (e.g. `<|...|>`).
     /// Special tokens that exist in the vocabulary are mapped directly to their
     /// token IDs; the remaining text segments are BPE-encoded normally.
@@ -700,10 +962,15 @@ pub const Tokenizer = struct {
         var tokens: std.ArrayList(u32) = .{};
         errdefer tokens.deinit(allocator);
 
+        // `pos` is the start of text not yet encoded; `scan` is where the search
+        // for the next special-token marker resumes. A `<` that does not open a
+        // special token stays in the pending text so pretokenization sees it
+        // together with what follows (`<p` is a single Qwen chunk).
         var pos: usize = 0;
-        while (pos < text.len) {
+        var scan: usize = 0;
+        while (scan < text.len) {
             // Look for the next `<` marker (handles both `<|...|>` and `<...>` formats).
-            if (std.mem.indexOfPos(u8, text, pos, "<")) |start| {
+            if (std.mem.indexOfPos(u8, text, scan, "<")) |start| {
                 // Try `<|...|>` first, then `<...>`
                 // Try to match a special token starting at `start`.
                 // Checks <|...|> (GPT-2/Llama) first, then <...> (Gemma).
@@ -714,7 +981,7 @@ pub const Tokenizer = struct {
                 if (start + 2 < text.len and text[start + 1] == '|') {
                     if (std.mem.indexOfPos(u8, text, start + 2, "|>")) |pipe_end| {
                         const candidate = text[start .. pipe_end + 2];
-                        if (self.token_to_id.get(candidate)) |id| {
+                        if (self.specialMarkerId(candidate)) |id| {
                             special_end = pipe_end + 2;
                             special_id = id;
                             found_special = true;
@@ -725,7 +992,7 @@ pub const Tokenizer = struct {
                 if (!found_special) {
                     if (std.mem.indexOfPos(u8, text, start + 1, ">")) |gt_pos| {
                         const candidate = text[start .. gt_pos + 1];
-                        if (self.token_to_id.get(candidate)) |id| {
+                        if (self.specialMarkerId(candidate)) |id| {
                             special_end = gt_pos + 1;
                             special_id = id;
                             found_special = true;
@@ -742,23 +1009,21 @@ pub const Tokenizer = struct {
                     }
                     try tokens.append(allocator, special_id);
                     pos = special_end;
+                    scan = special_end;
                     continue;
                 }
-                // The `<...>` pattern was not a known special token.
-                // BPE-encode everything up to and including `<` so the outer
-                // loop can continue scanning after it.
-                const chunk_end = start + 1;
-                const bpe = try self.encode(text[pos..chunk_end]);
-                defer self.freeEncoded(bpe);
-                try tokens.appendSlice(allocator, bpe);
-                pos = chunk_end;
+                // Not a known special token: keep the `<` in the pending text
+                // and resume the marker search after it.
+                scan = start + 1;
             } else {
-                // No more `<|` markers — BPE-encode the rest.
-                const bpe = try self.encode(text[pos..]);
-                defer self.freeEncoded(bpe);
-                try tokens.appendSlice(allocator, bpe);
-                pos = text.len;
+                break;
             }
+        }
+        if (pos < text.len) {
+            // No more special tokens: BPE-encode the rest.
+            const bpe = try self.encode(text[pos..]);
+            defer self.freeEncoded(bpe);
+            try tokens.appendSlice(allocator, bpe);
         }
 
         return try tokens.toOwnedSlice(allocator);
@@ -906,6 +1171,9 @@ pub const Tokenizer = struct {
     /// other tokenizers (Qwen token 1 is a plain `"` character).
     pub fn isEndOfGeneration(self: *const Tokenizer, token: u32) bool {
         if (token == self.eos_id) return true;
+        for (self.eog_ids) |id| {
+            if (id == token) return true;
+        }
         const tmpl = self.chat_template orelse return false;
         const is_gemma4 = std.mem.indexOf(u8, tmpl, "<|turn>") != null;
         if (is_gemma4 and (token == 1 or token == 212)) return true;
@@ -1408,6 +1676,8 @@ pub const Tokenizer = struct {
             self.merge_ranks_ready = false;
         }
         if (self.scores) |s| self.allocator.free(s);
+        if (self.special_token_mask) |m| self.allocator.free(m);
+        if (self.eog_ids_owned) self.allocator.free(self.eog_ids);
         self.allocator.free(self.merges);
         self.token_to_id.deinit();
         self.allocator.free(self.vocab);
@@ -1551,7 +1821,7 @@ test "initFromGGUF omits BOS and uses BPE for qwen3_5 aliases" {
     defer tok.deinit();
 
     try std.testing.expect(!tok.shouldPrependBos());
-    try std.testing.expectEqual(Tokenizer.Pretokenizer.gpt2_ascii, tok.pretokenizer);
+    try std.testing.expectEqual(Tokenizer.Pretokenizer.qwen35, tok.pretokenizer);
 }
 
 test "initFromGGUF omits BOS for gpt-oss prompts by default" {
@@ -2525,4 +2795,112 @@ test "applyChatTemplateWithOptions chatml renders tool result messages aggregate
         search_pos = p + 1;
     }
     try std.testing.expectEqual(@as(usize, 2), user_turn_count);
+}
+
+test "qwen35 pretokenizer matches the reference chunk boundaries" {
+    const cases = [_]struct { input: []const u8, chunks: []const []const u8 }{
+        .{ .input = "<p align=\"center\">\n  <img width=\"360\">", .chunks = &.{ "<p", " align", "=\"", "center", "\">\n", " ", " <", "img", " width", "=\"", "3", "6", "0", "\">" } },
+        .{ .input = "</p>\n\n# ZINC\n\nFast, it's", .chunks = &.{ "</", "p", ">\n\n", "#", " ZINC", "\n\n", "Fast", ",", " it", "'s" } },
+        .{ .input = "a  b\t\tc   ", .chunks = &.{ "a", " ", " b", "\t", "\tc", "   " } },
+        .{ .input = "\u{4F60}\u{597D}\u{FF0C}\u{4E16}\u{754C}\u{3002}", .chunks = &.{ "\u{4F60}\u{597D}", "\u{FF0C}\u{4E16}\u{754C}", "\u{3002}" } },
+        .{ .input = "e\u{0301}x \u{FF11}2", .chunks = &.{ "e\u{0301}x", " ", "\u{FF11}", "2" } },
+    };
+    for (cases) |case| {
+        var pos: usize = 0;
+        for (case.chunks) |want| {
+            try std.testing.expectEqualStrings(want, Tokenizer.nextQwenPretokenChunk(case.input, &pos, true));
+        }
+        try std.testing.expectEqual(case.input.len, pos);
+    }
+}
+
+test "qwen2 pretokenizer treats combining marks as symbols" {
+    const input = "e\u{0301}x";
+    var pos: usize = 0;
+    try std.testing.expectEqualStrings("e", Tokenizer.nextQwenPretokenChunk(input, &pos, false));
+    try std.testing.expectEqualStrings("\u{0301}x", Tokenizer.nextQwenPretokenChunk(input, &pos, false));
+    try std.testing.expectEqual(input.len, pos);
+}
+
+test "encodeWithSpecialTokens keeps a non-special < in the surrounding BPE text" {
+    const vocab = [_][]const u8{ "<", "p", "<p", "<|special|>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 3,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+    try tok.token_to_id.put("<", 0);
+    try tok.token_to_id.put("p", 1);
+    try tok.token_to_id.put("<p", 2);
+    try tok.token_to_id.put("<|special|>", 3);
+
+    // With no merges each byte is its own token; what matters is that the
+    // text before and after the special token is encoded in one call each,
+    // not split at the plain `<`.
+    const tokens = try tok.encodeWithSpecialTokens("<p<|special|><p", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 3, 0, 1 }, tokens);
+}
+
+test "qwen35 special-marker scan skips ordinary tokens shaped like markers" {
+    const vocab = [_][]const u8{ "<", "?", ">", "<?>", "<think>" };
+    var mask = [_]bool{ false, false, false, false, true };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 4,
+        .prepend_bos = false,
+        .pretokenizer = .qwen35,
+        .special_token_mask = &mask,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+    for (vocab, 0..) |piece, i| try tok.token_to_id.put(piece, @intCast(i));
+
+    const tokens = try tok.encodeWithSpecialTokens("<?><think>", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+    // `<?>` is an ordinary token: it goes through BPE (no merges here, so one
+    // token per byte); `<think>` is user-defined and maps directly.
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 4 }, tokens);
+}
+
+test "initFromGGUF builds the reference end-of-generation set" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const names = [_][]const u8{ "<|im_end|>", "<|endoftext|>", "a", "<|end|>", "<|return|>", "<|call|>" };
+    const tokens = try allocator.alloc(gguf.MetadataValue, names.len);
+    for (names, 0..) |name, i| tokens[i] = .{ .string = try allocator.dupe(u8, name) };
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.tokens"), .{ .array = tokens });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.model"), .{ .string = try allocator.dupe(u8, "gpt2") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "qwen35") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.eos_token_id"), .{ .uint32 = 0 });
+
+    var tok = try Tokenizer.initFromGGUF(&gf, allocator);
+    defer tok.deinit();
+
+    try std.testing.expect(tok.isEndOfGeneration(0)); // <|im_end|> (EOS)
+    try std.testing.expect(tok.isEndOfGeneration(1)); // <|endoftext|>
+    try std.testing.expect(!tok.isEndOfGeneration(2)); // ordinary token
+    try std.testing.expect(!tok.isEndOfGeneration(3)); // <|end|> with <|return|> + <|call|>
+    try std.testing.expect(tok.isEndOfGeneration(4)); // <|return|>
+    try std.testing.expect(tok.isEndOfGeneration(5)); // <|call|>
 }
