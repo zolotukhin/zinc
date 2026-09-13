@@ -1263,3 +1263,61 @@ prompt, then per-layer residuals against `llama-eval-callback`.
 26B-A4B Qwen 3.8's NextN acceptance lines and a false MTP flag (51538bf0: truncate at launch). Partial reruns
 overwrote the target provenance for untouched rows (ea391241, 51538bf0: per-model `provenance`/`generated_at`).
 llama.cpp on the node moved to master 5f436dddb.
+
+## Stage 53 — Qwen 3.6 35B-A3B output made exact (2026-09-13)
+
+Qwen 3.6 35B-A3B on the R9700 left llama.cpp at the first generated token and drifted into repetition,
+while its published decode led llama.cpp by 52%. Three independent causes, found in this order:
+
+1. **Tokenizer.** Qwen-family GGUFs (`tokenizer.ggml.pre` qwen35/qwen2) went through the GPT-2 ASCII
+   pretokenizer, and `encodeWithSpecialTokens` flushed text at every non-special `<`. A 200-byte README
+   prompt tokenized to 69 tokens against llama.cpp's 64. A reference-regex Qwen pretokenizer with Unicode
+   classes generated from llama.cpp's `unicode-data.cpp`, a marker scan that only splits at real specials,
+   and control/user-defined gating for Qwen markers (4b9a9089) make `zinc-tokenize` (new CPU-only tool)
+   match `llama-tokenize --ids --no-escape` exactly on README, Zig, JavaScript, Chinese and mixed-Unicode
+   corpora. `llama-tokenize` processes backslash escapes unless `--no-escape` is passed.
+2. **Default-on approximations.** Per-layer residuals (`ZINC_LAYER_DIAG_POS`) against
+   `llama-eval-callback` showed the embedding exact, layer 0's linear attention within 3%, and its FFN
+   output equal to a single expert's unweighted down projection. The Vulkan engine capped Qwen 3.6 decode
+   at top-3 of 8 experts (since 6d75305d, May 2026) and ran non-terminal prefill tokens with one expert
+   and no shared expert. Both are now opt-in (203cf73b). With exact routing token 0 matches llama.cpp to
+   within 3% through layer 30.
+3. **End of generation.** The CLI stopped only on `<|im_end|>`; the model can emit `<|endoftext|>`. The
+   tokenizer now builds llama.cpp's end-of-generation set and `generate`/the server use it.
+
+Result: 32 generated token ids identical to llama.cpp on 64-, 339- and 520-token raw prompts; chat stops
+after "The capital of France is Paris.". Exact routing cost decode 167 → 121–136 tok/s (llama.cpp 111)
+and dropped prefill to ~205 tok/s, recovered by enabling the Intel-only exact grouped MoE prefill on RDNA
+and capping chunks at its 384-token band (bd9822d1):
+
+| prompt | per-token exact | grouped exact | llama.cpp |
+|---|---|---|---|
+| 64 tokens | 265 tok/s | 801 tok/s | 350 |
+| 339 tokens | 203 | 1263 | 1182 |
+| 520 tokens | 204 | 1291 | 2037 |
+| 1347 tokens | — | 1553 | 2479 |
+
+Also fixed the same day: four regression pattern tests broken by the Muse/generic-tile/embedding commits
+(`zig test src/regression_tests.zig` on the node; it does not compile on macOS). Diagnostic habit: pass
+prompts with exact bytes (`P="$(cat f; printf x)"; P="${P%x}"`) — `$(cat f)` strips a trailing newline
+and shifts the first generated token.
+
+Published rows measured before these commits (Qwen 3.6 35B on RDNA, and any Vulkan target that ran the
+top-3 cap, including Intel) overstated decode; the RDNA rows are re-measured below. Long-prompt prefill
+still trails llama.cpp because every 384-token chunk re-streams the weights — raising the grouped band
+(route-slot scratch is tokens × 8) is the next lever.
+
+Full RDNA suite after the fixes (ZINC bd9822d1, llama.cpp master 5f436dddb, server-vs-server), Qwen 3.6
+35B-A3B with exact routing:
+
+| scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode |
+|---|---|---|---|---|
+| core | 509 | 365 | 145.0 | 111.0 |
+| context-medium | 1363 | 781 | 145.3 | 109.2 |
+| context-long | 1752 | 1598 | 144.2 | 110.8 |
+| decode-extended | 576 | 525 | 141.8 | 111.0 |
+
+Decode was 168 tok/s under the top-3 cap; exact routing still leads llama.cpp by ~31%. The
+decode-extended preview is no longer flagged for repetition. Rows still behind llama.cpp across the suite:
+Gemma 4 26B-A4B context-long prefill (1338 vs 1552), Gemma 4 31B context-long prefill (344 vs 349), Muse
+Glimmer decode (32.8–33.2 vs 33.7).
