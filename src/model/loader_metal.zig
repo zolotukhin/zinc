@@ -599,12 +599,22 @@ pub fn load(
     var copied_tensor_bytes: u64 = 0;
     var arena_index: usize = 0;
     var arena_offset: usize = 0;
+    const muse_rope_permute = config.architecture == .muse_glimmer;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
+        // Muse Glimmer: Q/K rows and q/k norm weights are reordered at load so
+        // the kernels' (i, i+half) RoPE pairing matches the trained adjacent
+        // pairing (see config.museRopePermutedCopy); such tensors are always
+        // copied out of the mmap.
+        const permuted_owned: ?[]u8 = if (muse_rope_permute)
+            try config_mod.museRopePermutedCopy(allocator, tensor_info.name, mmap_data[@intCast(data_offset)..][0..@intCast(tensor_size)], tensor_info.numElements(), config.hidden_dim, config.head_dim)
+        else
+            null;
+        defer if (permuted_owned) |pbuf| allocator.free(pbuf);
 
-        const copy_out = copy_tensors_out_of_mmap and shouldCopyOutOfMmap(config, tensor_info, data_offset);
-        const gpu_buf, const buffer_offset = if (copy_out and tensor_arenas.items.len > 0) blk: {
+        const copy_out = permuted_owned != null or (copy_tensors_out_of_mmap and shouldCopyOutOfMmap(config, tensor_info, data_offset));
+        const gpu_buf, const buffer_offset = if (copy_out and tensor_arenas.items.len > 0 and permuted_owned == null) blk: {
             const tensor_bytes: usize = @intCast(tensor_size);
             const aligned_size = alignForwardPow2(tensor_bytes, copied_tensor_arena_alignment);
             while (arena_index < tensor_arenas.items.len and arena_offset + aligned_size > tensor_arenas.items[arena_index].size) {
@@ -626,7 +636,8 @@ pub fn load(
             var buf = try metal_buffer.createBuffer(metal_ctx, @intCast(tensor_size));
             const src_off: usize = @intCast(data_offset);
             const tensor_bytes: usize = @intCast(tensor_size);
-            @memcpy(buf.cpu_ptr.?[0..tensor_bytes], mmap_data[src_off .. src_off + tensor_bytes]);
+            const copy_src: []const u8 = permuted_owned orelse mmap_data[src_off .. src_off + tensor_bytes];
+            @memcpy(buf.cpu_ptr.?[0..tensor_bytes], copy_src);
             copied_tensor_count += 1;
             copied_tensor_bytes += tensor_size;
             break :blk .{ buf, @as(u32, 0) };

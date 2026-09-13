@@ -1000,11 +1000,16 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
 
     // LM head goes through dispatchDmmvInner which accepts Q4_K / Q6_K.
     const lm_head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
-    if (!isSupported(lm_head.info.type_)) return false;
+    // The LM head goes through dispatchDmmvInner, which dispatches whatever
+    // dmmv pipeline exists for the type (Q5_K included: Muse Glimmer).
+    if (!isSupported(lm_head.info.type_) and engine.dmmv.pipelineForType(lm_head.info.type_) == null) return false;
 
     for (0..cfg.n_layers) |i| {
         const lt = engine.layer_tensors[i];
-        if (lt.attn_gate != null) return false;
+        // A separate attention gate (Muse Glimmer): the batched path's result is
+        // still wrong for Muse (per-token is verified against llama.cpp), so it
+        // stays off unless ZINC_MUSE_BATCHED=1 is set for debugging.
+        if (lt.attn_gate != null and !(cfg.architecture == .muse_glimmer and envFlagEnabled("ZINC_MUSE_BATCHED", false))) return false;
         if (lt.attn_q_bias != null or lt.attn_k_bias != null or
             lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
 
@@ -1090,7 +1095,7 @@ fn museEmbedRmsNorm(row: []f32, eps: f32) void {
 /// QK-normed attention). Muse's global layers (every 4th) use NoPE and full
 /// attention; its other layers are sliding-window (the window is not
 /// enforced on Vulkan, same as Gemma here).
-fn hasGemmaStylePostNorms(arch: ModelConfig.Architecture) bool {
+fn hasGemmaStylePostNorms(arch: loader.Architecture) bool {
     return arch == .gemma or arch == .muse_glimmer;
 }
 
@@ -7411,6 +7416,26 @@ pub const InferenceEngine = struct {
 
         var gemma_dense_next_attn_norm_ready = false;
         for (layer_start..layer_end) |layer_idx| {
+            // ZINC_MUSE_DIAG=1: dump the residual entering layers 1..3 for the
+            // first token (== the outputs of layers 0..2) to compare against
+            // llama.cpp's eval-callback `l_out-N` rows.
+            if (state.position == 0 and layer_idx >= 1 and layer_idx <= 3 and envFlagEnabled("ZINC_MUSE_DIAG", false)) {
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+                const diag_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+                const diag_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = diag_bytes };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.logits_staging.handle, 1, &diag_region);
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                const dv: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                var ss: f64 = 0.0;
+                for (0..hidden_dim) |i| ss += @as(f64, dv[i]) * @as(f64, dv[i]);
+                log.info("MUSE_DIAG: after layer {d}: hidden[0..3]={d:.4},{d:.4},{d:.4} last3={d:.4},{d:.4},{d:.4} rms={d:.4}", .{ layer_idx - 1, dv[0], dv[1], dv[2], dv[hidden_dim - 3], dv[hidden_dim - 2], dv[hidden_dim - 1], @sqrt(ss / @as(f64, @floatFromInt(hidden_dim))) });
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+            }
             const layer: u32 = @intCast(layer_idx);
             const lt = self.layer_tensors[layer_idx];
 
@@ -7553,7 +7578,7 @@ pub const InferenceEngine = struct {
                     // Gemma 4 proportional RoPE: global attention layers (use_k_as_v) rotate
                     // the full head_dim using precomputed rope_freqs.weight frequencies.
                     const proportional_rope = config.architecture == .gemma and use_k_as_v;
-                    const layer_rope_dim: u32 = if (museGlobalLayer(&config, layer))
+                    const layer_rope_dim: u32 = if (museGlobalLayer(config, layer))
                         0 // Muse global layers: NoPE
                     else if (proportional_rope)
                         layer_head_dim
@@ -28243,6 +28268,26 @@ pub const InferenceEngine = struct {
         const freq_buf_size = self.rope_freq_buf.size;
 
         for (0..cfg.n_layers) |layer_idx| {
+            // ZINC_MUSE_DIAG=1: dump token 0's residual entering layers 1..3
+            // (outputs of layers 0..2) in the batched path, for comparison
+            // with llama.cpp's `l_out-N` rows and the per-token path.
+            if (base_token == 0 and layer_idx >= 1 and layer_idx <= 3 and envFlagEnabled("ZINC_MUSE_DIAG", false)) {
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+                const diag_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+                const diag_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = diag_bytes };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, scratch_hidden.handle, self.logits_staging.handle, 1, &diag_region);
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                const dv: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                var ss: f64 = 0.0;
+                for (0..hidden_dim) |i| ss += @as(f64, dv[i]) * @as(f64, dv[i]);
+                log.info("MUSE_DIAG(batched): after layer {d}: hidden[0..3]={d:.4},{d:.4},{d:.4} last3={d:.4},{d:.4},{d:.4} rms={d:.4}", .{ layer_idx - 1, dv[0], dv[1], dv[2], dv[hidden_dim - 3], dv[hidden_dim - 2], dv[hidden_dim - 1], @sqrt(ss / @as(f64, @floatFromInt(hidden_dim))) });
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+            }
             const layer: u32 = @intCast(layer_idx);
             const lt = self.layer_tensors[layer_idx];
             const attn_norm_t = lt.attn_norm orelse return error.TensorNotFound;

@@ -639,6 +639,10 @@ pub fn load(
 
     var total_vram: u64 = 0;
     var total_host_visible: u64 = 0;
+    const load_arch_str = gf.getString("general.architecture") orelse "";
+    const muse_rope_permute = parseArchitecture(load_arch_str) == .muse_glimmer;
+    const muse_hidden_dim: u64 = gf.getU32("muse-glimmer.embedding_length") orelse 0;
+    const muse_head_dim: u64 = gf.getU32("muse-glimmer.attention.key_length") orelse 0;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
         if (skip_nextn and isAppendedNextnTensor(tensor_info.name, first_nextn_layer)) {
@@ -646,7 +650,13 @@ pub fn load(
             continue;
         }
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
-        const src_data = mmap_data[data_offset..][0..@intCast(tensor_size)];
+        const mmap_src = mmap_data[data_offset..][0..@intCast(tensor_size)];
+        const permuted_owned: ?[]u8 = if (muse_rope_permute)
+            try config_mod.museRopePermutedCopy(allocator, tensor_info.name, mmap_src, tensor_info.numElements(), muse_hidden_dim, muse_head_dim)
+        else
+            null;
+        defer if (permuted_owned) |pbuf| allocator.free(pbuf);
+        const src_data: []const u8 = permuted_owned orelse mmap_src;
         const offload = shouldOffloadToHost(tensor_info.name);
 
         var gpu_buf = blk: {

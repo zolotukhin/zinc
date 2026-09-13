@@ -160,3 +160,59 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.muse_glimmer, parseArchitecture("muse_glimmer"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }
+
+/// Muse Glimmer rotates adjacent dim pairs (llama.cpp LLAMA_ROPE_TYPE_NORM:
+/// (2i, 2i+1) with frequency i), while ZINC's rope kernels pair (i, i+half).
+/// Reordering each head's Q/K output rows to [even dims..., odd dims...] (and
+/// the per-dim q_norm/k_norm weights the same way) makes the kernels' pairing
+/// equal to the trained one: pair (i, i+half) of the new layout is (2i, 2i+1)
+/// of the original. Scores are dot products over the permuted dims (invariant);
+/// V and the output projection are untouched. Quantized rows move whole
+/// (blocks run along K), so no requantization.
+pub fn museRopePermutedCopy(allocator: std.mem.Allocator, name: []const u8, src: []const u8, n_elems: u64, hidden_dim: u64, head_dim: u64) !?[]u8 {
+    const is_q = std.mem.endsWith(u8, name, "attn_q.weight");
+    const is_k = std.mem.endsWith(u8, name, "attn_k.weight");
+    const is_norm = std.mem.endsWith(u8, name, "attn_q_norm.weight") or std.mem.endsWith(u8, name, "attn_k_norm.weight");
+    if (!(is_q or is_k or is_norm)) return null;
+    if (head_dim == 0 or head_dim % 2 != 0) return null;
+    const half = head_dim / 2;
+    const out = try allocator.alloc(u8, src.len);
+    errdefer allocator.free(out);
+    if (is_norm) {
+        if (n_elems != head_dim or n_elems == 0) {
+            allocator.free(out);
+            return null;
+        }
+        const esz: usize = src.len / @as(usize, @intCast(n_elems));
+        for (0..@intCast(half)) |i| {
+            @memcpy(out[i * esz ..][0..esz], src[(2 * i) * esz ..][0..esz]);
+            @memcpy(out[(i + @as(usize, @intCast(half))) * esz ..][0..esz], src[(2 * i + 1) * esz ..][0..esz]);
+        }
+        return out;
+    }
+    if (hidden_dim == 0 or n_elems % hidden_dim != 0) {
+        allocator.free(out);
+        return null;
+    }
+    const rows: usize = @intCast(n_elems / hidden_dim);
+    if (rows % @as(usize, @intCast(head_dim)) != 0 or @as(usize, src.len) % rows != 0) {
+        allocator.free(out);
+        return null;
+    }
+    const row_bytes: usize = src.len / rows;
+    const hd: usize = @intCast(head_dim);
+    const hf: usize = @intCast(half);
+    var h: usize = 0;
+    while (h < rows / hd) : (h += 1) {
+        for (0..hf) |i| {
+            const dst_even = (h * hd + i) * row_bytes;
+            const dst_odd = (h * hd + hf + i) * row_bytes;
+            const src_even = (h * hd + 2 * i) * row_bytes;
+            const src_odd = (h * hd + 2 * i + 1) * row_bytes;
+            @memcpy(out[dst_even..][0..row_bytes], src[src_even..][0..row_bytes]);
+            @memcpy(out[dst_odd..][0..row_bytes], src[src_odd..][0..row_bytes]);
+        }
+    }
+    return out;
+}
+
