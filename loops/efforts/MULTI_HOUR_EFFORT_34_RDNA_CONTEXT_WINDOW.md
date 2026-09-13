@@ -1139,4 +1139,7 @@ gate now lets eh_proj use it (stage 50).
 prime per 3,264-token chunk: 250 → 53 ms; 17K prefill 486 → **496.8 tok/s**
 (the MTP-off figure was 509). Speculation intact: 20K five-fact 5/5,
 acceptance 75%/100%/75% unchanged. 100K/197K timings queued.
+100K: 332.4 → **338.9 tok/s**; 197K: 886 → **876.1 s = 225.1 tok/s** (llama.cpp
+893 s = 221). Prefill scorecard, end of 2026-09-12: 20K 470 vs 459, 100K 339
+vs ~290, 197K 225 vs 221 — ZINC leads at every length, speculation priming on.
 
