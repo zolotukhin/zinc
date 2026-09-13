@@ -1197,3 +1197,40 @@ which exposes ZINC's Metal MoE prefill as per-token speed:
 qwen36-35b-a3b prefills per token; gemma4-26b-a4b has a batched MoE path whose
 guards may be failing (probe running).
 
+## Stage 51 — Muse Glimmer batched prefill on the R9700 (2026-09-13, 231cb50e)
+
+The published run had Muse at 36 tok/s prefill (per-token) against llama.cpp's 240. Enabling the generic
+batched path (attention gate added) produced correct output but every prefill of ≥179 tokens "hung" the GPU
+at the next submission. The diagnosis, in order:
+
+1. Per-layer waits in the decode step never logged — the first decode submission was already cancelled
+   ("context lost, guilty of a hard recovery"); `n=1` runs only survived because their token comes from the
+   prefill logits.
+2. `RADV_DEBUG=hang` caught the stall inside the *prefill* buffer at a plain `mul_mm_q4k` tile GEMM
+   (grid 624×8, no VM fault). A wave64 workgroup with fixed loops cannot deadlock, so the GEMM was merely
+   what was running when the kernel killed the job.
+3. Every failing prefill reported 2.1–2.2 s regardless of length (113 tokens: 1.44 s real and fine; 179+
+   tokens: dead); the "time" is the kill latency. Qwen 27B's 7-second, 4096-token chunk buffers run on the
+   same queue without incident, so it is not a plain job timeout. Node: kernel 7.2.2, `amdgpu mes=1
+   mes_kiq=1 user_queue=1`, `lockup_timeout` unset, `queue_preemption_timeout_ms=9000`. Mechanism unknown.
+4. Submitting the same buffer in pieces (every 13 or 4 layers) removed the failure: 243 tokens, 2.9 s real
+   compute, decode fine, no ring timeouts.
+
+Fix: Muse chunks capped at 256 tokens, the batched layer loop submits every 16 layers, and the FFN moved to
+the DP4a kernels: the activation-agnostic Gemma paths (attention projections, Q4_K/Q6_K down GEMM, int8
+scratch) now accept `muse_glimmer` through `isGemmaStyleDenseArch`, and a new
+`dispatchMuseGateUpSwigluDp4aBatched` runs the SwiGLU-fused Q4_K DP4a GEMM (Muse's FFN is SiLU, so the
+Gemma GEGLU kernels stay Gemma-only). Batched prefill is on by default for Muse.
+
+| prompt | before (per-token) | after | llama.cpp |
+|---|---|---|---|
+| 243 tokens | 36 tok/s | 244 tok/s | 240 |
+| 471 tokens | — | 263 tok/s | — |
+| 1259 tokens | 36 tok/s | 270 tok/s | — |
+
+Correctness: 48 greedy tokens after a 1259-token prompt identical to the per-token path; the 243-token
+continuation identical to llama.cpp's. Validate mode shows a 1.7 max logit deviation on a token deep in the
+tail (int8 activation quantization). Decode is unchanged at 33.6 tok/s = the 17 GB / 576 GB/s memory wall
+(llama.cpp 33.7). Per-token cost inside a chunk: FFN 2.35 ms (≈16 TFLOPS), attention 0.73 ms; chunk
+boundaries add ~20% wall overhead — the next levers if Muse prefill needs more.
+
