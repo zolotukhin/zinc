@@ -848,6 +848,14 @@ test("remote llama-server baselines disable prompt cache for prefill timing", ()
   expect(launchBody).toContain("\"--no-cache-prompt\"");
 });
 
+test("local llama-server baselines disable prompt cache for prefill timing", () => {
+  const src = readFileSync(new URL("./performance_suite.mjs", import.meta.url), "utf8");
+  const launchStart = src.indexOf("async function launchLocalLlamaServer");
+  expect(launchStart).toBeGreaterThanOrEqual(0);
+  const launchBody = src.slice(launchStart, launchStart + 4000);
+  expect(launchBody).toContain("\"--no-cache-prompt\"");
+});
+
 test("remote ZINC benchmark server uses one slot for single-request comparisons", () => {
   const src = readFileSync(new URL("./performance_suite.mjs", import.meta.url), "utf8");
   const launchStart = src.indexOf("async function launchRdnaZincServer");

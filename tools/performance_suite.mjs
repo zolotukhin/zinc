@@ -1722,6 +1722,16 @@ async function launchLocalLlamaServer(caseDef, serverPath, timeoutMs) {
     "--metrics",
     "--ctx-size", "4096",
     "--parallel", "1",
+    // Mirror the remote baseline launch: explicit flash attention and wide
+    // batches, and no prompt cache. Without --no-cache-prompt llama-server
+    // reuses the previous request's KV prefix, so the warmup run leaves only
+    // the trailing template tokens to prefill (observed: prompt_n=4 of 87 on
+    // b67a17c1, "23 tok/s" prefill) and the published prefill ratio is
+    // meaningless. ZINC's CLI runs always prefill the whole prompt.
+    "-b", "4096",
+    "-ub", "1024",
+    "--flash-attn", "on",
+    "--no-cache-prompt",
   ];
 
   const child = spawn(serverPath, args, {

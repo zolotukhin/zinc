@@ -30,6 +30,11 @@ const log = std.log.scoped(.forward);
 /// see this as a soft safety net rather than the primary limit.
 pub const runtime_context_cap: u32 = 262144;
 const queued_prefill_embed_tokens: usize = 256;
+/// Prompt tokens the batched-prefill scratch buffers (`prefill_embed_buf`,
+/// `qwen_ssm_prefill_proj_*`, the dense inter buffer) are sized for. The
+/// 9B/MoE single-pass ceilings stay at `queued_prefill_embed_tokens`; the 27B
+/// dense hybrid uses the full size (see `queuedPrefillSinglePassMaxTokens`).
+const batched_prefill_scratch_tokens: usize = 512;
 /// Max tokens verified in one speculative-decode batched pass (1 seed + drafts).
 /// Sizes `verify_logits_buf` (vocab x this). Draft length is capped below it.
 /// A verify is a ~fixed-cost batched forward, so a longer accepted draft
@@ -41,16 +46,23 @@ const spec_max_verify_tokens: u32 = 32;
 /// lifetime of the engine; requests above the cap fall back to transient
 /// allocate-and-free, exactly the pre-cache behavior.
 const batched_prefill_scratch_retain_max_tokens: u32 = 512;
-const qwen_ssm_projection_prefill_max_tokens: u32 = 256;
+// Layer-major materialization capacity of the SSM prefill projection path
+// (tokens per pass). Tied to the scratch size: with the 27B's 512-token
+// single pass, a prompt beyond this would silently fall to token-major
+// replay for the remainder (observed 2026-09-02: 496 tokens = 256
+// materialized + 240 replayed one at a time, 5x slower than three passes).
+const qwen_ssm_projection_prefill_max_tokens: u32 = @intCast(batched_prefill_scratch_tokens);
 const qwen_ssm_projection_prefill_min_tokens: usize = 32;
 // 27B layer-major single-shot / chunk ceiling. Was 40 (a conservative
-// validation limit from Effort 28); raised to 192 after verifying the
-// layer-major prefill is byte-identical to the per-token reference at every
-// chunk size up to the 256-token scratch-buffer limit (2026-07-19, greedy
-// output on 45-481 token prompts + cross-chunk recall). Larger chunks mean
-// fewer, wider GEMM batches: ~+28% prefill on the 27B (106 -> 135 tok/s).
+// validation limit from Effort 28), then 192 (2026-07-19, verified
+// byte-identical to the per-token reference at every chunk size up to the
+// then-256-token scratch limit). Raised to 512 with the scratch buffers
+// (Effort 30): a 496-token prompt ran as three ~165-token passes, each
+// re-streaming all weights and padding N to 4x48 GEMM tile columns; one
+// pass lifts the fused gate/up GEMM from ~10.8 to ~12.4 TFLOPS. Verified
+// greedy-identical against the 192 cap on 48/496-token prompts.
 // Overridable via ZINC_QWEN27B_CHUNK_TOKENS; see qwen35Dense27bQueuedPrefillMaxTokens.
-const qwen35_dense27b_queued_prefill_max_tokens: usize = 192;
+const qwen35_dense27b_queued_prefill_max_tokens: usize = 512;
 const qwen35_dense9b_prefill_prefix_layers: usize = 32;
 const qwen_ssm_projection_validate_default_tokens: u32 = 4;
 // the reference implementation's Metal `ggml_metal_op_mul_mat_id` switches from the small
@@ -1106,15 +1118,15 @@ fn qwen35DensePrefillPrefixLayerLimit(cfg: ModelConfig) usize {
     return 1;
 }
 
-/// The 27B layer-major single-shot / chunk ceiling (default 192). The scratch
-/// buffers are sized to qwen_ssm_projection_prefill_max_tokens (256), so
+/// The 27B layer-major single-shot / chunk ceiling (default 512). The scratch
+/// buffers are sized to batched_prefill_scratch_tokens (512), so
 /// ZINC_QWEN27B_CHUNK_TOKENS can retune it (e.g. lower on a slower machine, or
-/// sweep to re-confirm correctness). Clamped to [min, 256].
+/// sweep to re-confirm correctness). Clamped to [min, 512].
 fn qwen35Dense27bQueuedPrefillMaxTokens() u32 {
     const default_max: u32 = @intCast(qwen35_dense27b_queued_prefill_max_tokens);
     const requested = readU32Env("ZINC_QWEN27B_CHUNK_TOKENS") orelse return default_max;
     const min_tokens: u32 = @intCast(qwen_ssm_projection_prefill_min_tokens);
-    return @min(@max(requested, min_tokens), qwen_ssm_projection_prefill_max_tokens);
+    return @min(@max(requested, min_tokens), @as(u32, @intCast(batched_prefill_scratch_tokens)));
 }
 
 fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: usize) bool {
@@ -1124,6 +1136,16 @@ fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: 
         prompt_len <= qwen35Dense27bQueuedPrefillMaxTokens();
 }
 
+/// Largest prompt (in tokens) a single queued/batched prefill pass may carry
+/// for this model: the 27B dense hybrid gets the full scratch size, every
+/// other path keeps the 256-token embed cap it was validated at.
+fn queuedPrefillSinglePassMaxTokens(cfg: ModelConfig) usize {
+    if (defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and cfg.full_attn_interval == 4) {
+        return batched_prefill_scratch_tokens;
+    }
+    return queued_prefill_embed_tokens;
+}
+
 /// Largest prompt (in tokens) the queued/batched prefill path can process in
 /// a single call for this model, or null if the model has no such path. Used
 /// both to gate multi-chunk continuation prefill and as the chunk size when
@@ -1131,8 +1153,8 @@ fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: 
 ///
 /// Each model has its own ceiling: the 9B's is the 256-token embed-buffer cap
 /// (queued_prefill_embed_tokens); the 27B's is qwen35_dense27b_queued_prefill_max_tokens
-/// (192, overridable), the largest chunk verified byte-identical to the
-/// per-token reference. Both stay within the 256-token scratch buffers.
+/// (512, overridable), the largest chunk verified byte-identical to the
+/// per-token reference. Both stay within the scratch buffers.
 fn queuedTokenMajorChunkTokens(cfg: ModelConfig) ?u32 {
     if (defaultQwen35Dense9bQueuedPrefillEnabled(cfg)) return @intCast(queued_prefill_embed_tokens);
     if (defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and cfg.full_attn_interval == 4) {
@@ -1271,6 +1293,59 @@ fn ssmDeltaNetPrefillThreadgroupSize(
         return 128;
     }
     return 64;
+}
+
+/// `ZINC_METAL_SSM_DELTA_NET_PREFILL_WARP` (default on): run the batched
+/// delta-net scan on `ssm_delta_net_prefill_warp` (one simdgroup per state
+/// row, register-resident state, no barriers per token) instead of the block
+/// kernel (one threadgroup per head, state read-modify-written in device
+/// memory per token).
+fn ssmDeltaNetPrefillWarpEnabled() bool {
+    return readBoolEnv("ZINC_METAL_SSM_DELTA_NET_PREFILL_WARP") orelse true;
+}
+
+/// Simdgroups per threadgroup for the warp scan: grid.y = head_v_dim / this.
+const ssm_delta_net_prefill_warp_simdgroups: u32 = 4;
+/// The warp kernel caches gate/beta for every token in threadgroup memory.
+const ssm_delta_net_prefill_warp_max_tokens: u32 = 512;
+
+fn canUseSsmDeltaNetPrefillWarp(engine: *const InferenceEngine, push: *const SsmDeltaNetPrefillPush) bool {
+    const pipe = &engine.ssm_delta_net_prefill_warp_pipe;
+    return ssmDeltaNetPrefillWarpEnabled() and
+        push.head_v_dim == 128 and
+        push.d_state == 128 and
+        push.n_tokens >= 1 and
+        push.n_tokens <= ssm_delta_net_prefill_warp_max_tokens and
+        pipe.handle != null and
+        pipe.thread_execution_width == 32 and
+        pipe.max_threads_per_threadgroup >= 32 * ssm_delta_net_prefill_warp_simdgroups;
+}
+
+/// Batched delta-net scan dispatch: the warp kernel when the shape admits it
+/// (Qwen 27B dense hybrid 48x128x128, Qwen 35B-A3B 32x128x128), else the
+/// block kernel. Before the warp route, the 27B took the block kernel's
+/// generic scalar path at ~9 ms per layer for 165 tokens — the largest
+/// single prefill bucket (144 calls, ~1.3 s of a 3.6 s 496-token prefill).
+fn dispatchSsmDeltaNetPrefillOnCmd(
+    engine: *const InferenceEngine,
+    cmd: *MetalCommand,
+    bufs: []const *const MetalBuffer,
+    push: *const SsmDeltaNetPrefillPush,
+) void {
+    if (canUseSsmDeltaNetPrefillWarp(engine, push)) {
+        cmd.dispatchV2(
+            &engine.ssm_delta_net_prefill_warp_pipe,
+            .{ push.dt_rank, push.head_v_dim / ssm_delta_net_prefill_warp_simdgroups, 1 },
+            .{ 32 * ssm_delta_net_prefill_warp_simdgroups, 1, 1 },
+            bufs,
+            push,
+            @sizeOf(SsmDeltaNetPrefillPush),
+            0,
+        );
+        return;
+    }
+    const tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, push.dt_rank, push.head_v_dim, push.d_state, push.n_group);
+    cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ push.dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, bufs, push, @sizeOf(SsmDeltaNetPrefillPush), 0);
 }
 
 fn canUseQwenSsmConvD4FastPath(
@@ -6823,12 +6898,22 @@ fn canUseQwenSsmF32AlphaBetaDual(
     cols: u32,
 ) bool {
     const cfg = engine.config;
-    return cfg.architecture == .qwen2_moe and
+    // Qwen3.6 35B-A3B: the 32x2048 alpha/beta tails the kernel was written for.
+    const qwen36_moe_shape = cfg.architecture == .qwen2_moe and
         cfg.hidden_dim == 2048 and
         cfg.ssm_d_inner == 4096 and
-        rows == cfg.ssm_dt_rank and
         rows == 32 and
-        cols == 2048 and
+        cols == 2048;
+    // Qwen3.6/3.8 27B dense hybrid: 48x5120 F32 alpha/beta tails. Before this
+    // shape was admitted, decode fell through to the generic one-thread-per-row
+    // `dmmv_f32` — a single 64-thread threadgroup walking K=5120 serially
+    // (~0.5 ms per launch, twice per SSM layer, 96 launches per token).
+    const qwen35_dense27b_shape = defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and
+        qwen35Dense27bSsmTailF32DualEnabled() and
+        rows == 48 and
+        cols == 5120;
+    return (qwen36_moe_shape or qwen35_dense27b_shape) and
+        rows == cfg.ssm_dt_rank and
         alpha_t.info.type_ == .f32 and
         beta_t.info.type_ == .f32 and
         alpha_t.info.numElements() == @as(u64, rows) * @as(u64, cols) and
@@ -6838,6 +6923,13 @@ fn canUseQwenSsmF32AlphaBetaDual(
         engine.dmmv_f32_dual_small_pipe.handle != null and
         engine.dmmv_f32_dual_small_pipe.thread_execution_width == 32 and
         engine.dmmv_f32_dual_small_pipe.max_threads_per_threadgroup >= 1024;
+}
+
+/// `ZINC_METAL_QWEN27B_SSM_TAIL_F32_DUAL` (default on): route the Qwen 27B dense
+/// hybrid's F32 alpha/beta SSM tail projections through `dmmv_f32_dual_small`
+/// instead of the generic serial-K `dmmv_f32`.
+fn qwen35Dense27bSsmTailF32DualEnabled() bool {
+    return readBoolEnv("ZINC_METAL_QWEN27B_SSM_TAIL_F32_DUAL") orelse true;
 }
 
 fn canUseQwen35Dense9bSsmQ8AlphaBetaPair(
@@ -7223,6 +7315,7 @@ pub const InferenceEngine = struct {
     ssm_delta_net_pipe: MetalPipeline,
     ssm_delta_net_offset_pipe: MetalPipeline,
     ssm_delta_net_prefill_pipe: MetalPipeline,
+    ssm_delta_net_prefill_warp_pipe: MetalPipeline,
     ssm_delta_net_gated_norm_pipe: MetalPipeline,
     ssm_delta_net_gated_norm_qwen_pipe: MetalPipeline,
     ssm_gated_norm_pipe: MetalPipeline,
@@ -7685,16 +7778,16 @@ pub const InferenceEngine = struct {
         self.verify_argmax_out = null;
         self.verify_logits_buf = try metal_buffer.createBuffer(ctx, vocab_size * spec_max_verify_tokens);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.prefill_embed_buf = try metal_buffer.createBuffer(ctx, hidden_size * queued_prefill_embed_tokens);
-        self.qwen_ssm_prefill_proj_norm_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * hidden_size, 4));
-        self.qwen_ssm_prefill_proj_qkv_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, conv_channels) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_proj_z_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, d_inner) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_proj_alpha_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_proj_beta_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_shared_gate_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_branch_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, d_inner) * @sizeOf(f32), 4));
+        self.prefill_embed_buf = try metal_buffer.createBuffer(ctx, hidden_size * batched_prefill_scratch_tokens);
+        self.qwen_ssm_prefill_proj_norm_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * hidden_size, 4));
+        self.qwen_ssm_prefill_proj_qkv_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, conv_channels) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_proj_z_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, d_inner) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_proj_alpha_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_proj_beta_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_shared_gate_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_branch_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, d_inner) * @sizeOf(f32), 4));
         const qwen35_dense_prefill_inter_bytes: usize = if (qwen35DenseLayerMajorQueuedPrefillEnabled(cfg))
-            @as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, inter_dim) * @sizeOf(f32)
+            batched_prefill_scratch_tokens * @as(usize, inter_dim) * @sizeOf(f32)
         else
             4;
         const qwen35_dense_prefill_hidden_bytes: usize = if (qwen35DenseLayerMajorQueuedPrefillEnabled(cfg))
@@ -8212,6 +8305,7 @@ pub const InferenceEngine = struct {
         self.ssm_delta_net_pipe = try loadShaderPipeline(ctx, "ssm_delta_net");
         self.ssm_delta_net_offset_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_offset");
         self.ssm_delta_net_prefill_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_prefill");
+        self.ssm_delta_net_prefill_warp_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_prefill_warp");
         self.ssm_delta_net_gated_norm_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_gated_norm");
         self.ssm_delta_net_gated_norm_qwen_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_gated_norm_qwen");
         self.ssm_gated_norm_pipe = try loadShaderPipeline(ctx, "ssm_gated_norm");
@@ -9078,6 +9172,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.ssm_delta_net_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_offset_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_prefill_pipe);
+        metal_pipeline.freePipeline(&self.ssm_delta_net_prefill_warp_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_gated_norm_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_gated_norm_qwen_pipe);
         metal_pipeline.freePipeline(&self.ssm_gated_norm_pipe);
@@ -9519,7 +9614,7 @@ pub const InferenceEngine = struct {
         // causal window, so each continuation chunk resumes exactly where
         // the last ended. Chunk size is each model's own validated
         // single-shot ceiling (see queuedTokenMajorChunkTokens) -- 256 for
-        // the 9B, a much narrower 40 for the 27B.
+        // the 9B, 512 for the 27B.
         if (queuedTokenMajorChunkTokens(self.config)) |max_chunk_tokens| {
             if (prompt_tokens.len > max_chunk_tokens) {
                 var offset: usize = 0;
@@ -9556,7 +9651,7 @@ pub const InferenceEngine = struct {
     }
 
     fn canUseQueuedTokenMajorPrefill(self: *const InferenceEngine, prompt_len: usize) bool {
-        if (prompt_len <= 1 or prompt_len > queued_prefill_embed_tokens) return false;
+        if (prompt_len <= 1 or prompt_len > queuedPrefillSinglePassMaxTokens(self.config)) return false;
         const can_queue_qwen35_dense =
             defaultQwen35Dense9bQueuedPrefillEnabled(self.config) or
             shouldUseQwen35Dense27bQueuedTokenMajorPrefill(self.config, prompt_len);
@@ -19558,8 +19653,7 @@ fn recordQwenRoutePackedPrefixSsmLayerOnCmd(
         // exactly) each thread handles head_v_dim/tg_threads = 1 row instead of
         // 2, roughly halving that serial inner loop. This main route-packed
         // prefix path covers every SSM layer, yet was still hardcoded to 64.
-        const dn_tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, dt_rank, head_v_dim, d_state, n_group);
-        cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ dt_rank, 1, 1 }, .{ dn_tg_size, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+        dispatchSsmDeltaNetPrefillOnCmd(engine, cmd, &dn_bufs, &push);
         if (profile) |p| p.ssm_delta_calls += n_tokens;
         engine.position = n_tokens - 1;
         profileSsmBarrierBuffers(cmd, profile, .delta, &.{&scratch.attn_out});
@@ -22079,7 +22173,7 @@ fn canUseQwenSsmPrefillProjectionChunk(engine: *const InferenceEngine, prompt_le
     // raw prompts are coherence-sensitive and do not amortize the extra graph
     // anyway; keep them on the validated per-token path.
     if (prompt_len < qwen_ssm_projection_prefill_min_tokens) return false;
-    if (prompt_len > queued_prefill_embed_tokens) return false;
+    if (prompt_len > queuedPrefillSinglePassMaxTokens(engine.config)) return false;
     // Continuation chunks (nonzero position) are supported on the 9B and 27B
     // dense-hybrid paths, which share the SSM kernels that carry state in
     // the persistent per-layer buffers and the full-attention recorder that
@@ -22117,11 +22211,11 @@ fn logQwenSsmPrefillProjectionChunkBlocker(engine: *const InferenceEngine, promp
         log.info("Metal profile: Qwen SSM prefill projection disabled: feature flag off", .{});
         return;
     }
-    if (prompt_len < qwen_ssm_projection_prefill_min_tokens or prompt_len > queued_prefill_embed_tokens) {
+    if (prompt_len < qwen_ssm_projection_prefill_min_tokens or prompt_len > queuedPrefillSinglePassMaxTokens(engine.config)) {
         log.info("Metal profile: Qwen SSM prefill projection disabled: prompt_len={d} outside [{d},{d}]", .{
             prompt_len,
             qwen_ssm_projection_prefill_min_tokens,
-            queued_prefill_embed_tokens,
+            queuedPrefillSinglePassMaxTokens(engine.config),
         });
         return;
     }
@@ -22948,8 +23042,7 @@ fn recordQwen35Dense9bPrefixSsmDensePrefillLayerOnCmd(
             &engine.ssm_state_bufs.?[layer_idx],
             branch_work_buf,
         };
-        const tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, dt_rank, head_v_dim, d_state, n_group);
-        cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+        dispatchSsmDeltaNetPrefillOnCmd(engine, cmd, &bufs, &push);
         if (profile) |p| p.ssm_delta_calls += 1;
     }
     profileSsmBarrierBuffers(cmd, profile, .delta, &.{
@@ -23158,8 +23251,7 @@ fn prepareQwenSsmPrefillProjectionChunk(engine: *InferenceEngine, prompt_len: us
                 &engine.ssm_state_bufs.?[0],
                 &engine.qwen_ssm_prefill_branch_buf,
             };
-            const tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, dt_rank, head_v_dim, d_state, n_group);
-            cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+            dispatchSsmDeltaNetPrefillOnCmd(engine, &cmd, &bufs, &push);
             if (profile) |p| p.ssm_delta_calls += 1;
         }
         profileSsmBarrierBuffers(&cmd, profile, .delta, &.{
@@ -32361,6 +32453,149 @@ test "ssm_delta_net_prefill exact Qwen shape matches CPU reference" {
     }
 }
 
+test "ssm_delta_net_prefill_warp exact Qwen 27B shape matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_delta_net_prefill_warp");
+    defer metal_pipeline.freePipeline(&pipe);
+    try std.testing.expect(pipe.thread_execution_width == 32);
+
+    // Qwen3.6/3.8 27B dense hybrid: 48 heads over 16 groups (3 heads per group).
+    const n_tokens: u32 = 5;
+    const dt_rank: u32 = 48;
+    const head_v_dim: u32 = 128;
+    const d_state: u32 = 128;
+    const n_group: u32 = 16;
+    const d_inner: u32 = dt_rank * head_v_dim;
+    const qk_dim: u32 = d_state * n_group;
+    const conv_len: u32 = 2 * qk_dim + d_inner;
+    const state_len: usize = @as(usize, dt_rank) * head_v_dim * head_v_dim;
+    const token_count: usize = @intCast(n_tokens);
+    const dt_rank_usize: usize = @intCast(dt_rank);
+    const d_inner_usize: usize = @intCast(d_inner);
+    const conv_len_usize: usize = @intCast(conv_len);
+
+    var conv_buf = try metal_buffer.createBuffer(ctx, n_tokens * conv_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&conv_buf);
+    var alpha_buf = try metal_buffer.createBuffer(ctx, n_tokens * dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&alpha_buf);
+    var dt_bias_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dt_bias_buf);
+    var ssm_a_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&ssm_a_buf);
+    var beta_buf = try metal_buffer.createBuffer(ctx, n_tokens * dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&beta_buf);
+    var state_buf = try metal_buffer.createBuffer(ctx, state_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&state_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_tokens * d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const conv_ptr: [*]f32 = @ptrCast(@alignCast(conv_buf.cpu_ptr.?));
+    const alpha_ptr: [*]f32 = @ptrCast(@alignCast(alpha_buf.cpu_ptr.?));
+    const dt_bias_ptr: [*]f32 = @ptrCast(@alignCast(dt_bias_buf.cpu_ptr.?));
+    const ssm_a_ptr: [*]f32 = @ptrCast(@alignCast(ssm_a_buf.cpu_ptr.?));
+    const beta_ptr: [*]f32 = @ptrCast(@alignCast(beta_buf.cpu_ptr.?));
+    const state_ptr: [*]f32 = @ptrCast(@alignCast(state_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    for (0..token_count) |t| {
+        for (0..conv_len_usize) |j| {
+            const pattern: i32 = @intCast((t * 17 + j * 7) % 23);
+            conv_ptr[t * conv_len_usize + j] =
+                @as(f32, @floatFromInt(pattern - 11)) * 0.0125 + @as(f32, @floatFromInt(t)) * 0.002;
+        }
+        for (0..dt_rank_usize) |h| {
+            const idx = t * dt_rank_usize + h;
+            alpha_ptr[idx] = @as(f32, @floatFromInt(@as(i32, @intCast(t)) - @as(i32, @intCast(h % 5)))) * 0.025;
+            beta_ptr[idx] = @as(f32, @floatFromInt(@as(i32, @intCast((t + h) % 7)) - 3)) * 0.03;
+        }
+    }
+    for (0..dt_rank_usize) |h| {
+        dt_bias_ptr[h] = @as(f32, @floatFromInt(@as(i32, @intCast(h % 5)) - 2)) * 0.02;
+        ssm_a_ptr[h] = -0.25 - @as(f32, @floatFromInt(h % 3)) * 0.04;
+    }
+    for (0..state_len) |i| {
+        state_ptr[i] = @as(f32, @floatFromInt(@as(i32, @intCast(i % 19)) - 9)) * 0.004;
+    }
+    @memset(output_ptr[0 .. n_tokens * d_inner], 0);
+
+    const allocator = std.testing.allocator;
+    const ref_state = try allocator.alloc(f32, state_len);
+    defer allocator.free(ref_state);
+    const ref_output = try allocator.alloc(f32, token_count * d_inner_usize);
+    defer allocator.free(ref_output);
+    @memcpy(ref_state, state_ptr[0..state_len]);
+    @memset(ref_output, 0);
+
+    for (0..token_count) |t| {
+        const conv_base = t * conv_len_usize;
+        const dt_base = t * dt_rank_usize;
+        const out_base = t * d_inner_usize;
+        refRunSsmDeltaNet(
+            conv_ptr[conv_base .. conv_base + conv_len_usize],
+            alpha_ptr[dt_base .. dt_base + dt_rank_usize],
+            dt_bias_ptr[0..dt_rank],
+            beta_ptr[dt_base .. dt_base + dt_rank_usize],
+            ssm_a_ptr[0..dt_rank],
+            ref_state,
+            ref_output[out_base .. out_base + d_inner_usize],
+            dt_rank,
+            head_v_dim,
+            d_state,
+            n_group,
+        );
+    }
+
+    const push = SsmDeltaNetPrefillPush{
+        .d_inner = d_inner,
+        .dt_rank = dt_rank,
+        .head_v_dim = head_v_dim,
+        .d_state = d_state,
+        .n_group = n_group,
+        .has_dt_bias = 1,
+        .has_ssm_a = 1,
+        .n_tokens = n_tokens,
+        .alpha_stride = dt_rank,
+        .beta_stride = dt_rank,
+        .conv_stride = conv_len,
+        .output_stride = d_inner,
+        .alpha_offset = 0,
+        .beta_offset = 0,
+        .conv_offset = 0,
+        .output_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &conv_buf,
+        &alpha_buf,
+        &dt_bias_buf,
+        &ssm_a_buf,
+        &beta_buf,
+        &state_buf,
+        &output_buf,
+    };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(
+        &pipe,
+        .{ dt_rank, head_v_dim / ssm_delta_net_prefill_warp_simdgroups, 1 },
+        .{ 32 * ssm_delta_net_prefill_warp_simdgroups, 1, 1 },
+        &bufs,
+        &push,
+        @sizeOf(SsmDeltaNetPrefillPush),
+        0,
+    );
+    cmd.commitAndWait();
+
+    for (0..token_count * d_inner_usize) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.003);
+    }
+    for (0..state_len) |i| {
+        try std.testing.expectApproxEqAbs(ref_state[i], state_ptr[i], 0.003);
+    }
+}
+
 test "qwen ssm conv d4 threadgroup helper uses exact model shape" {
     const pipe = MetalPipeline{
         .handle = null,
@@ -36023,7 +36258,8 @@ test "qwen35 9b dense SSM prefill uses queued token commands only for exact shap
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 36));
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 40));
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 192));
-    try std.testing.expect(!shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 193));
+    try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 512));
+    try std.testing.expect(!shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 513));
 
     // PR #25 long-prompt chunking: each model's chunk size is its own
     // validated single-shot ceiling, never a shared constant (a 40-wide
