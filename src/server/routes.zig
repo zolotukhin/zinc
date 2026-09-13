@@ -3528,7 +3528,7 @@ fn handleCompletions(
     var req_id_buf: [32]u8 = undefined;
     const req_id = std.fmt.bufPrint(&req_id_buf, "cmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "cmpl-0";
 
-    const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch |err| {
+    const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), tokenizer.eog_ids, allocator) catch |err| {
         log.err("Completion generation failed: {s}", .{@errorName(err)});
         try conn.sendError(500, "internal_error", "Generation failed");
         return;

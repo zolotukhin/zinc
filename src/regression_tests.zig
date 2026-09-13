@@ -486,7 +486,7 @@ test "Vulkan Qwen dense-down DP4a keeps K17408 BN40 and BN64 specializations" {
     try expectContains(src, "use_n64_bm64");
     try expectContains(src, "use_exact_n64_bm64_acc");
     try expectContains(src, "use_ragged_n64_bm64");
-    try expectContains(src, "if (use_n64_bm64 or use_k21504_n64_bm64 or use_exact_n64_mmq64_acc or use_exact_n64_bm64_acc or use_ragged_n64_bm64 or use_k12288_ragged_n64_bm64) M / 64 else M / 32");
+    try expectContains(src, "if (use_generic_n64_bm64 or use_n64_bm64 or use_k21504_n64_bm64 or use_exact_n64_mmq64_acc or use_exact_n64_bm64_acc or use_ragged_n64_bm64 or use_k12288_ragged_n64_bm64) M / 64 else M / 32");
     try expectContainsNear(src, "pub fn recordMulMmQ6KFullDp4a(", "use_exact_n64_bk2", 2200);
     try expectContainsNear(src, "pub fn recordMulMmQ6KFullDp4a(", "use_exact_n64_acc", 2200);
     try expectContainsNear(src, "pub fn recordMulMmQ6KFullDp4a(", "use_ragged_n64", 3000);
@@ -666,13 +666,19 @@ test "Vulkan BM64 gate-up producers keep per-32 Q8 output blocks" {
     try expectContains(q8_1, "subgroupClusteredAdd(local_isum, Q8_BLOCK_THREADS)");
 }
 
-test "Vulkan Qwen gate-up BM64 path is isolated to K5120 N64 dispatches" {
+test "Vulkan gate-up BM64 path is K5120-specialized with a guarded dynamic-K fallback" {
+    // The K5120 BM64 pipelines stay specialized; shapes with no specialized
+    // pipeline (Muse Glimmer's K=6656) take the dynamic-K BM64 tile, which
+    // must never shadow the K4096/K5120 variants.
     const dmmv = @embedFile("compute/dmmv.zig");
     try expectContains(dmmv, "pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64");
     try expectContains(dmmv, "pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged_bm64");
     try expectContains(dmmv, "pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64");
     try expectContains(dmmv, "pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged_bm64");
-    try expectContains(dmmv, "const m_tile: u32 = if (use_bm64_n64 or use_bm64_ragged_n64) 64 else 32;");
+    try expectContains(dmmv, "const m_tile: u32 = if (use_generic_n64_bm64) 64 else if (use_bm64_n64 or use_bm64_ragged_n64) 64 else 32;");
+    try expectContains(dmmv, "const use_generic_n64_bm64 = genericBm64TileEnabled() and K != 4096 and K != 5120 and");
+    try expectContains(dmmv, "pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_n64_bm64_dynk");
+    try expectContains(dmmv, "pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_n64_bm64_dynk");
     try expectContains(dmmv, "M / m_tile");
 }
 
@@ -889,25 +895,27 @@ test "Vulkan fused RMS router merges wave32 subgroup partials" {
     try expectContains(src, "router_out[row] = merged;");
 }
 
-test "Vulkan Qwen 3.6 MoE decode top-k cap stays default-on on Intel" {
+test "Vulkan Qwen 3.6 MoE runs the metadata top-k unless a cap is requested" {
+    // A top-3 decode cap and a top-1 early-prefill cap were default-on and made
+    // Qwen 3.6 35B-A3B diverge from the reference at the first generated token.
+    // Caps stay available only as explicit, logged approximations.
     const src = @embedFile("compute/forward.zig");
-    try expectContains(src, "const qwen36_moe_intel_safe_defaults = qwen36_like_f32_ssm and isIntelGpuVendor(gpu_config.vendor);");
-    try expectContains(src, "const qwen36_topk_default: u32 = 3;");
-    try expectContains(src, "const qwen36_prefill_topk_default: u32 = if (qwen36_moe_intel_safe_defaults) 0 else 1;");
-    try expectContains(src, "Qwen 3.6 MoE top-k capped at {d} (set ZINC_QWEN36_MOE_TOPK={d} to restore metadata top-k)");
-    try expectContains(src, "Qwen 3.6 non-terminal prefill MoE top-k cap disabled by default on Intel");
+    try expectContains(src, "const qwen36_topk_default: u32 = 0;");
+    try expectContains(src, "const qwen36_prefill_topk_default: u32 = 0;");
+    try expectContains(src, "Qwen 3.6 MoE top-k capped at {d} via ZINC_QWEN36_MOE_TOPK (approximate output");
+    try expectContains(src, "via ZINC_QWEN36_MOE_PREFILL_TOPK (approximate output; unset it for exact prefill)");
 }
 
 test "Vulkan prefillBatched uses all batched primitives in the per-layer loop" {
     const src = @embedFile("compute/forward.zig");
     const fn_marker = "fn prefillBatchedImpl(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {";
-    try expectContainsNear(src, fn_marker, "dispatchProjectionBatched", 24000);
-    try expectContainsNear(src, fn_marker, "dispatchRopeBatched", 24000);
-    try expectContainsNear(src, fn_marker, "dispatchKvCacheWriteBatched", 24000);
-    try expectContainsNear(src, fn_marker, "dispatchFlashAttnBatched", 24000);
-    try expectContainsNear(src, fn_marker, "dispatchResidualRmsNorm", 30000);
-    try expectContainsNear(src, fn_marker, "dispatchFfnActivation", 24000);
-    try expectContainsNear(src, fn_marker, "dispatchDmmvInner", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchProjectionBatched", 40000);
+    try expectContainsNear(src, fn_marker, "dispatchRopeBatched", 40000);
+    try expectContainsNear(src, fn_marker, "dispatchKvCacheWriteBatched", 40000);
+    try expectContainsNear(src, fn_marker, "dispatchFlashAttnBatched", 40000);
+    try expectContainsNear(src, fn_marker, "dispatchResidualRmsNorm", 40000);
+    try expectContainsNear(src, fn_marker, "dispatchFfnActivation", 40000);
+    try expectContainsNear(src, fn_marker, "dispatchDmmvInner", 40000);
 }
 
 test "Vulkan prefillBatched threads base_token through RoPE, KV write, flash attn" {

@@ -3057,7 +3057,10 @@ pub fn main() !void {
         }
 
         // Generate
-        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, config.max_tokens, eos_id, allocator);
+        // Stop on every end-of-generation token (e.g. <|endoftext|> as well as
+        // <|im_end|>), except in benchmark mode, which runs to max_tokens.
+        const extra_stop_ids: []const u32 = if (eos_id == std.math.maxInt(u32)) &.{} else tokenizer.eog_ids;
+        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, config.max_tokens, eos_id, extra_stop_ids, allocator);
         defer allocator.free(output_tokens);
 
         // Output token IDs

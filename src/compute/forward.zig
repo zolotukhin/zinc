@@ -1115,6 +1115,12 @@ fn isGemmaStyleDenseArch(arch: loader.Architecture) bool {
     return arch == .gemma or arch == .muse_glimmer;
 }
 
+/// Prompt position selected by ZINC_LAYER_DIAG_POS for per-layer residual dumps.
+fn layerDiagPosition() ?u32 {
+    const raw = std.posix.getenv("ZINC_LAYER_DIAG_POS") orelse return null;
+    return std.fmt.parseInt(u32, raw, 10) catch null;
+}
+
 fn hasGemmaStylePostNorms(arch: loader.Architecture) bool {
     return arch == .gemma or arch == .muse_glimmer;
 }
@@ -2752,7 +2758,10 @@ pub const InferenceEngine = struct {
             log.info("MoE Q5_K x Q8_1 fused down+acc DISABLED via ZINC_MOE_Q5K_Q8_1_DOWN_ACC=0", .{});
         }
 
-        const qwen36_topk_default: u32 = 3;
+        // Exact metadata top-k by default. A cap trades output quality for
+        // speed (top-3 of 8 diverged from the reference at the first token on
+        // Qwen 3.6 35B-A3B), so it is opt-in via ZINC_QWEN36_MOE_TOPK=<k>.
+        const qwen36_topk_default: u32 = 0;
         const qwen36_topk_limit: u32 = if (qwen36_like_f32_ssm) blk: {
             if (qwen36_topk_env) |raw| {
                 const parsed = std.fmt.parseInt(u32, raw, 10) catch qwen36_topk_default;
@@ -2762,7 +2771,7 @@ pub const InferenceEngine = struct {
             break :blk qwen36_topk_default;
         } else 0;
         if (qwen36_topk_limit > 0) {
-            log.info("Qwen 3.6 MoE top-k capped at {d} (set ZINC_QWEN36_MOE_TOPK={d} to restore metadata top-k)", .{
+            log.warn("Qwen 3.6 MoE top-k capped at {d} via ZINC_QWEN36_MOE_TOPK (approximate output; unset it or use {d} for the metadata top-k)", .{
                 qwen36_topk_limit,
                 config.n_experts_used,
             });
@@ -2786,7 +2795,10 @@ pub const InferenceEngine = struct {
             });
         }
         const qwen36_prefill_topk_env = std.posix.getenv("ZINC_QWEN36_MOE_PREFILL_TOPK");
-        const qwen36_prefill_topk_default: u32 = if (qwen36_moe_intel_safe_defaults) 0 else 1;
+        // Exact prefill by default: capping routed experts and skipping the
+        // shared expert on early prompt tokens changes the prompt's KV/SSM
+        // state and the model's output. Opt in with ZINC_QWEN36_MOE_PREFILL_TOPK=<k>.
+        const qwen36_prefill_topk_default: u32 = 0;
         const qwen36_prefill_tail_topk_limit: u32 = if (qwen36_like_f32_ssm) blk: {
             if (qwen36_prefill_topk_env) |raw| {
                 const parsed = std.fmt.parseInt(u32, raw, 10) catch qwen36_prefill_topk_default;
@@ -2807,14 +2819,14 @@ pub const InferenceEngine = struct {
             break :blk qwen36_prefill_guard_default;
         } else 0;
         if (qwen36_prefill_tail_topk_limit > 0) {
-            log.info("Qwen 3.6 non-terminal prefill MoE top-k capped at {d} before final {d} prompt tokens (set ZINC_QWEN36_MOE_PREFILL_TOPK=0 to disable)", .{
+            log.warn("Qwen 3.6 non-terminal prefill MoE top-k capped at {d} before final {d} prompt tokens via ZINC_QWEN36_MOE_PREFILL_TOPK (approximate output; unset it for exact prefill)", .{
                 qwen36_prefill_tail_topk_limit,
                 qwen36_prefill_tail_topk_guard_tokens,
             });
         } else if (qwen36_like_f32_ssm and qwen36_prefill_topk_env != null) {
             log.info("Qwen 3.6 non-terminal prefill MoE top-k cap disabled via ZINC_QWEN36_MOE_PREFILL_TOPK={s}", .{qwen36_prefill_topk_env.?});
         } else if (qwen36_moe_intel_safe_defaults) {
-            log.info("Qwen 3.6 non-terminal prefill MoE top-k cap disabled by default on Intel (set ZINC_QWEN36_MOE_PREFILL_TOPK to cap)", .{});
+            log.debug("Qwen 3.6 prefill MoE runs the metadata top-k (set ZINC_QWEN36_MOE_PREFILL_TOPK to cap)", .{});
         }
 
         const is_amd_rdna_vendor = gpu_config.vendor == .amd_rdna3 or
@@ -7314,6 +7326,7 @@ pub const InferenceEngine = struct {
             const tmp = tmp_storage[0..hidden_dim];
             dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, tmp);
             if (arch == .gemma) {
+                // Gemma models scale embeddings by sqrt(hidden_dim).
                 const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
                 for (tmp) |*v| v.* *= scale;
             } else {
@@ -7338,6 +7351,32 @@ pub const InferenceEngine = struct {
     /// @param collect_output When `true`, the engine accumulates layer outputs needed by
     ///   diagnostic or GPT-OSS embedding-collection paths.
     /// @returns `error.ContextLengthExceeded` when `state.position` is at capacity.
+    /// Submit the decode command buffer so far, copy `hidden_buf` to host and
+    /// log its first/last three values and RMS as the output of `layer` at
+    /// position `pos`, then reopen the command buffer (diagnostic only).
+    fn layerDiagDump(self: *InferenceEngine, pos: u32, layer: usize, tag: []const u8) !void {
+        const hidden_dim = self.model.config.hidden_dim;
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+        const diag_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        const diag_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = diag_bytes };
+        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.logits_staging.handle, 1, &diag_region);
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        const dv: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+        var ss: f64 = 0.0;
+        for (0..hidden_dim) |i| ss += @as(f64, dv[i]) * @as(f64, dv[i]);
+        const n = hidden_dim;
+        log.info("LAYER_DIAG: pos={d} layer {d} {s}: first3={d:.4},{d:.4},{d:.4} last3={d:.4},{d:.4},{d:.4} rms={d:.4}", .{
+            pos,                                    layer, tag, dv[0], dv[1], dv[2], dv[n - 3], dv[n - 2], dv[n - 1],
+            @sqrt(ss / @as(f64, @floatFromInt(n))),
+        });
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+    }
+
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32, collect_output: bool) !void {
         if (state.position >= self.max_context_tokens) {
             return error.ContextLengthExceeded;
@@ -7450,24 +7489,15 @@ pub const InferenceEngine = struct {
         var gemma_dense_next_attn_norm_ready = false;
         for (layer_start..layer_end) |layer_idx| {
             // ZINC_MUSE_DIAG=1: dump the residual entering layers 1..3 for the
-            // first token (== the outputs of layers 0..2) to compare against
-            // llama.cpp's eval-callback `l_out-N` rows.
-            if (state.position == 0 and layer_idx >= 1 and layer_idx <= 3 and envFlagEnabled("ZINC_MUSE_DIAG", false)) {
-                try self.decode_cmd.end();
-                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-                try self.decode_cmd.reset();
-                try self.decode_cmd.beginOneTime();
-                const diag_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
-                const diag_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = diag_bytes };
-                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.logits_staging.handle, 1, &diag_region);
-                try self.decode_cmd.end();
-                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-                const dv: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
-                var ss: f64 = 0.0;
-                for (0..hidden_dim) |i| ss += @as(f64, dv[i]) * @as(f64, dv[i]);
-                log.info("MUSE_DIAG: after layer {d}: hidden[0..3]={d:.4},{d:.4},{d:.4} last3={d:.4},{d:.4},{d:.4} rms={d:.4}", .{ layer_idx - 1, dv[0], dv[1], dv[2], dv[hidden_dim - 3], dv[hidden_dim - 2], dv[hidden_dim - 1], @sqrt(ss / @as(f64, @floatFromInt(hidden_dim))) });
-                try self.decode_cmd.reset();
-                try self.decode_cmd.beginOneTime();
+            // first token. ZINC_LAYER_DIAG_POS=<p>: dump the residual entering
+            // every layer at prompt position p. Both print the previous layer's
+            // output, for comparison with the reference eval-callback `l_out-N`
+            // row of that token.
+            const layer_diag_here = if (layerDiagPosition()) |p| p == state.position else false;
+            if (layer_idx >= 1 and (layer_diag_here or
+                (state.position == 0 and layer_idx <= 3 and envFlagEnabled("ZINC_MUSE_DIAG", false))))
+            {
+                try self.layerDiagDump(state.position, layer_idx - 1, "out");
             }
             const layer: u32 = @intCast(layer_idx);
             const lt = self.layer_tensors[layer_idx];
@@ -7495,6 +7525,9 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.transferToComputeBarrier();
                 self.endProfilePhase(.embed_upload, embed_phase);
+                if (layerDiagPosition()) |p| {
+                    if (p == state.position) try self.layerDiagDump(state.position, 0, "embed");
+                }
             }
 
             // Appended NextN blocks are full-attention decoder blocks.
@@ -9114,6 +9147,10 @@ pub const InferenceEngine = struct {
                 };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, ffn_norm_in, self.ffn_norm_buf.handle, 1, &norm_region);
                 self.decode_cmd.transferToComputeBarrier();
+            }
+
+            if (layerDiagPosition()) |p| {
+                if (p == state.position) try self.layerDiagDump(state.position, layer_idx, "attn_residual");
             }
 
             // Prefill last-layer shortcut: at the final layer of a non-terminal prefill
@@ -11779,6 +11816,9 @@ pub const InferenceEngine = struct {
         if (collect_output and allow_final_tail) {
             const final_tail_phase = self.beginProfilePhase();
 
+            if (layerDiagPosition()) |p| {
+                if (p == state.position) try self.layerDiagDump(state.position, config.n_layers - 1, "out");
+            }
             // Final RMS norm: hidden_buf → norm_buf
             const final_norm_phase = self.beginProfilePhase();
             const final_norm_tensor = self.mtp_tail_norm_override orelse
@@ -32239,13 +32279,32 @@ fn mtpModelEligible(cfg: ModelConfig, model: *const Model) bool {
     return true;
 }
 
+/// Stop condition for `generate`: the primary EOS id plus extra
+/// end-of-generation ids.
+const GenerationStop = struct {
+    eos: u32,
+    extra: []const u32,
+
+    fn hit(self: GenerationStop, token: u32) bool {
+        if (token == self.eos) return true;
+        for (self.extra) |id| {
+            if (id == token) return true;
+        }
+        return false;
+    }
+};
+
 pub fn generate(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
     max_tokens: u32,
     eos_token_id: u32,
+    extra_stop_ids: []const u32,
     allocator: std.mem.Allocator,
 ) ![]u32 {
+    // Stop on the primary EOS and on any other end-of-generation token (for
+    // example `<|endoftext|>` alongside `<|im_end|>` in ChatML vocabularies).
+    const stop = GenerationStop{ .eos = eos_token_id, .extra = extra_stop_ids };
     var state = DecodeState.init(allocator);
     defer state.deinit();
     const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
@@ -32633,7 +32692,7 @@ pub fn generate(
         // Dump top-5 logits from prefill for comparison with the reference implementation
         if (engine.logits_readback_enabled or engine.validation_diagnostics_enabled) dumpTop5Logits(engine, 0);
         generated = 1;
-        if (first_token == eos_token_id) generated = effective_max_tokens; // stop early
+        if (stop.hit(first_token)) generated = effective_max_tokens; // stop early
         if (mtp_debug_draft and generated < effective_max_tokens) {
             try engine.mtpCaptureNormBufNow();
             const t0 = std.time.nanoTimestamp();
@@ -32646,7 +32705,7 @@ pub fn generate(
     if (mtp_active and generated < effective_max_tokens) {
         var seed = state.generated_tokens.items[state.generated_tokens.items.len - 1];
         mtp_loop: while (generated < effective_max_tokens) {
-            if (seed == eos_token_id) break;
+            if (stop.hit(seed)) break;
             const token_room = effective_max_tokens - generated;
             const context_room = engine.max_context_tokens -| state.position;
             if (token_room == 0 or context_room <= 1) break;
@@ -32657,7 +32716,7 @@ pub fn generate(
                 if (generated >= effective_max_tokens) break :mtp_loop;
                 try state.generated_tokens.append(allocator, result.drafts[i]);
                 generated += 1;
-                if (result.drafts[i] == eos_token_id) break :mtp_loop;
+                if (stop.hit(result.drafts[i])) break :mtp_loop;
             }
             if (generated >= effective_max_tokens) break;
             try state.generated_tokens.append(allocator, result.next_token);
@@ -32724,7 +32783,7 @@ pub fn generate(
                 mtp_dbg_total += 1;
                 if (d == token) mtp_dbg_hits += 1;
             }
-            if (token != eos_token_id and generated + 1 < effective_max_tokens) {
+            if (!stop.hit(token) and generated + 1 < effective_max_tokens) {
                 const t0 = std.time.nanoTimestamp();
                 mtp_dbg_pending = try engine.mtpDraftStep(&state, token, state.position);
                 mtp_dbg_ns += @intCast(std.time.nanoTimestamp() - t0);
@@ -32744,7 +32803,7 @@ pub fn generate(
         });
 
         // Check for EOS token (read from GGUF metadata)
-        if (token == eos_token_id) break;
+        if (stop.hit(token)) break;
     }
     const decode_end = std.time.nanoTimestamp();
     if (mtp_debug_draft) {
