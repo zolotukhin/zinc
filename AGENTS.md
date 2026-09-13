@@ -298,8 +298,11 @@ time):
    invocation. If `./zig-out/bin/zinc`, `llama-*`, or a model path under
    `~/Library/Caches/zinc` would execute locally, do not run it.
 2. No GPU process from this session is still alive where it will run:
-   `pgrep -fl 'zig-out/bin/zinc|llama-(server|cli|bench)'` must list nothing of
-   yours (the node's long-running service is the one exception you manage).
+   `for n in zinc llama-server llama-cli llama-bench; do pgrep -x "$n"; done`
+   must list nothing of yours (the node's long-running service is the one
+   exception you manage). Match exact process names with `pgrep -x`; a
+   `pgrep -f` pattern also matches the `ssh`/`bash -c` command line that carries
+   the check and the inference command, so it always fires.
 3. The command stops what it starts. Launch servers inside the same command that
    uses them and stop them by PID before it returns (`trap 'kill $PID' EXIT`);
    never leave a spawned server running between tool calls on any machine.
