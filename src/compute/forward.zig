@@ -983,7 +983,7 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     // rope) as V on the full-attn layers, and skipped the V unit-norm entirely.
     const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
     if (cfg.architecture != .gemma and full_attn_interval != 1) return false;
-    if (cfg.architecture != .gemma and cfg.sliding_window_size != 0) return false;
+    if (cfg.architecture != .gemma and cfg.architecture != .muse_glimmer and cfg.sliding_window_size != 0) return false;
 
     // Per-layer projections go through dispatchProjectionBatched →
     // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
@@ -1075,6 +1075,27 @@ fn qwenA3bQ6MoeColsRequestedForLayer(layer: u32, default_value: bool) bool {
         if (selected_layer == layer) return true;
     }
     return false;
+}
+
+/// Muse Glimmer applies a weightless RMSNorm to each embedding row.
+fn museEmbedRmsNorm(row: []f32, eps: f32) void {
+    var sum_sq: f64 = 0.0;
+    for (row) |v| sum_sq += @as(f64, v) * @as(f64, v);
+    const inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(row.len)) + @as(f64, eps)));
+    for (row) |*v| v.* *= inv;
+}
+
+/// Gemma-style layer skeleton (pre + post norms around attention and FFN):
+/// Gemma and Muse Glimmer (Gemma dense skeleton with Qwen-style gated,
+/// QK-normed attention). Muse's global layers (every 4th) use NoPE and full
+/// attention; its other layers are sliding-window (the window is not
+/// enforced on Vulkan, same as Gemma here).
+fn hasGemmaStylePostNorms(arch: ModelConfig.Architecture) bool {
+    return arch == .gemma or arch == .muse_glimmer;
+}
+
+fn museGlobalLayer(cfg: *const ModelConfig, layer: u32) bool {
+    return cfg.architecture == .muse_glimmer and ((layer + 1) % 4 == 0);
 }
 
 fn prefillProfileRequested() bool {
@@ -7262,6 +7283,9 @@ pub const InferenceEngine = struct {
             const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
             for (staging_f32[0..hidden_dim]) |*v| v.* *= scale;
         }
+        if (self.model.config.architecture == .muse_glimmer) {
+            museEmbedRmsNorm(staging_f32[0..hidden_dim], self.model.config.rms_norm_eps);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7529,7 +7553,9 @@ pub const InferenceEngine = struct {
                     // Gemma 4 proportional RoPE: global attention layers (use_k_as_v) rotate
                     // the full head_dim using precomputed rope_freqs.weight frequencies.
                     const proportional_rope = config.architecture == .gemma and use_k_as_v;
-                    const layer_rope_dim: u32 = if (proportional_rope)
+                    const layer_rope_dim: u32 = if (museGlobalLayer(&config, layer))
+                        0 // Muse global layers: NoPE
+                    else if (proportional_rope)
                         layer_head_dim
                     else
                         @min(if (config.rope_dim > 0) config.rope_dim else layer_head_dim, layer_head_dim);
@@ -8101,7 +8127,7 @@ pub const InferenceEngine = struct {
                     const o_tensor_for_merge = lt.attn_output;
                     const o_proj_quant_ok = if (o_tensor_for_merge) |ot| ot.info.type_ == .q4_k else false;
                     const apply_attn_gate_for_merge = lt.attn_gate != null;
-                    const post_attn_norm_for_merge = config.architecture == .gemma and lt.post_attention_norm != null;
+                    const post_attn_norm_for_merge = hasGemmaStylePostNorms(config.architecture) and lt.post_attention_norm != null;
                     const attn_chunks: u32 = if (use_split_k) self.splitKChunksForSeq(attn_seq_len) else 1;
                     // The fused o-proj merge reads partials laid out for the base
                     // chunk count only.
@@ -8612,7 +8638,7 @@ pub const InferenceEngine = struct {
                         self.prefill_embed_big_token_count >= gemma_prefill_long_draft_prompt_min_tokens and
                         self.prefill_embed_big_token_count <= gemma_prefill_shared_skip_max_tokens and
                         self.prefill_current_token_idx + gemma_prefill_long_draft_prompt_guard_tokens < self.prefill_embed_big_token_count;
-                    const apply_post_attn_norm = config.architecture == .gemma and
+                    const apply_post_attn_norm = hasGemmaStylePostNorms(config.architecture) and
                         lt.post_attention_norm != null and
                         !skip_gemma_short_prefill_post_attn_norm;
                     const has_post_attn_norm = apply_post_attn_norm;
@@ -8737,7 +8763,7 @@ pub const InferenceEngine = struct {
                             self.elementwise.pipeline_post_norm_residual_rms_norm != null and
                             pan_fused_ffn_norm_tensor != null and
                             !diag_attn_residual and
-                            config.architecture == .gemma and
+                            hasGemmaStylePostNorms(config.architecture) and
                             !self.validation_diagnostics_enabled;
                         const use_fused_pan_decode = apply_post_attn_norm and
                             self.elementwise.pipeline_rms_norm_add != null and
@@ -28155,6 +28181,7 @@ pub const InferenceEngine = struct {
                 if (is_gemma) {
                     for (dst) |*v| v.* *= gemma_scale;
                 }
+                if (cfg.architecture == .muse_glimmer) museEmbedRmsNorm(dst, cfg.rms_norm_eps);
             }
             self.prefill_embed_big_hidden = hidden_dim;
             self.prefill_embed_big_token_count = n_tokens;
@@ -28247,7 +28274,9 @@ pub const InferenceEngine = struct {
             const layer_q_dim: u32 = @intCast(q_t.info.numElements() / hidden_dim);
             const layer_kv_dim: u32 = @intCast(k_t.info.numElements() / hidden_dim);
             const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else cfg.n_kv_heads;
-            const layer_rope_dim: u32 = if (cfg.rope_dim > 0)
+            const layer_rope_dim: u32 = if (museGlobalLayer(&cfg, @intCast(layer_idx)))
+                0 // Muse global layers: NoPE
+            else if (cfg.rope_dim > 0)
                 @min(cfg.rope_dim, layer_head_dim)
             else
                 layer_head_dim;
@@ -28435,7 +28464,7 @@ pub const InferenceEngine = struct {
             self.endProfilePhase(.attention_o_proj, attention_o_proj_phase);
             const attention_post_norm_phase = self.beginProfilePhase();
             var ffn_norm_ready = false;
-            if (cfg.architecture == .gemma) {
+            if (hasGemmaStylePostNorms(cfg.architecture)) {
                 if (lt.post_attention_norm) |pan_t| {
                     if (self.elementwise.pipeline_post_norm_residual_rms_norm != null) {
                         try self.dispatchPostNormResidualRmsNorm(
@@ -28547,7 +28576,7 @@ pub const InferenceEngine = struct {
             // instead of (rms_norm_mul in place) + barrier + (scale_accumulate).
             // Falls back to the separate ops for non-Gemma or when the fused
             // pipeline failed to load.
-            const use_fused_pfn = cfg.architecture == .gemma and
+            const use_fused_pfn = hasGemmaStylePostNorms(cfg.architecture) and
                 lt.post_ffw_norm != null and
                 self.elementwise.pipeline_rms_norm_add != null;
             if (use_fused_pfn) {
@@ -28564,7 +28593,7 @@ pub const InferenceEngine = struct {
                     eps,
                 );
             } else {
-                if (cfg.architecture == .gemma) {
+                if (hasGemmaStylePostNorms(cfg.architecture)) {
                     if (lt.post_ffw_norm) |pfn_t| {
                         try self.dispatchRmsNorm(
                             scratch_down.handle,
@@ -28836,6 +28865,7 @@ pub const InferenceEngine = struct {
                 if (is_gemma) {
                     for (dst) |*v| v.* *= gemma_scale;
                 }
+                if (self.model.config.architecture == .muse_glimmer) museEmbedRmsNorm(dst, self.model.config.rms_norm_eps);
             }
         }
         self.prefill_embed_big_hidden = hidden_dim;
@@ -29491,18 +29521,24 @@ pub const InferenceEngine = struct {
         return softcap * std.math.tanh(logit / softcap);
     }
 
+    /// Cohere/Muse Glimmer `logit_scale`: multiply before softcapping
+    /// (greedy-invariant; matters for sampling and exact logits).
+    fn scaleLogit(logit: f32, logit_scale: f32) f32 {
+        return if (logit_scale > 0) logit * logit_scale else logit;
+    }
+
     fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
         if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
         if (logit >= 0) return logit / repetition_penalty;
         return logit * repetition_penalty;
     }
 
-    fn argmaxFromLogits(logits: []const f32, history: []const u32, repetition_penalty: f32, final_logit_softcapping: f32) u32 {
+    fn argmaxFromLogits(logits: []const f32, history: []const u32, repetition_penalty: f32, final_logit_softcapping: f32, logit_scale: f32) u32 {
         if (logits.len == 0) return 0;
         var best_idx: u32 = 0;
-        var best_val = adjustedLogit(softcapLogit(logits[0], final_logit_softcapping), 0, history, repetition_penalty);
+        var best_val = adjustedLogit(softcapLogit(scaleLogit(logits[0], logit_scale), final_logit_softcapping), 0, history, repetition_penalty);
         for (logits[1..], 1..) |raw_val, i| {
-            const val = adjustedLogit(softcapLogit(raw_val, final_logit_softcapping), @intCast(i), history, repetition_penalty);
+            const val = adjustedLogit(softcapLogit(scaleLogit(raw_val, logit_scale), final_logit_softcapping), @intCast(i), history, repetition_penalty);
             if (val > best_val) {
                 best_val = val;
                 best_idx = @intCast(i);
@@ -29511,11 +29547,11 @@ pub const InferenceEngine = struct {
         return best_idx;
     }
 
-    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random, final_logit_softcapping: f32) u32 {
+    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random, final_logit_softcapping: f32, logit_scale: f32) u32 {
         if (logits.len == 0) return 0;
-        if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0, final_logit_softcapping);
+        if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0, final_logit_softcapping, logit_scale);
         if (params.temperature <= 0.0001) {
-            return argmaxFromLogits(logits, history, params.repetition_penalty, final_logit_softcapping);
+            return argmaxFromLogits(logits, history, params.repetition_penalty, final_logit_softcapping, logit_scale);
         }
 
         const max_candidates = 128;
@@ -29530,7 +29566,7 @@ pub const InferenceEngine = struct {
         for (logits, 0..) |raw_val, i| {
             if (!std.math.isFinite(raw_val)) continue;
             const token_id: u32 = @intCast(i);
-            const val = adjustedLogit(softcapLogit(raw_val, final_logit_softcapping), token_id, history, params.repetition_penalty);
+            const val = adjustedLogit(softcapLogit(scaleLogit(raw_val, logit_scale), final_logit_softcapping), token_id, history, params.repetition_penalty);
 
             var insert_at = candidate_count;
             while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
@@ -30967,7 +31003,7 @@ pub const InferenceEngine = struct {
         const vocab_size = self.model.config.vocab_size;
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
         const logits = logits_ptr[0..vocab_size];
-        return sampleFromLogits(logits, state.generated_tokens.items, params, random, self.model.config.final_logit_softcapping);
+        return sampleFromLogits(logits, state.generated_tokens.items, params, random, self.model.config.final_logit_softcapping, self.model.config.logit_scale);
     }
 
     // -----------------------------------------------------------------------
@@ -32684,7 +32720,7 @@ test "SamplingParams requires logits readback for non-greedy decoding" {
 test "sampleFromLogits greedy path returns argmax" {
     const logits = [_]f32{ 0.5, 2.0, 1.25 };
     var prng = std.Random.DefaultPrng.init(1234);
-    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{}, prng.random(), 0);
+    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{}, prng.random(), 0, 0);
     try std.testing.expectEqual(@as(u32, 1), token);
 }
 
@@ -32695,7 +32731,7 @@ test "sampleFromLogits repetition penalty can break a simple loop" {
     const token = InferenceEngine.sampleFromLogits(&logits, &history, .{
         .temperature = 0.0,
         .repetition_penalty = 2.0,
-    }, prng.random(), 0);
+    }, prng.random(), 0, 0);
     try std.testing.expectEqual(@as(u32, 1), token);
 }
 
@@ -32706,7 +32742,7 @@ test "sampleFromLogits top_p keeps only the highest-probability token when thres
         .temperature = 0.8,
         .top_p = 0.5,
         .top_k = 8,
-    }, prng.random(), 0);
+    }, prng.random(), 0, 0);
     try std.testing.expectEqual(@as(u32, 0), token);
 }
 
