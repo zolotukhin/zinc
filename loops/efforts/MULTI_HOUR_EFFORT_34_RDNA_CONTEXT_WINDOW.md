@@ -1099,3 +1099,10 @@ slower: the f16 window adds 64 VGPRs to a 252-VGPR kernel, and the compiler
 did not turn it into packed FMAs), and accuracy drifts (top-2 logits differ by
 up to 0.27, the greedy stream diverges after 42 tokens). Removed.
 
+**Stage 43: what NextN priming costs in prefill.** 17K, `ZINC_MTP=1` vs `0`:
+480.3 vs 509.1 tok/s (6%); the per-chunk primes ("primed 3264 rows in 281 ms"
+× 5 + 69 ms) are 1.5 s of the 2.0 s difference. The draft block's attention
+output and FFN for a non-final chunk are never consumed — only its K/V rows
+are — so a KV-only prime for those chunks (the catch-up path already has
+`spec_kv_only`) would recover most of it at every depth.
+
