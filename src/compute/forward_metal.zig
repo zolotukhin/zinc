@@ -609,6 +609,9 @@ fn canUseDenseQ6kSimdgroupDmmvShape(cfg: ModelConfig, tensor_name: []const u8, M
     if (cfg.n_experts != 0 or M == 0 or M % 4 != 0 or K % 256 != 0) return false;
     return supportsDenseQ6kSimdgroupDmmvArch(cfg.architecture) or
         isQwen35DenseDownQ6kTarget(cfg, tensor_name, M, K) or
+        // 9B dense-down (M=4096, K=12288, Q6_K) was the last Q6_K matvec on the
+        // legacy dmmv_q6k: ~60 GB/s and the largest kernel by total decode time.
+        isQwen35Dense9bDownQ6kTarget(cfg, tensor_name, M, K) or
         isQwen35SsmQkvQ6kTarget(cfg, tensor_name, M, K) or
         isQwen35LmHeadQ6kTarget(cfg, tensor_name, M, K) or
         isQwen35Dense9bFullAttnKvQ6kTarget(cfg, tensor_name, M, K) or
