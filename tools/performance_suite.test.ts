@@ -1427,3 +1427,32 @@ test("artifact target summary excludes preview-flagged rows from headline stats"
   expect(intel?.summary.successful_models).toBe(1);
   expect(intel?.summary.compared_models).toBe(1);
 });
+
+test("partial merge keeps each untouched model's own provenance", () => {
+  const scenario = (median: number) => [{ id: "core", zinc: { decode_tps: { median, samples: [median] } } }];
+  const existing = {
+    targets: [{
+      id: "rdna",
+      generated_at: "2026-09-12T00:00:00.000Z",
+      provenance: { zinc: { version: "old111" } },
+      models: [
+        { id: "kept", scenarios: scenario(1) },
+        { id: "rerun", scenarios: scenario(2) },
+      ],
+    }],
+  };
+  const incoming = [{
+    id: "rdna",
+    generated_at: "2026-09-13T00:00:00.000Z",
+    provenance: { zinc: { version: "new222" } },
+    models: [{ id: "rerun", scenarios: scenario(3) }],
+  }];
+  const merged = mergeArtifacts(existing, incoming, { preserveMissingPhases: true });
+  const target = merged.targets.find((t: { id: string }) => t.id === "rdna");
+  const byId = Object.fromEntries(target.models.map((m: { id: string }) => [m.id, m]));
+  expect(target.provenance.zinc.version).toBe("new222");
+  expect(byId.kept.provenance.zinc.version).toBe("old111");
+  expect(byId.kept.generated_at).toBe("2026-09-12T00:00:00.000Z");
+  expect(byId.rerun.provenance.zinc.version).toBe("new222");
+  expect(byId.rerun.generated_at).toBe("2026-09-13T00:00:00.000Z");
+});

@@ -914,7 +914,7 @@ function mergeTargetForPartialRun(existingTarget, incomingTarget) {
   // every model with the run it was actually measured in; otherwise a
   // one-model rerun relabels untouched rows with the new commit.
   const stamp = (model, target, force) => (model && (force || !model.provenance)
-    ? { ...model, provenance: target?.provenance ?? null, captured_at: target?.captured_at ?? null }
+    ? { ...model, provenance: target?.provenance ?? null, generated_at: target?.generated_at ?? null }
     : model);
   const existingModels = new Map((existingTarget.models ?? []).map((model) => [model.id, stamp(model, existingTarget, false)]));
   const incomingModels = new Map((incomingTarget.models ?? []).map((model) => [model.id, stamp(model, incomingTarget, true)]));
@@ -1899,7 +1899,10 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs, targ
     `cmd = ${JSON.stringify(cmd)}`,
     "env = dict(os.environ)",
     `env.update(${JSON.stringify(creds.env ?? {})})`,
-    `log = open(${JSON.stringify(logPath)}, "ab", buffering=0)`,
+    // Truncate: log paths are keyed by port, and a reused port would otherwise hand
+    // this model the previous server's lines (a Gemma run inherited Qwen NextN/MTP
+    // acceptance lines and was published with an MTP badge).
+    `log = open(${JSON.stringify(logPath)}, "wb", buffering=0)`,
     `subprocess.Popen(cmd, cwd=${JSON.stringify(creds.workdir)}, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)`,
     'print("started")',
   ].join("; ");
@@ -1935,7 +1938,10 @@ async function launchRdnaZincServer(caseDef, creds, timeoutMs) {
     `cmd = ${JSON.stringify(cmd)}`,
     "env = dict(os.environ)",
     `env.update(${JSON.stringify({ RADV_PERFTEST: "coop_matrix", ...(creds.env ?? {}) })})`,
-    `log = open(${JSON.stringify(logPath)}, "ab", buffering=0)`,
+    // Truncate: log paths are keyed by port, and a reused port would otherwise hand
+    // this model the previous server's lines (a Gemma run inherited Qwen NextN/MTP
+    // acceptance lines and was published with an MTP badge).
+    `log = open(${JSON.stringify(logPath)}, "wb", buffering=0)`,
     `subprocess.Popen(cmd, cwd=${JSON.stringify(creds.workdir)}, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)`,
     'print("started")',
   ].join("; ");
