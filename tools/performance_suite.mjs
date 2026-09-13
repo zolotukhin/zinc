@@ -910,8 +910,14 @@ function mergeTargetForPartialRun(existingTarget, incomingTarget) {
     ...(existingTarget.models ?? []).map((model) => model.id),
     ...(incomingTarget.models ?? []).map((model) => model.id),
   ]);
-  const existingModels = new Map((existingTarget.models ?? []).map((model) => [model.id, model]));
-  const incomingModels = new Map((incomingTarget.models ?? []).map((model) => [model.id, model]));
+  // The target-level provenance below comes from the incoming run, so stamp
+  // every model with the run it was actually measured in; otherwise a
+  // one-model rerun relabels untouched rows with the new commit.
+  const stamp = (model, target, force) => (model && (force || !model.provenance)
+    ? { ...model, provenance: target?.provenance ?? null, captured_at: target?.captured_at ?? null }
+    : model);
+  const existingModels = new Map((existingTarget.models ?? []).map((model) => [model.id, stamp(model, existingTarget, false)]));
+  const incomingModels = new Map((incomingTarget.models ?? []).map((model) => [model.id, stamp(model, incomingTarget, true)]));
   const models = [...modelIds]
     .map((id) => mergeModelForPartialRun(existingModels.get(id), incomingModels.get(id)))
     .filter(Boolean);
