@@ -1110,3 +1110,13 @@ so the 281 ms per chunk is the prime's own time — and it normalizes the
 captured hidden rows *one row per dispatch with a barrier each* (~3,264
 dispatches per chunk). Batched into one dispatch (stage 44).
 
+**Stage 44: batched hidden-row norm in the prime: per-chunk prime 281 → 250
+ms, 17K prefill 480 → 487 tok/s; speculation intact** (20K five-fact 5/5,
+acceptance 75%/100%/75% as before), 100K 332.4 tok/s. The prime's cost is flat
+with depth (250 ms at 3K and at 13K of prefix), so it is its linear work: the
+CPU re-dequantizes the chunk's 3,264 embedding rows (the prefill just did the
+same rows into its host staging), two single-row norm dispatches per token
+build the concat input, and eh_proj goes through the generic batched
+projection. Stage 45: embedding rows copied from the prefill's staging and the
+concat norms batched (two in-place dispatches + one multi-region copy).
+
