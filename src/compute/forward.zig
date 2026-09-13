@@ -1087,6 +1087,12 @@ fn qwenA3bQ6MoeColsRequestedForLayer(layer: u32, default_value: bool) bool {
 }
 
 /// Muse Glimmer applies a weightless RMSNorm to each embedding row.
+/// Largest hidden size for which the embedding post-processing (Gemma's
+/// sqrt(hidden) scale, Muse's weightless RMS norm) runs on a stack row before
+/// the single write into the host-visible staging buffer. Reading back from
+/// write-combined staging memory costs ~0.5 ms per row on the R9700 host.
+const embed_row_tmp_max: usize = 16384;
+
 fn museEmbedRmsNorm(row: []f32, eps: f32) void {
     var sum_sq: f64 = 0.0;
     for (row) |v| sum_sq += @as(f64, v) * @as(f64, v);
@@ -7290,17 +7296,27 @@ pub const InferenceEngine = struct {
         const mmap = self.model.mmap_data orelse return error.NoMmapData;
         const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
 
+        const arch = self.model.config.architecture;
+        const post_process = arch == .gemma or arch == .muse_glimmer;
+        if (post_process and hidden_dim <= embed_row_tmp_max) {
+            // Dequantize into a cached stack row, post-process there (Gemma's
+            // sqrt(hidden_dim) scale, Muse's weightless RMS norm), then write
+            // the staging buffer once: reading back from write-combined
+            // memory cost ~0.5 ms per token.
+            var tmp_storage: [embed_row_tmp_max]f32 = undefined;
+            const tmp = tmp_storage[0..hidden_dim];
+            dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, tmp);
+            if (arch == .gemma) {
+                const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
+                for (tmp) |*v| v.* *= scale;
+            } else {
+                museEmbedRmsNorm(tmp, self.model.config.rms_norm_eps);
+            }
+            @memcpy(staging_f32[0..hidden_dim], tmp);
+            return;
+        }
         // Dequantize directly into pre-allocated staging buffer (zero alloc)
         dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, staging_f32[0..hidden_dim]);
-
-        // Gemma models scale embeddings by sqrt(hidden_dim).
-        if (self.model.config.architecture == .gemma) {
-            const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
-            for (staging_f32[0..hidden_dim]) |*v| v.* *= scale;
-        }
-        if (self.model.config.architecture == .muse_glimmer) {
-            museEmbedRmsNorm(staging_f32[0..hidden_dim], self.model.config.rms_norm_eps);
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -28294,14 +28310,31 @@ pub const InferenceEngine = struct {
                 @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))))
             else
                 1.0;
+            const is_muse = cfg.architecture == .muse_glimmer;
+            const use_tmp_row = (is_gemma or is_muse) and hidden_dim <= embed_row_tmp_max;
+            var tmp_storage: [embed_row_tmp_max]f32 = undefined;
             for (prompt_tokens, 0..) |tok, i| {
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
+                if (use_tmp_row) {
+                    // Post-process on a cached stack row and write the
+                    // host-visible staging buffer once: reading back from
+                    // write-combined memory cost ~0.6 ms per token.
+                    const tmp = tmp_storage[0..hidden_dim];
+                    dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, tmp);
+                    if (is_gemma) {
+                        for (tmp) |*v| v.* *= gemma_scale;
+                    } else {
+                        museEmbedRmsNorm(tmp, cfg.rms_norm_eps);
+                    }
+                    @memcpy(dst, tmp);
+                    continue;
+                }
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
                 if (is_gemma) {
                     for (dst) |*v| v.* *= gemma_scale;
                 }
-                if (cfg.architecture == .muse_glimmer) museEmbedRmsNorm(dst, cfg.rms_norm_eps);
+                if (is_muse) museEmbedRmsNorm(dst, cfg.rms_norm_eps);
             }
             self.prefill_embed_big_hidden = hidden_dim;
             self.prefill_embed_big_token_count = n_tokens;
@@ -28458,7 +28491,19 @@ pub const InferenceEngine = struct {
             // apply sigmoid(gate) to the attention output after flash attention.
             const muse_attn_gate_t: ?*const LoadedTensor = if (cfg.architecture == .muse_glimmer) lt.attn_gate else null;
             if (muse_attn_gate_t) |attn_gate_t| {
-                try self.dispatchProjectionBatched(attn_gate_t, scratch_norm, scratch_up, layer_q_dim, hidden_dim, n_tokens);
+                // Same normed input as q/k/v: re-quantize it to q8_1 (the qkv DP4a
+                // GEMMs above read the shared int8 scratch, hence the barrier) and
+                // run the gate projection on the DP4a path; f32 tiles otherwise.
+                var gate_done = false;
+                if (self.gemmaDenseProjectionDp4aSupported(attn_gate_t, layer_q_dim, hidden_dim, n_tokens)) {
+                    self.decode_cmd.computeBarrier();
+                    const gate_q8_1_cols = try self.gemmaPrepareProjectionQ8_1(scratch_norm, hidden_dim, n_tokens);
+                    if (gate_q8_1_cols > 0) {
+                        self.decode_cmd.computeBarrier();
+                        gate_done = try self.dispatchGemmaProjectionBatchedDp4a(attn_gate_t, scratch_norm, scratch_up, layer_q_dim, hidden_dim, n_tokens, gate_q8_1_cols, 0);
+                    }
+                }
+                if (!gate_done) try self.dispatchProjectionBatched(attn_gate_t, scratch_norm, scratch_up, layer_q_dim, hidden_dim, n_tokens);
                 self.decode_cmd.computeBarrier();
             }
 
