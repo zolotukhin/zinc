@@ -105,8 +105,6 @@ pub const AttentionDispatch = struct {
     pipeline_batched_tile_mmq: ?Pipeline,
     /// LDS-staged sibling of the int8 tile kernel (ZINC_FA_TILE_LDS=1).
     pipeline_batched_tile_mmq_lds: ?Pipeline,
-    /// f16-PV sibling of the LDS-staged int8 tile kernel (ZINC_FA_TILE_F16PV=1).
-    pipeline_batched_tile_mmq_lds_f16pv: ?Pipeline,
     /// Split-K variant — same flash_attn.spv specialized with N_I_CHUNKS=fa_split_k_active
     /// so it writes per-chunk partials into partial_attn_out_buf instead of the
     /// final normalized output. Enabled by default (N=4); disabled when ZINC_FA_SPLIT_K is 0 or 1.
@@ -211,11 +209,6 @@ pub const AttentionDispatch = struct {
             log.warn("flash_attn_batched_tile_q8mmq_lds shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
-        const attn_mmq_lds_f16pv_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched_tile_q8mmq_lds_f16pv.spv", .{shader_dir}) catch unreachable;
-        const pipeline_batched_tile_mmq_lds_f16pv: ?Pipeline = if (!kv_dtype.isQ8()) null else pipeline_mod.createFromSpirvWithOptions(instance, attn_mmq_lds_f16pv_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
-            log.warn("flash_attn_batched_tile_q8mmq_lds_f16pv shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
 
         // Split-K variant. The pipeline reuses flash_attn.spv with the
         // N_I_CHUNKS spec const set; its "output" binding (4) is wired to
@@ -287,7 +280,6 @@ pub const AttentionDispatch = struct {
             .pipeline_batched_tile = pipeline_batched_tile,
             .pipeline_batched_tile_mmq = pipeline_batched_tile_mmq,
             .pipeline_batched_tile_mmq_lds = pipeline_batched_tile_mmq_lds,
-            .pipeline_batched_tile_mmq_lds_f16pv = pipeline_batched_tile_mmq_lds_f16pv,
             .pipeline_split = pipeline_split,
             .pipeline_split_merge = pipeline_split_merge,
             .fa_split_k_active = fa_split_k_active,
@@ -622,7 +614,6 @@ pub const AttentionDispatch = struct {
         if (self.pipeline_batched_tile) |*p| p.deinit();
         if (self.pipeline_batched_tile_mmq) |*p| p.deinit();
         if (self.pipeline_batched_tile_mmq_lds) |*p| p.deinit();
-        if (self.pipeline_batched_tile_mmq_lds_f16pv) |*p| p.deinit();
         if (self.pipeline_gqa_split) |*p| p.deinit();
         if (self.pipeline_split_mmq) |*p| p.deinit();
         if (self.pipeline_split) |*p| p.deinit();

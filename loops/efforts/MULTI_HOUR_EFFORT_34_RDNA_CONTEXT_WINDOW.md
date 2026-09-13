@@ -1094,3 +1094,8 @@ run) still on. Prefill scorecard now: 20K 470 vs 459, 100K 331 vs ~290, 197K
 221.7 vs 221 — ZINC matches or leads at every measured length. Next: the
 packed-f16 PV variant (ZINC_FA_TILE_F16PV, off by default) under A/B.
 
+**Stage 42: packed-f16 PV rejected.** flash 0.454 → 1.417 ms per token (3×
+slower: the f16 window adds 64 VGPRs to a 252-VGPR kernel, and the compiler
+did not turn it into packed FMAs), and accuracy drifts (top-2 logits differ by
+up to 0.27, the greedy stream diverges after 42 tokens). Removed.
+
