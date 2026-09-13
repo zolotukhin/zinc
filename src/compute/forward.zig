@@ -104,9 +104,9 @@ fn qwenDenseDownDp4aAccEligible(
 const gemma_prefill_micro_prompt_guard_tokens: u32 = 8;
 const gemma_prefill_long_draft_prompt_min_tokens: u32 = 49;
 const gemma_prefill_dp4a_max_tokens: u32 = 384;
-/// Muse Glimmer batched prefill: chunk cap (keeps the DP4a token band and the
-/// per-submission GPU time short) and the layer cadence of intermediate submits.
-const muse_prefill_chunk_tokens: u32 = 256;
+/// Muse Glimmer batched prefill: chunk cap (the DP4a padded-token band tops out
+/// at 384) and the layer cadence of intermediate submits.
+const muse_prefill_chunk_tokens: u32 = 384;
 const muse_prefill_submit_layers: usize = 16;
 const gemma_prefill_long_draft_prompt_guard_tokens: u32 = 2;
 const gemma_prefill_shared_skip_max_tokens: u32 = 72;
