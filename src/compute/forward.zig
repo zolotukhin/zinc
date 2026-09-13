@@ -1632,6 +1632,10 @@ pub const InferenceEngine = struct {
     prefill_embed_big_capacity_bytes: u64 = 0,
     prefill_embed_big_hidden: u32 = 0,
     prefill_embed_big_token_count: u32 = 0,
+    /// Set by the chunked prefill around its per-chunk NextN prime: the chunk's
+    /// dequantized embedding rows are still in `prefill_embed_big`, so the prime
+    /// copies them from there instead of dequantizing them again on the CPU.
+    mtp_prime_embed_from_prefill: bool = false,
     prefill_current_token_idx: u32 = 0,
 
     // Effort-6 cycle 97 (A3b foundation): per-token capture buffers for the
@@ -27966,6 +27970,8 @@ pub const InferenceEngine = struct {
                 const end = @min(offset + chunk, prompt_tokens.len);
                 try self.prefillBatchedImpl(state, prompt_tokens[offset..end]);
                 if (prime_chunks) {
+                    self.mtp_prime_embed_from_prefill = true;
+                    defer self.mtp_prime_embed_from_prefill = false;
                     const primed = if (chunk_base == 0)
                         self.mtpPrime(state, prompt_tokens[0..end]) catch false
                     else
@@ -30330,13 +30336,31 @@ pub const InferenceEngine = struct {
         const scratch_swiglu = self.batched_scratch_swiglu.?;
         const scratch_down = self.batched_scratch_down.?;
 
-        try self.mtpStageEmbeddingRows(tokens, &mtp.prime_embed_staging);
+        // Embedding rows: reuse the prefill chunk's dequantized rows when the
+        // caller says they are still staged (row index = position - capture base).
+        const embed_row0: u32 = if (h_source == .capture_prev and base >= self.mtp_prime_capture_base) base - self.mtp_prime_capture_base else 0;
+        const embed_from_prefill = self.mtp_prime_embed_from_prefill and
+            h_source == .capture_prev and
+            base >= self.mtp_prime_capture_base and
+            self.prefill_embed_big != null and
+            self.prefill_embed_big_hidden == hidden_dim and
+            @as(u64, embed_row0) + @as(u64, T) <= @as(u64, self.prefill_embed_big_token_count);
+        if (!embed_from_prefill) try self.mtpStageEmbeddingRows(tokens, &mtp.prime_embed_staging);
         if (!cb_open) {
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.beginOneTime();
         }
-        self.mtpRecordEmbeddingRowsCopy(&mtp.prime_embed_staging, mtp.prime_embed_rows, tokens.len);
+        if (embed_from_prefill) {
+            const region = vk.c.VkBufferCopy{
+                .srcOffset = @as(vk.c.VkDeviceSize, embed_row0) * hidden_size,
+                .dstOffset = 0,
+                .size = @as(vk.c.VkDeviceSize, T) * hidden_size,
+            };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.prefill_embed_big.?.handle, mtp.prime_embed_rows.handle, 1, &region);
+        } else {
+            self.mtpRecordEmbeddingRowsCopy(&mtp.prime_embed_staging, mtp.prime_embed_rows, tokens.len);
+        }
         // h rows -> prime_h_rows (already output_norm'ed). For .capture_prev the
         // rows inside the capture window are contiguous, so they take one
         // batched norm below; the loop only handles the special first rows.
@@ -30385,15 +30409,24 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.transferToComputeBarrier();
         self.decode_cmd.computeBarrier();
-        // concat rows: [enorm(e_t) | hnorm(h_t)]
-        t = 0;
-        while (t < T) : (t += 1) {
-            const row_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, t) * hidden_size;
-            const cat_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, t) * hidden_size * 2;
-            try self.mtpRecordRmsNormRow(mtp.prime_embed_rows.handle, row_off, enorm, mtp.prime_concat_rows.handle, cat_off, hidden_dim);
-            try self.mtpRecordRmsNormRow(mtp.prime_h_rows.handle, row_off, hnorm, mtp.prime_concat_rows.handle, cat_off + hidden_size, hidden_dim);
+        // concat rows: [enorm(e_t) | hnorm(h_t)]. Two batched in-place norms
+        // (each workgroup reads its own row before writing it) and one
+        // multi-region copy into the interleaved concat layout, instead of two
+        // single-row dispatches per token.
+        try self.mtpRecordRmsNormRows(mtp.prime_embed_rows.handle, 0, enorm, mtp.prime_embed_rows.handle, 0, hidden_dim, T);
+        try self.mtpRecordRmsNormRows(mtp.prime_h_rows.handle, 0, hnorm, mtp.prime_h_rows.handle, 0, hidden_dim, T);
+        self.decode_cmd.computeToTransferBarrier();
+        {
+            const regions = try self.allocator.alloc(vk.c.VkBufferCopy, T);
+            defer self.allocator.free(regions);
+            for (0..T) |i| {
+                regions[i] = .{ .srcOffset = @as(vk.c.VkDeviceSize, i) * hidden_size, .dstOffset = @as(vk.c.VkDeviceSize, i) * hidden_size * 2, .size = hidden_size };
+            }
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.prime_embed_rows.handle, mtp.prime_concat_rows.handle, T, regions.ptr);
+            for (0..T) |i| regions[i].dstOffset += hidden_size;
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.prime_h_rows.handle, mtp.prime_concat_rows.handle, T, regions.ptr);
         }
-        self.decode_cmd.computeBarrier();
+        self.decode_cmd.transferToComputeBarrier();
         try self.dispatchProjectionBatched(eh_proj, mtp.prime_concat_rows, scratch_hidden, hidden_dim, hidden_dim * 2, T);
         self.decode_cmd.computeBarrier();
         const saved_position = state.position;
