@@ -1105,4 +1105,8 @@ up to 0.27, the greedy stream diverges after 42 tokens). Removed.
 output and FFN for a non-final chunk are never consumed — only its K/V rows
 are — so a KV-only prime for those chunks (the catch-up path already has
 `spec_kv_only`) would recover most of it at every depth.
+Reading the prime: the chunk prefill is synchronous (submitAndWait per chunk),
+so the 281 ms per chunk is the prime's own time — and it normalizes the
+captured hidden rows *one row per dispatch with a barrier each* (~3,264
+dispatches per chunk). Batched into one dispatch (stage 44).
 

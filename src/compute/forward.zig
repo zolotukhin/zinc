@@ -29807,16 +29807,32 @@ pub const InferenceEngine = struct {
         out_offset: vk.c.VkDeviceSize,
         n: u32,
     ) !void {
+        try self.mtpRecordRmsNormRows(x_buf, x_offset, w_tensor, out_buf, out_offset, n, 1);
+    }
+
+    /// `rows` consecutive rows in one dispatch (one workgroup per row, as the
+    /// batched attention norm does): the prime used to normalize the captured
+    /// hidden rows one dispatch + one barrier at a time, ~3,000 per chunk.
+    fn mtpRecordRmsNormRows(
+        self: *InferenceEngine,
+        x_buf: vk.c.VkBuffer,
+        x_offset: vk.c.VkDeviceSize,
+        w_tensor: *const LoadedTensor,
+        out_buf: vk.c.VkBuffer,
+        out_offset: vk.c.VkDeviceSize,
+        n: u32,
+        rows: u32,
+    ) !void {
         const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
         if (!pip.uses_push_descriptors) return error.ShaderNotLoaded;
-        const row_bytes = @as(vk.c.VkDeviceSize, n) * @sizeOf(f32);
+        const bytes = @as(vk.c.VkDeviceSize, n) * @sizeOf(f32) * @as(vk.c.VkDeviceSize, rows);
         const push = elementwise_mod.RmsNormPush{ .N = n, .eps_bits = @bitCast(self.model.config.rms_norm_eps) };
         const infos = [3]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = x_buf, .offset = x_offset, .range = row_bytes },
+            .{ .buffer = x_buf, .offset = x_offset, .range = bytes },
             .{ .buffer = w_tensor.gpu_buffer.handle, .offset = 0, .range = w_tensor.gpu_buffer.size },
-            .{ .buffer = out_buf, .offset = out_offset, .range = row_bytes },
+            .{ .buffer = out_buf, .offset = out_offset, .range = bytes },
         };
-        self.decode_cmd.pushDescAndDispatch(pip, self.instance.push_descriptor_fn, infos[0..], std.mem.asBytes(&push), 1, 1, 1);
+        self.decode_cmd.pushDescAndDispatch(pip, self.instance.push_descriptor_fn, infos[0..], std.mem.asBytes(&push), rows, 1, 1);
     }
 
     /// Build the NextN block input for one token as its own submission:
@@ -30321,10 +30337,18 @@ pub const InferenceEngine = struct {
             try self.decode_cmd.beginOneTime();
         }
         self.mtpRecordEmbeddingRowsCopy(&mtp.prime_embed_staging, mtp.prime_embed_rows, tokens.len);
-        // h rows -> prime_h_rows (already output_norm'ed).
+        // h rows -> prime_h_rows (already output_norm'ed). For .capture_prev the
+        // rows inside the capture window are contiguous, so they take one
+        // batched norm below; the loop only handles the special first rows.
+        const cap_base_for_batch = self.mtp_prime_capture_base;
+        const window_t0: u32 = if (h_source == .capture_prev)
+            (if (cap_base_for_batch + 1 > base) @min(T, cap_base_for_batch + 1 - base) else 0)
+        else
+            T;
         var t: u32 = 0;
         while (t < T) : (t += 1) {
             const dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, t) * hidden_size;
+            if (h_source == .capture_prev and t >= window_t0) break;
             switch (h_source) {
                 .capture_prev => {
                     const pos = base + t;
@@ -30351,6 +30375,13 @@ pub const InferenceEngine = struct {
                     vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.prime_h_staging.handle, mtp.prime_h_rows.handle, 1, &hr);
                 },
             }
+        }
+        if (h_source == .capture_prev and window_t0 < T) {
+            const cap = self.mtp_prefill_capture orelse return error.MtpNotPrepared;
+            const src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, (base + window_t0 - 1) - cap_base_for_batch) * hidden_size;
+            const dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, window_t0) * hidden_size;
+            self.decode_cmd.transferToComputeBarrier();
+            try self.mtpRecordRmsNormRows(cap.handle, src_off, out_norm, mtp.prime_h_rows.handle, dst_off, hidden_dim, T - window_t0);
         }
         self.decode_cmd.transferToComputeBarrier();
         self.decode_cmd.computeBarrier();
