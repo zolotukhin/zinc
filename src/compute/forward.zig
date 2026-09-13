@@ -29612,7 +29612,7 @@ pub const InferenceEngine = struct {
         const vocab_size = @as(vk.c.VkDeviceSize, cfg.vocab_size) * @sizeOf(f32);
         const n_layers: usize = @intCast(cfg.n_layers);
         const hist_slots: u32 = mtpDraftLimitFromEnv();
-        const prime_chunk_rows: u32 = mtp_prime_chunk_rows;
+        const prime_chunk_rows: u32 = mtpPrimeChunkRows();
         const allocator = self.allocator;
         if (self.mtp_vram_hold) |*hold| {
             hold.deinit();
@@ -30307,10 +30307,24 @@ pub const InferenceEngine = struct {
     /// (zeros for position 0), `.host_rows` uses mtp.prime_h_staging row t.
     /// Runs the NextN block over `tokens`. With `cb_open` the caller already began
     /// `decode_cmd` (restore copies go first); the whole batch is one submit.
+    /// ZINC_MTP_PRIME_TRACE=1: submit and wait at each section boundary of the
+    /// prime and log the section times (diagnostics; only when the prime owns
+    /// its command buffer).
+    fn mtpPrimeTraceLap(self: *InferenceEngine, on: bool, timer: *std.time.Timer, label: []const u8) !void {
+        if (!on) return;
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        log.info("NextN/MTP prime trace: {s} {d:.1} ms", .{ label, @as(f64, @floatFromInt(timer.lap())) / 1e6 });
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+    }
+
     fn mtpRunNextnBatch(self: *InferenceEngine, state: *DecodeState, tokens: []const u32, base: u32, h_source: MtpHSource, cb_open: bool) !void {
         const mtp = &(self.mtp orelse return error.MtpNotPrepared);
         const T: u32 = @intCast(tokens.len);
         if (T == 0) return;
+        const trace = !cb_open and envFlagEnabled("ZINC_MTP_PRIME_TRACE", false);
+        var trace_timer = try std.time.Timer.start();
         std.debug.assert(T <= mtp.prime_chunk_rows);
         const cfg = self.model.config;
         const hidden_dim = cfg.hidden_dim;
@@ -30361,6 +30375,7 @@ pub const InferenceEngine = struct {
         } else {
             self.mtpRecordEmbeddingRowsCopy(&mtp.prime_embed_staging, mtp.prime_embed_rows, tokens.len);
         }
+        try self.mtpPrimeTraceLap(trace, &trace_timer, if (embed_from_prefill) "embed rows (from prefill staging)" else "embed rows (CPU dequant + upload)");
         // h rows -> prime_h_rows (already output_norm'ed). For .capture_prev the
         // rows inside the capture window are contiguous, so they take one
         // batched norm below; the loop only handles the special first rows.
@@ -30409,6 +30424,7 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.transferToComputeBarrier();
         self.decode_cmd.computeBarrier();
+        try self.mtpPrimeTraceLap(trace, &trace_timer, "h rows");
         // concat rows: [enorm(e_t) | hnorm(h_t)]. Two batched in-place norms
         // (each workgroup reads its own row before writing it) and one
         // multi-region copy into the interleaved concat layout, instead of two
@@ -30427,8 +30443,10 @@ pub const InferenceEngine = struct {
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.prime_h_rows.handle, mtp.prime_concat_rows.handle, T, regions.ptr);
         }
         self.decode_cmd.transferToComputeBarrier();
+        try self.mtpPrimeTraceLap(trace, &trace_timer, "concat norms + copies");
         try self.dispatchProjectionBatched(eh_proj, mtp.prime_concat_rows, scratch_hidden, hidden_dim, hidden_dim * 2, T);
         self.decode_cmd.computeBarrier();
+        try self.mtpPrimeTraceLap(trace, &trace_timer, "eh_proj");
         const saved_position = state.position;
         const saved_spec = self.spec_batch_active;
         const saved_defer = self.spec_defer_submit;
@@ -30469,6 +30487,7 @@ pub const InferenceEngine = struct {
         if (self.mtp_nextn_record_only) return;
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        if (trace) log.info("NextN/MTP prime trace: attention (kv-only) {d:.1} ms", .{@as(f64, @floatFromInt(trace_timer.lap())) / 1e6});
     }
 
     /// Prime the NextN KV cache over a freshly prefilled prompt (positions
@@ -30565,13 +30584,18 @@ pub const InferenceEngine = struct {
             mtp.h_upload_pending = false;
         }
 
+        const trace = envFlagEnabled("ZINC_MTP_PRIME_TRACE", false);
+        if (trace) log.info("NextN/MTP prime trace: [suffix] carried-row upload {d:.1} ms", .{@as(f64, @floatFromInt(timer.read())) / 1e6});
         var start: u32 = 0;
         while (start < suffix_len) {
             const chunk: u32 = @min(mtp.prime_chunk_rows, suffix_len - start);
             const base = reused_prefix_len + start;
+            var chunk_timer = try std.time.Timer.start();
             try self.mtpRunNextnBatch(state, prompt_tokens[base .. base + chunk], base, .capture_prev, false);
+            if (trace) log.info("NextN/MTP prime trace: [suffix] chunk of {d} rows {d:.1} ms (wall of mtpRunNextnBatch)", .{ chunk, @as(f64, @floatFromInt(chunk_timer.read())) / 1e6 });
             start += chunk;
         }
+        const after_chunks_ns = timer.read();
 
         // Carried row for the first draft: the last appended row's normalized hidden.
         {
@@ -30591,6 +30615,7 @@ pub const InferenceEngine = struct {
         state.position = N;
         mtp.primed = true;
         mtp.resident_context_len = N;
+        if (trace) log.info("NextN/MTP prime trace: [suffix] carried-row readback {d:.1} ms", .{@as(f64, @floatFromInt(timer.read() - after_chunks_ns)) / 1e6});
         log.info("NextN/MTP: primed {d} appended rows over a {d}-token reused prefix in {d:.1} ms", .{ suffix_len, reused_prefix_len, @as(f64, @floatFromInt(timer.read())) / 1_000_000.0 });
         return true;
     }
@@ -31701,7 +31726,17 @@ const MtpVkState = struct {
     }
 };
 
-const mtp_prime_chunk_rows: u32 = 64;
+/// Rows per NextN prime sub-chunk. Each sub-chunk is one eh_proj GEMM with
+/// this many columns plus a KV-only attention pass; at 64 rows a 3,264-token
+/// prefill chunk needed 51 sub-chunks of ~5 ms (the 64-column GEMM runs far
+/// below its efficiency), a flat 255 ms per chunk = 6% of a long prefill.
+/// ZINC_MTP_PRIME_ROWS overrides.
+const mtp_prime_chunk_rows_default: u32 = 1024;
+fn mtpPrimeChunkRows() u32 {
+    const raw = std.posix.getenv("ZINC_MTP_PRIME_ROWS") orelse return mtp_prime_chunk_rows_default;
+    const v = std.fmt.parseInt(u32, raw, 10) catch return mtp_prime_chunk_rows_default;
+    return if (v == 0) mtp_prime_chunk_rows_default else v;
+}
 /// Upper bound on the prompt rows the NextN prime can capture. The capture
 /// buffer is rows x hidden f32, so this trades VRAM (671 MB at the default on a
 /// 5120-wide model) against the longest prompt that can still use speculative
@@ -31795,7 +31830,7 @@ fn mtpReservedBytes(cfg: ModelConfig) u64 {
     const hist = @as(u64, cfg.n_layers) * slots * (state_bytes + conv_bytes);
     const logits = @as(u64, cfg.vocab_size) * f4 * mtp_max_verify;
     const capture = @as(u64, mtpCaptureRowCap()) * hidden * f4;
-    const prime = @as(u64, mtp_prime_chunk_rows) * hidden * f4 * 4;
+    const prime = @as(u64, mtpPrimeChunkRows()) * hidden * f4 * 4;
     return hist + logits + capture + prime + hidden * f4 * 8;
 }
 

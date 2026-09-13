@@ -1120,3 +1120,12 @@ build the concat input, and eh_proj goes through the generic batched
 projection. Stage 45: embedding rows copied from the prefill's staging and the
 concat norms batched (two in-place dispatches + one multi-region copy).
 
+**Stage 46/47: the prime's 250 ms found.** `ZINC_MTP_PRIME_TRACE=1` splits the
+prime into sections: embed rows 0.2 ms, h rows 0.1, concat 0.1, **eh_proj
+4.2 ms**, attention (KV-only) 0.5 — per **64-row sub-chunk**
+(`mtp_prime_chunk_rows = 64`). A 3,264-token chunk is 51 sub-chunks × ~5 ms =
+255 ms, flat with depth: a 64-column GEMM at a fraction of its efficiency plus
+fixed per-submit costs. The embedding-row reuse and batched norms (stage 45)
+were right but immaterial. Sub-chunk raised to 1,024 rows
+(`ZINC_MTP_PRIME_ROWS`).
+
