@@ -1184,6 +1184,9 @@ const jsonLd = {
                                 <i class="bar-fill zinc" style={`width: ${barWidth(zincDecode, decodeMax)}%;`}></i>
                               </div>
                               <strong>{formatMetric(zincDecode, 'tok/s')}</strong>
+                              {row.scenario?.zinc?.speculative_decoding?.enabled && (
+                                <em class="spec-badge" title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
+                              )}
                             </div>
                             <div class="bar-line baseline">
                               <span>llama</span>
@@ -1264,6 +1267,9 @@ const jsonLd = {
                                 <i class="bar-fill zinc" style={`width: ${barWidth(zincDecode, decodeMax)}%;`}></i>
                               </div>
                               <strong>{formatMetric(zincDecode, 'tok/s')}</strong>
+                              {row.scenario?.zinc?.speculative_decoding?.enabled && (
+                                <em class="spec-badge" title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
+                              )}
                             </div>
                             <div class="bar-line baseline">
                               <span>llama</span>
@@ -1383,7 +1389,9 @@ const jsonLd = {
                                   <div class="backend-line">
                                     <span class="backend-pill zinc">Z</span>
                                     <div>
-                                      <strong>{formatMetric(zincDecode, 'tok/s')}</strong>
+                                      <strong>{formatMetric(zincDecode, 'tok/s')} {row.scenario?.zinc?.speculative_decoding?.enabled && (
+                                        <em class="spec-badge" title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
+                                      )}</strong>
                                       <small>{formatMetric(metricValue(row.scenario?.zinc?.ms_per_token), 'ms/tok')}</small>
                                     </div>
                                   </div>
@@ -4040,5 +4048,19 @@ const jsonLd = {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       margin: 0;
     }
+  }
+  .spec-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-style: normal;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    vertical-align: middle;
+    color: var(--accent, #0d6e77);
+    background: color-mix(in srgb, var(--accent, #0d6e77) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #0d6e77) 40%, transparent);
   }
 </style>

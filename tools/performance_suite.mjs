@@ -401,6 +401,21 @@ function usage() {
 `;
 }
 
+/// NextN/MTP speculative decoding: ZINC logs one acceptance line per request
+/// ("NextN/MTP: request accepted 12/16 draft tokens (75.0%) ..."). The last
+/// one in the captured output (or the server log tail) belongs to this run.
+export function parseZincSpeculative(text) {
+  const matches = [...text.matchAll(/NextN\/MTP: request accepted (\d+)\/(\d+) draft tokens \(([\d.]+)%\)/g)];
+  if (matches.length === 0) return null;
+  const last = matches[matches.length - 1];
+  return {
+    kind: "nextn",
+    accepted: Number(last[1]),
+    drafted: Number(last[2]),
+    acceptancePct: Number(last[3]),
+  };
+}
+
 export function parseZincCliOutput(text) {
   const promptTokens = text.match(/Prompt tokens \((\d+)\):/);
   const prefill = text.match(/Prefill(?:\s+complete)?\s*:\s*(\d+)\s+tokens\s+in\s+([\d.]+)\s*(ms|s)\s*\(([\d.]+)\s+tok\/s\)/i);
@@ -408,6 +423,7 @@ export function parseZincCliOutput(text) {
   const generated = text.match(/Generated\s+(\d+)\s+tokens\s+in\s+([\d.]+)\s+ms\s+[—-]\s+([\d.]+)\s+tok\/s\s+\(([\d.]+)\s+ms\/tok\)/);
   const output = text.match(/Output \((\d+) tokens\):\s*(.+)$/m);
   const outputText = text.match(/info\(zinc\): Output text:\s*([\s\S]*?)(?:\ninfo\(zinc\): Output tokens|\s*$)/);
+  const speculative = parseZincSpeculative(text);
 
   if (!generated) {
     throw new Error("Could not parse ZINC CLI output");
@@ -429,6 +445,7 @@ export function parseZincCliOutput(text) {
           })()
         : null),
     generatedTokens: Number(generated[1]),
+    speculative,
     decodeMs: Number(generated[2]),
     decodeTps: Number(generated[3]),
     msPerToken: Number(generated[4]),
@@ -1115,8 +1132,19 @@ function createStats(name, rows) {
   const decodeMsValues = rows.map((row) => row.decodeMs).filter((value) => value != null);
   const totalLatencyValues = rows.map((row) => row.totalLatencyMs).filter((value) => value != null);
   const totalTpsValues = rows.map((row) => row.totalTps).filter((value) => value != null);
+  const speculativeRows = rows.filter((row) => row.speculative != null);
+  const speculativeDecoding = speculativeRows.length > 0
+    ? {
+        enabled: true,
+        kind: speculativeRows[0].speculative.kind,
+        acceptance_pct: summarizeValues(speculativeRows.map((row) => row.speculative.acceptancePct)),
+        runs_with_speculation: speculativeRows.length,
+        runs: rows.length,
+      }
+    : { enabled: false };
   return {
     name,
+    speculative_decoding: speculativeDecoding,
     prompt_tokens: rows[0]?.promptTokens ?? null,
     prefill_tokens: rows[0]?.prefillTokens ?? null,
     generated_tokens: rows[0]?.generatedTokens ?? null,
