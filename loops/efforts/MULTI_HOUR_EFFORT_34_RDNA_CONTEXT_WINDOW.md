@@ -1128,4 +1128,10 @@ prime into sections: embed rows 0.2 ms, h rows 0.1, concat 0.1, **eh_proj
 fixed per-submit costs. The embedding-row reuse and batched norms (stage 45)
 were right but immaterial. Sub-chunk raised to 1,024 rows
 (`ZINC_MTP_PRIME_ROWS`).
+With 1,024-row sub-chunks the cost is linear in rows: **eh_proj 65 ms per
+1,024 rows** (107 GFLOP → 1.65 TFLOPS), attention KV-only 9.5 ms. The 27B's
+NextN eh_proj is Q8_0 [10240 → 5120] and `dispatchProjectionBatched` sends
+Q8_0 to the one-workgroup-per-row DMMV kpar batch. The A3b path has a
+Q8_0-weight × Q8-activation DP4a GEMM behind a model gate; a model-agnostic
+gate now lets eh_proj use it (stage 50).
 
