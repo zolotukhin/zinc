@@ -1135,3 +1135,8 @@ Q8_0 to the one-workgroup-per-row DMMV kpar batch. The A3b path has a
 Q8_0-weight × Q8-activation DP4a GEMM behind a model gate; a model-agnostic
 gate now lets eh_proj use it (stage 50).
 
+**Stage 50: eh_proj on the Q8_0 DP4a GEMM: 65 → 4.3 ms per 1,024 rows.** The
+prime per 3,264-token chunk: 250 → 53 ms; 17K prefill 486 → **496.8 tok/s**
+(the MTP-off figure was 509). Speculation intact: 20K five-fact 5/5,
+acceptance 75%/100%/75% unchanged. 100K/197K timings queued.
+
