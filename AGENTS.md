@@ -244,18 +244,68 @@ writing/                         # Draft writing and publishing notes
 - Keep shader local_size_x = 64 (RDNA4 wave64)
 
 ### Ask first
+- Any run on the workstation's own GPU (Metal target, Metal debugging, local model loads); see "GPU Workload Placement"
 - Changing the compute graph IR (`graph.zig` OpType enum)
 - Adding new model architectures to `architecture.zig`
 - Modifying Vulkan initialization or device selection
 - Changes to GGUF parsing that could break existing model loading
 
 ### Never
+- Load a model, start an inference server, or run a benchmark on the developer workstation without the user's explicit go-ahead for that run; all GPU workloads go to the remote test node (see "GPU Workload Placement")
+- Leave a spawned `zinc` or `llama-server` process running after the command that started it returns
 - Commit `.env`, credentials, private IPs, private hostnames, SSH aliases, private ports, GPU UUIDs, device serials, or host-specific usernames in paths
 - Hard-code remote endpoints or machine selectors in scripts, docs, prompts, tests, or generated artifacts; use `.env`, environment variables (`ZINC_HOST`, `ZINC_USER`, `ZINC_PORT`, `ZINC_GPU`, `ZINC_GPU_4090`, etc.), and placeholders such as `<host>` or `<cuda-device>` instead
 - Treat loopback (`127.0.0.1`, `localhost`, `0.0.0.0`) or public project/service URLs as leaks, but do re-check any non-loopback address or private-looking hostname before committing
 - Modify `.spv` binaries directly — always recompile from `.comp` source
 - Add runtime dependencies beyond Vulkan and system libc
 - Use wave32 without benchmarking against wave64 first
+
+## GPU Workload Placement (hard rule)
+
+The developer workstation (the machine the agent's shell runs on, including
+Apple Silicon Macs) is a shared desktop, not a benchmark box. In September 2026
+an agent debugging a Metal MoE prefill loaded a 17 GB GGUF in ZINC while a
+`llama-server` it had started earlier still held the same model. WindowServer
+starved of GPU time, macOS panicked with `userspace watchdog timeout`, and the
+workstation rebooted mid-session.
+
+**All model and GPU workloads run on the remote test node**, over
+`ssh -p "$ZINC_PORT" "$ZINC_USER@$ZINC_HOST"` (values from `.env`). That covers:
+
+- `zinc` CLI or server runs, including `--model-id` runs, validate/bisect/profile
+  env modes, and anything else that loads a GGUF
+- every llama.cpp binary (`llama-server`, `llama-cli`, `llama-bench`,
+  `llama-eval-callback`, ...)
+- `bun tools/performance_suite.mjs` with `--target metal` or `--target both`
+  (`--target rdna` is fine locally: `bun` only drives the node over SSH)
+- `bun test` suites or smoke tests that start a server or load a model
+- `zinc model pull` for benchmarking purposes, and `--metal-pull-missing`
+
+**Allowed on the workstation:** `zig build`, `zig fmt`, `zig build test` cases that
+do not open a model file, shader compilation, git, the site build, and
+`wrangler` deploys.
+
+**Metal-only work** (a `forward_metal.zig` bug, the Metal perf-suite target, a
+Metal kernel) needs the user's explicit go-ahead for that specific run, in the
+current conversation. A general request to "fix", "benchmark", or "continue" is
+not that go-ahead. Without it, stop and ask; record findings so far instead of
+running anything.
+
+**Preflight before any command that could touch a GPU** (check all three, every
+time):
+
+1. The inference part of the command is inside the `ssh ... "$ZINC_HOST"`
+   invocation. If `./zig-out/bin/zinc`, `llama-*`, or a model path under
+   `~/Library/Caches/zinc` would execute locally, do not run it.
+2. No GPU process from this session is still alive where it will run:
+   `pgrep -fl 'zig-out/bin/zinc|llama-(server|cli|bench)'` must list nothing of
+   yours (the node's long-running service is the one exception you manage).
+3. The command stops what it starts. Launch servers inside the same command that
+   uses them and stop them by PID before it returns (`trap 'kill $PID' EXIT`);
+   never leave a spawned server running between tool calls on any machine.
+
+Even with approval to use a local GPU, run one GPU process at a time and never
+two copies of a multi-GB model.
 
 ## Remote Test Node
 
