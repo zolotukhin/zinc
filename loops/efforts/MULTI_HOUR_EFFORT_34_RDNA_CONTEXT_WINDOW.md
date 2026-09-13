@@ -1143,3 +1143,57 @@ acceptance 75%/100%/75% unchanged. 100K/197K timings queued.
 893 s = 221). Prefill scorecard, end of 2026-09-12: 20K 470 vs 459, 100K 339
 vs ~290, 197K 225 vs 221 — ZINC leads at every length, speculation priming on.
 
+---
+
+## Published-gap fixes (2026-09-13, after the full suite publish 763a0d2f)
+
+The suite run against llama.cpp master 790cf51aa left three ZINC deficits:
+Metal Qwen 3.8 27B decode (15.6 vs 19.5), Metal Qwen 3.5 9B decode (47.5 vs
+66.9), and Muse Glimmer 30B on the R9700 (prefill 36 vs 240 — and, on
+inspection of the artifact's output preview, garbage text). Plus Gemma 4
+26B-A4B on Metal (68 vs 80).
+
+1. **Metal 27B**: effort 30's `perf/metal-qwen27b-decode` (four commits, 110
+   commits behind) merged cleanly (`fe5964cd`); token-identical; CLI decode
+   17.0 → 23.7 tok/s. It also adds `--no-cache-prompt` to the suite's local
+   llama-server launch, so every earlier published Metal prefill baseline was
+   prompt-cache-biased.
+2. **Metal 9B**: `ZINC_METAL_KERNEL_TIMING=1 --profile` ranked the Q6_K
+   dense-down (M=4096, K=12288) on the legacy `dmmv_q6k` (~60 GB/s) as #1 by
+   total; the simdgroup-kernel shape list had every qwen35 Q6_K target except
+   the 9B down. Added (`6e104888`): 48.5 → 68.4 tok/s, token-identical.
+3. **Muse on Vulkan**: the Vulkan forward had none of the Muse specifics
+   (weightless embedding RMSNorm, Gemma-style post norms, NoPE global layers,
+   logit_scale) and the batched prefill rejected it (separate attn_gate, Q5_K
+   LM head, sliding-window config). Ported (`68a03ec6` + follow-ups); the
+   window itself is not enforced on Vulkan (same as Gemma there).
+4. **Gemma 4 26B-A4B on Metal**: no slow kernel; ~300 small dispatches per
+   token (separate rms_norm_mul ×67, shared-expert gate and up as two q8_0
+   matvecs ×73, attn-proj q8_0 ×61) — a dispatch-fusion project, deferred.
+
+**Muse on Vulkan, resolved for the per-token path** (`879fcb79`): besides the
+Metal-era fixes, llama.cpp rotates Muse with adjacent-pair RoPE
+(`LLAMA_ROPE_TYPE_NORM`) while every ZINC rope kernel pairs (i, i+half); fixed
+by permuting each head's Q/K output rows (and the q/k norm weights) at load in
+both loaders. Verified with `llama-eval-callback`: embd_norm and l_out-0..2
+match within quantization noise; "The capital of France is" → " Paris." The
+generic batched prefill lacked the attention gate entirely (only the Qwen
+layer-major function had it) — being added.
+
+**Metal rerun with a fair baseline** (`--no-cache-prompt`, from the merged
+branch): llama.cpp's Metal prefill numbers rise 2–9× versus the biased run,
+which exposes ZINC's Metal MoE prefill as per-token speed:
+
+| Metal core / long | ZINC | llama.cpp |
+|---|---:|---:|
+| qwen38-27b decode | 21.3 / 23.1 | 23.9 / 22.8 |
+| qwen35-9b decode | 67.1 / 60.4 | 65.5 / 65.2 |
+| gemma4-26b-a4b decode | 68.4 / 63.6 | 81.7 / 81.5 |
+| gemma4-26b-a4b prefill | 304 / 74 | 380 / 1131 |
+| qwen36-35b-a3b prefill | 91 / 85 | 320 / 1234 |
+| gemma4-31b decode | 20.8 / 19.2 | 22.4 / 21.7 |
+
+`canUseBatchedPrefill` (Metal) returns false for any non-Gemma MoE, so
+qwen36-35b-a3b prefills per token; gemma4-26b-a4b has a batched MoE path whose
+guards may be failing (probe running).
+
