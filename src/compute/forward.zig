@@ -18440,6 +18440,21 @@ pub const InferenceEngine = struct {
             !std.ascii.eqlIgnoreCase(raw, "no");
     }
 
+    /// Model-agnostic gate for the Q8_0-weight × Q8-activation DP4a projection
+    /// (the A3b SSM gate without the model check): the 27B's NextN eh_proj is
+    /// Q8_0 and ran at 1.65 TFLOPS on the batched DMMV path.
+    fn q8ProjectionDp4aEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
+        if (self.validation_diagnostics_enabled) return false;
+        if (self.use_qwen36_dense_prefill_validate or self.use_qwen36_ssm_prefill_validate) return false;
+        if (!self.isAmdRdna() and !self.intelA3bProductionEnabled()) return false;
+        if (!self.instance.caps.integer_dot_product) return false;
+        if (self.instance.push_descriptor_fn == null) return false;
+        if (n_tokens < 64) return false;
+        return self.dmmv.pipeline_mul_mm_q8_0_full_dp4a != null and
+            self.dmmv.pipeline_quantize_act_q8 != null and
+            self.dmmv.pipeline_mul_mm_q8_0 != null;
+    }
+
     fn qwenA3bSsmQ8Dp4aEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
         if (self.validation_diagnostics_enabled) return false;
         if (self.use_qwen36_dense_prefill_validate or self.use_qwen36_ssm_prefill_validate) return false;
@@ -18778,7 +18793,7 @@ pub const InferenceEngine = struct {
         K: u32,
         n_tokens: u32,
     ) !u32 {
-        if (!self.qwenA3bSsmQ8Dp4aEnabled(n_tokens)) return 0;
+        if (!self.qwenA3bSsmQ8Dp4aEnabled(n_tokens) and !self.q8ProjectionDp4aEnabled(n_tokens)) return 0;
         if (K == 0 or (K & 31) != 0) return 0;
         const packed_i8 = self.batched_scratch_norm_q8 orelse return 0;
         const scale = self.batched_scratch_norm_q8_scale orelse return 0;
@@ -18833,7 +18848,7 @@ pub const InferenceEngine = struct {
         pre_quantized_cols: u32,
     ) !bool {
         if (pre_quantized_cols == 0) return false;
-        if (!self.qwenA3bSsmQ8Dp4aEnabled(n_tokens)) return false;
+        if (!self.qwenA3bSsmQ8Dp4aEnabled(n_tokens) and !self.q8ProjectionDp4aEnabled(n_tokens)) return false;
         if (tensor.info.type_ != .q8_0) return false;
         if (M == 0 or K == 0 or (M & 31) != 0 or (K & 31) != 0) return false;
         const packed_i8 = self.batched_scratch_norm_q8 orelse return false;
@@ -30444,7 +30459,15 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.transferToComputeBarrier();
         try self.mtpPrimeTraceLap(trace, &trace_timer, "concat norms + copies");
-        try self.dispatchProjectionBatched(eh_proj, mtp.prime_concat_rows, scratch_hidden, hidden_dim, hidden_dim * 2, T);
+        var eh_done = false;
+        if (eh_proj.info.type_ == .q8_0 and self.q8ProjectionDp4aEnabled(T)) {
+            const eh_cols = try self.qwenA3bPrepareProjectionQ8(mtp.prime_concat_rows, hidden_dim * 2, T);
+            if (eh_cols > 0) {
+                self.decode_cmd.computeBarrier();
+                eh_done = try self.dispatchQwenA3bQ8ProjectionDp4a(eh_proj, mtp.prime_concat_rows, scratch_hidden, hidden_dim, hidden_dim * 2, T, eh_cols);
+            }
+        }
+        if (!eh_done) try self.dispatchProjectionBatched(eh_proj, mtp.prime_concat_rows, scratch_hidden, hidden_dim, hidden_dim * 2, T);
         self.decode_cmd.computeBarrier();
         try self.mtpPrimeTraceLap(trace, &trace_timer, "eh_proj");
         const saved_position = state.position;
