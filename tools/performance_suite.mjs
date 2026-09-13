@@ -2002,14 +2002,18 @@ async function runRdnaZincOpenAiSeries({ label, warmupRuns, runs, creds, port, l
     "set -euo pipefail",
     `LOG=${shellQuote(logPath)}`,
     `count_generated() { awk '/info\\(forward\\): Generated / { c++ } END { print c + 0 }' "$LOG" 2>/dev/null || printf '0\\n'; }`,
+    `count_accepted() { awk '/info\\(forward\\): NextN\\/MTP: request accepted / { c++ } END { print c + 0 }' "$LOG" 2>/dev/null || printf '0\\n'; }`,
     "before=$(count_generated)",
+    "before_acc=$(count_accepted)",
     `response=$(curl -sS http://${host}:${port}${endpoint} -H 'Content-Type: application/json' -d ${shellQuote(JSON.stringify(payload))})`,
     "if printf '%s' \"$response\" | grep -q '\"error\"'; then msg=$(printf '%s' \"$response\" | python3 -c 'import json,sys; body=json.load(sys.stdin); print(body.get(\"error\",{}).get(\"message\", \"\"))' 2>/dev/null || true); printf '%s\\n' \"$response\"; printf '\\n__ZINC_TIMING__\\n'; tail -n 40 \"$LOG\" 2>/dev/null || true; if [ -n \"$msg\" ]; then echo \"err(zinc-bench): ZINC server returned error: $msg\" >&2; else echo 'err(zinc-bench): ZINC server returned an error response' >&2; fi; exit 125; fi",
     `deadline=$((SECONDS + ${deadlineSeconds}))`,
     "while [ \"$(count_generated)\" -le \"$before\" ]; do if [ \"$SECONDS\" -ge \"$deadline\" ]; then printf '%s\\n' \"$response\"; printf '\\n__ZINC_TIMING__\\n'; tail -n 40 \"$LOG\" 2>/dev/null || true; echo 'err(zinc-bench): no ZINC Generated log line after API response' >&2; exit 124; fi; sleep 0.05; done",
+    // NextN/MTP logs its acceptance line a few ms after the Generated line; wait for it when the model speculates.
+    "if [ \"$before_acc\" -gt 0 ] || grep -q 'NextN/MTP: 1 appended' \"$LOG\" 2>/dev/null; then acc_deadline=$((SECONDS + 3)); while [ \"$(count_accepted)\" -le \"$before_acc\" ] && [ \"$SECONDS\" -lt \"$acc_deadline\" ]; do sleep 0.05; done; fi",
     "printf '%s\\n' \"$response\"",
     "printf '\\n__ZINC_TIMING__\\n'",
-    "awk '/info\\(forward\\): Prefill:|info\\(forward\\): Generated / { lines[++n] = $0 } END { start = n > 1 ? n - 1 : 1; for (i = start; i <= n; i++) print lines[i] }' \"$LOG\"",
+    "awk '/info\\(forward\\): NextN\\/MTP: request accepted / { acc = $0 } /info\\(forward\\): Prefill:|info\\(forward\\): Generated / { lines[++n] = $0 } END { start = n > 1 ? n - 1 : 1; for (i = start; i <= n; i++) print lines[i]; if (acc != \"\") print acc }' \"$LOG\"",
   ].join("\n");
   const command = rdnaRemoteCommand(remoteScript, creds);
   const measured = [];
