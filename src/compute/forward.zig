@@ -28342,6 +28342,14 @@ pub const InferenceEngine = struct {
             try self.dispatchGemmaQkvProjectionsBatched(q_t, k_t, v_t_opt, scratch_norm, scratch_q, scratch_k, scratch_v, layer_q_dim, layer_kv_dim, hidden_dim, n_tokens);
             self.decode_cmd.computeBarrier();
             self.endProfilePhase(.attention_qkv, attention_qkv_phase);
+            // Muse Glimmer's separate attention gate: project it from the
+            // attention-norm output now (scratch_up is free until the FFN) and
+            // apply sigmoid(gate) to the attention output after flash attention.
+            const muse_attn_gate_t: ?*const LoadedTensor = if (cfg.architecture == .muse_glimmer) lt.attn_gate else null;
+            if (muse_attn_gate_t) |attn_gate_t| {
+                try self.dispatchProjectionBatched(attn_gate_t, scratch_norm, scratch_up, layer_q_dim, hidden_dim, n_tokens);
+                self.decode_cmd.computeBarrier();
+            }
 
             // Per-head Q/K norms, plus Gemma's unit V norm before K is overwritten.
             const apply_v_unit_norm = cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0;
@@ -28484,6 +28492,19 @@ pub const InferenceEngine = struct {
             try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, layer_head_dim, cfg.n_heads, layer_n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
             self.decode_cmd.computeBarrier();
             self.endProfilePhase(.flash_attn_kernel, flash_attn_kernel_phase);
+
+            if (muse_attn_gate_t != null) {
+                try self.dispatchSigmoidMul(
+                    scratch_attn_out.handle,
+                    scratch_attn_out.size,
+                    scratch_up.handle,
+                    scratch_up.size,
+                    scratch_attn_out.handle,
+                    scratch_attn_out.size,
+                    n_tokens * layer_q_dim,
+                );
+                self.decode_cmd.computeBarrier();
+            }
 
             // O projection, optional Gemma post-attention norm, then fused
             // residual+FFN norm.
