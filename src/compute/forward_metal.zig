@@ -11172,6 +11172,16 @@ pub const InferenceEngine = struct {
             const scale = @as(f32, @floatCast(@sqrt(@as(f64, @floatFromInt(self.config.hidden_dim)))));
             for (dst) |*value| value.* *= scale;
         }
+        // Muse Glimmer applies a weightless RMSNorm to the embeddings before they
+        // enter the residual stream (muse-glimmer.cpp: build_norm(inpL, null, RMS)).
+        // Do it per-token here (CPU, race-free) so the residual base is unit-RMS.
+        if (self.config.architecture == .muse_glimmer) {
+            var sum_sq: f64 = 0;
+            for (dst) |v| sum_sq += @as(f64, v) * @as(f64, v);
+            const mean_sq = sum_sq / @as(f64, @floatFromInt(hidden_dim_usize));
+            const inv_rms: f32 = @floatCast(1.0 / @sqrt(mean_sq + @as(f64, self.config.rms_norm_eps)));
+            for (dst) |*value| value.* *= inv_rms;
+        }
     }
 
     fn loadTokenEmbedding(self: *InferenceEngine, token_id: u32) !void {
@@ -27191,9 +27201,17 @@ fn runDecodeStep(
             break :blk &hybrid_group_cmd_storage;
         } else null;
 
-        if (is_full_attn) {
+        if (!isSsmLayer(cfg, layer_idx)) {
             if (profile) |p| p.full_attn_layers += 1;
-            const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
+            var attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
+            if (cfg.architecture == .muse_glimmer) {
+                if ((layer_idx + 1) % 4 == 0) {
+                    attn.rope_dim = 0;
+                    attn.sliding_window_size = 0;
+                } else {
+                    attn.sliding_window_size = cfg.sliding_window_size;
+                }
+            }
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
             var cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
