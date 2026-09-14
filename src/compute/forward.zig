@@ -407,7 +407,7 @@ fn getScaleMinK4(j: usize, scales: []const u8) struct { sc: u8, m: u8 } {
 
 /// Dequantize a single row from a quantized tensor to f32.
 /// Supports F32, F16, Q8_0, Q6_K, Q5_K, Q4_K, Q5_0, and MXFP4 formats.
-fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, output: []f32) void {
+pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, output: []f32) void {
     switch (quant_type) {
         .f32 => {
             const row_bytes = @as(usize, cols) * 4;

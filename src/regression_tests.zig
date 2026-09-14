@@ -1797,9 +1797,15 @@ test "Q5_0 shader reads qh via byte assembly, not unaligned uint32 cast" {
 }
 
 test "Q5_0 dequantRow matches expected values for known block" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-
-    const forward_metal = @import("compute/forward_metal.zig");
+    // Runs on every backend instead of skipping off macOS: each backend's CPU
+    // row dequantizer must read qh from byte offset 2 correctly.
+    const backend = @import("build_options").backend;
+    const dequant = if (builtin.os.tag == .macos)
+        @import("compute/forward_metal.zig")
+    else if (comptime std.mem.eql(u8, backend, "cuda") or std.mem.eql(u8, backend, "rocm"))
+        @import("model/loader_cuda.zig")
+    else
+        @import("compute/forward.zig");
     // Build a Q5_0 block: d=0.5, qh=0x0000FFFF (bits 0-15 set), qs all 0x53 (lo=3, hi=5)
     // Element j (0-15): lo=3, bit_lo=1 → quant=3|(1<<4)=19 → value=0.5*(19-16)=1.5
     // Element 16+j:     hi=5, bit_hi=0 → quant=5|(0<<4)=5  → value=0.5*(5-16)=-5.5
@@ -1813,7 +1819,7 @@ test "Q5_0 dequantRow matches expected values for known block" {
     block[5] = 0x00; // qh = 0x0000FFFF
     @memset(block[6..22], 0x53); // lo=3, hi=5
     var output: [32]f32 = undefined;
-    forward_metal.dequantRow(&block, 0, 32, .q5_0, &output);
+    dequant.dequantRow(&block, 0, 32, .q5_0, &output);
     for (0..16) |j| {
         try std.testing.expectApproxEqAbs(@as(f32, 1.5), output[j], 0.001);
     }

@@ -21,7 +21,26 @@ function getEnv(name: string): string | null {
   return value && value.length > 0 ? value : null;
 }
 
-const MANAGED_MODEL_ROOT = join(homedir(), "Library", "Caches", "zinc", "models", "models");
+/**
+ * Directory holding managed model installs, mirroring the engine's cache root
+ * (src/model/managed.zig resolveCacheRoot): $XDG_CACHE_HOME/zinc/models, else
+ * ~/Library/Caches/zinc/models on macOS, else ~/.cache/zinc/models.
+ */
+export function managedModelRoot(
+  env: Record<string, string | undefined> = process.env,
+  platform: string = process.platform,
+  home: string = homedir(),
+): string {
+  const xdg = env.XDG_CACHE_HOME;
+  const cacheRoot = xdg && xdg.length > 0
+    ? join(xdg, "zinc", "models")
+    : platform === "darwin"
+      ? join(home, "Library", "Caches", "zinc", "models")
+      : join(home, ".cache", "zinc", "models");
+  return join(cacheRoot, "models");
+}
+
+export const MANAGED_MODEL_ROOT = managedModelRoot();
 
 function managedModelPath(id: string): string {
   return join(MANAGED_MODEL_ROOT, id, "model.gguf");

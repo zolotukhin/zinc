@@ -3,10 +3,9 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { QWEN_SMOKE_CASES, resolveSmokeModel, runSmokeCase, smokeTimeoutMs } from "./test_qwen_smoke";
+import { MANAGED_MODEL_ROOT, QWEN_SMOKE_CASES, resolveSmokeModel, runSmokeCase, smokeTimeoutMs } from "./test_qwen_smoke";
 import { runSuite } from "./test_openai_sdk";
 
-const MANAGED_MODEL_ROOT = join(homedir(), "Library", "Caches", "zinc", "models", "models");
 const SERVER_MODEL_IDS = [
   "qwen35-9b-q4k-m",
   "gemma4-26b-a4b-q4k-m",

@@ -2099,16 +2099,41 @@ fn findRepeatedPhraseLoop(text: []const u8) ?usize {
     return null;
 }
 
-fn findStreamingStopStart(text: []const u8, stop_strs: []const []const u8) ?usize {
+/// Bytes of still-open reasoning scanned for a tight repetition loop. Planning
+/// text restates facts in its outline and draft far apart; a degenerate loop
+/// repeats inside a short window.
+const open_reasoning_loop_window: usize = 600;
+
+fn findStreamingStopStart(text: []const u8, stop_strs: []const []const u8, thinking_enabled: bool) ?usize {
     var first: ?usize = findFirstStop(text, stop_strs);
     if (findUnexpectedThinkingTailStart(text)) |idx| {
         if (first == null or idx < first.?) first = idx;
     }
-    if (findLeakedReasoningStart(text)) |idx| {
-        if (first == null or idx < first.?) first = idx;
-    }
-    if (findRepeatedPhraseLoop(text)) |idx| {
-        if (first == null or idx < first.?) first = idx;
+    // The leaked-reasoning and repetition heuristics judge the visible answer.
+    // With thinking enabled the reasoning plans, drafts and is then restated by
+    // the answer, so a phrase seen in the facts, the draft and the answer is not
+    // a loop; scanning the whole text stopped Qwen 3.6 35B-A3B mid-answer and
+    // cut the response back into its reasoning.
+    const answer_start: ?usize = if (!thinking_enabled)
+        0
+    else if (std.mem.lastIndexOf(u8, text, "</think>")) |close|
+        close + "</think>".len
+    else
+        null;
+    if (answer_start) |start| {
+        const answer = text[start..];
+        if (findLeakedReasoningStart(answer)) |rel| {
+            if (first == null or start + rel < first.?) first = start + rel;
+        }
+        if (findRepeatedPhraseLoop(answer)) |rel| {
+            if (first == null or start + rel < first.?) first = start + rel;
+        }
+    } else {
+        // Reasoning still open: only a tight loop in its most recent text stops it.
+        const window_start = text.len -| open_reasoning_loop_window;
+        if (findRepeatedPhraseLoop(text[window_start..])) |rel| {
+            if (first == null or window_start + rel < first.?) first = window_start + rel;
+        }
     }
     return first;
 }
@@ -3167,7 +3192,7 @@ fn handleChatCompletions(
                 }
 
                 // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
-                if (findStreamingStopStart(gen_text_buf[0..gen_text_len], stop_strs)) |stop_idx| {
+                if (findStreamingStopStart(gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled)) |stop_idx| {
                     gen_text_len = stop_idx;
                     const pending_text = gen_text_buf[sent_text_len..gen_text_len];
                     const cleaned_pending = trimTrailingChatArtifacts(pending_text);
@@ -3355,7 +3380,7 @@ fn handleChatCompletions(
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
                 ns_gen += 1;
-                const hit = if (findStreamingStopStart(text_buf.items, stop_strs)) |pos| blk: {
+                const hit = if (findStreamingStopStart(text_buf.items, stop_strs, thinking_enabled)) |pos| blk: {
                     text_buf.shrinkRetainingCapacity(pos);
                     break :blk true;
                 } else false;
@@ -3367,7 +3392,7 @@ fn handleChatCompletions(
                 server_state.setActiveContextTokens(state.position);
                 state.generated_tokens.append(allocator, prev) catch {};
             }
-            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items, stop_strs) == null) {
+            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items, stop_strs, thinking_enabled) == null) {
                 finish_reason = .length;
             }
         }
@@ -4690,7 +4715,7 @@ test "findStreamingStopStart detects leaked prompt-analysis tail" {
         "Overall, while Zig has potential, it is not yet the best choice for production kernel programming." ++
         "<think>\nThinking Process:\n1. Analyze the Request:\n" ++
         "    *   Current State: The assistant has already provided a response in the few-shot example.";
-    try std.testing.expect(findStreamingStopStart(raw, chat_stop_strs[0..]) != null);
+    try std.testing.expect(findStreamingStopStart(raw, chat_stop_strs[0..], false) != null);
 }
 
 test "trimRestartedAnswer strips duplicated restart from opening paragraph" {
@@ -5709,4 +5734,40 @@ test "startsWithLeakedReasoning detects meta-commentary at start" {
     try std.testing.expect(startsWithLeakedReasoning("  Let me think about this carefully."));
     try std.testing.expect(!startsWithLeakedReasoning("Zig is a modern systems programming language."));
     try std.testing.expect(!startsWithLeakedReasoning("C types include int, float, and char."));
+}
+
+test "findStreamingStopStart does not treat an answer restating its reasoning as a loop" {
+    const sentence = "Zig is a general-purpose programming language";
+    const text = sentence ++ ". " ++ sentence ++ " designed for clarity.</think>\n\n" ++
+        sentence ++ " with manual memory management. It compiles to native code.";
+    // Scanning the whole text sees the phrase three times and would cut the
+    // response back into the reasoning.
+    try std.testing.expect(findRepeatedPhraseLoop(text) != null);
+    try std.testing.expect(findStreamingStopStart(text, chat_stop_strs[0..], true) == null);
+}
+
+test "findStreamingStopStart still stops a looping answer after the reasoning" {
+    const reasoning = "Plan the answer.</think>\n\n";
+    const looping = "I should cover the main types. I should also mention type safety. I should also mention type safety. I should also mention type safety. I should also mention type safety.";
+    const idx = findStreamingStopStart(reasoning ++ looping, chat_stop_strs[0..], true) orelse return error.TestExpectedStop;
+    try std.testing.expect(idx > reasoning.len);
+}
+
+test "findStreamingStopStart stops a tight loop in open reasoning but not distant restatements" {
+    const tight = "Let me think. I should also mention type safety. I should also mention type safety. I should also mention type safety. I should also mention type safety.";
+    try std.testing.expect(findStreamingStopStart(tight, chat_stop_strs[0..], true) != null);
+
+    // Natural, non-repeating prose between restatements: a run of identical
+    // characters would itself be a loop.
+    const fact = "Zig is a general-purpose programming language. ";
+    const near_filler = "it targets systems programming and aims to be a simpler and safer successor for work that C does today, ";
+    const far_filler =
+        "memory in Zig is managed through allocators that callers pass in explicitly, which keeps every allocation visible at the call site, " ++
+        "errors are ordinary values carried in error unions and each one has to be handled or propagated with try, " ++
+        "comptime lets code run while the compiler is working so generics and configuration need no macro language, " ++
+        "the build system is itself a Zig program that describes steps, artifacts and dependencies, " ++
+        "cross compilation to dozens of targets ships with the toolchain, " ++
+        "and interop with C headers works without writing bindings by hand because the compiler translates them directly, ";
+    const distant = fact ++ near_filler ++ fact ++ far_filler ++ fact;
+    try std.testing.expect(findStreamingStopStart(distant, chat_stop_strs[0..], true) == null);
 }
