@@ -161,7 +161,7 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }
 
-/// Muse Glimmer rotates adjacent dim pairs (llama.cpp LLAMA_ROPE_TYPE_NORM:
+/// Muse Glimmer rotates adjacent dim pairs (the reference implementation's LLAMA_ROPE_TYPE_NORM:
 /// (2i, 2i+1) with frequency i), while ZINC's rope kernels pair (i, i+half).
 /// Reordering each head's Q/K output rows to [even dims..., odd dims...] (and
 /// the per-dim q_norm/k_norm weights the same way) makes the kernels' pairing

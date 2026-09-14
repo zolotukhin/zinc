@@ -1,7 +1,7 @@
 //! Unicode classes for code points >= 0x80 used by the Qwen-family
 //! pretokenizer: \p{L}, \p{M}, \p{N} and \s. ASCII is classified inline by the
 //! caller. The ranges are generated from the reference implementation's
-//! unicode-data.cpp (llama.cpp master 5f436dddb) so chunk boundaries match it.
+//! unicode-data.cpp (reference master 5f436dddb) so chunk boundaries match it.
 //! @section Tokenization
 
 pub const letter_ranges = [_][2]u32{

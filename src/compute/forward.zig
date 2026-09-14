@@ -1015,7 +1015,7 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     for (0..cfg.n_layers) |i| {
         const lt = engine.layer_tensors[i];
         // A separate attention gate (Muse Glimmer): the batched path's result is
-        // still wrong for Muse (per-token is verified against llama.cpp), so it
+        // still wrong for Muse (per-token is verified against the reference implementation), so it
         // is on by default (ZINC_MUSE_BATCHED=0 falls back to per-token prefill).
         if (lt.attn_gate != null and !(cfg.architecture == .muse_glimmer and envFlagEnabled("ZINC_MUSE_BATCHED", true))) return false;
         if (lt.attn_q_bias != null or lt.attn_k_bias != null or
@@ -1401,7 +1401,7 @@ pub const InferenceEngine = struct {
     /// turn rolls back to it and re-processes the canonical suffix (previous
     /// answer, end of turn, new question), so the reused context is exactly what
     /// a fresh render would be — no accumulated per-turn scaffolds in the
-    /// DeltaNet state. This is how llama.cpp reuses on hybrid models too.
+    /// DeltaNet state. This is how the reference implementation reuses state on hybrid models too.
     ssm_checkpoint: ?Buffer = null,
     ssm_checkpoint_layer_stride: vk.c.VkDeviceSize = 0,
     ssm_checkpoint_conv_size: vk.c.VkDeviceSize = 0,
@@ -28550,7 +28550,7 @@ pub const InferenceEngine = struct {
         for (0..cfg.n_layers) |layer_idx| {
             // ZINC_MUSE_DIAG=1: dump token 0's residual entering layers 1..3
             // (outputs of layers 0..2) in the batched path, for comparison
-            // with llama.cpp's `l_out-N` rows and the per-token path.
+            // with the reference eval-callback `l_out-N` rows and the per-token path.
             if (base_token == 0 and layer_idx >= 1 and layer_idx <= 3 and envFlagEnabled("ZINC_MUSE_DIAG", false)) {
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
