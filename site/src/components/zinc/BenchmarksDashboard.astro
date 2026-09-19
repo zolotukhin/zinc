@@ -797,6 +797,13 @@ const jsonLd = {
       name: 'ZINC benchmark artifact',
       description: 'Structured benchmark artifact used to render the public ZINC benchmarks dashboard across RDNA, Intel Arc, and Metal targets.',
       dateModified: benchmarkData.generated_at,
+      creator: {
+        '@type': 'Person',
+        name: 'Stepan Zolotukhin',
+        url: `${siteUrl}/about`,
+      },
+      license: 'https://opensource.org/licenses/MIT',
+      isAccessibleForFree: true,
       distribution: {
         '@type': 'DataDownload',
         encodingFormat: 'application/json',
