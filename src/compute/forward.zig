@@ -103,7 +103,8 @@ fn qwenDenseDownDp4aAccEligible(
 }
 const gemma_prefill_micro_prompt_guard_tokens: u32 = 8;
 const gemma_prefill_long_draft_prompt_min_tokens: u32 = 49;
-const gemma_prefill_dp4a_max_tokens: u32 = 384;
+const gemma_prefill_dp4a_max_tokens_default: u32 = 384;
+const gemma_prefill_dp4a_max_tokens_rdna: u32 = 16384;
 /// Muse Glimmer batched prefill chunk cap (the DP4a padded-token band tops out
 /// at 384).
 const muse_prefill_chunk_tokens: u32 = 384;
@@ -13503,6 +13504,20 @@ pub const InferenceEngine = struct {
         }
     }
 
+    /// Widest prompt that stays on Gemma's int8 prefill kernels. RDNA runs them
+    /// over a whole long prompt greedy-identically and 2.8x faster than the f32
+    /// fallback (Gemma 4 26B-A4B, 1459 tokens: 1140 vs 413 tok/s), so only Intel
+    /// keeps the narrow band it was tuned with.
+    fn gemmaPrefillDp4aMaxTokens(self: *const InferenceEngine) u32 {
+        if (std.posix.getenv("ZINC_GEMMA_DP4A_MAX_TOKENS")) |raw| {
+            if (std.fmt.parseInt(u32, std.mem.trim(u8, raw, " \t\r\n"), 10)) |parsed| {
+                if (parsed >= 64) return parsed;
+            } else |_| {}
+        }
+        if (self.isAmdRdna()) return gemma_prefill_dp4a_max_tokens_rdna;
+        return gemma_prefill_dp4a_max_tokens_default;
+    }
+
     fn gemmaDenseGegluDp4aEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
         if (self.validation_diagnostics_enabled) return false;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return false;
@@ -13512,7 +13527,7 @@ pub const InferenceEngine = struct {
         if (cfg.architecture != .gemma or cfg.ssm_d_inner != 0) return false;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
         const padded_tokens = self.gemmaDensePrefillPaddedTokenCount(n_tokens);
-        if (padded_tokens < 64 or padded_tokens > gemma_prefill_dp4a_max_tokens) return false;
+        if (padded_tokens < 64 or padded_tokens > self.gemmaPrefillDp4aMaxTokens()) return false;
         return self.dmmv.pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a != null and
             self.dmmv.pipeline_quantize_act_q8_1 != null;
     }
@@ -13526,7 +13541,7 @@ pub const InferenceEngine = struct {
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return false;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
         const padded_tokens = self.gemmaDensePrefillPaddedTokenCount(n_tokens);
-        if (padded_tokens < 64 or padded_tokens > gemma_prefill_dp4a_max_tokens) return false;
+        if (padded_tokens < 64 or padded_tokens > self.gemmaPrefillDp4aMaxTokens()) return false;
         const q6_path =
             self.dmmv.pipeline_mul_mm_q6k_full_dp4a != null and
             self.dmmv.pipeline_quantize_act_q8 != null and
@@ -13570,7 +13585,7 @@ pub const InferenceEngine = struct {
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return false;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
         const padded_tokens = self.gemmaProjectionPrefillPaddedTokenCount(n_tokens);
-        return padded_tokens >= 64 and padded_tokens <= gemma_prefill_dp4a_max_tokens;
+        return padded_tokens >= 64 and padded_tokens <= self.gemmaPrefillDp4aMaxTokens();
     }
 
     fn gemmaDenseProjectionDp4aSupported(self: *const InferenceEngine, tensor: *const LoadedTensor, M: u32, K: u32, n_tokens: u32) bool {
@@ -18670,7 +18685,7 @@ pub const InferenceEngine = struct {
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return n_tokens;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return n_tokens;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return n_tokens;
-        if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > gemma_prefill_dp4a_max_tokens) return n_tokens;
+        if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > self.gemmaPrefillDp4aMaxTokens()) return n_tokens;
         // Muse Glimmer rounds to 64: its FFN and projection GEMMs have no
         // K-specialized pipeline, so they run the generic 64x64 int8 tile,
         // which needs a column count that is a multiple of 64.
@@ -18685,7 +18700,7 @@ pub const InferenceEngine = struct {
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return n_tokens;
         if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return n_tokens;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return n_tokens;
-        if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > gemma_prefill_dp4a_max_tokens) return n_tokens;
+        if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > self.gemmaPrefillDp4aMaxTokens()) return n_tokens;
         // Muse Glimmer rounds to 64: its FFN and projection GEMMs have no
         // K-specialized pipeline, so they run the generic 64x64 int8 tile,
         // which needs a column count that is a multiple of 64.
@@ -28228,7 +28243,7 @@ pub const InferenceEngine = struct {
         const intel_batched_explicitly_off = intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "0");
         const intel_batched_requested = isIntelGpuVendor(self.gpu_config.vendor) and
             (intel_batched_explicitly_on or (!intel_batched_explicitly_off and intel_gemma_chunk_default));
-        const intel_default_chunk_limit: u32 = if (intel_gemma_moe_default) gemma_prefill_dp4a_max_tokens else 96;
+        const intel_default_chunk_limit: u32 = if (intel_gemma_moe_default) self.gemmaPrefillDp4aMaxTokens() else 96;
         const chunk_limit = intelBatchedPrefillChunkLimit(self.gpu_config.vendor, intel_default_chunk_limit);
         if (intel_batched_requested and
             chunk_limit > 0 and

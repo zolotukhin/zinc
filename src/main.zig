@@ -2829,7 +2829,10 @@ pub fn main() !void {
             }
 
             // Generate
-            const output_tokens = forward_metal.generate(&engine, prompt_tokens, config.max_tokens, eos_id, allocator) catch |err| {
+            // Benchmark mode runs to max_tokens; otherwise stop on every
+            // end-of-generation token, not just the primary EOS.
+            const extra_stop_ids: []const u32 = if (eos_id == std.math.maxInt(u32)) &.{} else tokenizer.eog_ids;
+            const output_tokens = forward_metal.generate(&engine, prompt_tokens, config.max_tokens, eos_id, extra_stop_ids, allocator) catch |err| {
                 log.err("Failed to generate: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };

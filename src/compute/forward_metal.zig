@@ -30723,11 +30723,22 @@ fn draftFromNgram(seq: []const u32, out: []u32, max_k: usize) usize {
     return 0;
 }
 
+/// True for the primary EOS and for any other end-of-generation token the
+/// vocabulary defines (for example `<|endoftext|>` alongside `<|im_end|>`).
+fn isGenerationStopToken(token: u32, eos_id: u32, extra_stop_ids: []const u32) bool {
+    if (token == eos_id) return true;
+    for (extra_stop_ids) |id| {
+        if (token == id) return true;
+    }
+    return false;
+}
+
 pub fn generateWithMetrics(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
     max_tokens: u32,
     eos_id: u32,
+    extra_stop_ids: []const u32,
     allocator: std.mem.Allocator,
 ) !GenerateResult {
     var output: std.ArrayList(u32) = .{};
@@ -30763,7 +30774,7 @@ pub fn generateWithMetrics(
     var eos_at_first_position = false;
     if (prompt_tokens.len > 0 and decode_budget > 0) {
         const first_token = engine.sampleGreedy();
-        if (first_token == eos_id) {
+        if (isGenerationStopToken(first_token, eos_id, extra_stop_ids)) {
             eos_at_first_position = true;
             return .{
                 .output_tokens = try output.toOwnedSlice(allocator),
@@ -30832,7 +30843,7 @@ pub fn generateWithMetrics(
                 try engine.decodeStep(&state, seed);
                 const next_token = engine.sampleGreedy();
                 spec_fallback_ns += @intCast(std.time.nanoTimestamp() - ft0);
-                if (next_token == eos_id) break :outer;
+                if (isGenerationStopToken(next_token, eos_id, extra_stop_ids)) break :outer;
                 try output.append(allocator, next_token);
                 try state.generated_tokens.append(allocator, next_token);
                 try full_seq.append(allocator, next_token);
@@ -30858,7 +30869,7 @@ pub fn generateWithMetrics(
             state.position = engine.position;
             for (0..j) |k| {
                 const tok = draft_buf[k];
-                if (tok == eos_id) break :outer;
+                if (isGenerationStopToken(tok, eos_id, extra_stop_ids)) break :outer;
                 try output.append(allocator, tok);
                 try state.generated_tokens.append(allocator, tok);
                 try full_seq.append(allocator, tok);
@@ -30866,7 +30877,7 @@ pub fn generateWithMetrics(
                 if (tokens_generated >= decode_budget) break :outer;
             }
             const correction = verify_out[j];
-            if (correction == eos_id) break :outer;
+            if (isGenerationStopToken(correction, eos_id, extra_stop_ids)) break :outer;
             try output.append(allocator, correction);
             try state.generated_tokens.append(allocator, correction);
             try full_seq.append(allocator, correction);
@@ -30893,7 +30904,7 @@ pub fn generateWithMetrics(
             try engine.decodeStep(&state, input_token);
 
             const next_token = engine.sampleGreedy();
-            if (next_token == eos_id) break;
+            if (isGenerationStopToken(next_token, eos_id, extra_stop_ids)) break;
 
             try output.append(allocator, next_token);
             try state.generated_tokens.append(allocator, next_token);
@@ -30940,9 +30951,10 @@ pub fn generate(
     prompt_tokens: []const u32,
     max_tokens: u32,
     eos_id: u32,
+    extra_stop_ids: []const u32,
     allocator: std.mem.Allocator,
 ) ![]u32 {
-    const result = try generateWithMetrics(engine, prompt_tokens, max_tokens, eos_id, allocator);
+    const result = try generateWithMetrics(engine, prompt_tokens, max_tokens, eos_id, extra_stop_ids, allocator);
     if (result.metrics.prefill_tokens > 0) {
         log.info("Prefill: {d} tokens in {d:.1} ms ({d:.1} tok/s)", .{
             result.metrics.prefill_tokens,

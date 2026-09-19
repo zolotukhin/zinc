@@ -437,7 +437,7 @@ pub fn main() !void {
 
     var warmup_idx: u32 = 0;
     while (warmup_idx < config.warmup_runs) : (warmup_idx += 1) {
-        var warmup = try forward_metal.generateWithMetrics(&engine, prompt_tokens, config.max_tokens, tokenizer.eosId(), allocator);
+        var warmup = try forward_metal.generateWithMetrics(&engine, prompt_tokens, config.max_tokens, tokenizer.eosId(), tokenizer.eog_ids, allocator);
         defer warmup.deinit(allocator);
         try stdout.interface.print(
             "Warmup {d}: prefill {d:.1} tok/s | decode {d:.2} tok/s | {d:.1} ms/tok | output {d} tokens\n",
@@ -469,7 +469,7 @@ pub fn main() !void {
 
     var run_idx: u32 = 0;
     while (run_idx < config.runs) : (run_idx += 1) {
-        var run = try forward_metal.generateWithMetrics(&engine, prompt_tokens, config.max_tokens, tokenizer.eosId(), allocator);
+        var run = try forward_metal.generateWithMetrics(&engine, prompt_tokens, config.max_tokens, tokenizer.eosId(), tokenizer.eog_ids, allocator);
         defer run.deinit(allocator);
 
         prefill_tps[run_idx] = run.metrics.prefill_tps;

@@ -846,7 +846,8 @@ test "Vulkan batched kpar pipelines use non-wave64 options on Intel" {
 test "Vulkan Intel batched prefill keeps chunk override for fallback debugging" {
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "ZINC_INTEL_BATCHED_PREFILL_CHUNK");
-    try expectContains(src, "const gemma_prefill_dp4a_max_tokens: u32 = 384;");
+    try expectContains(src, "const gemma_prefill_dp4a_max_tokens_default: u32 = 384;");
+    try expectContainsNear(src, "fn gemmaPrefillDp4aMaxTokens", "if (self.isAmdRdna()) return gemma_prefill_dp4a_max_tokens_rdna;", 500);
     try expectContainsNear(src, "fn intelBatchedPrefillChunkLimit", "orelse return default_limit;", 500);
     try expectContainsNear(src, "fn intelBatchedPrefillChunkLimit", "if (std.mem.eql(u8, raw, \"0\")) return 0;", 700);
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine", "intelBatchedPrefillChunkLimit", 1800);
@@ -854,8 +855,8 @@ test "Vulkan Intel batched prefill keeps chunk override for fallback debugging" 
     try expectContainsNear(src, "const intel_gemma_moe_default", "cfg.n_experts > 0", 300);
     try expectContainsNear(src, "const intel_gemma_moe_default", "gemmaGroupedMoePrefillEnvEnabled()", 500);
     try expectContainsNear(src, "const intel_batched_requested", "intel_gemma_chunk_default", 500);
-    try expectContainsNear(src, "const intel_default_chunk_limit", "if (intel_gemma_moe_default) gemma_prefill_dp4a_max_tokens else 96", 250);
-    try expectContainsNear(src, "fn gemmaDenseProjectionDp4aEnabled", "padded_tokens <= gemma_prefill_dp4a_max_tokens", 1000);
+    try expectContainsNear(src, "const intel_default_chunk_limit", "if (intel_gemma_moe_default) self.gemmaPrefillDp4aMaxTokens() else 96", 250);
+    try expectContainsNear(src, "fn gemmaDenseProjectionDp4aEnabled", "padded_tokens <= self.gemmaPrefillDp4aMaxTokens()", 1000);
     try expectContainsNear(src, "Intel batched prefill chunking ENABLED", "prefillBatchedImpl(state, prompt_tokens[offset..end])", 1200);
 }
 
