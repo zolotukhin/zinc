@@ -688,6 +688,7 @@ const targets = [...benchmarkData.targets]
   .sort((a, b) => targetRank(a.id) - targetRank(b.id))
   .map(normalizeTarget);
 
+const mtpTargetLabels = targets.filter((target) => targetMtpModels(target).length > 0).map((target) => targetBackendLabel(target));
 const totalUniqueModels = new Set(targets.flatMap((target) => target.models.map((model: any) => model.id))).size;
 const totalComparedModels = targets.reduce((sum, target) => sum + (target.summary?.compared_models ?? 0), 0);
 
@@ -1049,6 +1050,13 @@ const jsonLd = {
             )}
           </details>
         </header>
+
+        {mtpModels.length === 0 && mtpTargetLabels.length > 0 && (
+          <p class="mtp-note">
+            No speculative decoding on this backend. The {mtpTargetLabels.join(' and ')} tab has an MTP on/off switch for the
+            models that support it.
+          </p>
+        )}
 
         {mtpModels.length > 0 && (
           <div class="mtp-switch" data-mtp-switch>
@@ -4203,6 +4211,12 @@ const jsonLd = {
       margin: 0;
     }
   }
+  .mtp-note {
+    margin: 0 0 1.25rem;
+    color: var(--color-text-muted, #6b7280);
+    font-size: 0.9rem;
+  }
+
   .mtp-switch {
     display: flex;
     flex-wrap: wrap;
