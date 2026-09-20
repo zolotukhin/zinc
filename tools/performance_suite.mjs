@@ -1274,6 +1274,9 @@ function remoteEnvPrefix(creds) {
 }
 
 const REMOTE_ZINC_TUNING_ENV_KEYS = [
+  // Lets a run measure the same model with NextN/MTP speculative decoding off,
+  // which is what the dashboard's MTP toggle compares against.
+  "ZINC_MTP",
   "ZINC_BATCHED_PREFILL",
   "ZINC_QWEN_MOE_BATCHED",
   "ZINC_MOE_TC",

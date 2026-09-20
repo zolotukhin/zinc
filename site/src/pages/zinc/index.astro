@@ -80,9 +80,9 @@ const rdnaRocmQwen38Prefill = metricMedian(rdnaRocmQwen38?.zinc?.prefill_tps);
 const rdnaRocmQwen38BaselinePrefill = metricMedian(rdnaRocmQwen38?.baseline?.prefill_tps);
 const metal35Decode = metricMedian(metal35?.zinc?.decode_tps);
 
-const homeDescription = `Run GGUF models locally with ZINC. Use Vulkan or ROCm on AMD Radeon, Vulkan on Intel Arc, Metal on Apple Silicon, or the experimental CUDA backend on NVIDIA RTX.`;
-const appDescription = `A Zig inference engine for running GGUF models on consumer GPUs, with Vulkan, ROCm, Metal, and experimental CUDA backends.`;
-const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent Vulkan and ROCm server comparisons against llama.cpp. Vulkan reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp). On ROCm, Qwen 3.8 27B reaches ${formatTokNumber(rdnaRocmQwen38Decode)} tok/s decode versus ${formatTokNumber(rdnaRocmQwen38BaselineDecode)}, and ${formatTokNumber(rdnaRocmQwen38Prefill)} tok/s prefill versus ${formatTokNumber(rdnaRocmQwen38BaselinePrefill)}, with ZINC ahead in all four workloads against the latest upstream llama.cpp build used for the run. On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
+const homeDescription = `Run GGUF models locally with ZINC. Use ROCm or Vulkan on AMD Radeon, Vulkan on Intel Arc, Metal on Apple Silicon, or the experimental CUDA backend on NVIDIA RTX.`;
+const appDescription = `A Zig inference engine for running GGUF models on consumer GPUs, with ROCm, Vulkan, Metal, and experimental CUDA backends.`;
+const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent ROCm and Vulkan server comparisons against llama.cpp, and ROCm is the headline Radeon result. On ROCm, Qwen 3.8 27B reaches ${formatTokNumber(rdnaRocmQwen38Decode)} tok/s decode versus ${formatTokNumber(rdnaRocmQwen38BaselineDecode)}, and ${formatTokNumber(rdnaRocmQwen38Prefill)} tok/s prefill versus ${formatTokNumber(rdnaRocmQwen38BaselinePrefill)}, with ZINC ahead in all four workloads against the latest upstream llama.cpp build used for the run. The portable Vulkan build reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
 
 function ratioX(zinc: number | null | undefined, baseline: number | null | undefined) {
   if (zinc == null || baseline == null || Number.isNaN(zinc) || Number.isNaN(baseline) || baseline <= 0) return null;
@@ -165,19 +165,6 @@ const rdnaRocmQwen38ScenarioWins = (rdnaRocmQwen38?.scenarios ?? []).filter((sce
 
 const amdBackends = [
   {
-    id: 'vulkan',
-    label: 'Vulkan',
-    target: rdnaTarget,
-    board: rdnaBoard,
-    modelCount: rdnaModelCount,
-    decodeWins: rdnaDecodeWins,
-    prefillWins: rdnaPrefillWins,
-    overallWins: rdnaOverallWins,
-    headline: formatTokNumber(rdna35Decode, 1),
-    headlineLabel: 'tok/s top decode',
-    headlineNote: 'Qwen3.6 35B A3B',
-  },
-  {
     id: 'rocm',
     label: 'ROCm',
     target: rdnaRocmTarget,
@@ -190,22 +177,35 @@ const amdBackends = [
     headlineLabel: 'Qwen 3.8 decode tok/s',
     headlineNote: `${formatTokNumber(rdnaRocmQwen38BaselineDecode, 1)} in latest llama.cpp`,
   },
+  {
+    id: 'vulkan',
+    label: 'Vulkan',
+    target: rdnaTarget,
+    board: rdnaBoard,
+    modelCount: rdnaModelCount,
+    decodeWins: rdnaDecodeWins,
+    prefillWins: rdnaPrefillWins,
+    overallWins: rdnaOverallWins,
+    headline: formatTokNumber(rdna35Decode, 1),
+    headlineLabel: 'tok/s top decode',
+    headlineNote: 'Qwen3.6 35B A3B',
+  },
 ];
 
 const platformCards = [
-  {
-    title: 'AMD Radeon',
-    backend: 'Vulkan',
-    status: 'Supported',
-    metric: `${rdnaDecodeWins}/${rdnaModelCount} decode wins`,
-    note: 'Five RDNA4 models measured against llama.cpp.',
-  },
   {
     title: 'AMD Radeon',
     backend: 'ROCm',
     status: 'Supported',
     metric: `${rdnaRocmDecodeWins}/${rdnaRocmModelCount} decode wins`,
     note: `${rdnaRocmSuccessfulCount}/${rdnaRocmModelCount} model rows complete; Qwen 3.8 wins ${rdnaRocmQwen38ScenarioWins}/4 workloads.`,
+  },
+  {
+    title: 'AMD Radeon',
+    backend: 'Vulkan',
+    status: 'Supported',
+    metric: `${rdnaDecodeWins}/${rdnaModelCount} decode wins`,
+    note: 'Five RDNA4 models measured against llama.cpp.',
   },
   {
     title: 'Apple Silicon',
@@ -256,15 +256,15 @@ const jsonLd = {
           name: 'Which consumer GPUs does ZINC target?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'ZINC runs local models on AMD Radeon through Vulkan or ROCm, Intel Arc through Vulkan, Apple Silicon through Metal, and NVIDIA RTX through an experimental CUDA backend.',
+            text: 'ZINC runs local models on AMD Radeon through ROCm or Vulkan, Intel Arc through Vulkan, Apple Silicon through Metal, and NVIDIA RTX through an experimental CUDA backend.',
           },
         },
         {
           '@type': 'Question',
-          name: 'Should I use Vulkan or ROCm on AMD Radeon?',
+          name: 'Should I use ROCm or Vulkan on AMD Radeon?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'ZINC supports AMD Radeon through both Vulkan and ROCm. Use the default Vulkan build for broad RDNA3/RDNA4 compatibility, or select the ROCm build for the HIP runtime and its dedicated gfx1201 kernels. The public dashboard publishes the two backends independently on the same Radeon AI PRO R9700.',
+            text: 'ZINC supports AMD Radeon through both ROCm and Vulkan. ROCm is the primary Radeon path and the one the dashboard leads with: it runs the HIP runtime and the dedicated gfx1201 kernels, and it posts the widest prefill margins over llama.cpp. Choose the Vulkan build when you want broad RDNA3/RDNA4 portability without a ROCm installation. The public dashboard publishes the two backends independently on the same Radeon AI PRO R9700.',
           },
         },
         {
@@ -272,7 +272,7 @@ const jsonLd = {
           name: 'Which GPUs are fastest for local LLM inference with ZINC?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: `The Radeon AI PRO R9700 (32 GB, 640 GB/s) is the primary RDNA4 tuning target. The dashboard publishes both Vulkan and ROCm runs on that card, alongside Intel Arc Vulkan results, Apple Silicon Metal results, and NVIDIA RTX CUDA experiments.`,
+            text: `The Radeon AI PRO R9700 (32 GB, 640 GB/s) is the primary RDNA4 tuning target. The dashboard publishes both ROCm and Vulkan runs on that card, alongside Intel Arc Vulkan results, Apple Silicon Metal results, and NVIDIA RTX CUDA experiments.`,
           },
         },
         {
