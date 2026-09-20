@@ -48,6 +48,37 @@ For password-auth Intel nodes, the suite reads `ZINC_INTEL_SSH_PASSWORD`, `ZINC_
 
 The default RDNA suite covers Gemma 4 26B-A4B Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3.5 9B Q4_K_M, Qwen 3.6 35B-A3B UD Q4_K_XL, and Qwen 3.8 27B Q4_K_M. The small-Qwen row is `Qwen3.5-9B-Q4_K_M.gguf`, not the older Qwen 3 8B GGUF.
 
+## Publishing an MTP on/off pair
+
+NextN/MTP speculative decoding is a ZINC-only feature, so a decode number
+measured with it on is not a like-for-like comparison against llama.cpp, which
+has no equivalent. Rows that use it carry both measurements, and the dashboard
+shows an on/off switch. Only `qwen38-27b-q4k-m` has NextN weights today, and
+only on the Vulkan backend.
+
+Measure the pair with two passes over the same model, then fold the second one
+into the published row:
+
+```bash
+# 1. The published row, measured the normal way (MTP on by default).
+bun tools/performance_suite.mjs --target rdna --models qwen38-27b-q4k-m \
+  --rdna-sync --rdna-build --rdna-start-llama --output /tmp/mtp-on.json
+
+# 2. The same scenarios with speculation disabled. ZINC_MTP is forwarded to the
+#    remote server, and --phase zinc skips the unchanged llama.cpp baseline.
+ZINC_MTP=0 bun tools/performance_suite.mjs --target rdna --models qwen38-27b-q4k-m \
+  --phase zinc --no-site-write --output /tmp/mtp-off.json
+
+# 3. Attach it as variants.mtp_off on the published scenarios.
+bun tools/merge_mtp_variant.mjs --off /tmp/mtp-off.json
+```
+
+The merge compares the off-variant against the baseline already published for
+that row, so both variants share one llama.cpp run, and it refuses an artifact
+whose runs still report speculation (a missed `ZINC_MTP=0`). Run the pair back
+to back on the same build: the toggle invites a direct comparison of the two
+numbers, so they should differ only in speculation.
+
 ## Ad-hoc llama.cpp baseline on the RDNA4 node
 
 Use this when you want a one-off llama.cpp number outside the perf suite — for example, to validate a Mesa or driver change before doing a full publish run.
