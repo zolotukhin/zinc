@@ -410,6 +410,14 @@ function mtpOffScenario(scenario: any) {
   return { ...scenario, zinc: variant.zinc, comparison: variant.comparison ?? null };
 }
 
+function mtpOffTarget(target: any) {
+  const models = (target.models ?? []).map((model: any) => ({
+    ...model,
+    scenarios: ensureScenarios(model).map((scenario: any) => mtpOffScenario(scenario) ?? scenario),
+  }));
+  return normalizeTarget({ ...target, models });
+}
+
 function targetMtpModels(target: any) {
   const labels: string[] = [];
   for (const model of target.models ?? []) {
@@ -942,6 +950,7 @@ const jsonLd = {
     const methodology = target.methodology ?? {};
     const zincBackend = methodology.zinc_backend ?? null;
     const mtpModels = targetMtpModels(target);
+    const mtpOffSummary = mtpModels.length > 0 ? mtpOffTarget(target).summary : null;
     const llamaBackend = methodology.llama_backend
       ? `${methodology.llama_backend}${methodology.llama_device ? ` (${methodology.llama_device})` : ''}`
       : null;
@@ -1060,17 +1069,17 @@ const jsonLd = {
         <div class="summary-grid">
           <article class="summary-card">
             <span>Fastest</span>
-            <strong>{formatMetric(target.summary?.fastest_decode_tps, 'tok/s')}</strong>
-            <small>{displayModelLabel(target.summary?.fastest_model_label)}</small>
+            <strong {...mtpText(formatMetric(target.summary?.fastest_decode_tps, 'tok/s'), mtpOffSummary ? formatMetric(mtpOffSummary.fastest_decode_tps, 'tok/s') : null)}>{formatMetric(target.summary?.fastest_decode_tps, 'tok/s')}</strong>
+            <small {...mtpText(displayModelLabel(target.summary?.fastest_model_label), mtpOffSummary ? displayModelLabel(mtpOffSummary.fastest_model_label) : null)}>{displayModelLabel(target.summary?.fastest_model_label)}</small>
           </article>
           <article class="summary-card">
             <span>Decode</span>
-            <strong>{formatMetric(target.summary?.average_decode_tps, 'tok/s')}</strong>
+            <strong {...mtpText(formatMetric(target.summary?.average_decode_tps, 'tok/s'), mtpOffSummary ? formatMetric(mtpOffSummary.average_decode_tps, 'tok/s') : null)}>{formatMetric(target.summary?.average_decode_tps, 'tok/s')}</strong>
             <small>average</small>
           </article>
           <article class="summary-card">
             <span>Overall</span>
-            <strong>{formatPercent(target.summary?.average_pct_of_llama)}</strong>
+            <strong {...mtpText(formatPercent(target.summary?.average_pct_of_llama), mtpOffSummary ? formatPercent(mtpOffSummary.average_pct_of_llama) : null)}>{formatPercent(target.summary?.average_pct_of_llama)}</strong>
             <small>prefill + decode vs llama.cpp</small>
           </article>
         </div>
@@ -4253,6 +4262,11 @@ const jsonLd = {
   .mtp-switch-button:focus-visible {
     outline: 2px solid var(--accent, #0d6e77);
     outline-offset: 2px;
+  }
+
+  /* An author display rule beats the UA [hidden] rule, so the toggle needs this. */
+  .spec-badge[hidden] {
+    display: none;
   }
 
   .spec-badge {
