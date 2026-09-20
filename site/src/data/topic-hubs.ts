@@ -688,7 +688,7 @@ export const topicHubs: TopicHub[] = [
     ],
     docs: [
       {
-        title: 'Run LLMs on AMD GPUs with Vulkan or ROCm',
+        title: 'Run LLMs on AMD GPUs with ROCm or Vulkan',
         href: '/zinc/docs/getting-started/',
         description: 'The fastest path from clone to local AMD, Intel Arc, or Apple Silicon inference.',
       },
@@ -711,8 +711,8 @@ export const topicHubs: TopicHub[] = [
     related: ['qwen3-6-local-inference', 'gemma-local-inference', 'kv-cache-quantization'],
     faqs: [
       {
-        question: 'Should I use Vulkan or ROCm on AMD RDNA4?',
-        answer: 'Both are supported ZINC backends. Vulkan offers broad driver compatibility, while ROCm uses HIP and dedicated gfx1201 kernels. Compare the separate backend tabs for the model and phase you care about.',
+        question: 'Should I use ROCm or Vulkan on AMD RDNA4?',
+        answer: 'Both are supported ZINC backends. ROCm is the primary Radeon path, using HIP with dedicated gfx1201 kernels, and it leads the published dashboard; Vulkan is the portable option with broad driver compatibility. Compare the separate backend tabs for the model and phase you care about.',
       },
       {
         question: 'Which RDNA4 GPU is the best target for ZINC?',
