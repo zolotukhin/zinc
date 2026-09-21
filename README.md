@@ -4,9 +4,9 @@
 
 # ZINC
 
-Fast, local GGUF inference for the GPUs people already own. ZINC is one Zig
-binary with a command line, browser chat, model manager, and OpenAI-compatible
-API.
+Run open-weight models on the GPU you already own. ZINC is a single Zig binary —
+no Python, no CUDA-only assumptions — that loads GGUF files and gives you a
+command line, a browser chat, a model manager, and an OpenAI-compatible API.
 
 <p>
   <a href="https://github.com/zolotukhin/zinc/actions/workflows/test.yml"><img src="https://github.com/zolotukhin/zinc/actions/workflows/test.yml/badge.svg" alt="CI status"></a>
@@ -20,21 +20,43 @@ API.
 [Read the docs](https://zolotukhin.ai/zinc/docs/) ·
 [Join Discord](https://discord.gg/QRUgWH2aGV)
 
-## Faster on the hardware we test
+## Speed, measured honestly
 
-ZINC beats the comparison llama.cpp build on **prefill, decode, and combined
-time for all six models** in the current Radeon AI PRO R9700 ROCm core suite.
-Both engines use the same GPU, GGUF files, prompts, reusable servers, warmups,
-and measured run counts.
+Each model below was run twice on the same Radeon AI PRO R9700: once through
+ZINC's ROCm backend, once through llama.cpp. Same GGUF file, same prompts, same
+reusable-server setup, same warmups and repeat counts. The bars show how ZINC
+compares on the two things you feel while using a model — how fast it reads your
+prompt, and how fast it writes the answer.
 
 <a href="https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm">
-  <img src="assets/rocm-r9700-benchmark.svg" alt="ZINC ahead of llama.cpp across six model benchmarks on a Radeon AI PRO R9700 using ROCm" width="100%">
+  <img src="assets/rocm-r9700-benchmark.svg" alt="ZINC compared with llama.cpp across six models on a Radeon AI PRO R9700 using ROCm" width="100%">
 </a>
 
-That is a scoped, reproducible result—not a claim about every model or GPU.
-The [live benchmark page](https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm)
-includes all four workloads, raw samples, exact prompts, build revisions, and
-the checked-in JSON.
+Reading that honestly: **prompt processing is where ZINC is far ahead** — 1.7x
+to 4.1x llama.cpp across all six models, which is what you feel when a long
+chat, a pasted document, or a code file has to be read before the first word
+appears. **Token generation is close to parity**, within a few percent either
+way, with one exception:
+
+- **Qwen 3.8 generates 1.9x faster because it speculates.** That model ships an
+  extra "NextN" block, and ZINC uses it to draft tokens the full model then
+  verifies in one batched pass — only tokens the full model agrees with are
+  kept, so the output is identical to ordinary decoding, just produced in fewer
+  passes. llama.cpp has no equivalent here, so the benchmark page has a switch
+  that turns it off for a strict like-for-like comparison.
+- **On AMD, the two backends trade places.** ROCm wins prompt processing by a
+  wide margin; Vulkan currently generates tokens faster (on Gemma 4 26B-A4B,
+  118 tok/s on Vulkan against 96 on ROCm). Both are published separately on the
+  [benchmark page](https://zolotukhin.ai/zinc/benchmarks/) so you can compare
+  the build you actually plan to run.
+
+This is one GPU and six models, not a universal claim. Other cards are measured
+separately, and rows where llama.cpp is ahead stay on the page.
+
+Every number comes from `tools/performance_suite.mjs` and lands in
+[`site/src/data/zinc-performance.json`](site/src/data/zinc-performance.json),
+recording prompts, raw samples, build revisions and the llama.cpp commit used.
+The chart above is regenerated from that file, never hand-edited.
 
 ## Get running
 
@@ -46,12 +68,13 @@ git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build -Doptimize=ReleaseFast
 
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
+./zig-out/bin/zinc --check                      # what GPU did it find?
+./zig-out/bin/zinc model pull qwen35-9b-q4k-m   # fetch a model
 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "Hello" --chat
 ```
 
-Build the native AMD ROCm backend with:
+On AMD you can pick either backend. Vulkan is the portable default; ROCm uses
+HIP with kernels tuned for RDNA4 and leads on prompt processing:
 
 ```bash
 ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
@@ -59,46 +82,49 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
 ```
 
 See [Getting started](https://zolotukhin.ai/zinc/docs/getting-started/) for
-package prerequisites and the first-run walkthrough, or use the dedicated
+package prerequisites and the first-run walkthrough, or the dedicated
 [ROCm setup guide](https://zolotukhin.ai/zinc/docs/rocm/).
 
-## Supported GPU paths
+## Chat and API
 
-- AMD Radeon: Vulkan and ROCm/HIP
-- Intel Arc: Vulkan
-- Apple Silicon: Metal
-- NVIDIA RTX: experimental CUDA
+```bash
+./zig-out/bin/zinc chat --model-id qwen35-9b-q4k-m
+```
 
-Backends have native kernels and are measured separately. The
-[hardware guide](https://zolotukhin.ai/zinc/docs/hardware-requirements/) keeps
-the validated cards, drivers, memory requirements, and current limitations in
-one place.
+That one command starts the browser chat and an OpenAI-compatible API on the
+same port, so existing clients and SDKs work unchanged: `/health` for liveness,
+`/v1/models` and `/v1/chat/completions` for the API. The
+[API guide](https://zolotukhin.ai/zinc/docs/api/) has curl and SDK examples.
+
+## GPU support
+
+| Hardware | Backend | Status |
+| --- | --- | --- |
+| AMD Radeon (RDNA3/RDNA4) | ROCm/HIP | Supported · fastest prompt processing on Radeon |
+| AMD Radeon (RDNA3/RDNA4) | Vulkan | Supported · portable, and currently faster at generation |
+| Intel Arc (Xe2/Battlemage) | Vulkan | Supported |
+| Apple Silicon | Metal | Supported |
+| NVIDIA RTX | CUDA | Experimental |
+
+Each backend has its own kernels and is benchmarked separately — no backend
+inherits another's results. The
+[hardware guide](https://zolotukhin.ai/zinc/docs/hardware-requirements/) lists
+validated cards, drivers, memory requirements and current limitations.
 
 ## Models
 
-ZINC works with local GGUF files and a managed model catalog. Current tuning
-work covers Qwen 3.5, Qwen 3.6, Qwen 3.8, Gemma 4, and Muse Glimmer.
-
-- The Muse checkpoint used in ZINC measurements is the exact
-  [Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf)
-  file published by Meta.
-
-You can also point directly at a file or Hugging Face repository:
+ZINC reads local GGUF files and ships a managed catalog you can pull from.
+Current tuning work covers Qwen 3.5, Qwen 3.6, Qwen 3.8, Gemma 4 and Muse
+Glimmer, including mixture-of-experts and hybrid-attention architectures.
 
 ```bash
 ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"
 ./zig-out/bin/zinc -hf Qwen/Qwen3-0.6B-GGUF:Q8_0 --prompt "Hello" --chat
 ```
 
-## Local server and API
-
-```bash
-./zig-out/bin/zinc chat --model-id qwen35-9b-q4k-m
-```
-
-This starts the browser chat and OpenAI-compatible API. Health checks are at
-`/health`; model listing and chat completions are under `/v1`. The
-[API guide](https://zolotukhin.ai/zinc/docs/api/) has curl and SDK examples.
+The Muse checkpoint used in ZINC measurements is the exact
+[Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf)
+file published by Meta.
 
 ## Build, test, contribute
 
@@ -107,11 +133,12 @@ zig build -Doptimize=ReleaseFast
 zig build test
 ```
 
-Benchmark claims come from `tools/performance_suite.mjs`; published artifacts
-live in `site/src/data/zinc-performance.json`. Start with the
-[development guide](docs/DEVELOPMENT.md) and [contributing guide](CONTRIBUTING.md).
+Start with the [development guide](docs/DEVELOPMENT.md) and the
+[contributing guide](CONTRIBUTING.md). To reproduce or extend the benchmarks,
+[docs/BENCHMARKING.md](docs/BENCHMARKING.md) documents the suite, including how
+to publish a speculative-decoding on/off pair.
 
-ZINC is active engineering work. If a model or GPU path is incomplete, the
+ZINC is active engineering work. When a model or GPU path is incomplete, the
 benchmark page leaves that result visible instead of quietly dropping it.
 
 MIT licensed.

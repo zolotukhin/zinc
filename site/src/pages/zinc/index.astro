@@ -264,7 +264,7 @@ const jsonLd = {
           name: 'Should I use ROCm or Vulkan on AMD Radeon?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'ZINC supports AMD Radeon through both ROCm and Vulkan. ROCm is the primary Radeon path and the one the dashboard leads with: it runs the HIP runtime and the dedicated gfx1201 kernels, and it posts the widest prefill margins over llama.cpp. Choose the Vulkan build when you want broad RDNA3/RDNA4 portability without a ROCm installation. The public dashboard publishes the two backends independently on the same Radeon AI PRO R9700.',
+            text: 'ZINC supports AMD Radeon through both ROCm and Vulkan. ROCm is the primary Radeon path and the one the dashboard leads with: it runs the HIP runtime and the dedicated gfx1201 kernels, and it posts the widest prompt-processing margins over llama.cpp. Vulkan needs no ROCm installation and currently generates tokens faster on several models, so the dashboard publishes the two backends independently on the same Radeon AI PRO R9700 rather than picking one for you.',
           },
         },
         {
@@ -353,7 +353,7 @@ const jsonLd = {
     <div class="sweep-header">
       <div>
         <p class="section-kicker">Measured on one Radeon</p>
-        <h2 id="amd-sweep-heading">Choose Vulkan or ROCm</h2>
+        <h2 id="amd-sweep-heading">Choose ROCm or Vulkan</h2>
       </div>
       <span class="sweep-machine">Radeon AI PRO R9700 · 32 GB · 640 GB/s</span>
     </div>
@@ -527,6 +527,8 @@ const jsonLd = {
     <p>The server provides <code>POST /v1/chat/completions</code>, streaming responses, and a built-in chat page. Existing clients can use the <a href="/zinc/docs/api/">OpenAI-compatible API</a>.</p>
 
     <p>Models load from memory-mapped GGUF files. Current quantization support includes Q4_K, Q5_K, Q6_K, Q8_0, and F16. The tested model families are listed in the <a href="/zinc/docs/running-zinc/">model guide</a>.</p>
+
+    <p>Models that ship an appended NextN block — Qwen 3.8 today — generate with self-speculation: the small block drafts the next tokens and the full model verifies them in one batched pass, keeping only the ones it agrees with. Output is identical to ordinary decoding, so it is a speed change and not a quality trade. It runs on the Vulkan and ROCm servers for a single request slot, and the benchmark page can switch it off because llama.cpp has no equivalent to compare against.</p>
 
     <p>ZINC is written in Zig and builds as one binary. The Metal backend uses a small Objective-C shim.</p>
 

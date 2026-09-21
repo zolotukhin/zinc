@@ -1,69 +1,67 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="610" viewBox="0 0 1120 610" role="img" aria-labelledby="title desc">
-  <title id="title">ZINC versus llama.cpp on Radeon AI PRO R9700 with ROCm</title>
-  <desc id="desc">Six horizontal bars show ZINC ahead of the same-machine llama.cpp comparison in combined prompt and decode time. Every row also lists ZINC performance as a percentage of llama.cpp for prefill and decode.</desc>
-  <rect width="1120" height="610" fill="#f7f5f0"/>
-  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" fill="#1f2428">
-    <text x="48" y="58" font-size="26" font-weight="700">Six models. Six wins.</text>
-    <text x="48" y="88" font-size="15" fill="#59636e">Radeon AI PRO R9700 · ROCm · reusable servers · median core workload</text>
-    <text x="1072" y="58" font-size="16" font-weight="700" text-anchor="end" fill="#b84a00">ZINC vs llama.cpp</text>
-
-    <text x="48" y="138" font-size="12" font-weight="700" fill="#59636e">MODEL</text>
-    <text x="420" y="138" font-size="12" font-weight="700" fill="#59636e">COMBINED THROUGHPUT</text>
-    <text x="1072" y="138" font-size="12" font-weight="700" text-anchor="end" fill="#59636e">PHASES</text>
-
-    <line x1="48" y1="152" x2="1072" y2="152" stroke="#d7d2c8"/>
-    <line x1="820" y1="164" x2="820" y2="548" stroke="#6e7781" stroke-dasharray="4 5"/>
-    <text x="820" y="570" font-size="11" text-anchor="middle" fill="#6e7781">llama.cpp = 100%</text>
-
-    <g transform="translate(0 176)">
-      <text x="48" y="18" font-size="16" font-weight="600">Gemma 4 26B-A4B</text>
-      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
-      <rect x="420" y="2" width="469" height="22" fill="#d35400"/>
-      <text x="902" y="19" font-size="14" font-weight="700">117%</text>
-      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 187% · decode 115%</text>
-    </g>
-
-    <g transform="translate(0 238)">
-      <text x="48" y="18" font-size="16" font-weight="600">Gemma 4 31B</text>
-      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
-      <rect x="420" y="2" width="448" height="22" fill="#d35400"/>
-      <text x="881" y="19" font-size="14" font-weight="700">112%</text>
-      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 223% · decode 108%</text>
-    </g>
-
-    <g transform="translate(0 300)">
-      <text x="48" y="18" font-size="16" font-weight="600">Muse Glimmer 30B</text>
-      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
-      <rect x="420" y="2" width="442" height="22" fill="#d35400"/>
-      <text x="875" y="19" font-size="14" font-weight="700">110%</text>
-      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 163% · decode 108%</text>
-    </g>
-
-    <g transform="translate(0 362)">
-      <text x="48" y="18" font-size="16" font-weight="600">Qwen 3.5 9B</text>
-      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
-      <rect x="420" y="2" width="453" height="22" fill="#d35400"/>
-      <text x="886" y="19" font-size="14" font-weight="700">113%</text>
-      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 146% · decode 113%</text>
-    </g>
-
-    <g transform="translate(0 424)">
-      <text x="48" y="18" font-size="16" font-weight="600">Qwen 3.6 35B-A3B</text>
-      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
-      <rect x="420" y="2" width="486" height="22" fill="#d35400"/>
-      <text x="919" y="19" font-size="14" font-weight="700">121%</text>
-      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 115% · decode 122%</text>
-    </g>
-
-    <g transform="translate(0 486)">
-      <text x="48" y="18" font-size="16" font-weight="600">Qwen 3.8 27B</text>
-      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
-      <rect x="420" y="2" width="490" height="22" fill="#d35400"/>
-      <text x="923" y="19" font-size="14" font-weight="700">123%</text>
-      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 259% · decode 108%</text>
-    </g>
-
-    <line x1="48" y1="548" x2="1072" y2="548" stroke="#d7d2c8"/>
-    <text x="48" y="584" font-size="12" fill="#59636e">Same GPU, GGUF, prompts, warmups, and measured runs. Full samples and revisions: zolotukhin.ai/zinc/benchmarks</text>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="710" viewBox="0 0 1040 710" role="img" aria-labelledby="title desc">
+<title id="title">ZINC compared with llama.cpp on Radeon AI PRO R9700 using ROCm</title>
+<desc id="desc">For each model, two bars show ZINC's prompt-processing and token-generation speed as a percentage of a llama.cpp run on the same GPU, model file and prompt. The dashed line marks llama.cpp's own speed.</desc>
+<rect width="1040" height="710" fill="#faf8f4"/>
+<rect x="24" y="24" width="992" height="662" rx="18" fill="#ffffff" stroke="#e3ded4"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" fill="#1f2428">
+<text x="40" y="72" font-size="27" font-weight="700">ZINC vs llama.cpp on one Radeon</text>
+<text x="40" y="99" font-size="14.5" fill="#5c6670">Radeon AI PRO R9700 · ROCm · same GGUF, same prompts, both engines served from a reusable server</text>
+<rect x="40.0" y="113" width="26.0" height="11" rx="3" fill="#d35400"/>
+<text x="74" y="122" font-size="13" fill="#5c6670">prompt processing</text>
+<rect x="208.0" y="113" width="26.0" height="11" rx="3" fill="#f0a06a"/>
+<text x="242" y="122" font-size="13" fill="#5c6670">token generation</text>
+<text x="1000" y="122" font-size="13" text-anchor="end" fill="#5c6670">bar length = ZINC speed ÷ llama.cpp speed</text>
+<line x1="40" y1="124" x2="1000" y2="124" stroke="#d7d2c8"/>
+<line x1="442.8888888888889" y1="138" x2="442.8888888888889" y2="600" stroke="#9aa4ae" stroke-dasharray="4 5"/>
+<text x="442.8888888888889" y="618" font-size="11.5" text-anchor="middle" fill="#5c6670">llama.cpp speed</text>
+<text x="40" y="170" font-size="16" font-weight="600">Gemma 4 26B-A4B MoE</text>
+<text x="40" y="190" font-size="12.5" fill="#5c6670">1282 vs 312 tok/s · 95.5 vs 106.2 tok/s</text>
+<rect x="314.0" y="154" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="154" width="529.7" height="17" rx="4" fill="#d35400"/>
+<text x="853.7106787607843" y="167" font-size="13.5" font-weight="700" fill="#1f2428">411%</text>
+<rect x="314.0" y="177" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="177" width="115.9" height="17" rx="4" fill="#f0a06a"/>
+<text x="439.8749694746199" y="190" font-size="13.5" font-weight="700" fill="#1f2428">90%</text>
+<text x="40" y="248" font-size="16" font-weight="600">Muse Glimmer 30B</text>
+<text x="40" y="268" font-size="12.5" fill="#5c6670">761 vs 238 tok/s · 33.6 vs 33.7 tok/s</text>
+<rect x="314.0" y="232" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="232" width="412.7" height="17" rx="4" fill="#d35400"/>
+<text x="736.7454285990124" y="245" font-size="13.5" font-weight="700" fill="#1f2428">320%</text>
+<rect x="314.0" y="255" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="255" width="128.6" height="17" rx="4" fill="#f0a06a"/>
+<text x="452.5969585403509" y="268" font-size="13.5" font-weight="700" fill="#1f2428">100%</text>
+<text x="40" y="326" font-size="16" font-weight="600">Gemma 4 31B</text>
+<text x="40" y="346" font-size="12.5" fill="#5c6670">496 vs 173 tok/s · 28.0 vs 29.4 tok/s</text>
+<rect x="314.0" y="310" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="310" width="369.0" height="17" rx="4" fill="#d35400"/>
+<text x="692.9820549803921" y="323" font-size="13.5" font-weight="700" fill="#1f2428">286%</text>
+<rect x="314.0" y="333" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="333" width="122.7" height="17" rx="4" fill="#f0a06a"/>
+<text x="446.73540818058484" y="346" font-size="13.5" font-weight="700" fill="#1f2428">95%</text>
+<text x="40" y="404" font-size="16" font-weight="600">Qwen 3.8 27B Dense *</text>
+<text x="40" y="424" font-size="12.5" fill="#5c6670">502 vs 184 tok/s · 57.5 vs 31.0 tok/s</text>
+<rect x="314.0" y="388" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="388" width="352.4" height="17" rx="4" fill="#d35400"/>
+<text x="676.4094268444444" y="401" font-size="13.5" font-weight="700" fill="#1f2428">273%</text>
+<rect x="314.0" y="411" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="411" width="239.4" height="17" rx="4" fill="#f0a06a"/>
+<text x="563.4132140350878" y="424" font-size="13.5" font-weight="700" fill="#1f2428">186%</text>
+<text x="40" y="482" font-size="16" font-weight="600">Qwen 3.5 9B</text>
+<text x="40" y="502" font-size="12.5" fill="#5c6670">1254 vs 519 tok/s · 92.5 vs 87.7 tok/s</text>
+<rect x="314.0" y="466" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="466" width="311.5" height="17" rx="4" fill="#d35400"/>
+<text x="635.5190252681482" y="479" font-size="13.5" font-weight="700" fill="#1f2428">242%</text>
+<rect x="314.0" y="489" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="489" width="135.9" height="17" rx="4" fill="#f0a06a"/>
+<text x="459.8950780266667" y="502" font-size="13.5" font-weight="700" fill="#1f2428">105%</text>
+<text x="40" y="560" font-size="16" font-weight="600">Qwen 3.6 35B A3B</text>
+<text x="40" y="580" font-size="12.5" fill="#5c6670">610 vs 365 tok/s · 97.8 vs 110.5 tok/s</text>
+<rect x="314.0" y="544" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="544" width="215.4" height="17" rx="4" fill="#d35400"/>
+<text x="539.4466822692063" y="557" font-size="13.5" font-weight="700" fill="#1f2428">167%</text>
+<rect x="314.0" y="567" width="580.0" height="17" rx="4" fill="#e8e4db"/>
+<rect x="314.0" y="567" width="114.1" height="17" rx="4" fill="#f0a06a"/>
+<text x="438.119797922807" y="580" font-size="13.5" font-weight="700" fill="#1f2428">89%</text>
+<text x="40" y="640" font-size="12" fill="#5c6670">Measured 2026-09-21 · ZINC 1ec151a278ba · llama.cpp 5f436dddb · medians of repeated runs after warmup</text>
+<text x="40" y="660" font-size="12" fill="#5c6670">* generation uses the model's own NextN block to draft tokens, which llama.cpp cannot do here. The benchmark page can switch it off.</text>
+</g></svg>

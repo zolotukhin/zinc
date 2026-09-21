@@ -712,7 +712,7 @@ export const topicHubs: TopicHub[] = [
     faqs: [
       {
         question: 'Should I use ROCm or Vulkan on AMD RDNA4?',
-        answer: 'Both are supported ZINC backends. ROCm is the primary Radeon path, using HIP with dedicated gfx1201 kernels, and it leads the published dashboard; Vulkan is the portable option with broad driver compatibility. Compare the separate backend tabs for the model and phase you care about.',
+        answer: 'Both are supported ZINC backends. ROCm is the primary Radeon path, using HIP with dedicated gfx1201 kernels, and it posts by far the widest prompt-processing margins; Vulkan needs no ROCm install and currently generates tokens faster on several models. Compare the separate backend tabs for the model and phase you care about.',
       },
       {
         question: 'Which RDNA4 GPU is the best target for ZINC?',
