@@ -32,6 +32,21 @@ const forwardcuda = @import("../compute/forward_cuda.zig");
 
 const log = std.log.scoped(.cuda_serve);
 
+/// Draft depth per MTP cycle in serving. Matches the CLI default; the engine
+/// clamps it to its own maximum and to ZINC_MTP_DRAFTS.
+const mtp_serve_max_drafts: u32 = 3;
+
+/// One line per request, in the same shape the Vulkan server emits, so the
+/// benchmark harness records acceptance for ROCm server runs too
+/// (tools/performance_suite.mjs parseZincSpeculative matches this prefix).
+fn logMtpAcceptance(drafted: u32, accepted: u32, cycles: u32) void {
+    const pct = if (drafted > 0)
+        100.0 * @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(drafted))
+    else
+        0.0;
+    log.info("NextN/MTP: request accepted {d}/{d} draft tokens ({d:.1}%) over {d} cycles", .{ accepted, drafted, pct, cycles });
+}
+
 /// Architecture-dispatched GPU forward held by the serving engine. gemma4 dense
 /// (`ForwardGemma`) and the qwen35/36 hybrid-SSM family (`ForwardCuda`) expose the
 /// SAME batched serving primitives — `decodeBatch(tokens,positions,slots,out)` and
@@ -141,6 +156,13 @@ pub const ServeEngine = struct {
     prefill_wall_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     peak_batch: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    /// NextN/MTP self-speculation for the single-slot case. The draft/verify
+    /// path writes the single-sequence KV, not the per-slot KV the batched loop
+    /// uses, so it only runs when this engine owns exactly one slot. Multi-slot
+    /// serving keeps the batched path, which amortizes weights across requests
+    /// and is the better trade there anyway.
+    mtp_single: bool = false,
+
     /// Allocate slot-based per-sequence state + a scheduler with `nslots` concurrent
     /// slots, each `slot_ctx` tokens deep. The forward (`fwd`) must already be
     /// initialized; it may be EITHER a gemma or qwen forward (dispatched by `Forward`).
@@ -155,8 +177,15 @@ pub const ServeEngine = struct {
         try fwd.allocSlots(nslots, slot_ctx);
         errdefer fwd.freeSlots();
         const sched = try scheduler.Scheduler.init(allocator, nslots);
-        log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}, eot={?d}", .{ nslots, slot_ctx, eos, eot });
-        return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos, .eot = eot };
+        const mtp_single = nslots == 1 and switch (fwd) {
+            .qwen => |q| q.mtpEnabled() and (q.mtpPrepare() catch |err| blk: {
+                log.warn("NextN/MTP setup failed ({s}); serving with ordinary decode", .{@errorName(err)});
+                break :blk false;
+            }),
+            .gemma => false,
+        };
+        log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}, eot={?d}, mtp={}", .{ nslots, slot_ctx, eos, eot, mtp_single });
+        return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos, .eot = eot, .mtp_single = mtp_single };
     }
 
     pub fn deinit(self: *ServeEngine) void {
@@ -303,6 +332,121 @@ pub const ServeEngine = struct {
         return req.generated_tokens.items[req.generated_tokens.items.len - 1] == eot;
     }
 
+    /// Run one request end to end on the single-sequence path with NextN/MTP
+    /// self-speculation, publishing tokens as they are committed.
+    ///
+    /// The batched loop cannot host this: `mtpCycle` drafts into the
+    /// single-sequence KV and rolls it back on a rejected draft, so it needs the
+    /// whole sequence to itself. With one slot that is exactly what a request
+    /// has. Every published token is a target-model output — drafts are only
+    /// kept where the target agreed — so the stream matches ordinary greedy
+    /// decoding token for token.
+    ///
+    /// @returns false when MTP was unavailable for this request, so the caller
+    /// falls back to the ordinary slot path.
+    fn runMtpRequest(self: *ServeEngine, slot_id: u32, timer_opt: *?std.time.Timer) bool {
+        const q = switch (self.fwd) {
+            .qwen => |ptr| ptr,
+            .gemma => return false,
+        };
+        const req = &self.sched.slots[slot_id].?;
+        const np = req.prompt_tokens.len;
+        if (np == 0) return false;
+
+        // The previous request left recurrent state behind; the KV is overwritten
+        // from position 0 by this prefill.
+        q.resetState() catch |err| {
+            log.err("request {d} state reset failed: {s}", .{ req.id, @errorName(err) });
+            return false;
+        };
+
+        const pf_t0 = if (timer_opt.*) |*tm| tm.read() else 0;
+        var next_tok = q.prefillBatched(req.prompt_tokens) catch |err| {
+            log.warn("request {d} batched prefill failed ({s}); using the slot path", .{ req.id, @errorName(err) });
+            return false;
+        };
+        if (timer_opt.*) |*tm| {
+            const elapsed = tm.read() - pf_t0;
+            _ = self.prefill_wall_ns.fetchAdd(elapsed, .monotonic);
+            _ = self.prefill_tokens.fetchAdd(np, .monotonic);
+            self.recordPrefillTiming(req.id, np, elapsed);
+        }
+
+        // Priming reads the prompt rows the batched prefill just produced, so it
+        // has to happen before any decode step overwrites them.
+        const primed = q.mtpPrime(req.prompt_tokens) catch |err| blk: {
+            log.warn("request {d} NextN/MTP priming failed ({s}); ordinary decode", .{ req.id, @errorName(err) });
+            break :blk false;
+        };
+        if (!primed) return false;
+
+        req.transition(.decoding) catch {};
+        var pos: u32 = @intCast(np);
+        var drafted: u32 = 0;
+        var accepted: u32 = 0;
+        var cycles: u32 = 0;
+        // Every exit below is a finished request, including the ones that end
+        // inside emitToken, so report acceptance from a defer rather than the
+        // one path that falls out of the loop.
+        defer if (drafted > 0) logMtpAcceptance(drafted, accepted, cycles);
+
+        // Emit the prefill's token, then let each cycle commit it and hand back
+        // the next one.
+        if (!self.emitToken(slot_id, next_tok, timer_opt)) return true;
+
+        while (true) {
+            const req_now = &self.sched.slots[slot_id].?;
+            const room = req_now.params.max_tokens -| @as(u32, @intCast(req_now.generated_tokens.items.len));
+            if (room == 0) break;
+            const max_drafts = @min(mtp_serve_max_drafts, room);
+            const dec_t0 = if (timer_opt.*) |*tm| tm.read() else 0;
+            const result = q.mtpCycle(next_tok, pos, max_drafts, self.eos) catch |err| {
+                log.err("request {d} NextN/MTP cycle failed: {s}", .{ req_now.id, @errorName(err) });
+                self.failSlot(slot_id);
+                return true;
+            };
+            if (timer_opt.*) |*tm| {
+                const elapsed = tm.read() - dec_t0;
+                _ = self.decode_wall_ns.fetchAdd(elapsed, .monotonic);
+                _ = self.decode_tokens.fetchAdd(1 + result.n_accepted, .monotonic);
+                _ = self.decode_steps.fetchAdd(1, .monotonic);
+                self.recordDecodeTiming(req_now.id, elapsed);
+            }
+            cycles += 1;
+            drafted += result.n_drafted;
+            accepted += result.n_accepted;
+            // The cycle committed the seed plus every accepted draft.
+            pos += 1 + result.n_accepted;
+
+            var i: u32 = 0;
+            while (i < result.n_accepted) : (i += 1) {
+                if (!self.emitToken(slot_id, result.drafts[i], timer_opt)) return true;
+            }
+            next_tok = result.next_token;
+            if (!self.emitToken(slot_id, next_tok, timer_opt)) return true;
+        }
+
+        self.finishSlot(slot_id);
+        return true;
+    }
+
+    /// Append + publish one token. Returns false once the request is complete
+    /// (stop token or budget), having released the slot.
+    fn emitToken(self: *ServeEngine, slot_id: u32, token: u32, timer_opt: *?std.time.Timer) bool {
+        _ = timer_opt;
+        const req = &self.sched.slots[slot_id].?;
+        req.appendToken(token) catch {
+            self.failSlot(slot_id);
+            return false;
+        };
+        self.publish(req.id, token);
+        if (self.requestShouldStop(req)) {
+            self.finishSlot(slot_id);
+            return false;
+        }
+        return true;
+    }
+
     fn workerLoop(self: *ServeEngine) void {
         const fwd = self.fwd;
         // Local copies of the scratch slot-id slices (scratch is reused across
@@ -338,6 +482,10 @@ pub const ServeEngine = struct {
                 const req = &self.sched.slots[slot_id].?;
                 const np = req.prompt_tokens.len;
                 const pf_t0 = if (timer_opt) |*tm| tm.read() else 0;
+                // One slot and a NextN block: run the whole request on the
+                // single-sequence path so it can self-speculate (~1.8x decode).
+                // Falls through to the slot path when that is unavailable.
+                if (self.mtp_single and self.runMtpRequest(slot_id, &timer_opt)) continue;
                 // Clear any accumulated state from this slot's previous request
                 // BEFORE prefilling the new one from pos=0 (qwen SSM recurrent state;
                 // no-op for gemma). Slots are reused when nslots < concurrent clients.

@@ -32,6 +32,7 @@ import {
   parseLlamaCppVersionOutput,
   parseOpenAiCompletionOutput,
   parseZincCliOutput,
+  parseZincSpeculative,
   parseZincServerOutput,
   parseZincVersionOutput,
   prefersChatPrompt,
@@ -1455,4 +1456,14 @@ test("partial merge keeps each untouched model's own provenance", () => {
   expect(byId.kept.generated_at).toBe("2026-09-12T00:00:00.000Z");
   expect(byId.rerun.provenance.zinc.version).toBe("new222");
   expect(byId.rerun.generated_at).toBe("2026-09-13T00:00:00.000Z");
+});
+
+test("parseZincSpeculative reads the acceptance line both servers log", () => {
+  // Vulkan (src/compute/forward.zig) and ROCm (src/server/cuda_serve.zig) must
+  // keep emitting this exact prefix or MTP runs silently lose their badge.
+  const vulkan = "info(forward): NextN/MTP: request accepted 12/16 draft tokens (75.0%) over 8 cycles; draft=1.0 ms target=2.0 ms restore=0.1 ms catch-up=0.2 ms";
+  const rocm = "info(cuda_serve): NextN/MTP: request accepted 56/78 draft tokens (71.8%) over 30 cycles";
+  expect(parseZincSpeculative(vulkan)).toEqual({ kind: "nextn", accepted: 12, drafted: 16, acceptancePct: 75 });
+  expect(parseZincSpeculative(rocm)).toEqual({ kind: "nextn", accepted: 56, drafted: 78, acceptancePct: 71.8 });
+  expect(parseZincSpeculative("no speculation here")).toBeNull();
 });
