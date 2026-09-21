@@ -44,13 +44,21 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
 ```
 
 Qwen 3.8 GGUFs that include the model's appended NextN block use it
-automatically for CLI generation. ZINC drafts two tokens, verifies the seed and
-drafts together with the full 64-layer model, and restores the recurrent state
-at the accepted boundary when a draft is rejected. `ZINC_MTP=0` returns to
-ordinary greedy decode. `ZINC_MTP_DRAFTS=2` is the measured R9700 default;
+automatically. ZINC drafts two tokens, verifies the seed and drafts together
+with the full 64-layer model, and restores the recurrent state at the accepted
+boundary when a draft is rejected. Only tokens the full model agreed with are
+emitted, so output is identical to ordinary greedy decode — on the R9700 it
+measures byte-for-byte equal with speculation on and off. `ZINC_MTP=0` returns
+to ordinary greedy decode. `ZINC_MTP_DRAFTS=2` is the measured R9700 default;
 `1` and `3` remain available for GPUs or workloads with a different acceptance
-profile. This path is currently CLI-only, so the reusable-server benchmark
-table below does not include its speedup.
+profile.
+
+The server uses it too, but only when it owns a single request slot
+(`--parallel 1`): drafting writes the single-sequence KV cache and rewinds it on
+a rejected draft, which needs the whole sequence, while multi-slot serving keeps
+the batched loop that amortizes weights across concurrent requests. On the
+R9700 with Qwen 3.8 27B Q4_K_M, single-slot serving measures 60-63 tok/s decode
+against 32 tok/s with `ZINC_MTP=0`, at 72-81% draft acceptance.
 
 Start the OpenAI-compatible server:
 
@@ -97,8 +105,8 @@ available as correctness/performance A/B opt-outs:
 - `ZINC_ROCM_DECODE_SSM_COL_WARP=0`
 - `ZINC_ROCM_DECODE_SSM_FAST=0`
 - `ZINC_BATCH_B1_MATVEC=0`
-- `ZINC_MTP=0` (Qwen 3.8 CLI: disable model-native NextN drafting)
-- `ZINC_MTP_Q8=0` (Qwen 3.8 CLI: use the float multi-token verifier)
+- `ZINC_MTP=0` (Qwen 3.8 CLI and single-slot server: disable model-native NextN drafting)
+- `ZINC_MTP_Q8=0` (Qwen 3.8: use the float multi-token verifier)
 
 The Qwen 3.8 decode path uses packed Q8 activations for the hot Q4_K, Q5_K,
 and Q6_K projections, paired projection kernels where the shapes permit it, a

@@ -2027,7 +2027,9 @@ async function runRdnaZincOpenAiSeries({ label, warmupRuns, runs, creds, port, l
     "set -euo pipefail",
     `LOG=${shellQuote(logPath)}`,
     `count_generated() { awk '/info\\(forward\\): Generated / { c++ } END { print c + 0 }' "$LOG" 2>/dev/null || printf '0\\n'; }`,
-    `count_accepted() { awk '/info\\(forward\\): NextN\\/MTP: request accepted / { c++ } END { print c + 0 }' "$LOG" 2>/dev/null || printf '0\\n'; }`,
+    // Scope-agnostic: Vulkan logs this under info(forward), the ROCm serving
+    // engine under info(cuda_serve).
+    `count_accepted() { awk '/NextN\\/MTP: request accepted / { c++ } END { print c + 0 }' "$LOG" 2>/dev/null || printf '0\\n'; }`,
     "before=$(count_generated)",
     "before_acc=$(count_accepted)",
     `response=$(curl -sS http://${host}:${port}${endpoint} -H 'Content-Type: application/json' -d ${shellQuote(JSON.stringify(payload))})`,
@@ -2038,7 +2040,7 @@ async function runRdnaZincOpenAiSeries({ label, warmupRuns, runs, creds, port, l
     "if [ \"$before_acc\" -gt 0 ] || grep -q 'NextN/MTP: 1 appended' \"$LOG\" 2>/dev/null; then acc_deadline=$((SECONDS + 3)); while [ \"$(count_accepted)\" -le \"$before_acc\" ] && [ \"$SECONDS\" -lt \"$acc_deadline\" ]; do sleep 0.05; done; fi",
     "printf '%s\\n' \"$response\"",
     "printf '\\n__ZINC_TIMING__\\n'",
-    "awk '/info\\(forward\\): NextN\\/MTP: request accepted / { acc = $0 } /info\\(forward\\): Prefill:|info\\(forward\\): Generated / { lines[++n] = $0 } END { start = n > 1 ? n - 1 : 1; for (i = start; i <= n; i++) print lines[i]; if (acc != \"\") print acc }' \"$LOG\"",
+    "awk '/NextN\\/MTP: request accepted / { acc = $0 } /info\\(forward\\): Prefill:|info\\(forward\\): Generated / { lines[++n] = $0 } END { start = n > 1 ? n - 1 : 1; for (i = start; i <= n; i++) print lines[i]; if (acc != \"\") print acc }' \"$LOG\"",
   ].join("\n");
   const command = rdnaRemoteCommand(remoteScript, creds);
   const measured = [];
