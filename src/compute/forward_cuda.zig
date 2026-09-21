@@ -1407,6 +1407,14 @@ pub const ForwardCuda = struct {
                 std.ascii.eqlIgnoreCase(e, "false") or std.ascii.eqlIgnoreCase(e, "no");
             graph_optin = !graph_off;
         }
+        // Both default-on gates below were measured on NVIDIA. On ROCm the same
+        // capture is a measured REGRESSION: R9700, clocks normalized the way the
+        // perf suite does, medians of three interleaved runs, token-identical —
+        // qwen35-9b 91.1 tok/s captured vs 93.8 per-launch (-2.9%), qwen36-35b-a3b
+        // 94.9 vs 99.1 (-4.4%). Models whose gate leaves the graph off measured
+        // neutral, which is the control. HIP therefore keeps both gates opt-in
+        // (ZINC_CUDA_GRAPH=1); CUDA keeps the defaults it was tuned with.
+        const graph_default_on = !is_rocm;
         if (graphs_supported and !graph_off) {
             if (d.n_experts == 0) {
                 // Dense decode graph (Effort-25 proof; Effort-27 C3 productized).
@@ -1416,13 +1424,19 @@ pub const ForwardCuda = struct {
                 // matvecs swamp the launch-bubbles the graph removes, so the graph
                 // re-instantiate cost makes it a ~3% REGRESSION (C3 measured 0.967
                 // median, 4 rounds) — same size-gating Effort-25 C4 saw on MoE graphs.
-                if (d.n_embd <= dense_graph_max_embd or graph_optin) {
+                if ((graph_default_on and d.n_embd <= dense_graph_max_embd) or graph_optin) {
                     self.graph = shim.cuda_graph_create();
                     log.info("CUDA graph: dense decode enabled (n_embd={d}, opt out ZINC_CUDA_GRAPH=0)", .{d.n_embd});
+                } else if (d.n_embd <= dense_graph_max_embd) {
+                    log.info("CUDA graph: dense decode capturable but opt-in on this backend (set ZINC_CUDA_GRAPH=1)", .{});
                 }
             } else if (self.moeGraphCapturable()) {
-                self.graph = shim.cuda_graph_create();
-                log.info("CUDA graph: capturable MoE decode default-on (opt out ZINC_CUDA_GRAPH=0)", .{});
+                if (graph_default_on or graph_optin) {
+                    self.graph = shim.cuda_graph_create();
+                    log.info("CUDA graph: capturable MoE decode default-on (opt out ZINC_CUDA_GRAPH=0)", .{});
+                } else {
+                    log.info("CUDA graph: capturable MoE decode but opt-in on this backend (set ZINC_CUDA_GRAPH=1)", .{});
+                }
             } else {
                 log.info("CUDA graph: MoE has a non-batched expert layer (per-slot fallback) — graph disabled", .{});
             }
