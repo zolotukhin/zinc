@@ -448,6 +448,37 @@ test "Vulkan Gemma grouped MoE prefill wires Q5_1 route-column down projection" 
     try expectContains(q5_cols, "x_route_divisor");
 }
 
+// The host sizes every route-packed MoE cols dispatch from
+// moeColsRowsPerWorkgroup / moeFusedGateUpWorkgroupsX. If a shader changes how
+// many rows a workgroup covers without updating those, the grid either leaves
+// rows uncomputed or launches workgroups that exit immediately — which is
+// exactly what q5_1 and the fused Gemma gate/up were doing (8 rows each against
+// a grid sized for 4). Pin both sides together.
+test "MoE cols shaders agree with the host rows-per-workgroup" {
+    const Case = struct { shader: []const u8, rows: []const u8 };
+    const four_row = [_]Case{
+        .{ .shader = @embedFile("shaders/dmmv_q4k_moe_cols.comp"), .rows = "ROWS_PER_WG = 4u" },
+        .{ .shader = @embedFile("shaders/dmmv_q5k_moe_cols.comp"), .rows = "ROWS_PER_WG = 4u" },
+        .{ .shader = @embedFile("shaders/dmmv_q6k_moe_cols.comp"), .rows = "ROWS_PER_WG = 4u" },
+    };
+    for (four_row) |case| try expectContains(case.shader, case.rows);
+
+    // The two eight-row kernels the dispatch helpers special-case.
+    try expectContains(@embedFile("shaders/dmmv_q5_1_moe_cols.comp"), "ROWS_PER_WG = 8u");
+    try expectContains(@embedFile("shaders/dmmv_q4k_moe_fused_gate_up_geglu_cols_top1.comp"), "ROWS_PER_WG = 8u");
+
+    const dmmv_src = @embedFile("compute/dmmv.zig");
+    try expectContainsNear(dmmv_src, "fn moeColsRowsPerWorkgroup", ".q5_1 => 8,", 400);
+    try expectContainsNear(dmmv_src, "fn moeColsRowsPerWorkgroup", "else => 4,", 400);
+    try expectContains(dmmv_src, "moe_fused_gate_up_rows_per_workgroup: u32 = 8;");
+
+    // Every grid the callers compute goes through the helpers, not a literal.
+    const fwd = @embedFile("compute/forward.zig");
+    try expectContains(fwd, "dmmv_mod.moeColsWorkgroupsX(down_exps.info.type_, hidden_dim)");
+    try expectContains(fwd, "dmmv_mod.moeFusedGateUpWorkgroupsX(inter_dim)");
+    try expectContains(fwd, "dmmv_mod.moeColsWorkgroupsX(.q5_1, hidden_dim)");
+}
+
 test "Vulkan Qwen dense-down DP4a keeps K17408 BN40 and BN64 specializations" {
     const src = @embedFile("compute/dmmv.zig");
     try expectContains(src, "const spec_k_17408_n40_bk2 = [_]pipeline_mod.SpecConst{");
