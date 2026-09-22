@@ -540,6 +540,39 @@ pub fn build(b: *std.Build) void {
     const tokenize_tool_step = b.step("tokenize-tool", "Build the CPU-only GGUF tokenizer check (zig-out/bin/zinc-tokenize)");
     tokenize_tool_step.dependOn(&b.addInstallArtifact(tokenize_tool, .{}).step);
 
+    // Kernel-level check for the Q5_1 route-packed MoE down projection
+    // (`zig build validate-moe-cols`). Runs the shader against a CPU Q5_1
+    // dequant reference on synthetic weights, so a wrong kernel fails with the
+    // route and row that diverged instead of silently changing model output.
+    // Vulkan only: it opens a device and loads the compiled SPIR-V.
+    if (selected_backend == .vulkan) {
+        const moe_cols_mod = b.createModule(.{
+            .root_source_file = b.path("tools/validate_q5_1_moe_cols.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const vulkan_mod = b.createModule(.{
+            .root_source_file = b.path("src/vulkan/mod.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        configureVulkanModule(b, target, vulkan_mod);
+        moe_cols_mod.addImport("vulkan", vulkan_mod);
+        configureVulkanModule(b, target, moe_cols_mod);
+        const moe_cols_exe = b.addExecutable(.{
+            .name = "zinc-validate-q5-1-moe-cols",
+            .root_module = moe_cols_mod,
+        });
+        const moe_cols_step = b.step("validate-moe-cols", "Check dmmv_q5_1_moe_cols against a CPU reference");
+        moe_cols_step.dependOn(&b.addInstallArtifact(moe_cols_exe, .{}).step);
+        // The validator loads the installed SPIR-V, so it has to depend on the
+        // shader compile/install — otherwise editing the shader and running this
+        // step happily validates the previous build's .spv.
+        moe_cols_step.dependOn(b.getInstallStep());
+    }
+
     // --- CUDA primitive-layer smoke (Linux/WSL2 + NVIDIA only) ---
     // Builds & runs src/cuda/smoke.zig standalone — independent of the main exe
     // and the gpu/interface.zig dispatch — so the src/cuda/* primitive layer can
