@@ -528,7 +528,7 @@ const jsonLd = {
 
     <p>Models load from memory-mapped GGUF files. Current quantization support includes Q4_K, Q5_K, Q6_K, Q8_0, and F16. The tested model families are listed in the <a href="/zinc/docs/running-zinc/">model guide</a>.</p>
 
-    <p>Models that ship an appended NextN block — Qwen 3.8 today — generate with self-speculation: the small block drafts the next tokens and the full model verifies them in one batched pass, keeping only the ones it agrees with. Output is identical to ordinary decoding, so it is a speed change and not a quality trade. It runs on the Vulkan and ROCm servers for a single request slot, and the benchmark page can switch it off because llama.cpp has no equivalent to compare against.</p>
+    <p>Models that ship an appended NextN block — Qwen 3.8 today — generate with self-speculation: the small block drafts the next tokens and the full model verifies them in one batched pass, keeping only the ones it agrees with. Output is identical to ordinary decoding, so it is a speed change and not a quality trade. It runs on the Vulkan and ROCm servers for a single request slot. llama.cpp can speculate with the same block by exporting it as a separate draft model, which our benchmark runs do not do, so the published comparison uses the non-speculative measurement and the benchmark page has a switch for the speculative one.</p>
 
     <p>ZINC is written in Zig and builds as one binary. The Metal backend uses a small Objective-C shim.</p>
 

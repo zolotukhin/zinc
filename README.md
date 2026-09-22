@@ -38,12 +38,14 @@ chat, a pasted document, or a code file has to be read before the first word
 appears. **Token generation is close to parity**, within a few percent either
 way, with one exception:
 
-- **Qwen 3.8 generates 1.9x faster because it speculates.** That model ships an
-  extra "NextN" block, and ZINC uses it to draft tokens the full model then
-  verifies in one batched pass — only tokens the full model agrees with are
-  kept, so the output is identical to ordinary decoding, just produced in fewer
-  passes. llama.cpp has no equivalent here, so the benchmark page has a switch
-  that turns it off for a strict like-for-like comparison.
+- **Qwen 3.8 can speculate, and the chart does not count it.** That model ships
+  an extra "NextN" block, and ZINC uses it to draft tokens the full model then
+  verifies in one batched pass — identical output, fewer passes, 1.9x the
+  generation speed. llama.cpp can speculate with the same block (its converter
+  exports it as a separate draft model), and our runs do not give it one, so
+  that number would not be a fair comparison. The bar above therefore shows both
+  engines **without** speculation, where ZINC is 107% of llama.cpp; the
+  benchmark page has a switch for the speculative figure.
 - **On AMD, the two backends trade places.** ROCm wins prompt processing by a
   wide margin; Vulkan currently generates tokens faster (on Gemma 4 26B-A4B,
   118 tok/s on Vulkan against 96 on ROCm). Both are published separately on the

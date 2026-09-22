@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="710" viewBox="0 0 1040 710" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="726" viewBox="0 0 1040 726" role="img" aria-labelledby="title desc">
 <title id="title">ZINC compared with llama.cpp on Radeon AI PRO R9700 using ROCm</title>
 <desc id="desc">For each model, two bars show ZINC's prompt-processing and token-generation speed as a percentage of a llama.cpp run on the same GPU, model file and prompt. The dashed line marks llama.cpp's own speed.</desc>
-<rect width="1040" height="710" fill="#faf8f4"/>
-<rect x="24" y="24" width="992" height="662" rx="18" fill="#ffffff" stroke="#e3ded4"/>
+<rect width="1040" height="726" fill="#faf8f4"/>
+<rect x="24" y="24" width="992" height="678" rx="18" fill="#ffffff" stroke="#e3ded4"/>
 <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" fill="#1f2428">
 <text x="40" y="72" font-size="27" font-weight="700">ZINC vs llama.cpp on one Radeon</text>
 <text x="40" y="99" font-size="14.5" fill="#5c6670">Radeon AI PRO R9700 · ROCm · same GGUF, same prompts, both engines served from a reusable server</text>
@@ -39,13 +39,13 @@
 <rect x="314.0" y="333" width="122.7" height="17" rx="4" fill="#f0a06a"/>
 <text x="446.73540818058484" y="346" font-size="13.5" font-weight="700" fill="#1f2428">95%</text>
 <text x="40" y="404" font-size="16" font-weight="600">Qwen 3.8 27B Dense *</text>
-<text x="40" y="424" font-size="12.5" fill="#5c6670">502 vs 184 tok/s · 57.5 vs 31.0 tok/s</text>
+<text x="40" y="424" font-size="12.5" fill="#5c6670">502 vs 184 tok/s · 33.1 vs 31.0 tok/s</text>
 <rect x="314.0" y="388" width="580.0" height="17" rx="4" fill="#e8e4db"/>
 <rect x="314.0" y="388" width="352.4" height="17" rx="4" fill="#d35400"/>
 <text x="676.4094268444444" y="401" font-size="13.5" font-weight="700" fill="#1f2428">273%</text>
 <rect x="314.0" y="411" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="411" width="239.4" height="17" rx="4" fill="#f0a06a"/>
-<text x="563.4132140350878" y="424" font-size="13.5" font-weight="700" fill="#1f2428">186%</text>
+<rect x="314.0" y="411" width="137.7" height="17" rx="4" fill="#f0a06a"/>
+<text x="461.7354629614035" y="424" font-size="13.5" font-weight="700" fill="#1f2428">107%</text>
 <text x="40" y="482" font-size="16" font-weight="600">Qwen 3.5 9B</text>
 <text x="40" y="502" font-size="12.5" fill="#5c6670">1254 vs 519 tok/s · 92.5 vs 87.7 tok/s</text>
 <rect x="314.0" y="466" width="580.0" height="17" rx="4" fill="#e8e4db"/>
@@ -63,5 +63,6 @@
 <rect x="314.0" y="567" width="114.1" height="17" rx="4" fill="#f0a06a"/>
 <text x="438.119797922807" y="580" font-size="13.5" font-weight="700" fill="#1f2428">89%</text>
 <text x="40" y="640" font-size="12" fill="#5c6670">Measured 2026-09-21 · ZINC 1ec151a278ba · llama.cpp 5f436dddb · medians of repeated runs after warmup</text>
-<text x="40" y="660" font-size="12" fill="#5c6670">* generation uses the model's own NextN block to draft tokens, which llama.cpp cannot do here. The benchmark page can switch it off.</text>
+<text x="40" y="660" font-size="12" fill="#5c6670">* both engines shown without speculative decoding. Qwen 3.8 27B Dense reaches 57.5 tok/s (186%) using its NextN block; llama.cpp</text>
+<text x="40" y="676" font-size="12" fill="#5c6670">can use that block as a separate draft model, which these runs do not do, so that number is not a like-for-like comparison.</text>
 </g></svg>

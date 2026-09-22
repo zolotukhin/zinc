@@ -10,8 +10,13 @@
  *
  * Bars are ZINC as a percentage of the same-machine llama.cpp run, so models
  * with very different absolute speeds stay comparable in one picture; the
- * absolute tok/s sit next to each bar. Rows measured with speculative decoding
- * are marked, because llama.cpp has no equivalent.
+ * absolute tok/s sit next to each bar.
+ *
+ * Where a row was also measured with speculative decoding turned off, the bar
+ * shows THAT number. llama.cpp can speculate on the same model too (its
+ * converter exports the NextN block as a separate draft model), and these runs
+ * do not give it one, so the speculative figure is not a like-for-like
+ * comparison — it goes in a footnote instead of the bar.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -63,15 +68,25 @@ export function collectRows(data, targetId) {
     const basePrefill = metric(core.baseline, "prefill_tps");
     const baseDecode = metric(core.baseline, "decode_tps");
     if (!zincPrefill || !zincDecode || !basePrefill || !baseDecode) continue;
+    // Prefer the non-speculative measurement for the bar so both engines are
+    // running the same technique; keep the speculative one for the footnote.
+    const offDecode = metric(core.variants?.mtp_off?.zinc, "decode_tps");
+    const speculative = core.zinc?.speculative_decoding?.enabled === true;
+    const comparableDecode = speculative && offDecode ? offDecode : zincDecode;
     rows.push({
       label: shortModelLabel(model),
       prefillPct: (zincPrefill / basePrefill) * 100,
-      decodePct: (zincDecode / baseDecode) * 100,
+      decodePct: (comparableDecode / baseDecode) * 100,
       zincPrefill,
-      zincDecode,
+      zincDecode: comparableDecode,
       basePrefill,
       baseDecode,
-      speculative: core.zinc?.speculative_decoding?.enabled === true,
+      speculative,
+      // True when the bar is a like-for-like comparison: either the row never
+      // speculated, or we measured it again with speculation off.
+      comparable: !speculative || offDecode != null,
+      speculativeDecode: speculative ? zincDecode : null,
+      speculativePct: speculative ? (zincDecode / baseDecode) * 100 : null,
     });
   }
   // Ordered by prompt processing: it is the axis with the widest spread, and
@@ -97,7 +112,7 @@ export function renderSvg(data, targetId) {
   const barW = cardW - labelW - 130; // leaves room for the percentage label
   const rowH = 78;
   const headerH = 150;
-  const footerH = rows.some((r) => r.speculative) ? 92 : 64;
+  const footerH = rows.some((r) => r.speculative) ? 108 : 64;
   const height = headerH + rows.length * rowH + footerH;
   // The axis follows the data (rounded up to a clean step) so no bar is clipped
   // into looking the same length as a slower one.
@@ -158,9 +173,17 @@ export function renderSvg(data, targetId) {
   // Footnotes
   let footY = headerH + rows.length * rowH + 22;
   out.push(`<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">Measured ${escapeXml(measured)} · ZINC ${escapeXml(zincVersion)} · llama.cpp ${escapeXml(llamaCommit)} · medians of repeated runs after warmup</text>`);
-  if (rows.some((r) => r.speculative)) {
+  const spec = rows.find((r) => r.speculative);
+  if (spec && spec.comparable) {
     footY += 20;
-    out.push(`<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">* generation uses the model's own NextN block to draft tokens, which llama.cpp cannot do here. The benchmark page can switch it off.</text>`);
+    out.push(`<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">* both engines shown without speculative decoding. ${escapeXml(spec.label)} reaches ${spec.speculativeDecode.toFixed(1)} tok/s (${Math.round(spec.speculativePct)}%) using its NextN block; llama.cpp</text>`);
+    footY += 16;
+    out.push(`<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">can use that block as a separate draft model, which these runs do not do, so that number is not a like-for-like comparison.</text>`);
+  } else if (spec) {
+    footY += 20;
+    out.push(`<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">* ${escapeXml(spec.label)} generation uses its NextN block and was not measured without it, so this bar is NOT like-for-like:</text>`);
+    footY += 16;
+    out.push(`<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">llama.cpp can speculate with the same block as a separate draft model and these runs do not give it one.</text>`);
   }
   out.push(`</g></svg>`);
   return out.join("\n");

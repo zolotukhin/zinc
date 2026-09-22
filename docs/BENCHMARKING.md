@@ -50,10 +50,13 @@ The default RDNA suite covers Gemma 4 26B-A4B Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3
 
 ## Publishing an MTP on/off pair
 
-NextN/MTP speculative decoding is a ZINC-only feature, so a decode number
-measured with it on is not a like-for-like comparison against llama.cpp, which
-has no equivalent. Rows that use it carry both measurements, and the dashboard
-shows an on/off switch. Only `qwen38-27b-q4k-m` has NextN weights today, and
+NextN/MTP speculative decoding changes what is being compared, so a decode
+number measured with it on is not like-for-like against a llama.cpp run without
+it. llama.cpp is not incapable here: its converter can export the same NextN
+block as a standalone draft model (`--mtp`, `supports_mtp_export` on the Qwen
+conversion class) and drive it with `--model-draft`. Our runs do not do that
+yet, so rows that speculate carry both measurements, the published comparison
+uses the non-speculative one, and the dashboard shows an on/off switch. Only `qwen38-27b-q4k-m` has NextN weights today, and
 only on the Vulkan backend.
 
 Measure the pair with two passes over the same model, then fold the second one

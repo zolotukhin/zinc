@@ -41,6 +41,8 @@ test("collectRows keeps complete core rows, strongest first", () => {
   expect(rows.map((r) => r.label)).toEqual(["Fast Model", "Slow Model"]);
   expect(rows[0].prefillPct).toBe(200);
   expect(rows[0].speculative).toBe(true);
+  // No off-variant was measured, so the bar cannot be like-for-like and says so.
+  expect(rows[0].comparable).toBe(false);
   expect(rows[1].decodePct).toBe(105);
   // The row without a baseline cannot be a comparison, so it is dropped.
   expect(rows.some((r) => r.label === "No Baseline")).toBe(false);
@@ -54,9 +56,27 @@ test("renderSvg draws one labelled pair per model and cites provenance", () => {
   expect(svg).toContain(">105%<");
   expect(svg).toContain("ZINC abc123");
   expect(svg).toContain("llama.cpp def456");
-  // The speculative row is marked and explained.
+  // A speculative row with no off-variant is marked as NOT like-for-like.
   expect(svg).toContain("Fast Model *");
-  expect(svg).toContain("NextN block to draft tokens");
+  expect(svg).toContain("NOT like-for-like");
+});
+
+test("a measured off-variant becomes the bar, and the speculative figure is footnoted", () => {
+  const data = artifact();
+  const core = data.targets[0].models[1].scenarios[0] as any;
+  core.variants = { mtp_off: { zinc: { decode_tps: metric(120) } } };
+  const { rows } = collectRows(data, "rdna-rocm");
+  const fast = rows.find((r) => r.label === "Fast Model")!;
+  // Bar uses the non-speculative 120 vs baseline 100, not the speculative 180.
+  expect(fast.decodePct).toBe(120);
+  expect(fast.comparable).toBe(true);
+  expect(fast.speculativePct).toBe(180);
+
+  const svg = renderSvg(data, "rdna-rocm");
+  expect(svg).toContain(">120%<");
+  expect(svg).not.toContain(">180%<");
+  expect(svg).toContain("both engines shown without speculative decoding");
+  expect(svg).toContain("separate draft model");
 });
 
 test("renderSvg keeps every bar and label inside the card", () => {

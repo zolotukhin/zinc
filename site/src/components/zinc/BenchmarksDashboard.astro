@@ -1063,13 +1063,14 @@ const jsonLd = {
             <div class="mtp-switch-copy">
               <strong>Speculative decoding (MTP)</strong>
               <small>
-                {mtpModels.join(', ')} {mtpModels.length === 1 ? 'runs' : 'run'} NextN self-speculation. llama.cpp has no
-                equivalent, so switch it off to compare decoding step for step.
+                {mtpModels.join(', ')} {mtpModels.length === 1 ? 'runs' : 'run'} NextN self-speculation, drafting tokens the
+                full model then verifies. llama.cpp can speculate with the same block by exporting it as a separate draft
+                model, which these runs do not do — so the figures default to both engines without it.
               </small>
             </div>
             <div class="mtp-switch-buttons" role="group" aria-label="Speculative decoding">
-              <button type="button" class="mtp-switch-button is-active" data-mtp-mode="on" aria-pressed="true">On</button>
-              <button type="button" class="mtp-switch-button" data-mtp-mode="off" aria-pressed="false">Off</button>
+              <button type="button" class="mtp-switch-button" data-mtp-mode="on" aria-pressed="false">On</button>
+              <button type="button" class="mtp-switch-button is-active" data-mtp-mode="off" aria-pressed="true">Off</button>
             </div>
           </div>
         )}
@@ -1077,17 +1078,17 @@ const jsonLd = {
         <div class="summary-grid">
           <article class="summary-card">
             <span>Fastest</span>
-            <strong {...mtpText(formatMetric(target.summary?.fastest_decode_tps, 'tok/s'), mtpOffSummary ? formatMetric(mtpOffSummary.fastest_decode_tps, 'tok/s') : null)}>{formatMetric(target.summary?.fastest_decode_tps, 'tok/s')}</strong>
-            <small {...mtpText(displayModelLabel(target.summary?.fastest_model_label), mtpOffSummary ? displayModelLabel(mtpOffSummary.fastest_model_label) : null)}>{displayModelLabel(target.summary?.fastest_model_label)}</small>
+            <strong {...mtpText(formatMetric(target.summary?.fastest_decode_tps, 'tok/s'), mtpOffSummary ? formatMetric(mtpOffSummary.fastest_decode_tps, 'tok/s') : null)}>{formatMetric((mtpOffSummary ?? target.summary)?.fastest_decode_tps, 'tok/s')}</strong>
+            <small {...mtpText(displayModelLabel(target.summary?.fastest_model_label), mtpOffSummary ? displayModelLabel(mtpOffSummary.fastest_model_label) : null)}>{displayModelLabel((mtpOffSummary ?? target.summary)?.fastest_model_label)}</small>
           </article>
           <article class="summary-card">
             <span>Decode</span>
-            <strong {...mtpText(formatMetric(target.summary?.average_decode_tps, 'tok/s'), mtpOffSummary ? formatMetric(mtpOffSummary.average_decode_tps, 'tok/s') : null)}>{formatMetric(target.summary?.average_decode_tps, 'tok/s')}</strong>
+            <strong {...mtpText(formatMetric(target.summary?.average_decode_tps, 'tok/s'), mtpOffSummary ? formatMetric(mtpOffSummary.average_decode_tps, 'tok/s') : null)}>{formatMetric((mtpOffSummary ?? target.summary)?.average_decode_tps, 'tok/s')}</strong>
             <small>average</small>
           </article>
           <article class="summary-card">
             <span>Overall</span>
-            <strong {...mtpText(formatPercent(target.summary?.average_pct_of_llama), mtpOffSummary ? formatPercent(mtpOffSummary.average_pct_of_llama) : null)}>{formatPercent(target.summary?.average_pct_of_llama)}</strong>
+            <strong {...mtpText(formatPercent(target.summary?.average_pct_of_llama), mtpOffSummary ? formatPercent(mtpOffSummary.average_pct_of_llama) : null)}>{formatPercent((mtpOffSummary ?? target.summary)?.average_pct_of_llama)}</strong>
             <small>prefill + decode vs llama.cpp</small>
           </article>
         </div>
@@ -1223,6 +1224,12 @@ const jsonLd = {
                     const zincDecodeOff = offRow ? decodeValue(offRow) : null;
                     const decodeRatioOff = offRow ? decodeRatioValue(offRow) : null;
                     const overallRatioOff = offRow ? overallRatioValue(offRow) : null;
+                    // Speculation off is the default view: it is the only
+                    // like-for-like comparison against a llama.cpp run with no
+                    // draft model.
+                    const shownDecode = offRow ? zincDecodeOff : zincDecode;
+                    const shownDecodeRatio = offRow ? decodeRatioOff : decodeRatio;
+                    const shownOverallRatio = offRow ? overallRatioOff : overallRatio;
 
                     return (
                       <article class="rank-row">
@@ -1258,23 +1265,23 @@ const jsonLd = {
                             <div class="rank-metric-title">
                               <span>Decode</span>
                               <strong
-                                class:list={['ratio-pill', ratioTone(decodeRatio)]}
+                                class:list={['ratio-pill', ratioTone(shownDecodeRatio)]}
                                 {...mtpText(formatPercent(decodeRatio), offRow ? formatPercent(decodeRatioOff) : null)}
                                 {...mtpTone(ratioTone(decodeRatio), offRow ? ratioTone(decodeRatioOff) : null)}
-                              >{formatPercent(decodeRatio)}</strong>
+                              >{formatPercent(shownDecodeRatio)}</strong>
                             </div>
                             <div class="bar-line">
                               <span>ZINC</span>
                               <div class="bar-track" aria-hidden="true">
                                 <i
                                   class="bar-fill zinc"
-                                  style={`width: ${barWidth(zincDecode, decodeMax)}%;`}
+                                  style={`width: ${barWidth(shownDecode, decodeMax)}%;`}
                                   {...mtpWidth(barWidth(zincDecode, decodeMax), offRow ? barWidth(zincDecodeOff, decodeMax) : null)}
                                 ></i>
                               </div>
-                              <strong {...mtpText(formatMetric(zincDecode, 'tok/s'), offRow ? formatMetric(zincDecodeOff, 'tok/s') : null)}>{formatMetric(zincDecode, 'tok/s')}</strong>
+                              <strong {...mtpText(formatMetric(zincDecode, 'tok/s'), offRow ? formatMetric(zincDecodeOff, 'tok/s') : null)}>{formatMetric(shownDecode, 'tok/s')}</strong>
                               {row.scenario?.zinc?.speculative_decoding?.enabled && (
-                                <em class="spec-badge" data-mtp-hide-off title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
+                                <em class="spec-badge" data-mtp-hide-off hidden title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
                               )}
                             </div>
                             <div class="bar-line baseline">
@@ -1288,10 +1295,10 @@ const jsonLd = {
                         </div>
                         <div class="rank-ratio">
                           <strong
-                            class:list={['ratio-pill', ratioTone(overallRatio)]}
+                            class:list={['ratio-pill', ratioTone(shownOverallRatio)]}
                             {...mtpText(formatPercent(overallRatio), offRow ? formatPercent(overallRatioOff) : null)}
                             {...mtpTone(ratioTone(overallRatio), offRow ? ratioTone(overallRatioOff) : null)}
-                          >{formatPercent(overallRatio)}</strong>
+                          >{formatPercent(shownOverallRatio)}</strong>
                           <small>overall</small>
                         </div>
                       </article>
@@ -1322,6 +1329,10 @@ const jsonLd = {
                       const zincOverallOff = offRow ? overallValue(offRow) : null;
                       const decodeRatioOff = offRow ? decodeRatioValue(offRow) : null;
                       const overallRatioOff = offRow ? overallRatioValue(offRow) : null;
+                      const shownDecode = offRow ? zincDecodeOff : zincDecode;
+                      const shownOverall = offRow ? zincOverallOff : zincOverall;
+                      const shownDecodeRatio = offRow ? decodeRatioOff : decodeRatio;
+                      const shownOverallRatio = offRow ? overallRatioOff : overallRatio;
 
                       return (
                         <article class="mobile-model">
@@ -1358,23 +1369,23 @@ const jsonLd = {
                             <div class="mobile-metric-head">
                               <span>Decode</span>
                               <strong
-                                class:list={['ratio-pill', ratioTone(decodeRatio)]}
+                                class:list={['ratio-pill', ratioTone(shownDecodeRatio)]}
                                 {...mtpText(formatPercent(decodeRatio), offRow ? formatPercent(decodeRatioOff) : null)}
                                 {...mtpTone(ratioTone(decodeRatio), offRow ? ratioTone(decodeRatioOff) : null)}
-                              >{formatPercent(decodeRatio)}</strong>
+                              >{formatPercent(shownDecodeRatio)}</strong>
                             </div>
                             <div class="bar-line">
                               <span>ZINC</span>
                               <div class="bar-track" aria-hidden="true">
                                 <i
                                   class="bar-fill zinc"
-                                  style={`width: ${barWidth(zincDecode, decodeMax)}%;`}
+                                  style={`width: ${barWidth(shownDecode, decodeMax)}%;`}
                                   {...mtpWidth(barWidth(zincDecode, decodeMax), offRow ? barWidth(zincDecodeOff, decodeMax) : null)}
                                 ></i>
                               </div>
-                              <strong {...mtpText(formatMetric(zincDecode, 'tok/s'), offRow ? formatMetric(zincDecodeOff, 'tok/s') : null)}>{formatMetric(zincDecode, 'tok/s')}</strong>
+                              <strong {...mtpText(formatMetric(zincDecode, 'tok/s'), offRow ? formatMetric(zincDecodeOff, 'tok/s') : null)}>{formatMetric(shownDecode, 'tok/s')}</strong>
                               {row.scenario?.zinc?.speculative_decoding?.enabled && (
-                                <em class="spec-badge" data-mtp-hide-off title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
+                                <em class="spec-badge" data-mtp-hide-off hidden title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
                               )}
                             </div>
                             <div class="bar-line baseline">
@@ -1390,21 +1401,21 @@ const jsonLd = {
                             <div class="mobile-metric-head">
                               <span>Overall</span>
                               <strong
-                                class:list={['ratio-pill', ratioTone(overallRatio)]}
+                                class:list={['ratio-pill', ratioTone(shownOverallRatio)]}
                                 {...mtpText(formatPercent(overallRatio), offRow ? formatPercent(overallRatioOff) : null)}
                                 {...mtpTone(ratioTone(overallRatio), offRow ? ratioTone(overallRatioOff) : null)}
-                              >{formatPercent(overallRatio)}</strong>
+                              >{formatPercent(shownOverallRatio)}</strong>
                             </div>
                             <div class="bar-line">
                               <span>ZINC</span>
                               <div class="bar-track" aria-hidden="true">
                                 <i
                                   class="bar-fill zinc"
-                                  style={`width: ${barWidth(zincOverall, overallMax)}%;`}
+                                  style={`width: ${barWidth(shownOverall, overallMax)}%;`}
                                   {...mtpWidth(barWidth(zincOverall, overallMax), offRow ? barWidth(zincOverallOff, overallMax) : null)}
                                 ></i>
                               </div>
-                              <strong {...mtpText(formatMetric(zincOverall, 'tok/s'), offRow ? formatMetric(zincOverallOff, 'tok/s') : null)}>{formatMetric(zincOverall, 'tok/s')}</strong>
+                              <strong {...mtpText(formatMetric(zincOverall, 'tok/s'), offRow ? formatMetric(zincOverallOff, 'tok/s') : null)}>{formatMetric(shownOverall, 'tok/s')}</strong>
                             </div>
                             <div class="bar-line baseline">
                               <span>llama</span>
@@ -1453,6 +1464,10 @@ const jsonLd = {
                         const zincOverallOff = offRow ? overallValue(offRow) : null;
                         const decodeRatioOff = offRow ? decodeRatioValue(offRow) : null;
                         const overallRatioOff = offRow ? overallRatioValue(offRow) : null;
+                        const shownDecode = offRow ? zincDecodeOff : zincDecode;
+                        const shownOverall = offRow ? zincOverallOff : zincOverall;
+                        const shownDecodeRatio = offRow ? decodeRatioOff : decodeRatio;
+                        const shownOverallRatio = offRow ? overallRatioOff : overallRatio;
                         const runCount = sampleCount(row.scenario?.zinc?.decode_tps) || sampleCount(row.scenario?.baseline?.decode_tps);
                         const rowStatus = scenarioStatus(row.scenario);
 
@@ -1508,8 +1523,8 @@ const jsonLd = {
                                   <div class="backend-line">
                                     <span class="backend-pill zinc">Z</span>
                                     <div>
-                                      <strong><span {...mtpText(formatMetric(zincDecode, 'tok/s'), offRow ? formatMetric(zincDecodeOff, 'tok/s') : null)}>{formatMetric(zincDecode, 'tok/s')}</span> {row.scenario?.zinc?.speculative_decoding?.enabled && (
-                                        <em class="spec-badge" data-mtp-hide-off title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
+                                      <strong><span {...mtpText(formatMetric(zincDecode, 'tok/s'), offRow ? formatMetric(zincDecodeOff, 'tok/s') : null)}>{formatMetric(shownDecode, 'tok/s')}</span> {row.scenario?.zinc?.speculative_decoding?.enabled && (
+                                        <em class="spec-badge" data-mtp-hide-off hidden title={`NextN speculative decoding on: ${formatNumber(row.scenario.zinc.speculative_decoding.acceptance_pct?.median ?? row.scenario.zinc.speculative_decoding.acceptance_pct?.avg)}% of draft tokens accepted`}>MTP</em>
                                       )}</strong>
                                       <small {...mtpText(formatMetric(metricValue(row.scenario?.zinc?.ms_per_token), 'ms/tok'), offRow ? formatMetric(metricValue(offRow?.zinc?.ms_per_token), 'ms/tok') : null)}>{formatMetric(metricValue(row.scenario?.zinc?.ms_per_token), 'ms/tok')}</small>
                                     </div>
@@ -1524,10 +1539,10 @@ const jsonLd = {
                                   {hasValue(decodeRatio) ? (
                                     <div class="metric-footer compact">
                                       <strong
-                                        class:list={['ratio-pill', ratioTone(decodeRatio)]}
+                                        class:list={['ratio-pill', ratioTone(shownDecodeRatio)]}
                                         {...mtpText(formatPercent(decodeRatio), offRow ? formatPercent(decodeRatioOff) : null)}
                                         {...mtpTone(ratioTone(decodeRatio), offRow ? ratioTone(decodeRatioOff) : null)}
-                                      >{formatPercent(decodeRatio)}</strong>
+                                      >{formatPercent(shownDecodeRatio)}</strong>
                                       <small {...mtpText(formatSignedMetric(decodeDeltaValue(row.scenario), 'tok/s'), offRow ? formatSignedMetric(decodeDeltaValue(offRow), 'tok/s') : null)}>{formatSignedMetric(decodeDeltaValue(row.scenario), 'tok/s')}</small>
                                     </div>
                                   ) : (
@@ -1550,7 +1565,7 @@ const jsonLd = {
                                   <div class="backend-line">
                                     <span class="backend-pill zinc">Z</span>
                                     <div>
-                                      <strong {...mtpText(formatMetric(zincOverall, 'tok/s'), offRow ? formatMetric(zincOverallOff, 'tok/s') : null)}>{formatMetric(zincOverall, 'tok/s')}</strong>
+                                      <strong {...mtpText(formatMetric(zincOverall, 'tok/s'), offRow ? formatMetric(zincOverallOff, 'tok/s') : null)}>{formatMetric(shownOverall, 'tok/s')}</strong>
                                       <small>prompt+decode</small>
                                     </div>
                                   </div>
@@ -1564,10 +1579,10 @@ const jsonLd = {
                                   {hasValue(overallRatio) ? (
                                     <div class="metric-footer compact">
                                       <strong
-                                        class:list={['ratio-pill', ratioTone(overallRatio)]}
+                                        class:list={['ratio-pill', ratioTone(shownOverallRatio)]}
                                         {...mtpText(formatPercent(overallRatio), offRow ? formatPercent(overallRatioOff) : null)}
                                         {...mtpTone(ratioTone(overallRatio), offRow ? ratioTone(overallRatioOff) : null)}
-                                      >{formatPercent(overallRatio)}</strong>
+                                      >{formatPercent(shownOverallRatio)}</strong>
                                       <small>{formatSignedMetric(overallDeltaValue(row.scenario), 'tok/s')}</small>
                                       <small>{formatLatencyDelta(latencyDeltaValue(row.scenario))}</small>
                                     </div>
