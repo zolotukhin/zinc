@@ -83,6 +83,36 @@ pub const MoeColsDmmvPushConstants = extern struct {
     accumulate: u32 = 0,
 };
 
+/// Output rows one workgroup of a route-packed MoE cols kernel covers.
+///
+/// The shaders do not agree: `dmmv_q5_1_moe_cols` takes eight rows with eight
+/// lanes each, the K-quant ones take four rows with sixteen lanes. The host has
+/// to size grid.x from this, or it either leaves rows uncomputed (grid too
+/// small) or launches workgroups that read their ids and immediately return
+/// (grid too large) — the q5_1 down projection was doing the latter, at double
+/// the workgroups it needed.
+pub fn moeColsRowsPerWorkgroup(quant_type: GGMLType) u32 {
+    return switch (quant_type) {
+        .q5_1 => 8,
+        else => 4,
+    };
+}
+
+/// The fused Gemma gate/up GEGLU cols kernel packs eight rows per workgroup,
+/// like the q5_1 down kernel it feeds.
+pub const moe_fused_gate_up_rows_per_workgroup: u32 = 8;
+
+/// grid.x for the fused gate/up columns dispatch covering `rows` output rows.
+pub fn moeFusedGateUpWorkgroupsX(rows: u32) u32 {
+    return (rows + moe_fused_gate_up_rows_per_workgroup - 1) / moe_fused_gate_up_rows_per_workgroup;
+}
+
+/// grid.x for a route-packed MoE cols dispatch covering `rows` output rows.
+pub fn moeColsWorkgroupsX(quant_type: GGMLType, rows: u32) u32 {
+    const per_workgroup = moeColsRowsPerWorkgroup(quant_type);
+    return (rows + per_workgroup - 1) / per_workgroup;
+}
+
 fn moeColsKAligned(quant_type: GGMLType, K: u32) bool {
     if (K == 0) return false;
     return switch (quant_type) {

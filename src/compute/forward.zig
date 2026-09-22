@@ -21177,7 +21177,9 @@ pub const InferenceEngine = struct {
             self.logits_staging.size >= q6_down_compare_bytes;
         var q6_down_compare_ran = false;
         const q6_suffix_compare_requested = envFlagEnabled("ZINC_MOE_Q6K_SUFFIX_COMPARE", false);
-        const standard_down_workgroups_x: u32 = (hidden_dim + 3) / 4;
+        // grid.x follows the down kernel's rows-per-workgroup (q5_1 packs eight,
+        // the K-quant cols kernels four), not a fixed divisor.
+        const standard_down_workgroups_x: u32 = dmmv_mod.moeColsWorkgroupsX(down_exps.info.type_, hidden_dim);
         const prefix_down_workgroups_x: u32 = if (use_q8_1_down_cols)
             (hidden_dim + 31) / 32
         else
@@ -27312,8 +27314,8 @@ pub const InferenceEngine = struct {
                 n_used,
                 route_stride_u32,
                 ids_stride,
-                (inter_dim + 3) / 4,
-                (hidden_dim + 3) / 4,
+                dmmv_mod.moeFusedGateUpWorkgroupsX(inter_dim),
+                dmmv_mod.moeColsWorkgroupsX(.q5_1, hidden_dim),
                 0,
             );
             const route_pack_ranges = [_]CommandBuffer.BufferRange{
@@ -27963,8 +27965,8 @@ pub const InferenceEngine = struct {
                     1,
                     route_stride_u32,
                     prefix_tokens,
-                    (inter_dim + 3) / 4,
-                    (hidden_dim + 3) / 4,
+                    dmmv_mod.moeFusedGateUpWorkgroupsX(inter_dim),
+                    dmmv_mod.moeColsWorkgroupsX(.q5_1, hidden_dim),
                     0,
                 );
                 const route_pack_ranges = [_]CommandBuffer.BufferRange{

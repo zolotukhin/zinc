@@ -253,14 +253,17 @@ fn runShape(
     var cmd = try command.CommandBuffer.init(instance, pool);
     defer cmd.deinit(pool);
     try cmd.beginOneTime();
-    // Grid x covers the rows (the shader takes eight rows per workgroup but the
-    // production dispatch sizes x by M/4, so mirror that); y is one per active block.
+    // grid.x mirrors the engine: this shader takes eight rows per workgroup, so
+    // the dispatch covers ceil(M/8). Testing the exact grid the engine uses is
+    // the point — a mismatch here leaves rows uncomputed in production while a
+    // generous grid hides it.
+    const rows_per_workgroup: usize = 8;
     cmd.pushDescAndDispatch(
         pipe,
         instance.push_descriptor_fn,
         infos[0..],
         std.mem.asBytes(&push),
-        @intCast((M + 3) / 4),
+        @intCast((M + rows_per_workgroup - 1) / rows_per_workgroup),
         @intCast(active_blocks.items.len),
         1,
     );
