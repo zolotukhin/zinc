@@ -25,8 +25,12 @@ layout(push_constant) uniform PushConstants {
     uint accumulate;
 };
 
-layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
-layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[]; };
+// Words and vec4s, like dmmv_q4k_moe_cols: a Q5_1 block is 24 bytes (6 words)
+// and callers pass 4-byte-aligned weight offsets and 16-byte-aligned activation
+// offsets (both are 0 today). Reading bytes and scalars made this kernel cost
+// 3.7x the gate/up projection per FLOP.
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
 layout(set = 0, binding = 2) buffer Output { float y_data[]; };
 layout(set = 0, binding = 3) readonly buffer Counts { uint counts[]; };
 layout(set = 0, binding = 4) readonly buffer PackedIds { uint packed_ids[]; };
@@ -36,13 +40,31 @@ const uint NUM_COLS = 8u;
 const uint ROWS_PER_WG = 8u;
 const uint LANES_PER_ROW = 8u;
 const uint Q5_1_BLOCK_SIZE = 32u;
-const uint Q5_1_BYTES = 24u;
+const uint Q5_1_WORDS = 6u;
+
+// Four 5-bit quants from one qs word: the low or high nibble of each byte
+// plus its bit from qh (elements j..j+3 of the block, j = 4 * word index).
+vec4 q5_lo(uint qs, uint qh, uint j) {
+    return vec4(
+        float((qs & 0xFu) | (((qh >> j) & 1u) << 4)),
+        float(((qs >> 8) & 0xFu) | (((qh >> (j + 1u)) & 1u) << 4)),
+        float(((qs >> 16) & 0xFu) | (((qh >> (j + 2u)) & 1u) << 4)),
+        float(((qs >> 24) & 0xFu) | (((qh >> (j + 3u)) & 1u) << 4)));
+}
+
+vec4 q5_hi(uint qs, uint qh, uint j) {
+    return vec4(
+        float(((qs >> 4) & 0xFu) | (((qh >> (j + 16u)) & 1u) << 4)),
+        float(((qs >> 12) & 0xFu) | (((qh >> (j + 17u)) & 1u) << 4)),
+        float(((qs >> 20) & 0xFu) | (((qh >> (j + 18u)) & 1u) << 4)),
+        float(((qs >> 28) & 0xFu) | (((qh >> (j + 19u)) & 1u) << 4)));
+}
 
 void accumulate_q5_1_block(
     uint row,
     uint blk,
     uint blocks_per_row,
-    uint expert_base,
+    uint expert_base_u32,
     uint x0,
     uint x1,
     uint x2,
@@ -62,36 +84,26 @@ void accumulate_q5_1_block(
     inout vec4 acc0,
     inout vec4 acc1
 ) {
-    const uint byte_off = expert_base + row * blocks_per_row * Q5_1_BYTES + blk * Q5_1_BYTES;
-    const uint xb = blk * Q5_1_BLOCK_SIZE;
+    const uint w = expert_base_u32 + (row * blocks_per_row + blk) * Q5_1_WORDS;
+    const vec2 dm = unpackHalf2x16(a_u32[w]);
+    const uint qh = a_u32[w + 1u];
+    const uint xb = blk * (Q5_1_BLOCK_SIZE / 4u);
 
-    const uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
-    const float d = unpackHalf2x16(d_bits).x;
-    const uint m_bits = uint(a_data[byte_off + 2u]) | (uint(a_data[byte_off + 3u]) << 8);
-    const float m = unpackHalf2x16(m_bits).x;
+    for (uint i = 0u; i < 4u; i++) {
+        const uint qs = a_u32[w + 2u + i];
+        const vec4 wl = dm.x * q5_lo(qs, qh, 4u * i) + dm.y;
+        const vec4 wh = dm.x * q5_hi(qs, qh, 4u * i) + dm.y;
+        const uint lo = xb + i;
+        const uint hi = xb + 4u + i;
 
-    const uint qh = uint(a_data[byte_off + 4u])
-        | (uint(a_data[byte_off + 5u]) << 8)
-        | (uint(a_data[byte_off + 6u]) << 16)
-        | (uint(a_data[byte_off + 7u]) << 24);
-
-    for (uint j = 0u; j < 16u; j++) {
-        const uint q_byte = uint(a_data[byte_off + 8u + j]);
-        const uint lo = q_byte & 0x0Fu;
-        const uint hi = q_byte >> 4;
-        const uint bit_lo = (qh >> j) & 1u;
-        const uint bit_hi = (qh >> (j + 16u)) & 1u;
-        const float w0 = d * float(lo | (bit_lo << 4)) + m;
-        const float w1 = d * float(hi | (bit_hi << 4)) + m;
-
-        if (active0) acc0.x += w0 * x_data[x0 + xb + j] + w1 * x_data[x0 + xb + 16u + j];
-        if (active1) acc0.y += w0 * x_data[x1 + xb + j] + w1 * x_data[x1 + xb + 16u + j];
-        if (active2) acc0.z += w0 * x_data[x2 + xb + j] + w1 * x_data[x2 + xb + 16u + j];
-        if (active3) acc0.w += w0 * x_data[x3 + xb + j] + w1 * x_data[x3 + xb + 16u + j];
-        if (active4) acc1.x += w0 * x_data[x4 + xb + j] + w1 * x_data[x4 + xb + 16u + j];
-        if (active5) acc1.y += w0 * x_data[x5 + xb + j] + w1 * x_data[x5 + xb + 16u + j];
-        if (active6) acc1.z += w0 * x_data[x6 + xb + j] + w1 * x_data[x6 + xb + 16u + j];
-        if (active7) acc1.w += w0 * x_data[x7 + xb + j] + w1 * x_data[x7 + xb + 16u + j];
+        if (active0) acc0.x += dot(wl, x_v4[x0 + lo]) + dot(wh, x_v4[x0 + hi]);
+        if (active1) acc0.y += dot(wl, x_v4[x1 + lo]) + dot(wh, x_v4[x1 + hi]);
+        if (active2) acc0.z += dot(wl, x_v4[x2 + lo]) + dot(wh, x_v4[x2 + hi]);
+        if (active3) acc0.w += dot(wl, x_v4[x3 + lo]) + dot(wh, x_v4[x3 + hi]);
+        if (active4) acc1.x += dot(wl, x_v4[x4 + lo]) + dot(wh, x_v4[x4 + hi]);
+        if (active5) acc1.y += dot(wl, x_v4[x5 + lo]) + dot(wh, x_v4[x5 + hi]);
+        if (active6) acc1.z += dot(wl, x_v4[x6 + lo]) + dot(wh, x_v4[x6 + hi]);
+        if (active7) acc1.w += dot(wl, x_v4[x7 + lo]) + dot(wh, x_v4[x7 + hi]);
     }
 }
 
@@ -130,23 +142,24 @@ void main() {
     const uint route7 = active7 ? packed_ids[ids_base + 7u] : 0u;
 
     const uint x_div = max(x_route_divisor, 1u);
-    const uint x_base = x_offset / 4u;
-    const uint x0 = x_base + (route0 / x_div) * K;
-    const uint x1 = x_base + (route1 / x_div) * K;
-    const uint x2 = x_base + (route2 / x_div) * K;
-    const uint x3 = x_base + (route3 / x_div) * K;
-    const uint x4 = x_base + (route4 / x_div) * K;
-    const uint x5 = x_base + (route5 / x_div) * K;
-    const uint x6 = x_base + (route6 / x_div) * K;
-    const uint x7 = x_base + (route7 / x_div) * K;
+    const uint x_base = x_offset / 16u;
+    const uint k_v4 = K / 4u;
+    const uint x0 = x_base + (route0 / x_div) * k_v4;
+    const uint x1 = x_base + (route1 / x_div) * k_v4;
+    const uint x2 = x_base + (route2 / x_div) * k_v4;
+    const uint x3 = x_base + (route3 / x_div) * k_v4;
+    const uint x4 = x_base + (route4 / x_div) * k_v4;
+    const uint x5 = x_base + (route5 / x_div) * k_v4;
+    const uint x6 = x_base + (route6 / x_div) * k_v4;
+    const uint x7 = x_base + (route7 / x_div) * k_v4;
 
     const uint blocks_per_row = K / Q5_1_BLOCK_SIZE;
-    const uint expert_base = a_offset + expert_id * expert_stride;
+    const uint expert_base_u32 = (a_offset + expert_id * expert_stride) / 4u;
     vec4 acc0 = vec4(0.0);
     vec4 acc1 = vec4(0.0);
 
     for (uint blk = lane; blk < blocks_per_row; blk += LANES_PER_ROW) {
-        accumulate_q5_1_block(row, blk, blocks_per_row, expert_base,
+        accumulate_q5_1_block(row, blk, blocks_per_row, expert_base_u32,
             x0, x1, x2, x3, x4, x5, x6, x7,
             active0, active1, active2, active3, active4, active5, active6, active7,
             acc0, acc1);
