@@ -1458,9 +1458,9 @@ pub const InferenceEngine = struct {
     // the SwiGLU fold which removes the gate_buf/up_buf write+read pair
     // entirely, a structurally distinct change.
     use_fused_dense_ffn: bool = false,
-    /// Gemma MoE decode tail: fold the shared-expert post-norm into its add, and
-    /// the final post-norm + residual + layer scale + next attn norm into one
-    /// dispatch (ZINC_GEMMA_MOE_TAIL_FUSE=0 restores the separate passes).
+    /// Gemma-style decode tails (Gemma 4 MoE and dense, Muse Glimmer): fold the
+    /// post-norms, residual, layer scale and next attn norm into one dispatch
+    /// (ZINC_GEMMA_MOE_TAIL_FUSE=0 restores the separate passes).
     use_gemma_moe_tail_fuse: bool = false,
     /// Gemma MoE decode: router logits and softmax top-k in one dispatch
     /// (ZINC_GEMMA_ROUTER_TOPK_FUSE=0 restores the separate top-k).
@@ -11645,7 +11645,8 @@ pub const InferenceEngine = struct {
                     else
                         null;
                     const can_fuse_dense_tail_next_attn_norm =
-                        config.architecture == .gemma and
+                        isGemmaStyleDenseArch(config.architecture) and
+                        self.use_gemma_moe_tail_fuse and
                         config.n_experts == 0 and
                         config.ssm_d_inner == 0 and
                         !self.prefill_active and
