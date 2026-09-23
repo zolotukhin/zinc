@@ -63,16 +63,20 @@ export function collectRows(data, targetId) {
   for (const model of target.models ?? []) {
     const core = (model.scenarios ?? []).find((s) => s.id === "core");
     if (!core) continue;
-    const zincPrefill = metric(core.zinc, "prefill_tps");
     const zincDecode = metric(core.zinc, "decode_tps");
     const basePrefill = metric(core.baseline, "prefill_tps");
     const baseDecode = metric(core.baseline, "decode_tps");
-    if (!zincPrefill || !zincDecode || !basePrefill || !baseDecode) continue;
+    if (!zincDecode || !basePrefill || !baseDecode) continue;
     // Prefer the non-speculative measurement for the bar so both engines are
     // running the same technique; keep the speculative one for the footnote.
     const offDecode = metric(core.variants?.mtp_off?.zinc, "decode_tps");
     const speculative = core.zinc?.speculative_decoding?.enabled === true;
-    const comparableDecode = speculative && offDecode ? offDecode : zincDecode;
+    const useOff = speculative && offDecode != null;
+    const comparableDecode = useOff ? offDecode : zincDecode;
+    // Both bars come from the same run, so the chart agrees with the
+    // dashboard's like-for-like view.
+    const zincPrefill = metric(useOff ? core.variants.mtp_off.zinc : core.zinc, "prefill_tps");
+    if (!zincPrefill) continue;
     rows.push({
       label: shortModelLabel(model),
       prefillPct: (zincPrefill / basePrefill) * 100,
@@ -125,6 +129,10 @@ export function renderSvg(data, targetId) {
   const measured = (target.generated_at ?? "").slice(0, 10);
   const gpu = target.machine?.gpu ?? "GPU";
   const backend = /rocm/i.test(targetId) ? "ROCm" : (target.methodology?.zinc_backend ?? "");
+  const llamaBackend = target.methodology?.llama_backend ?? null;
+  const backends = llamaBackend && llamaBackend !== backend
+    ? `ZINC on ${backend}, llama.cpp on ${llamaBackend}`
+    : `both on ${backend}`;
 
   const out = [];
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`);
@@ -136,7 +144,7 @@ export function renderSvg(data, targetId) {
 
   // Header
   out.push(`<text x="${cardX}" y="72" font-size="27" font-weight="700">ZINC vs llama.cpp on one Radeon</text>`);
-  out.push(`<text x="${cardX}" y="99" font-size="14.5" fill="${THEME.muted}">${escapeXml(gpu)} · ${escapeXml(backend)} · same GGUF, same prompts, both engines served from a reusable server</text>`);
+  out.push(`<text x="${cardX}" y="99" font-size="14.5" fill="${THEME.muted}">${escapeXml(gpu)} · ${escapeXml(backends)} · same GGUF, same prompt tokens, reusable servers</text>`);
 
   // Legend
   const legendY = 122;

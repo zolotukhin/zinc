@@ -64,13 +64,15 @@ test("renderSvg draws one labelled pair per model and cites provenance", () => {
 test("a measured off-variant becomes the bar, and the speculative figure is footnoted", () => {
   const data = artifact();
   const core = data.targets[0].models[1].scenarios[0] as any;
-  core.variants = { mtp_off: { zinc: { decode_tps: metric(120) } } };
+  core.variants = { mtp_off: { zinc: { prefill_tps: metric(150), decode_tps: metric(120) } } };
   const { rows } = collectRows(data, "rdna-rocm");
   const fast = rows.find((r) => r.label === "Fast Model")!;
   // Bar uses the non-speculative 120 vs baseline 100, not the speculative 180.
   expect(fast.decodePct).toBe(120);
   expect(fast.comparable).toBe(true);
   expect(fast.speculativePct).toBe(180);
+  // Prefill comes from the same non-speculative run as the decode bar.
+  expect(fast.prefillPct).toBe(150);
 
   const svg = renderSvg(data, "rdna-rocm");
   expect(svg).toContain(">120%<");

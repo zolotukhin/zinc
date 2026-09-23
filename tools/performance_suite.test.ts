@@ -10,6 +10,8 @@ import {
   BENCH_SYSTEM_PROMPT,
   promptTokensMatch,
   provenanceDirtyCommand,
+  appendLoadavgProbe,
+  splitLoadavgProbe,
   benchmarkStatisticsNote,
   benchmarkFailureReason,
   canonicalModelIdFromPath,
@@ -1505,4 +1507,14 @@ test("provenance dirtiness ignores files that cannot change a measurement", () =
   for (const p of ["site", "docs", "README.md", "assets"]) expect(cmd).toContain(`:(exclude)${p}`);
   expect(cmd).not.toContain("exclude)src");
   expect(cmd).not.toContain("exclude)tools");
+});
+
+test("host load probe is split off before the response is parsed", () => {
+  const script = appendLoadavgProbe("curl -sS http://127.0.0.1:1/v1/completions");
+  expect(script.startsWith("curl -sS")).toBe(true);
+  expect(script).toContain("/proc/loadavg");
+  const body = '{"choices":[{"text":"x"}]}';
+  expect(splitLoadavgProbe(`${body}\n\n__ZINC_LOADAVG__ 15.23\n`)).toEqual({ stdout: `${body}\n`, hostLoad1m: 15.23 });
+  expect(splitLoadavgProbe(`${body}\n\n__ZINC_LOADAVG__ \n`).hostLoad1m).toBe(null);
+  expect(splitLoadavgProbe(body)).toEqual({ stdout: body, hostLoad1m: null });
 });

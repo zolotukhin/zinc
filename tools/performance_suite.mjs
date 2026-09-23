@@ -1152,6 +1152,7 @@ function createStats(name, rows) {
   const decodeMsValues = rows.map((row) => row.decodeMs).filter((value) => value != null);
   const totalLatencyValues = rows.map((row) => row.totalLatencyMs).filter((value) => value != null);
   const totalTpsValues = rows.map((row) => row.totalTps).filter((value) => value != null);
+  const hostLoadValues = rows.map((row) => row.hostLoad1m).filter((value) => value != null);
   const speculativeRows = rows.filter((row) => row.speculative != null);
   const speculativeDecoding = speculativeRows.length > 0
     ? {
@@ -1176,6 +1177,7 @@ function createStats(name, rows) {
     ms_per_token: summarizeValues(msValues),
     total_latency_ms: summarizeValues(totalLatencyValues),
     end_to_end_tps: summarizeValues(totalTpsValues),
+    ...(hostLoadValues.length > 0 ? { host_load_1m: summarizeValues(hostLoadValues) } : {}),
   };
 }
 
@@ -2000,6 +2002,22 @@ async function launchRdnaZincServer(caseDef, creds, timeoutMs) {
   return { port, logPath };
 }
 
+// Host load at the end of each measured request. A busy host slows the
+// dispatch-heavy decoders in both engines, so the artifact carries it rather
+// than leaving readers to guess why two runs differ.
+const LOADAVG_MARKER = "__ZINC_LOADAVG__";
+
+export function appendLoadavgProbe(remoteScript) {
+  return `${remoteScript}\nprintf '\\n${LOADAVG_MARKER} %s\\n' "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"`;
+}
+
+export function splitLoadavgProbe(stdout) {
+  const idx = stdout.lastIndexOf(LOADAVG_MARKER);
+  if (idx < 0) return { stdout, hostLoad1m: null };
+  const load = Number.parseFloat(stdout.slice(idx + LOADAVG_MARKER.length).trim());
+  return { stdout: stdout.slice(0, idx).replace(/\n$/, ""), hostLoad1m: Number.isFinite(load) ? load : null };
+}
+
 async function runOpenAiSeries({ label, warmupRuns, runs, baseUrl, caseDef, timeoutMs }) {
   const endpoint = caseDef.prompt_mode === "chat" ? `${baseUrl}/chat/completions` : `${baseUrl}/completions`;
   const payload = buildOpenAiPayload(caseDef);
@@ -2030,7 +2048,7 @@ async function runRdnaOpenAiSeries({ label, warmupRuns, runs, creds, port, caseD
   const endpoint = caseDef.prompt_mode === "chat" ? `/v1/chat/completions` : `/v1/completions`;
   const payload = buildOpenAiPayload(caseDef);
   const command = rdnaRemoteCommand(
-    `curl -sS http://${creds.loopbackHost ?? "127.0.0.1"}:${port}${endpoint} -H 'Content-Type: application/json' -d ${shellQuote(JSON.stringify(payload))}`,
+    appendLoadavgProbe(`curl -sS http://${creds.loopbackHost ?? "127.0.0.1"}:${port}${endpoint} -H 'Content-Type: application/json' -d ${shellQuote(JSON.stringify(payload))}`),
     creds,
   );
   const measured = [];
@@ -2038,7 +2056,7 @@ async function runRdnaOpenAiSeries({ label, warmupRuns, runs, creds, port, caseD
   for (let i = 0; i < warmupRuns; i += 1) {
     console.log(`  warmup ${i + 1}/${warmupRuns}: ${label}`);
     const result = await runShell(command, { cwd: ROOT, timeoutMs });
-    parseOpenAiCompletionOutput(result.stdout);
+    parseOpenAiCompletionOutput(splitLoadavgProbe(result.stdout).stdout);
   }
 
   for (let i = 0; i < runs; i += 1) {
@@ -2046,7 +2064,9 @@ async function runRdnaOpenAiSeries({ label, warmupRuns, runs, creds, port, caseD
     const started = performance.now();
     const result = await runShell(command, { cwd: ROOT, timeoutMs });
     const ended = performance.now();
-    const parsed = parseOpenAiCompletionOutput(result.stdout);
+    const probe = splitLoadavgProbe(result.stdout);
+    const parsed = parseOpenAiCompletionOutput(probe.stdout);
+    parsed.hostLoad1m = probe.hostLoad1m;
     parsed.totalLatencyMs = ended - started;
     const totalTokens = (parsed.promptTokens ?? 0) + (parsed.generatedTokens ?? 0);
     parsed.totalTps = totalTokens > 0 ? totalTokens / Math.max((ended - started) / 1000, 1e-9) : null;
@@ -2080,13 +2100,13 @@ async function runRdnaZincOpenAiSeries({ label, warmupRuns, runs, creds, port, l
     "printf '\\n__ZINC_TIMING__\\n'",
     "awk '/NextN\\/MTP: request accepted / { acc = $0 } /info\\(forward\\): Prefill:|info\\(forward\\): Generated / { lines[++n] = $0 } END { start = n > 1 ? n - 1 : 1; for (i = start; i <= n; i++) print lines[i]; if (acc != \"\") print acc }' \"$LOG\"",
   ].join("\n");
-  const command = rdnaRemoteCommand(remoteScript, creds);
+  const command = rdnaRemoteCommand(appendLoadavgProbe(remoteScript), creds);
   const measured = [];
 
   for (let i = 0; i < warmupRuns; i += 1) {
     console.log(`  warmup ${i + 1}/${warmupRuns}: ${label}`);
     const result = await runShell(command, { cwd: ROOT, timeoutMs });
-    parseZincServerOutput(result.stdout);
+    parseZincServerOutput(splitLoadavgProbe(result.stdout).stdout);
   }
 
   for (let i = 0; i < runs; i += 1) {
@@ -2094,7 +2114,9 @@ async function runRdnaZincOpenAiSeries({ label, warmupRuns, runs, creds, port, l
     const started = performance.now();
     const result = await runShell(command, { cwd: ROOT, timeoutMs });
     const ended = performance.now();
-    const parsed = parseZincServerOutput(result.stdout);
+    const probe = splitLoadavgProbe(result.stdout);
+    const parsed = parseZincServerOutput(probe.stdout);
+    parsed.hostLoad1m = probe.hostLoad1m;
     parsed.totalLatencyMs = ended - started;
     const totalTokens = (parsed.promptTokens ?? 0) + (parsed.generatedTokens ?? 0);
     parsed.totalTps = totalTokens > 0 ? totalTokens / Math.max((ended - started) / 1000, 1e-9) : null;
