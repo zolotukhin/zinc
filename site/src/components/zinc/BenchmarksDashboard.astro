@@ -990,6 +990,12 @@ const jsonLd = {
                 ZINC completed {(target.summary?.successful_models ?? 0)} of {(target.summary?.benchmarked_models ?? 0)} models in this run ({formatShortDate(target.generated_at)}). The averages use completed rows only; open a failed row for its recorded reason.
               </p>
             )}
+            {parityRows.length > 0 && parityMatched < parityRows.length && (
+              <p class="panel-banner" role="note">
+                <strong>Prompts did not match in every row.</strong>{' '}
+                In {parityRows.length - parityMatched} of {parityRows.length} rows ZINC and llama.cpp read different prompt token counts, because this run ({formatShortDate(target.generated_at)}) predates the harness sending both engines the same system turn and thinking switch. Per-token rates are still measured, but treat these rows as indicative until the target is re-run.
+              </p>
+            )}
           </div>
           <details class="machine-details">
             <summary>Exact configuration</summary>

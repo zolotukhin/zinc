@@ -144,13 +144,21 @@ bun tools/performance_suite.mjs \
   --rdna-backend rocm \
   --rdna-build \
   --rdna-start-llama \
-  --rdna-llama-server /path/to/llama-server \
-  --rdna-llama-device Vulkan0 \
+  --rdna-llama-server /path/to/llama.cpp/build-hip/bin/llama-server \
+  --rdna-llama-device ROCm0 \
   --no-site-write \
   --output /tmp/zinc-rocm-qwen38.json
 ```
 
-On the validated R9700 stack, the 2026-09-02 Qwen 3.8 27B four-scenario server
+Build that llama.cpp with `-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1201` at the same
+commit as the Vulkan baseline, so the ROCm tab compares ROCm with ROCm. The
+current numbers, with both engines reading identical prompt tokens, are on the
+[benchmark dashboard](https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm).
+
+The table below is a historical record. It was measured before the harness
+sent both engines the same system turn and thinking switch, so each server
+applied its own chat template and the prompt token counts differed. On the
+validated R9700 stack, the 2026-09-02 Qwen 3.8 27B four-scenario server
 matrix produced these five-run medians. The comparison used llama.cpp commit
 `9400c8946`, which was the tip of upstream `master` when the run started; it was
 not an older historical pin. `Overall` is the comparable

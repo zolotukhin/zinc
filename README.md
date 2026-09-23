@@ -22,35 +22,40 @@ command line, a browser chat, a model manager, and an OpenAI-compatible API.
 
 ## Speed, measured honestly
 
-Each model below was run twice on the same Radeon AI PRO R9700: once through
-ZINC's ROCm backend, once through llama.cpp. Same GGUF file, same prompts, same
-reusable-server setup, same warmups and repeat counts. The bars show how ZINC
-compares on the two things you feel while using a model — how fast it reads your
-prompt, and how fast it writes the answer.
+Each model below was run on the same Radeon AI PRO R9700 through ZINC's ROCm
+backend and through llama.cpp's ROCm (HIP) backend, built from the same
+llama.cpp commit as our Vulkan comparison. Both engines load the same GGUF file,
+read the same prompt tokens (the harness checks the counts match), run in a
+reusable server, and get the same warmups and repeat counts. The bars show how
+ZINC compares on the two things you feel while using a model: how fast it reads
+your prompt, and how fast it writes the answer.
 
 <a href="https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm">
-  <img src="assets/rocm-r9700-benchmark.svg" alt="ZINC compared with llama.cpp across six models on a Radeon AI PRO R9700 using ROCm" width="100%">
+  <img src="assets/rocm-r9700-benchmark.svg" alt="ZINC compared with llama.cpp across six models on a Radeon AI PRO R9700, both using ROCm" width="100%">
 </a>
 
-Reading that honestly: **prompt processing is where ZINC is far ahead** — 1.7x
-to 4.1x llama.cpp across all six models, which is what you feel when a long
-chat, a pasted document, or a code file has to be read before the first word
-appears. **Token generation is close to parity**, within a few percent either
-way, with one exception:
+Reading that honestly:
 
+- **Prompt processing** is 1.1x to 2.0x llama.cpp on the short chat prompt shown
+  here. The lead narrows as prompts grow: across all four workloads llama.cpp is
+  ahead in three of the 24 prompt-processing rows (Qwen 3.6 35B-A3B on 150- and
+  300-token prompts, Gemma 4 31B on the longest).
+- **Token generation** is ahead on all six models, from level (Gemma 4 31B,
+  101%) to 1.28x (Qwen 3.6 35B-A3B).
 - **Qwen 3.8 can speculate, and the chart does not count it.** That model ships
   an extra "NextN" block, and ZINC uses it to draft tokens the full model then
-  verifies in one batched pass — identical output, fewer passes, 1.9x the
+  verifies in one batched pass: identical output, fewer passes, 1.9x the
   generation speed. llama.cpp can speculate with the same block (its converter
   exports it as a separate draft model), and our runs do not give it one, so
-  that number would not be a fair comparison. The bar above therefore shows both
-  engines **without** speculation, where ZINC is 107% of llama.cpp; the
-  benchmark page has a switch for the speculative figure.
-- **On AMD, the two backends trade places.** ROCm wins prompt processing by a
-  wide margin; Vulkan currently generates tokens faster (on Gemma 4 26B-A4B,
-  118 tok/s on Vulkan against 96 on ROCm). Both are published separately on the
-  [benchmark page](https://zolotukhin.ai/zinc/benchmarks/) so you can compare
-  the build you actually plan to run.
+  that number would not be a fair comparison. The chart therefore shows both
+  engines **without** speculation; the benchmark page has a switch for the
+  speculative figure.
+- **On AMD, pick the backend for the job.** ZINC's ROCm backend reads prompts
+  much faster than its Vulkan backend; for generation the two are close, and
+  Vulkan is ahead on some models (Qwen 3.6 35B-A3B: 105 tok/s on Vulkan, 97 on
+  ROCm). The Vulkan build is compared against llama.cpp's Vulkan backend and
+  published separately on the
+  [benchmark page](https://zolotukhin.ai/zinc/benchmarks/).
 
 This is one GPU and six models, not a universal claim. Other cards are measured
 separately, and rows where llama.cpp is ahead stay on the page.
@@ -103,7 +108,7 @@ same port, so existing clients and SDKs work unchanged: `/health` for liveness,
 | Hardware | Backend | Status |
 | --- | --- | --- |
 | AMD Radeon (RDNA3/RDNA4) | ROCm/HIP | Supported · fastest prompt processing on Radeon |
-| AMD Radeon (RDNA3/RDNA4) | Vulkan | Supported · portable, and currently faster at generation |
+| AMD Radeon (RDNA3/RDNA4) | Vulkan | Supported · portable, no ROCm install needed |
 | Intel Arc (Xe2/Battlemage) | Vulkan | Supported |
 | Apple Silicon | Metal | Supported |
 | NVIDIA RTX | CUDA | Experimental |
