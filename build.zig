@@ -340,6 +340,7 @@ pub fn build(b: *std.Build) void {
         "residual_rms_norm",
         "residual_rms_norm_wide",
         "post_norm_residual_rms_norm",
+        "gemma_moe_tail_fused",
         "rms_norm_add",
         "rms_norm_add_vec4",
         "dmmv_q4k_wide",

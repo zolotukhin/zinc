@@ -524,6 +524,9 @@ pub const ElementwiseDispatch = struct {
     pipeline_residual_rms_norm_wide: ?Pipeline,
     /// Fused Gemma post-attention norm + residual-add + FFN RMS norm (5 bindings).
     pipeline_post_norm_residual_rms_norm: ?Pipeline,
+    /// Gemma 4 MoE decode tail: routed + shared post-norms, final post-norm,
+    /// residual, layer scale and next attn norm in one dispatch (8 bindings).
+    pipeline_gemma_moe_tail_fused: ?Pipeline,
     /// Fused residual-add + RMS norm + Q8_1 quantize for the Qwen3.6-27B
     /// dense FFN prefill DP4a path (6 bindings: hidden(rw), residual,
     /// norm_out, weights, packed_i8, scale_dsum). Saves one quantize_act_q8_1
@@ -936,6 +939,12 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        const gemma_moe_tail_path = std.fmt.bufPrint(&path_buf, "{s}/gemma_moe_tail_fused.spv", .{shader_dir}) catch unreachable;
+        const pipeline_gemma_moe_tail_fused = pipeline_mod.createFromSpirvWithOptions(instance, gemma_moe_tail_path, 8, @sizeOf(PostNormResidualRmsNormPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("gemma_moe_tail_fused shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // residual_rms_norm_quant_q8_1: 6 bindings (hidden, residual, norm_out,
         // weights, packed_i8, scale_dsum). Used by the Qwen3.6-27B dense FFN
         // prefill DP4a path to fuse the quantize_act_q8_1 dispatch into the
@@ -1081,6 +1090,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_residual_rms_norm = pipeline_residual_rms_norm,
             .pipeline_residual_rms_norm_wide = pipeline_residual_rms_norm_wide,
             .pipeline_post_norm_residual_rms_norm = pipeline_post_norm_residual_rms_norm,
+            .pipeline_gemma_moe_tail_fused = pipeline_gemma_moe_tail_fused,
             .pipeline_residual_rms_norm_quant_q8_1 = pipeline_residual_rms_norm_quant_q8_1,
             .pipeline_rms_norm_add = pipeline_rms_norm_add,
             .pipeline_rms_norm_add_vec4 = pipeline_rms_norm_add_vec4,
@@ -1621,6 +1631,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_residual_rms_norm) |*p| p.deinit();
         if (self.pipeline_residual_rms_norm_wide) |*p| p.deinit();
         if (self.pipeline_post_norm_residual_rms_norm) |*p| p.deinit();
+        if (self.pipeline_gemma_moe_tail_fused) |*p| p.deinit();
         if (self.pipeline_residual_rms_norm_quant_q8_1) |*p| p.deinit();
         if (self.pipeline_rms_norm_add) |*p| p.deinit();
         if (self.pipeline_rms_norm_add_vec4) |*p| p.deinit();

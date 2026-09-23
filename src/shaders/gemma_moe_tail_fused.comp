@@ -1,0 +1,93 @@
+#version 460
+// ZINC - fused Gemma 4 MoE decode tail.
+//
+// Semantics (single token, one workgroup):
+//   c[i]      = w_moe[i]    * moe[i]    * rsqrt(mean(moe^2)    + eps)   // post_ffw_norm_2
+//             + w_shared[i] * shared[i] * rsqrt(mean(shared^2) + eps)   // post_ffw_norm_1
+//   h[i]      = hidden[i] + w_post[i] * c[i] * rsqrt(mean(c^2) + eps)   // post_ffw_norm + residual
+//   hidden[i] = h[i] * hidden_scale                                     // per-layer output scale
+//   norm_out[i] = norm_w[i] * h[i] * rsqrt(mean(h^2) + eps)             // next layer's attn_norm
+//
+// This replaces, per MoE layer:
+//   rms_norm_mul(moe)            barrier
+//   rms_norm_add(moe += shared)  barrier
+//   post_norm_residual_rms_norm  (itself already four passes folded)
+// The routed and shared expert outputs arrive raw. `moe` is left untouched.
+// The next-layer norm uses the unscaled h, as post_norm_residual_rms_norm does:
+// RMS norm is scale-invariant up to eps.
+//
+// Dispatch: (1, 1, 1), local_size_x = 256 (four wave64 subgroups, as in
+// post_norm_residual_rms_norm, because the kernel is reduction-bound).
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PushConstants {
+    uint  n;
+    float eps;
+    float hidden_scale;
+};
+
+layout(set = 0, binding = 0)           buffer Hidden        { float hidden[];   };
+layout(set = 0, binding = 1) readonly  buffer Moe           { float moe[];      };
+layout(set = 0, binding = 2) readonly  buffer Shared        { float shared_v[]; };
+layout(set = 0, binding = 3) readonly  buffer MoeWeights    { float w_moe[];    };
+layout(set = 0, binding = 4) readonly  buffer SharedWeights { float w_shared[]; };
+layout(set = 0, binding = 5) readonly  buffer PostWeights   { float w_post[];   };
+layout(set = 0, binding = 6) writeonly buffer NormOut       { float norm_out[]; };
+layout(set = 0, binding = 7) readonly  buffer NormWeights   { float norm_w[];   };
+
+shared vec2 s_partial[16];
+
+// Sums two values across the workgroup. The leading barrier keeps a later call
+// from overwriting s_partial before every lane has read the previous result.
+vec2 reduce_sum2(vec2 v) {
+    vec2 total = subgroupAdd(v);
+    barrier();
+    if (gl_SubgroupInvocationID == 0u) s_partial[gl_SubgroupID] = total;
+    barrier();
+    vec2 merged = vec2(0.0);
+    for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_partial[sg];
+    return merged;
+}
+
+float combined(uint i, float inv_moe, float inv_shared) {
+    return w_moe[i] * moe[i] * inv_moe + w_shared[i] * shared_v[i] * inv_shared;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint stride = gl_WorkGroupSize.x;
+    const float fn = float(n);
+
+    vec2 sq = vec2(0.0);
+    for (uint i = tid; i < n; i += stride) {
+        const float m = moe[i];
+        const float s = shared_v[i];
+        sq += vec2(m * m, s * s);
+    }
+    sq = reduce_sum2(sq);
+    const float inv_moe = inversesqrt(sq.x / fn + eps);
+    const float inv_shared = inversesqrt(sq.y / fn + eps);
+
+    float c_sq = 0.0;
+    for (uint i = tid; i < n; i += stride) {
+        const float c = combined(i, inv_moe, inv_shared);
+        c_sq += c * c;
+    }
+    const float inv_c = inversesqrt(reduce_sum2(vec2(c_sq, 0.0)).x / fn + eps);
+
+    float h_sq = 0.0;
+    for (uint i = tid; i < n; i += stride) {
+        const float h = hidden[i] + w_post[i] * combined(i, inv_moe, inv_shared) * inv_c;
+        hidden[i] = h * hidden_scale;
+        h_sq += h * h;
+    }
+    const float inv_h = inversesqrt(reduce_sum2(vec2(h_sq, 0.0)).x / fn + eps);
+
+    // Each lane re-reads only the hidden elements it wrote above.
+    for (uint i = tid; i < n; i += stride) {
+        norm_out[i] = norm_w[i] * (hidden[i] / hidden_scale) * inv_h;
+    }
+}

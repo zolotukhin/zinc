@@ -1455,6 +1455,10 @@ pub const InferenceEngine = struct {
     // the SwiGLU fold which removes the gate_buf/up_buf write+read pair
     // entirely, a structurally distinct change.
     use_fused_dense_ffn: bool = false,
+    /// Gemma MoE decode tail: fold the shared-expert post-norm into its add, and
+    /// the final post-norm + residual + layer scale + next attn norm into one
+    /// dispatch (ZINC_GEMMA_MOE_TAIL_FUSE=0 restores the separate passes).
+    use_gemma_moe_tail_fuse: bool = false,
     // Default-on only for Qwen3.6-27B's wide dense FFN shape. Uses the
     // NUM_ROWS=1 specialization of the fused gate+up+SwiGLU Q4_K shader
     // instead of widening the regular NUM_ROWS=2 path that previously
@@ -3996,6 +4000,7 @@ pub const InferenceEngine = struct {
             .mtp_enabled = mtp_candidate,
             .use_ssm_delta_normed_qk = ssm_delta_normed_qk_enabled,
             .use_fused_dense_ffn = fused_dense_ffn_enabled,
+            .use_gemma_moe_tail_fuse = envFlagEnabled("ZINC_GEMMA_MOE_TAIL_FUSE", true),
             .use_qwen36_dense_fused_row1 = qwen36_dense_row1_enabled,
             .use_gemma_dense_decode_dp4a = gemma_dense_decode_dp4a_enabled,
             .use_fused_oproj_merge = fused_oproj_merge_enabled,
@@ -11000,7 +11005,30 @@ pub const InferenceEngine = struct {
                 // one Gemma-specific dispatch+barrier per MoE layer.
                 const skip_gemma_short_prefill_post_norm_2 =
                     skip_gemma_short_prefill_shared_expert and lt.post_ffw_norm != null;
-                if (!use_gpu_moe and lt.post_ffw_norm_2 != null and !skip_gemma_short_prefill_post_norm_2) {
+                // Decode: the routed post-norm, the shared-expert post-norm + add, and
+                // the final tail all run in one gemma_moe_tail_fused dispatch after both
+                // expert branches finish, so neither intermediate norm is recorded here.
+                const gemma_mega_next_norm = if (layer_idx + 1 < layer_end)
+                    self.layer_tensors[layer_idx + 1].attn_norm
+                else
+                    null;
+                const gemma_moe_mega_tail = self.use_gemma_moe_tail_fuse and
+                    config.architecture == .gemma and
+                    !use_gpu_moe and
+                    !self.prefill_active and
+                    !self.validation_diagnostics_enabled and
+                    !skip_gemma_short_prefill_shared_expert and
+                    !gemma_moe_accumulated_into_hidden and
+                    lt.post_ffw_norm_2 != null and
+                    lt.post_ffw_norm_1 != null and
+                    lt.post_ffw_norm != null and
+                    lt.ffn_gate_shexp != null and
+                    lt.ffn_up_shexp != null and
+                    lt.ffn_down_shexp != null and
+                    lt.ffn_gate_inp_shexp == null and
+                    gemma_mega_next_norm != null and
+                    self.elementwise.pipeline_gemma_moe_tail_fused != null;
+                if (!use_gpu_moe and !gemma_moe_mega_tail and lt.post_ffw_norm_2 != null and !skip_gemma_short_prefill_post_norm_2) {
                     if (lt.post_ffw_norm_2) |pfn2_t| {
                         try self.dispatchRmsNorm(
                             self.moe_out_buf.handle,
@@ -11139,8 +11167,33 @@ pub const InferenceEngine = struct {
                         self.endProfilePhase(.shared_down, shared_down_phase);
 
                         // Gemma 4 MoE: post_ffw_norm_1 on shared expert output BEFORE combining.
-                        // Matches Metal forward_metal.zig:4314-4317.
-                        if (lt.post_ffw_norm_1) |pfn1_t| {
+                        // Matches Metal forward_metal.zig:4314-4317. With no shared-expert
+                        // gate the combine is a plain add, so norm + add run as one
+                        // rms_norm_add: moe_out += post_ffw_norm_1 * rms(down).
+                        const fuse_shexp_norm_add = !gemma_moe_mega_tail and self.use_gemma_moe_tail_fuse and
+                            config.architecture == .gemma and
+                            lt.post_ffw_norm_1 != null and
+                            cpu_shexp_gate == null and
+                            !self.validation_diagnostics_enabled and
+                            self.elementwise.pipeline_rms_norm_add != null;
+                        if (fuse_shexp_norm_add) {
+                            const fused_gate_phase = self.beginProfilePhase();
+                            try self.dispatchRmsNormAdd(
+                                self.moe_out_buf.handle,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                lt.post_ffw_norm_1.?.gpu_buffer.handle,
+                                lt.post_ffw_norm_1.?.gpu_buffer.size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                            self.decode_cmd.computeBarrier();
+                            self.endProfilePhase(.shared_gate_acc, fused_gate_phase);
+                        } else if (gemma_moe_mega_tail) {
+                            // Raw shared output stays in down_buf for the fused tail.
+                        } else if (lt.post_ffw_norm_1) |pfn1_t| {
                             try self.dispatchRmsNorm(
                                 self.down_buf.handle,
                                 hidden_size,
@@ -11155,58 +11208,60 @@ pub const InferenceEngine = struct {
                             self.decode_cmd.computeBarrier();
                         }
 
-                        const shexp_acc_buf = self.moe_out_buf.handle;
-                        const shared_gate_phase = self.beginProfilePhase();
-                        if (cpu_shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
-                            try self.dispatchSigmoidScaleAcc(
-                                shexp_acc_buf,
-                                hidden_size,
-                                self.down_buf.handle,
-                                hidden_size,
-                                self.router_logits_buf.handle,
-                                @sizeOf(f32),
-                                hidden_dim,
-                            );
-                        } else if (cpu_shexp_gate != null) {
-                            if (self.profile_enabled) self.profile_token_counters.cpu_shared_gate_fallbacks += 1;
-                            {
-                                const bar = vk.c.VkMemoryBarrier{
-                                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                                    .pNext = null,
-                                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
-                                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
-                                };
-                                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
-                                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(f32) };
-                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &rgn);
+                        if (!fuse_shexp_norm_add and !gemma_moe_mega_tail) {
+                            const shexp_acc_buf = self.moe_out_buf.handle;
+                            const shared_gate_phase = self.beginProfilePhase();
+                            if (cpu_shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
+                                try self.dispatchSigmoidScaleAcc(
+                                    shexp_acc_buf,
+                                    hidden_size,
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    self.router_logits_buf.handle,
+                                    @sizeOf(f32),
+                                    hidden_dim,
+                                );
+                            } else if (cpu_shexp_gate != null) {
+                                if (self.profile_enabled) self.profile_token_counters.cpu_shared_gate_fallbacks += 1;
+                                {
+                                    const bar = vk.c.VkMemoryBarrier{
+                                        .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                        .pNext = null,
+                                        .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                                        .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                                    };
+                                    vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                                    const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(f32) };
+                                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &rgn);
+                                }
+                                try self.decode_cmd.end();
+                                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                                const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
+                                const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
+                                if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                                try self.decode_cmd.reset();
+                                try self.decode_cmd.begin();
+                                try self.dispatchScaleAcc(
+                                    shexp_acc_buf,
+                                    hidden_size,
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    hidden_dim,
+                                    shexp_weight,
+                                );
+                            } else {
+                                try self.dispatchScaleAcc(
+                                    shexp_acc_buf,
+                                    hidden_size,
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    hidden_dim,
+                                    1.0,
+                                );
                             }
-                            try self.decode_cmd.end();
-                            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-                            const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
-                            const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
-                            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-                            try self.decode_cmd.reset();
-                            try self.decode_cmd.begin();
-                            try self.dispatchScaleAcc(
-                                shexp_acc_buf,
-                                hidden_size,
-                                self.down_buf.handle,
-                                hidden_size,
-                                hidden_dim,
-                                shexp_weight,
-                            );
-                        } else {
-                            try self.dispatchScaleAcc(
-                                shexp_acc_buf,
-                                hidden_size,
-                                self.down_buf.handle,
-                                hidden_size,
-                                hidden_dim,
-                                1.0,
-                            );
+                            self.decode_cmd.computeBarrier();
+                            self.endProfilePhase(.shared_gate_acc, shared_gate_phase);
                         }
-                        self.decode_cmd.computeBarrier();
-                        self.endProfilePhase(.shared_gate_acc, shared_gate_phase);
                         self.endProfilePhase(.shared_expert, shared_phase);
                     }
                 }
@@ -11223,7 +11278,63 @@ pub const InferenceEngine = struct {
                     // per MoE layer while keeping terminal prefill/decode exact.
                     const skip_gemma_short_prefill_post_norm =
                         skip_gemma_short_prefill_shared_expert and lt.post_ffw_norm != null;
-                    if (!skip_gemma_short_prefill_post_norm) {
+                    // Decode fast tail: post_ffw_norm(moe_out) + residual add + layer
+                    // output scale + the next layer's attn norm in one dispatch — the
+                    // same fused shader the dense Gemma tail uses. Replaces four
+                    // dispatches and their barriers per MoE layer.
+                    const moe_next_attn_norm = if (layer_idx + 1 < layer_end)
+                        self.layer_tensors[layer_idx + 1].attn_norm
+                    else
+                        null;
+                    const fuse_moe_tail = !gemma_moe_mega_tail and self.use_gemma_moe_tail_fuse and
+                        config.architecture == .gemma and
+                        !self.prefill_active and
+                        !self.validation_diagnostics_enabled and
+                        !diag_ffn_residual and
+                        !skip_gemma_short_prefill_post_norm and
+                        !gemma_moe_accumulated_into_hidden and
+                        lt.post_ffw_norm != null and
+                        moe_next_attn_norm != null and
+                        self.elementwise.pipeline_post_norm_residual_rms_norm != null;
+                    if (gemma_moe_mega_tail) {
+                        const tail_scale = self.layer_output_scales[layer];
+                        try self.dispatchGemmaMoeTailFused(
+                            self.moe_out_buf,
+                            self.down_buf,
+                            lt.post_ffw_norm_2.?,
+                            lt.post_ffw_norm_1.?,
+                            lt.post_ffw_norm.?,
+                            gemma_mega_next_norm.?,
+                            hidden_dim,
+                            rms_norm_eps,
+                            tail_scale,
+                        );
+                        gemma_dense_next_attn_norm_ready = true;
+                        gemma_dense_tail_wrote_next_attn_norm = true;
+                        gemma_dense_tail_folded_layer_output_scale = tail_scale != 1.0;
+                    } else if (fuse_moe_tail) {
+                        const tail_scale = self.layer_output_scales[layer];
+                        try self.dispatchPostNormResidualRmsNorm(
+                            self.hidden_buf.handle,
+                            hidden_size,
+                            self.moe_out_buf.handle,
+                            hidden_size,
+                            lt.post_ffw_norm.?.gpu_buffer.handle,
+                            lt.post_ffw_norm.?.gpu_buffer.size,
+                            self.norm_buf.handle,
+                            hidden_size,
+                            moe_next_attn_norm.?.gpu_buffer.handle,
+                            moe_next_attn_norm.?.gpu_buffer.size,
+                            hidden_dim,
+                            1,
+                            rms_norm_eps,
+                            tail_scale,
+                        );
+                        gemma_dense_next_attn_norm_ready = true;
+                        gemma_dense_tail_wrote_next_attn_norm = true;
+                        gemma_dense_tail_folded_layer_output_scale = tail_scale != 1.0;
+                    }
+                    if (!fuse_moe_tail and !gemma_moe_mega_tail and !skip_gemma_short_prefill_post_norm) {
                         if (lt.post_ffw_norm) |pfn_t| {
                             try self.dispatchRmsNorm(
                                 self.moe_out_buf.handle,
@@ -11250,7 +11361,7 @@ pub const InferenceEngine = struct {
                         self.decode_cmd.transferToComputeBarrier();
                     }
 
-                    if (!gemma_moe_accumulated_into_hidden) {
+                    if (!gemma_moe_accumulated_into_hidden and !fuse_moe_tail and !gemma_moe_mega_tail) {
                         try self.dispatchScaleAcc(
                             self.hidden_buf.handle,
                             hidden_size,
@@ -11368,7 +11479,10 @@ pub const InferenceEngine = struct {
                     (!dense_prefill_validate_capture or self.dense_prefill_validate_production) and
                     gate_tensor.info.type_ == .q4_k and
                     up_tensor.info.type_ == .q4_k and
-                    (inter_dim <= 12288 or qwen36_row1_dense_eligible) and
+                    // Wider FFNs (Muse Glimmer 30B: 19968) measured +0.5% decode on
+                    // RDNA4, token-identical; other GPUs keep the measured cap.
+                    (inter_dim <= 12288 or qwen36_row1_dense_eligible or
+                        (self.isAmdRdna() and envFlagEnabled("ZINC_FUSED_DENSE_WIDE", true))) and
                     (hidden_dim % 4) == 0 and
                     (hidden_dim % 256) == 0;
                 const gemma_dense_geglu_pair_eligible = self.use_fused_dense_ffn and
@@ -12254,6 +12368,47 @@ pub const InferenceEngine = struct {
     ///
     /// Replaces post_attention_norm + barrier + residual_rms_norm in the
     /// dense batched prefill path.
+    /// One-workgroup Gemma 4 MoE decode tail (src/shaders/gemma_moe_tail_fused.comp).
+    fn dispatchGemmaMoeTailFused(
+        self: *InferenceEngine,
+        moe: Buffer,
+        shared_out: Buffer,
+        w_moe: *const LoadedTensor,
+        w_shared: *const LoadedTensor,
+        w_post: *const LoadedTensor,
+        next_norm_w: *const LoadedTensor,
+        hidden_dim: u32,
+        eps: f32,
+        hidden_scale: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_gemma_moe_tail_fused orelse return error.ShaderNotLoaded);
+        const push = PostNormResidualRmsNormPush{ .n = hidden_dim, .eps = eps, .hidden_scale = hidden_scale };
+        const vec_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        self.pushDispatch8(
+            pip,
+            std.mem.asBytes(&push),
+            self.hidden_buf.handle,
+            vec_bytes,
+            moe.handle,
+            vec_bytes,
+            shared_out.handle,
+            vec_bytes,
+            w_moe.gpu_buffer.handle,
+            w_moe.gpu_buffer.size,
+            w_shared.gpu_buffer.handle,
+            w_shared.gpu_buffer.size,
+            w_post.gpu_buffer.handle,
+            w_post.gpu_buffer.size,
+            self.norm_buf.handle,
+            vec_bytes,
+            next_norm_w.gpu_buffer.handle,
+            next_norm_w.gpu_buffer.size,
+            1,
+            1,
+            1,
+        );
+    }
+
     fn dispatchPostNormResidualRmsNorm(
         self: *InferenceEngine,
         hidden: vk.c.VkBuffer,
