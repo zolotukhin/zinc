@@ -9354,6 +9354,8 @@ pub const InferenceEngine = struct {
 
             var gpu_moe_barriers_cover_hidden = false;
             var gemma_moe_accumulated_into_hidden = false;
+            // Set when the routed MoE block already recorded the shared expert.
+            var gemma_shared_overlapped = false;
             var skip_gemma_short_prefill_layer_output_scale = false;
             var gemma_dense_tail_wrote_next_attn_norm = false;
             var gemma_dense_tail_folded_layer_output_scale = false;
@@ -10435,6 +10437,14 @@ pub const InferenceEngine = struct {
                         }
                         self.endProfilePhase(.moe_topk, moe_topk_phase);
 
+                        // With the fused tail, the shared expert only has to finish before
+                        // it, so record its gate/up and down beside the routed ones and let
+                        // them share barriers. Its GeGLU goes to gate_buf (routed uses swiglu_buf).
+                        const overlap_shared = self.gemmaMoeMegaTailEligible(&lt, layer_idx, layer_end, use_gpu_moe, gemma_short_prefill_fast_tail) and
+                            ((lt.ffn_gate_shexp.?.info.type_ == .q4_k and lt.ffn_up_shexp.?.info.type_ == .q4_k and
+                                self.dmmv.pipeline_q4k_fused_gate_up_geglu_pair != null) or
+                                (lt.ffn_gate_shexp.?.info.type_ == .q8_0 and lt.ffn_up_shexp.?.info.type_ == .q8_0 and
+                                    self.dmmv.pipeline_q8_0_fused_gate_up_geglu != null));
                         const moe_gate_up_phase = self.beginProfilePhase();
                         try self.dispatchDmmvMoeFusedGateUpGeglu(
                             gate_exps,
@@ -10447,6 +10457,13 @@ pub const InferenceEngine = struct {
                             up_base_offset,
                             n_used,
                         );
+                        if (overlap_shared) {
+                            if (lt.ffn_gate_shexp.?.info.type_ == .q4_k) {
+                                try self.dispatchDmmvFusedGateUpGegluPair(lt.ffn_gate_shexp.?, lt.ffn_up_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
+                            } else {
+                                try self.dispatchDmmvFusedGateUpGegluQ8_0(lt.ffn_gate_shexp.?, lt.ffn_up_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
+                            }
+                        }
                         self.decode_cmd.computeBarrier();
                         self.endProfilePhase(.moe_gate_up, moe_gate_up_phase);
 
@@ -10482,6 +10499,11 @@ pub const InferenceEngine = struct {
                                 n_used,
                                 gemma_short_prefill_direct_hidden_accum,
                             );
+                        }
+                        if (overlap_shared) {
+                            const shexp_bytes = @as(vk.c.VkDeviceSize, shexp_inter_dim) * @sizeOf(f32);
+                            try self.dispatchDmmv(lt.ffn_down_shexp.?, self.gate_buf, shexp_bytes, self.down_buf, hidden_dim, shexp_inter_dim);
+                            gemma_shared_overlapped = true;
                         }
                         self.decode_cmd.computeBarrier();
                         if (gemma_short_prefill_direct_hidden_accum) {
@@ -11012,22 +11034,8 @@ pub const InferenceEngine = struct {
                     self.layer_tensors[layer_idx + 1].attn_norm
                 else
                     null;
-                const gemma_moe_mega_tail = self.use_gemma_moe_tail_fuse and
-                    config.architecture == .gemma and
-                    !use_gpu_moe and
-                    !self.prefill_active and
-                    !self.validation_diagnostics_enabled and
-                    !skip_gemma_short_prefill_shared_expert and
-                    !gemma_moe_accumulated_into_hidden and
-                    lt.post_ffw_norm_2 != null and
-                    lt.post_ffw_norm_1 != null and
-                    lt.post_ffw_norm != null and
-                    lt.ffn_gate_shexp != null and
-                    lt.ffn_up_shexp != null and
-                    lt.ffn_down_shexp != null and
-                    lt.ffn_gate_inp_shexp == null and
-                    gemma_mega_next_norm != null and
-                    self.elementwise.pipeline_gemma_moe_tail_fused != null;
+                const gemma_moe_mega_tail = !gemma_moe_accumulated_into_hidden and
+                    self.gemmaMoeMegaTailEligible(&lt, layer_idx, layer_end, use_gpu_moe, skip_gemma_short_prefill_shared_expert);
                 if (!use_gpu_moe and !gemma_moe_mega_tail and lt.post_ffw_norm_2 != null and !skip_gemma_short_prefill_post_norm_2) {
                     if (lt.post_ffw_norm_2) |pfn2_t| {
                         try self.dispatchRmsNorm(
@@ -11046,7 +11054,7 @@ pub const InferenceEngine = struct {
                 }
 
                 // Shared expert for CPU MoE fallback only (GPU MoE handles shared expert inline above)
-                if (!use_gpu_moe and !skip_gemma_short_prefill_shared_expert) {
+                if (!use_gpu_moe and !skip_gemma_short_prefill_shared_expert and !gemma_shared_overlapped) {
                     const cpu_gate_shexp = lt.ffn_gate_shexp;
                     const cpu_up_shexp = lt.ffn_up_shexp;
                     const cpu_down_shexp = lt.ffn_down_shexp;
@@ -12368,6 +12376,20 @@ pub const InferenceEngine = struct {
     ///
     /// Replaces post_attention_norm + barrier + residual_rms_norm in the
     /// dense batched prefill path.
+    /// Whether this Gemma MoE layer's decode tail runs as one gemma_moe_tail_fused
+    /// dispatch. The routed block also uses it to overlap the shared expert with
+    /// the routed experts (they then share barriers), so both sites must agree.
+    fn gemmaMoeMegaTailEligible(self: *const InferenceEngine, lt: *const LayerTensors, layer_idx: usize, layer_end: usize, use_gpu_moe: bool, short_prefill_tail: bool) bool {
+        if (!self.use_gemma_moe_tail_fuse) return false;
+        if (self.model.config.architecture != .gemma) return false;
+        if (use_gpu_moe or self.prefill_active or self.validation_diagnostics_enabled or short_prefill_tail) return false;
+        if (lt.post_ffw_norm_2 == null or lt.post_ffw_norm_1 == null or lt.post_ffw_norm == null) return false;
+        if (lt.ffn_gate_shexp == null or lt.ffn_up_shexp == null or lt.ffn_down_shexp == null) return false;
+        if (lt.ffn_gate_inp_shexp != null) return false;
+        if (layer_idx + 1 >= layer_end or self.layer_tensors[layer_idx + 1].attn_norm == null) return false;
+        return self.elementwise.pipeline_gemma_moe_tail_fused != null;
+    }
+
     /// One-workgroup Gemma 4 MoE decode tail (src/shaders/gemma_moe_tail_fused.comp).
     fn dispatchGemmaMoeTailFused(
         self: *InferenceEngine,
