@@ -2838,8 +2838,10 @@ pub const ForwardCuda = struct {
         // --- Router: batched rms_norm → F32 logits → per-token top-k softmax. -----
         const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
         cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &wfn.gpu_buffer, &b.ffn_norm }, &rms, @sizeOf(RmsPush), 0);
-        const rl = MatvecBatchPush{ .M = d.n_experts, .K = d.n_embd, .x_tok_stride = d.n_embd, .y_tok_stride = d.n_experts };
-        cmd.dispatch(&self.pipes.dmmv_f32_batched, .{ d.n_experts, T, 1 }, .{ 256, 1, 1 }, &.{ &wrouter.gpu_buffer, &b.ffn_norm, &b.router_logits_e }, &rl, @sizeOf(MatvecBatchPush), 0);
+        if (!self.f32ProjectionBlas(&wrouter.gpu_buffer, &b.ffn_norm, &b.router_logits_e, d.n_experts, d.n_embd, T)) {
+            const rl = MatvecBatchPush{ .M = d.n_experts, .K = d.n_embd, .x_tok_stride = d.n_embd, .y_tok_stride = d.n_experts };
+            cmd.dispatch(&self.pipes.dmmv_f32_batched, .{ d.n_experts, T, 1 }, .{ 256, 1, 1 }, &.{ &wrouter.gpu_buffer, &b.ffn_norm, &b.router_logits_e }, &rl, @sizeOf(MatvecBatchPush), 0);
+        }
         const tk = TopkPush{ .n_experts = d.n_experts, .k = n_used };
         cmd.dispatch(&self.pipes.softmax_topk_batched, .{ T, 1, 1 }, .{ 64, 1, 1 }, &.{ &b.router_logits_e, &b.router_table_e }, &tk, @sizeOf(TopkPush), 0);
 
@@ -3031,6 +3033,20 @@ pub const ForwardCuda = struct {
             (idx == 0 or (is_rocm and (idx == 1 or idx == 2 or idx == 3))) and prefillQ8On();
     }
 
+    /// F32-weight projection over T tokens as one hipBLAS SGEMM: Y[T,M] = X[T,K]·W[M,K]^T.
+    /// `dmmv_f32_batched` gives every (row, token) pair its own workgroup, so it
+    /// re-reads the weight row T times; for Qwen 3.6's router (256x2048) and
+    /// delta-net alpha/beta it was 15% of a 315-token prefill on the R9700.
+    /// ROCm only (CUDA keeps its measured path); ZINC_F32_BLAS=0 opts out.
+    /// Returns false when the caller should use the matvec.
+    fn f32ProjectionBlas(self: *ForwardCuda, w: *const CudaBuffer, x: *const CudaBuffer, y: *const CudaBuffer, M: u32, K: u32, T: u32) bool {
+        if (comptime !is_rocm) return false;
+        if (T < f32_blas_min_t or M < f32_blas_min_m or !self.use_cublas) return false;
+        if (!envFlag("ZINC_F32_BLAS", true)) return false;
+        shim.cuda_cublas_sgemm_strided_batched(self.ctx, 1, 0, M, T, K, w.handle, 0, K, 0, x.handle, 0, K, 0, y.handle, 0, M, 0, 1, 0.0);
+        return true;
+    }
+
     fn gemmDispatchPrefillImpl(self: *ForwardCuda, cmd: *command.CudaCommand, w: *const LoadedTensor, x: *const CudaBuffer, y: *const CudaBuffer, M: u32, K: u32, T: u32, reuse_q8: bool) void {
         const idx = dmmvIdx(w.info.type_);
 
@@ -3040,6 +3056,7 @@ pub const ForwardCuda = struct {
         // prompt. This kernel preserves the exact 256-thread reduction while
         // moving the token dimension into grid.y, collapsing that to 96 launches.
         if (idx == 4) {
+            if (self.f32ProjectionBlas(&w.gpu_buffer, x, y, M, K, T)) return;
             const bp = MatvecBatchPush{
                 .M = M,
                 .K = K,
@@ -5435,6 +5452,12 @@ fn qwenMoeBatchedOn() bool {
 fn ceilDiv(a: u32, b: u32) u32 {
     return (a + b - 1) / b;
 }
+
+// Below these the per-(row, token) matvec launches too little work for a BLAS
+// call to pay off (and M = 1 is the shared-expert gate scalar). Measured on
+// Qwen 3.6 35B-A3B: +9% prefill at 153 tokens, +11% at 315, -2% at 35.
+const f32_blas_min_t: u32 = 64;
+const f32_blas_min_m: u32 = 16;
 
 fn envFlag(name: []const u8, default: bool) bool {
     const value = std.posix.getenv(name) orelse return default;
