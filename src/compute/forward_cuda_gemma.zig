@@ -1716,7 +1716,9 @@ pub const ForwardGemma = struct {
         } else {
             self.gemmDispatch(&cmd, wdown, &b.geglu, &b.down, d.n_embd, d.n_ff, T);
         }
-        const post_block: u32 = if (is_rocm and d.is_muse and T == 1 and self.decode_b1) 1024 else 256;
+        // Single-sequence decode: the one-row norm kernels are latency-bound at
+        // 256 threads (Muse measured first; Gemma 4 31B shares the shape).
+        const post_block: u32 = if (is_rocm and T == 1 and self.decode_b1) gemmaNormBlock() else 256;
         const next_wan = if (L + 1 < d.n_layers) self.model.getLayer(L + 1, "attn_norm.weight") else null;
         const next_wq = if (L + 1 < d.n_layers) self.model.getLayer(L + 1, "attn_q.weight") else null;
         const next_wk = if (L + 1 < d.n_layers) self.model.getLayer(L + 1, "attn_k.weight") else null;
@@ -2248,7 +2250,7 @@ pub const ForwardGemma = struct {
         } else {
             self.gemmDispatch(&cmd, wo, &b.attn_out, &b.o, d.n_embd, g.q_dim, B);
         }
-        const post_block: u32 = if (is_rocm and d.is_muse and B == 1 and self.decode_b1) 1024 else 256;
+        const post_block: u32 = if (is_rocm and B == 1 and self.decode_b1) gemmaNormBlock() else 256;
         const chain_ffn_norm = self.use_muse_norm_chain and q8_o and self.use_rocm_rms_q8 and
             self.use_decode_q8_ffn and wfg.info.type_ == .q4_k and wfu.info.type_ == .q4_k;
         if (chain_ffn_norm) {
