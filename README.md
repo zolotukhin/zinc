@@ -36,12 +36,12 @@ your prompt, and how fast it writes the answer.
 
 Reading that honestly:
 
-- **Prompt processing** is 1.1x to 2.0x llama.cpp on the short chat prompt shown
+- **Prompt processing** is level to 2.0x llama.cpp on the short chat prompt shown
   here. The lead narrows as prompts grow: across all four workloads llama.cpp is
   ahead in three of the 24 prompt-processing rows (Qwen 3.6 35B-A3B on 150- and
   300-token prompts, Gemma 4 31B on the longest).
 - **Token generation** is ahead on all six models, from level (Gemma 4 31B,
-  101%) to 1.28x (Qwen 3.6 35B-A3B).
+  101%) to 1.27x (Qwen 3.6 35B-A3B).
 - **Qwen 3.8 can speculate, and the chart does not count it.** That model ships
   an extra "NextN" block, and ZINC uses it to draft tokens the full model then
   verifies in one batched pass: identical output, fewer passes, 1.9x the

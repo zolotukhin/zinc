@@ -31,13 +31,13 @@
 <rect x="314.0" y="255" width="294.0" height="17" rx="4" fill="#f0a06a"/>
 <text x="618.0017063368421" y="268" font-size="13.5" font-weight="700" fill="#1f2428">101%</text>
 <text x="40" y="326" font-size="16" font-weight="600">Qwen 3.5 9B</text>
-<text x="40" y="346" font-size="12.5" fill="#5c6670">1219 vs 664 tok/s · 91.2 vs 76.7 tok/s</text>
+<text x="40" y="346" font-size="12.5" fill="#5c6670">1226 vs 668 tok/s · 90.9 vs 76.4 tok/s</text>
 <rect x="314.0" y="310" width="580.0" height="17" rx="4" fill="#e8e4db"/>
 <rect x="314.0" y="310" width="532.2" height="17" rx="4" fill="#d35400"/>
-<text x="856.237772" y="323" font-size="13.5" font-weight="700" fill="#1f2428">184%</text>
+<text x="856.1862758999999" y="323" font-size="13.5" font-weight="700" fill="#1f2428">184%</text>
 <rect x="314.0" y="333" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="333" width="344.7" height="17" rx="4" fill="#f0a06a"/>
-<text x="668.6786180336842" y="346" font-size="13.5" font-weight="700" fill="#1f2428">119%</text>
+<rect x="314.0" y="333" width="345.1" height="17" rx="4" fill="#f0a06a"/>
+<text x="669.0994572726316" y="346" font-size="13.5" font-weight="700" fill="#1f2428">119%</text>
 <text x="40" y="404" font-size="16" font-weight="600">Muse Glimmer 30B</text>
 <text x="40" y="424" font-size="12.5" fill="#5c6670">692 vs 389 tok/s · 33.4 vs 31.0 tok/s</text>
 <rect x="314.0" y="388" width="580.0" height="17" rx="4" fill="#e8e4db"/>
@@ -47,22 +47,22 @@
 <rect x="314.0" y="411" width="312.8" height="17" rx="4" fill="#f0a06a"/>
 <text x="636.8442801694737" y="424" font-size="13.5" font-weight="700" fill="#1f2428">108%</text>
 <text x="40" y="482" font-size="16" font-weight="600">Qwen 3.8 27B Dense *</text>
-<text x="40" y="502" font-size="12.5" fill="#5c6670">401 vs 246 tok/s · 32.9 vs 29.1 tok/s</text>
+<text x="40" y="502" font-size="12.5" fill="#5c6670">403 vs 233 tok/s · 32.8 vs 28.2 tok/s</text>
 <rect x="314.0" y="466" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="466" width="472.0" height="17" rx="4" fill="#d35400"/>
-<text x="795.9999936" y="479" font-size="13.5" font-weight="700" fill="#1f2428">163%</text>
+<rect x="314.0" y="466" width="501.2" height="17" rx="4" fill="#d35400"/>
+<text x="825.1923006999999" y="479" font-size="13.5" font-weight="700" fill="#1f2428">173%</text>
 <rect x="314.0" y="489" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="489" width="327.1" height="17" rx="4" fill="#f0a06a"/>
-<text x="651.1474306421053" y="502" font-size="13.5" font-weight="700" fill="#1f2428">113%</text>
+<rect x="314.0" y="489" width="338.2" height="17" rx="4" fill="#f0a06a"/>
+<text x="662.1633380705263" y="502" font-size="13.5" font-weight="700" fill="#1f2428">117%</text>
 <text x="40" y="560" font-size="16" font-weight="600">Qwen 3.6 35B A3B</text>
-<text x="40" y="580" font-size="12.5" fill="#5c6670">544 vs 492 tok/s · 96.6 vs 75.7 tok/s</text>
+<text x="40" y="580" font-size="12.5" fill="#5c6670">514 vs 503 tok/s · 96.0 vs 75.4 tok/s</text>
 <rect x="314.0" y="544" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="544" width="321.1" height="17" rx="4" fill="#d35400"/>
-<text x="645.1034569999999" y="557" font-size="13.5" font-weight="700" fill="#1f2428">111%</text>
+<rect x="314.0" y="544" width="296.1" height="17" rx="4" fill="#d35400"/>
+<text x="620.0763754685715" y="557" font-size="13.5" font-weight="700" fill="#1f2428">102%</text>
 <rect x="314.0" y="567" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="567" width="370.2" height="17" rx="4" fill="#f0a06a"/>
-<text x="694.1551872063158" y="580" font-size="13.5" font-weight="700" fill="#1f2428">128%</text>
-<text x="40" y="640" font-size="12" fill="#5c6670">Measured 2026-09-23 · ZINC 5484b74de4e7 · llama.cpp 5f436dddb · medians of repeated runs after warmup</text>
-<text x="40" y="660" font-size="12" fill="#5c6670">* both engines shown without speculative decoding. Qwen 3.8 27B Dense reaches 54.5 tok/s (187%) using its NextN block; llama.cpp</text>
+<rect x="314.0" y="567" width="369.3" height="17" rx="4" fill="#f0a06a"/>
+<text x="693.3282868231579" y="580" font-size="13.5" font-weight="700" fill="#1f2428">127%</text>
+<text x="40" y="640" font-size="12" fill="#5c6670">Measured 2026-09-23 · ZINC 5484b74de4e7 + 20c08b0a0c14 · llama.cpp 5f436dddb · medians of repeated runs after warmup</text>
+<text x="40" y="660" font-size="12" fill="#5c6670">* both engines shown without speculative decoding. Qwen 3.8 27B Dense reaches 54.9 tok/s (195%) using its NextN block; llama.cpp</text>
 <text x="40" y="676" font-size="12" fill="#5c6670">can use that block as a separate draft model, which these runs do not do, so that number is not a like-for-like comparison.</text>
 </g></svg>
