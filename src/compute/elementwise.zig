@@ -299,6 +299,16 @@ pub const ResidualRmsNormPush = extern struct {
     scale_bits: u32,
 };
 
+/// Push constants for the fused Gemma router + softmax top-k
+/// (src/shaders/rms_norm_scale_dmmv_f32_topk.comp).
+pub const RmsNormScaleDmmvF32TopkPush = extern struct {
+    M: u32,
+    K: u32,
+    eps_bits: u32,
+    k: u32,
+    scale_bits: u32,
+};
+
 /// Push constants for fused post-norm + residual-add + RMS norm
 /// (src/shaders/post_norm_residual_rms_norm.comp). One dispatch replaces
 /// Gemma's post_attention_norm -> barrier -> residual_rms_norm sequence.
@@ -549,6 +559,8 @@ pub const ElementwiseDispatch = struct {
     /// router DMMV in one dispatch. The expert/shared FFN norm remains
     /// separate because Gemma routes on a different normalized vector.
     pipeline_rms_norm_scale_dmmv_f32: ?Pipeline,
+    /// Gemma router + softmax top-k in one dispatch (last workgroup selects).
+    pipeline_rms_norm_scale_dmmv_f32_topk: ?Pipeline,
     /// Fused RMS norm + Q4_K alpha/beta SSM proj DMMV pipeline (7 bindings:
     /// hidden, attn_norm_w, alpha_w, beta_w, norm_buf, alpha_out, beta_out).
     /// Replaces (rms_norm_mul → alpha DMMV → beta DMMV) trio at the start
@@ -999,6 +1011,11 @@ pub const ElementwiseDispatch = struct {
             log.warn("rms_norm_scale_dmmv_f32 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+        const rms_norm_scale_topk_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_scale_dmmv_f32_topk.spv", .{shader_dir}) catch unreachable;
+        const pipeline_rms_norm_scale_dmmv_f32_topk = pipeline_mod.createFromSpirvWithOptions(instance, rms_norm_scale_topk_path, 6, @sizeOf(RmsNormScaleDmmvF32TopkPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("rms_norm_scale_dmmv_f32_topk shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
 
         // rms_norm_dmmv_q4k_alpha_beta: fused RMS norm + Q4_K alpha/beta
         // SSM proj DMMV, 7 bindings (hidden, attn_norm_w, alpha_w, beta_w,
@@ -1097,6 +1114,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_norm_rope = pipeline_norm_rope,
             .pipeline_rms_norm_dmmv_f32 = pipeline_rms_norm_dmmv_f32,
             .pipeline_rms_norm_scale_dmmv_f32 = pipeline_rms_norm_scale_dmmv_f32,
+            .pipeline_rms_norm_scale_dmmv_f32_topk = pipeline_rms_norm_scale_dmmv_f32_topk,
             .pipeline_rms_norm_dmmv_q4k_alpha_beta = pipeline_rms_norm_dmmv_q4k_alpha_beta,
             .pipeline_rms_norm_dmmv_alpha_beta_ksplit = pipeline_rms_norm_dmmv_alpha_beta_ksplit,
             .pipeline_qk_norm_rope_kv_write = pipeline_qk_norm_rope_kv_write,
@@ -1638,6 +1656,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_norm_rope) |*p| p.deinit();
         if (self.pipeline_rms_norm_dmmv_f32) |*p| p.deinit();
         if (self.pipeline_rms_norm_scale_dmmv_f32) |*p| p.deinit();
+        if (self.pipeline_rms_norm_scale_dmmv_f32_topk) |*p| p.deinit();
         if (self.pipeline_rms_norm_dmmv_q4k_alpha_beta) |*p| p.deinit();
         if (self.pipeline_rms_norm_dmmv_alpha_beta_ksplit) |*p| p.deinit();
         if (self.pipeline_qk_norm_rope_kv_write) |*p| p.deinit();

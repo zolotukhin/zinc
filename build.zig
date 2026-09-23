@@ -355,6 +355,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q4k_o_proj_merge",
         "rms_norm_dmmv_f32",
         "rms_norm_scale_dmmv_f32",
+        "rms_norm_scale_dmmv_f32_topk",
         "rms_norm_scale_dmmv_f32_batch",
         "rms_norm_dmmv_q4k_alpha_beta",
         "rms_norm_dmmv_alpha_beta_ksplit",

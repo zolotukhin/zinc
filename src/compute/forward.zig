@@ -1236,6 +1236,9 @@ pub const InferenceEngine = struct {
     ssm_conv_state_offsets: []u32, // [n_layers]
     // GPU-side MoE router output (for Phase 3c GPU router)
     router_output_buf: Buffer, // GPU-side expert_ids[k] u32 + expert_weights[k] f32 for fast MoE routing
+    /// Arrival counter for rms_norm_scale_dmmv_f32_topk (last workgroup runs the top-k).
+    router_topk_counter: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    router_topk_counter_zeroed: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1): per-(token, layer) capture of
     // softmax_topk output. Enabled only when the flag is set; otherwise handle==null
     // and the hot path skips the copy entirely. Slot layout:
@@ -1459,6 +1462,9 @@ pub const InferenceEngine = struct {
     /// the final post-norm + residual + layer scale + next attn norm into one
     /// dispatch (ZINC_GEMMA_MOE_TAIL_FUSE=0 restores the separate passes).
     use_gemma_moe_tail_fuse: bool = false,
+    /// Gemma MoE decode: router logits and softmax top-k in one dispatch
+    /// (ZINC_GEMMA_ROUTER_TOPK_FUSE=0 restores the separate top-k).
+    use_gemma_router_topk_fuse: bool = false,
     // Default-on only for Qwen3.6-27B's wide dense FFN shape. Uses the
     // NUM_ROWS=1 specialization of the fused gate+up+SwiGLU Q4_K shader
     // instead of widening the regular NUM_ROWS=2 path that previously
@@ -2469,6 +2475,12 @@ pub const InferenceEngine = struct {
             vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         );
         errdefer router_output_buf.deinit();
+        var router_topk_counter = try Buffer.initDeviceLocal(
+            instance,
+            16,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        );
+        errdefer router_topk_counter.deinit();
 
         // Descriptor pool: need many sets for all layers + MoE experts
         // Per layer: ~15 descriptor sets; MoE adds ~32 per layer (8 experts × 4 ops)
@@ -4001,6 +4013,8 @@ pub const InferenceEngine = struct {
             .use_ssm_delta_normed_qk = ssm_delta_normed_qk_enabled,
             .use_fused_dense_ffn = fused_dense_ffn_enabled,
             .use_gemma_moe_tail_fuse = envFlagEnabled("ZINC_GEMMA_MOE_TAIL_FUSE", true),
+            .use_gemma_router_topk_fuse = envFlagEnabled("ZINC_GEMMA_ROUTER_TOPK_FUSE", true),
+            .router_topk_counter = router_topk_counter,
             .use_qwen36_dense_fused_row1 = qwen36_dense_row1_enabled,
             .use_gemma_dense_decode_dp4a = gemma_dense_decode_dp4a_enabled,
             .use_fused_oproj_merge = fused_oproj_merge_enabled,
@@ -9356,6 +9370,8 @@ pub const InferenceEngine = struct {
             var gemma_moe_accumulated_into_hidden = false;
             // Set when the routed MoE block already recorded the shared expert.
             var gemma_shared_overlapped = false;
+            // Set when the router dispatch also produced the top-k and pre_ffw_norm_2.
+            var gemma_router_topk_fused = false;
             var skip_gemma_short_prefill_layer_output_scale = false;
             var gemma_dense_tail_wrote_next_attn_norm = false;
             var gemma_dense_tail_folded_layer_output_scale = false;
@@ -9414,7 +9430,34 @@ pub const InferenceEngine = struct {
                 var router_input_buf = self.ffn_norm_buf;
 
                 if (!use_precomputed_router) {
-                    if (can_fuse_gemma_router) {
+                    if (can_fuse_gemma_router and self.gemmaRouterTopkFusable(&lt, n_used)) {
+                        // Router + top-k in one dispatch. pre_ffw_norm_2 reads only
+                        // hidden_buf, so it runs beside it and one barrier covers both.
+                        try self.dispatchRmsNormScaleDmmvF32Topk(
+                            lt.ffn_gate_inp_scale.?,
+                            router_tensor,
+                            config.n_experts,
+                            hidden_dim,
+                            rms_norm_eps,
+                            n_used,
+                            1.0 / std.math.sqrt(@as(f32, @floatFromInt(hidden_dim))),
+                        );
+                        if (lt.pre_ffw_norm_2) |pre_norm_t| {
+                            try self.dispatchRmsNorm(
+                                self.hidden_buf.handle,
+                                hidden_size,
+                                pre_norm_t.gpu_buffer.handle,
+                                pre_norm_t.gpu_buffer.size,
+                                self.residual_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                        }
+                        self.decode_cmd.computeBarrier();
+                        gemma_router_topk_fused = true;
+                    } else if (can_fuse_gemma_router) {
                         try self.dispatchRmsNormScaleDmmvF32(
                             self.hidden_buf.handle,
                             hidden_size,
@@ -10382,7 +10425,9 @@ pub const InferenceEngine = struct {
                             log.info("FASTPATH: Gemma GPU-topk MoE ENABLED (q4k gate+up+geglu, scaled fused down+acc, n_used={d})", .{n_used});
                         }
                         const moe_topk_phase = self.beginProfilePhase();
-                        if (use_precomputed_router) {
+                        if (gemma_router_topk_fused) {
+                            // Routes and pre_ffw_norm_2 already written and barriered.
+                        } else if (use_precomputed_router) {
                             const route_region = vk.c.VkBufferCopy{
                                 .srcOffset = self.partial_decode_router_output_in_offset,
                                 .dstOffset = 0,
@@ -10418,7 +10463,9 @@ pub const InferenceEngine = struct {
                                 n_used,
                             );
                         }
-                        if (defer_gemma_pre_ffw_norm_2) {
+                        if (gemma_router_topk_fused) {
+                            // Covered by the router dispatch's barrier.
+                        } else if (defer_gemma_pre_ffw_norm_2) {
                             const pre_norm_t = lt.pre_ffw_norm_2.?;
                             try self.dispatchRmsNorm(
                                 self.hidden_buf.handle,
@@ -12376,6 +12423,74 @@ pub const InferenceEngine = struct {
     ///
     /// Replaces post_attention_norm + barrier + residual_rms_norm in the
     /// dense batched prefill path.
+    /// Whether this Gemma MoE layer's router and softmax top-k run as one
+    /// rms_norm_scale_dmmv_f32_topk dispatch. Mirrors the conditions of the
+    /// gemma_gpu_topk_moe + softmax_topk_v2 path it replaces, so the router site
+    /// and the top-k site agree.
+    fn gemmaRouterTopkFusable(self: *const InferenceEngine, lt: *const LayerTensors, n_used: u32) bool {
+        const cfg = self.model.config;
+        if (!self.use_gemma_router_topk_fuse or cfg.architecture != .gemma) return false;
+        if (self.prefill_active or self.validation_diagnostics_enabled) return false;
+        if (n_used == 0 or n_used > 16 or cfg.n_experts == 0 or cfg.n_experts > 256) return false;
+        if (self.router_topk_counter.handle == null or self.elementwise.pipeline_rms_norm_scale_dmmv_f32_topk == null) return false;
+        if (!self.use_softmax_topk_v2 or self.elementwise.pipeline_softmax_topk_v2 == null) return false;
+        const fused_gate_up = lt.ffn_gate_up_exps orelse return false;
+        const gate = lt.ffn_gate_exps orelse fused_gate_up;
+        const up = lt.ffn_up_exps orelse fused_gate_up;
+        const down = lt.ffn_down_exps orelse return false;
+        if (gate.info.type_ != .q4_k or up.info.type_ != .q4_k) return false;
+        const down_ok = (down.info.type_ == .q5_1 and self.dmmv.pipeline_q5_1_moe_fused_down_acc_scaled != null) or
+            (down.info.type_ == .q8_0 and self.dmmv.pipeline_q8_0_moe_fused_down_acc_scaled != null);
+        if (!down_ok) return false;
+        if (lt.ffn_gate_inp_bias != null or lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null or lt.ffn_down_exps_bias != null) return false;
+        if (lt.ffn_down_exps_scale == null) return false;
+        return self.elementwise.pipeline_softmax_topk != null and self.dmmv.pipeline_q4k_moe_fused_gate_up_geglu != null;
+    }
+
+    fn dispatchRmsNormScaleDmmvF32Topk(
+        self: *InferenceEngine,
+        router_scale: *const LoadedTensor,
+        router_w: *const LoadedTensor,
+        n_experts: u32,
+        hidden_dim: u32,
+        eps: f32,
+        n_used: u32,
+        logit_scale: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_rms_norm_scale_dmmv_f32_topk orelse return error.ShaderNotLoaded);
+        if (!self.router_topk_counter_zeroed) {
+            vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.router_topk_counter.handle, 0, self.router_topk_counter.size, 0);
+            self.decode_cmd.transferToComputeBarrier();
+            self.router_topk_counter_zeroed = true;
+        }
+        const push = elementwise_mod.RmsNormScaleDmmvF32TopkPush{
+            .M = n_experts,
+            .K = hidden_dim,
+            .eps_bits = @bitCast(eps),
+            .k = n_used,
+            .scale_bits = @bitCast(logit_scale),
+        };
+        self.pushDispatch6(
+            pip,
+            std.mem.asBytes(&push),
+            self.hidden_buf.handle,
+            @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32),
+            router_scale.gpu_buffer.handle,
+            router_scale.gpu_buffer.size,
+            router_w.gpu_buffer.handle,
+            router_w.gpu_buffer.size,
+            self.router_logits_buf.handle,
+            self.router_logits_buf.size,
+            self.router_output_buf.handle,
+            self.router_output_buf.size,
+            self.router_topk_counter.handle,
+            self.router_topk_counter.size,
+            n_experts,
+            1,
+            1,
+        );
+    }
+
     /// Whether this Gemma MoE layer's decode tail runs as one gemma_moe_tail_fused
     /// dispatch. The routed block also uses it to overlap the shared expert with
     /// the routed experts (they then share barriers), so both sites must agree.
@@ -32067,6 +32182,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.gpu_ssm_states);
         self.allocator.free(self.ssm_conv_state_offsets);
         self.router_output_buf.deinit();
+        if (self.router_topk_counter.handle != null) self.router_topk_counter.deinit();
         if (self.routing_capture_buf.handle != null) self.routing_capture_buf.deinit();
         if (self.prefill_expert_count_buf.handle != null) self.prefill_expert_count_buf.deinit();
         if (self.prefill_ffn_input_capture_buf.handle != null) self.prefill_ffn_input_capture_buf.deinit();

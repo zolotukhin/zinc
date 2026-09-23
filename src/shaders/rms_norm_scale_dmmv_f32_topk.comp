@@ -1,0 +1,139 @@
+#version 460
+// ZINC - Gemma 4 MoE router + softmax top-k in one dispatch.
+//
+// Every workgroup computes one router logit exactly as rms_norm_scale_dmmv_f32:
+//   logit[row] = dot(rms_norm(hidden) * router_scale, router_w[row])
+// then bumps a device-scope counter. The workgroup that finishes last runs
+// softmax_topk_v2's selection over all logits (same packing and tie-break, so
+// the routes are bit-identical) and resets the counter for the next layer.
+// This removes the separate top-k dispatch and the barrier before it.
+//
+// Dispatch: (M, 1, 1), local_size_x = 64. Requires M <= 256 and k <= 16.
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint eps_bits;
+    uint k;
+    uint scale_bits;
+};
+
+layout(set = 0, binding = 0) readonly buffer Hidden        { vec4 hidden_v4[]; };
+layout(set = 0, binding = 1) readonly buffer RouterScale   { vec4 scale_v4[]; };
+layout(set = 0, binding = 2) readonly buffer RouterWeights { vec4 router_w_v4[]; };
+layout(set = 0, binding = 3) coherent buffer RouterLogits  { float router_out[]; };
+layout(set = 0, binding = 4) buffer RouterOutput           { uint output_data[]; };
+layout(set = 0, binding = 5) coherent buffer Counter       { uint counter; };
+
+const uint MAX_PER_THREAD = 4u;  // covers M up to 64 * 4 = 256
+const uint MAX_K = 16u;
+
+shared bool s_is_last;
+shared float s_topk_logits[MAX_K];
+shared uint s_subgroup_winner[4];
+shared uint s_global_winner;
+
+uint sortable(float f) {
+    uint ui = floatBitsToUint(f);
+    return (ui & 0x80000000u) != 0u ? ~ui : (ui ^ 0x80000000u);
+}
+
+float unsortable_hi(uint s) {
+    uint full = (s & 0x80000000u) != 0u ? (s ^ 0x80000000u) : ~s;
+    return uintBitsToFloat(full & 0xFFFFFF00u);
+}
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+
+    // --- Router logit (identical to rms_norm_scale_dmmv_f32) ---
+    const float eps = uintBitsToFloat(eps_bits);
+    const uint K_v4 = K >> 2;
+    float sum_sq = 0.0;
+    for (uint i = tid; i < K_v4; i += 64u) {
+        vec4 v = hidden_v4[i];
+        sum_sq += dot(v, v);
+    }
+    sum_sq = subgroupAdd(sum_sq);
+    const float rms_inv = inversesqrt(sum_sq / float(K) + eps);
+    const uint w_base_v4 = row * K_v4;
+    float sum = 0.0;
+    for (uint k_v4 = tid; k_v4 < K_v4; k_v4 += 64u) {
+        vec4 x = hidden_v4[k_v4] * rms_inv * scale_v4[k_v4];
+        sum += dot(x, router_w_v4[w_base_v4 + k_v4]);
+    }
+    sum = subgroupAdd(sum);
+
+    // --- Publish the logit; the last workgroup to arrive owns the top-k ---
+    if (tid == 0u) {
+        router_out[row] = sum;
+        memoryBarrierBuffer();
+        const uint arrived = atomicAdd(counter, 1u);
+        s_is_last = arrived == M - 1u;
+    }
+    barrier();
+    if (!s_is_last) return;
+    memoryBarrierBuffer();
+
+    // --- softmax_topk_v2 selection over router_out ---
+    const float logit_scale = uintBitsToFloat(scale_bits);
+    float vals[MAX_PER_THREAD];
+    uint idxs[MAX_PER_THREAD];
+    for (uint i = 0u; i < MAX_PER_THREAD; i++) {
+        uint elem_idx = tid + i * 64u;
+        if (elem_idx < M) {
+            vals[i] = router_out[elem_idx];
+            idxs[i] = elem_idx;
+        } else {
+            vals[i] = -1.0 / 0.0;
+            idxs[i] = 0u;
+        }
+    }
+
+    for (uint ki = 0u; ki < k; ki++) {
+        float best_val = vals[0];
+        uint best_idx = idxs[0];
+        for (uint i = 1u; i < MAX_PER_THREAD; i++) {
+            if (vals[i] > best_val) {
+                best_val = vals[i];
+                best_idx = idxs[i];
+            }
+        }
+        uint packed = (sortable(best_val) & 0xFFFFFF00u) | (255u - (best_idx & 0xFFu));
+        uint subgroup_winner = subgroupMax(packed);
+        if (subgroupElect()) s_subgroup_winner[gl_SubgroupID] = subgroup_winner;
+        barrier();
+        if (tid == 0u) {
+            uint winner_scan = s_subgroup_winner[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) winner_scan = max(winner_scan, s_subgroup_winner[sg]);
+            s_global_winner = winner_scan;
+        }
+        barrier();
+        uint winner = s_global_winner;
+        uint winner_idx = 255u - (winner & 0xFFu);
+        float winner_val = unsortable_hi(winner & 0xFFFFFF00u);
+        for (uint i = 0u; i < MAX_PER_THREAD; i++) {
+            if (idxs[i] == winner_idx) vals[i] = -1.0 / 0.0;
+        }
+        if (tid == 0u) {
+            output_data[ki] = winner_idx;
+            if (ki < MAX_K) s_topk_logits[ki] = winner_val * logit_scale;
+        }
+    }
+    barrier();
+
+    float my_logit = (tid < k && tid < MAX_K) ? s_topk_logits[tid] : -1.0 / 0.0;
+    float max_logit = subgroupMax(my_logit);
+    float my_exp = (tid < k && tid < MAX_K) ? exp(my_logit - max_logit) : 0.0;
+    float wsum = subgroupAdd(my_exp);
+    float inv_wsum = (wsum > 0.0) ? (1.0 / wsum) : 0.0;
+    if (tid < k && tid < MAX_K) output_data[k + tid] = floatBitsToUint(my_exp * inv_wsum);
+
+    if (tid == 0u) counter = 0u;
+}
