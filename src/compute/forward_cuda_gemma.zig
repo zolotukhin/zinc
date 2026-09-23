@@ -140,6 +140,23 @@ const QuantActPush = extern struct { K: u32, T: u32 };
 const Dmmv2Push = extern struct { M0: u32, M1: u32, K: u32, pair_reduce: u32 = 0 };
 const Dmmv3Push = extern struct { M0: u32, M1: u32, M2: u32, K: u32 };
 
+/// Threads for the one-workgroup (single-token) norm kernels on the decode path.
+/// At 256 each thread walks ~21 dependent loads per pass over a 5376-wide
+/// vector (Gemma 4 31B), which made the fused norm+residual kernels 19 us each;
+/// 1024 threads measured +3.8% Gemma 4 31B decode on the R9700.
+/// ZINC_GEMMA_NORM_BLOCK overrides (multiple of 32, <= 1024).
+var gemma_norm_block_cached: u32 = 0;
+fn gemmaNormBlock() u32 {
+    if (gemma_norm_block_cached != 0) return gemma_norm_block_cached;
+    var v: u32 = 1024;
+    if (std.posix.getenv("ZINC_GEMMA_NORM_BLOCK")) |raw| {
+        const parsed = std.fmt.parseUnsigned(u32, std.mem.trim(u8, raw, " \t\r\n"), 10) catch 1024;
+        if (parsed >= 32 and parsed <= 1024 and parsed % 32 == 0) v = parsed;
+    }
+    gemma_norm_block_cached = v;
+    return v;
+}
+
 fn dmmvIdx(t: gguf.GGMLType) usize {
     return switch (t) {
         .q4_k => 0,
@@ -1077,16 +1094,16 @@ pub const ForwardGemma = struct {
                 const rms_q8 = RmsQ8Push{ .N = d.n_embd, .eps = d.rms_eps, .T = 1 };
                 cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf, &self.batch.?.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
             } else {
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                 const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             }
             cmd.dispatch(&self.pipes.dmmv_q5k_q8_fast, .{ d.vocab, 1, 1 }, .{ 64, 1, 1 }, &.{ &lm_head.gpu_buffer, &self.batch.?.act_q8, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         } else if (lm_idx < 4) {
-            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
             cmd.dispatch(&self.pipes.dmmv_fast[lm_idx], .{ d.vocab, 1, 1 }, .{ 64, 1, 1 }, &.{ &lm_head.gpu_buffer, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         } else {
-            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
             cmd.dispatch(&self.pipes.dmmv[lm_idx], .{ d.vocab, 1, 1 }, .{ 256, 1, 1 }, &.{ &lm_head.gpu_buffer, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         }
         self.argmaxDispatch(&cmd, &self.argmax_buf);
@@ -1417,7 +1434,7 @@ pub const ForwardGemma = struct {
 
         var cmd = try command.beginCommand(ctx);
         const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid_last, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &hid_last, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
         const lm = DmmvPush{ .M = d.vocab, .K = d.n_embd };
         const lm_idx = dmmvIdx(lm_head.info.type_);
         if (lm_idx < 4) {
@@ -1866,16 +1883,16 @@ pub const ForwardGemma = struct {
                     const rms_q8 = RmsQ8Push{ .N = d.n_embd, .eps = d.rms_eps, .T = 1 };
                     cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf, &b.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
                 } else {
-                    cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                    cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                     const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                     cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
                 }
                 cmd.dispatch(&self.pipes.dmmv_q5k_q8_fast, .{ d.vocab, 1, 1 }, .{ 64, 1, 1 }, &.{ &lm_head.gpu_buffer, &b.act_q8, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
             } else if (lm_idx < 4) {
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                 cmd.dispatch(&self.pipes.dmmv_fast[lm_idx], .{ d.vocab, 1, 1 }, .{ 64, 1, 1 }, &.{ &lm_head.gpu_buffer, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
             } else {
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                 cmd.dispatch(&self.pipes.dmmv[lm_idx], .{ d.vocab, 1, 1 }, .{ 256, 1, 1 }, &.{ &lm_head.gpu_buffer, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
             }
             self.argmaxDispatch(&cmd, &am_slot);
@@ -1934,13 +1951,13 @@ pub const ForwardGemma = struct {
                     const rms_q8 = RmsQ8Push{ .N = d.n_embd, .eps = d.rms_eps, .T = 1 };
                     cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf, &b.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
                 } else {
-                    cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                    cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                     const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                     cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
                 }
                 cmd.dispatch(&self.pipes.dmmv_q5k_q8_fast, .{ d.vocab, 1, 1 }, .{ 64, 1, 1 }, &.{ &lm_head.gpu_buffer, &b.act_q8, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
             } else {
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &hid, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                 if (lm_idx < 4) {
                     cmd.dispatch(&self.pipes.dmmv_fast[lm_idx], .{ d.vocab, 1, 1 }, .{ 64, 1, 1 }, &.{ &lm_head.gpu_buffer, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
                 } else {
@@ -2789,7 +2806,7 @@ pub const ForwardGemma = struct {
                 const rms_q8 = RmsQ8Push{ .N = d.n_embd, .eps = d.rms_eps, .T = 1 };
                 cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf, &self.batch.?.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
             } else {
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
                 if (q8_front) {
                     const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                     cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
@@ -2992,16 +3009,16 @@ pub const ForwardGemma = struct {
         // (ffn_norm_buf), so ffnBlock skips its standalone pre-ffn norm.
         if (fold) {
             const wfn = self.layer(L, "ffn_norm.weight");
-            cmd.dispatch(&self.pipes.rms_norm_residual_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.o_buf, &wpan.gpu_buffer, &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_residual_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.o_buf, &wpan.gpu_buffer, &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
         } else if (self.fuse_attn_moe_norm) {
             // MoE layer: fold the 3 MoE pre-norms (rms_norm_triple off the just-
             // updated hidden) into THIS post-attn norm+residual launch → moeFfnBlock
             // skips its standalone rms_norm_triple. Byte-identical; one fewer launch.
             const wfn = self.layer(L, "ffn_norm.weight");
             const wpre2 = self.layer(L, "pre_ffw_norm_2.weight");
-            cmd.dispatch(&self.pipes.rms_norm_residual_triple, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.o_buf, &wpan.gpu_buffer, &self.hidden, &wfn.gpu_buffer, &wpre2.gpu_buffer, &self.ffn_norm_buf, &self.norm_buf, &self.moe_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_residual_triple, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.o_buf, &wpan.gpu_buffer, &self.hidden, &wfn.gpu_buffer, &wpre2.gpu_buffer, &self.ffn_norm_buf, &self.norm_buf, &self.moe_norm_buf }, &rms, @sizeOf(RmsPush), 0);
         } else {
-            cmd.dispatch(&self.pipes.rms_norm_residual, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.o_buf, &wpan.gpu_buffer, &self.hidden }, &post_rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_residual, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.o_buf, &wpan.gpu_buffer, &self.hidden }, &post_rms, @sizeOf(RmsPush), 0);
         }
         self.submit(cmd);
     }
@@ -3045,7 +3062,7 @@ pub const ForwardGemma = struct {
                 const rms_q8 = RmsQ8Push{ .N = d.n_embd, .eps = d.rms_eps, .T = 1 };
                 cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf, &self.batch.?.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
             } else {
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
             }
         }
         // GeGLU FFN: gelu(gate) * up → down. gate & up share the pre-ffn norm
@@ -3091,14 +3108,14 @@ pub const ForwardGemma = struct {
         if (fold_next) {
             const wan_next = self.layer(L + 1, "attn_norm.weight");
             if (wlos) |ws| {
-                cmd.dispatch(&self.pipes.rms_norm_residual_scale_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden, &ws.gpu_buffer, &wan_next.gpu_buffer, &self.norm_buf }, &post_rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm_residual_scale_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden, &ws.gpu_buffer, &wan_next.gpu_buffer, &self.norm_buf }, &post_rms, @sizeOf(RmsPush), 0);
             } else {
-                cmd.dispatch(&self.pipes.rms_norm_residual_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden, &wan_next.gpu_buffer, &self.norm_buf }, &post_rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm_residual_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden, &wan_next.gpu_buffer, &self.norm_buf }, &post_rms, @sizeOf(RmsPush), 0);
             }
         } else if (wlos) |ws| {
-            cmd.dispatch(&self.pipes.rms_norm_residual_scale, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden, &ws.gpu_buffer }, &post_rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_residual_scale, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden, &ws.gpu_buffer }, &post_rms, @sizeOf(RmsPush), 0);
         } else {
-            cmd.dispatch(&self.pipes.rms_norm_residual, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden }, &post_rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_residual, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.down_buf, &wpfn.gpu_buffer, &self.hidden }, &post_rms, @sizeOf(RmsPush), 0);
         }
         self.submit(cmd);
     }
@@ -3158,7 +3175,7 @@ pub const ForwardGemma = struct {
             // moe_norm_buf) were already produced by the attention block's fused
             // rms_norm_residual_triple — skip the standalone triple here.
             if (!self.fuse_attn_moe_norm) {
-                cmd.dispatch(&self.pipes.rms_norm_triple, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wfn.gpu_buffer, &wpre2.gpu_buffer, &self.ffn_norm_buf, &self.norm_buf, &self.moe_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm_triple, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &wfn.gpu_buffer, &wpre2.gpu_buffer, &self.ffn_norm_buf, &self.norm_buf, &self.moe_norm_buf }, &rms, @sizeOf(RmsPush), 0);
             }
             if (shared_gu_q8) {
                 const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
@@ -3183,7 +3200,7 @@ pub const ForwardGemma = struct {
             } else {
                 self.dmmvDispatch(&cmd, wdown, &self.geglu_buf, &self.shared_buf, d.n_embd, sf, 0, 0);
             }
-            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.shared_buf, &wpn1.gpu_buffer, &self.shared_buf }, &rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.shared_buf, &wpn1.gpu_buffer, &self.shared_buf }, &rms, @sizeOf(RmsPush), 0);
             self.submit(cmd);
         }
 
@@ -3300,7 +3317,7 @@ pub const ForwardGemma = struct {
             // Cycle 17: when fusing, skip the standalone post_ffw_norm_2 here — the
             // fused moe_norm_combine_tail does it from the raw weighted-acc moe_out_buf.
             if (!self.fuse_norm_combine)
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.moe_out_buf, &wpn2.gpu_buffer, &self.moe_out_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.moe_out_buf, &wpn2.gpu_buffer, &self.moe_out_buf }, &rms, @sizeOf(RmsPush), 0);
             if (batched) self.submit(cmd) else cmd.commitAndWait();
         }
 
@@ -3314,9 +3331,9 @@ pub const ForwardGemma = struct {
             if (self.fuse_norm_combine) {
                 // Cycle 17: also fold post_ffw_norm_2 (above) into the combine — reads
                 // moe_out_buf RAW, norms it internally. Two single-block launches → one.
-                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), d.n_embd * @sizeOf(f32));
+                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), d.n_embd * @sizeOf(f32));
             } else {
-                cmd.dispatch(&self.pipes.moe_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.moe_combine_tail, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
             }
             if (batched) self.submit(cmd) else cmd.commitAndWait();
         }
@@ -3762,7 +3779,7 @@ pub const ForwardGemma = struct {
             const wrouter = self.layer(L, "ffn_gate_inp.weight"); // [n_embd, n_experts] F32
             const wrscale = self.layer(L, "ffn_gate_inp.scale"); // [n_embd] F32
             var cmd = try command.beginCommand(ctx);
-            cmd.dispatch(&self.pipes.rms_norm_noweight, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_noweight, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
             const mv = MulVecPush{ .N = d.n_embd, .scale = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(d.n_embd))) };
             cmd.dispatch(&self.pipes.mul_vec_scaled, .{ ceilDiv(d.n_embd, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.norm_buf, &wrscale.gpu_buffer }, &mv, @sizeOf(MulVecPush), 0);
             self.dmmvDispatch(&cmd, wrouter, &self.norm_buf, &self.router_logits_buf, d.n_experts, d.n_embd, 0, 0);
@@ -3801,7 +3818,7 @@ pub const ForwardGemma = struct {
                 const gu_half = expertSliceBytes(wgu.info.type_, ef, d.n_embd); // ef rows
                 const gu_full = gu_half * 2; // 2*ef rows per expert
                 const down_slice = expertSliceBytes(wde.info.type_, d.n_embd, ef);
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wpre2.gpu_buffer, &self.moe_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &wpre2.gpu_buffer, &self.moe_norm_buf }, &rms, @sizeOf(RmsPush), 0);
                 if (batched) {
                     const nrows = n_used * ef;
                     const pg = ExpertsPush{ .M = ef, .K = d.n_embd, .slice = gu_full, .x_stride = 0, .n_used = n_used, .base = 0 };
@@ -3842,7 +3859,7 @@ pub const ForwardGemma = struct {
             // Cycle 17: when fusing, skip the standalone post_ffw_norm_2 here — the
             // fused moe_norm_combine_tail does it from the raw weighted-acc moe_out_buf.
             if (!self.fuse_norm_combine)
-                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.moe_out_buf, &wpn2.gpu_buffer, &self.moe_out_buf }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.moe_out_buf, &wpn2.gpu_buffer, &self.moe_out_buf }, &rms, @sizeOf(RmsPush), 0);
             if (batched) self.submit(cmd) else cmd.commitAndWait();
         }
 
@@ -3856,9 +3873,9 @@ pub const ForwardGemma = struct {
             if (self.fuse_norm_combine) {
                 // Cycle 17: also fold post_ffw_norm_2 (above) into the combine — reads
                 // moe_out_buf RAW, norms it internally. Two single-block launches → one.
-                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), d.n_embd * @sizeOf(f32));
+                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), d.n_embd * @sizeOf(f32));
             } else {
-                cmd.dispatch(&self.pipes.moe_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.moe_combine_tail, .{ 1, 1, 1 }, .{ gemmaNormBlock(), 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
             }
             if (batched) self.submit(cmd) else cmd.commitAndWait();
         }
