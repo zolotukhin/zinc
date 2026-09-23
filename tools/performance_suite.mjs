@@ -792,6 +792,13 @@ function scenarioNeedsOutputReview(scenario) {
   ).tone === "caution";
 }
 
+// Two tokenizers may disagree by a BOS or a trailing newline; anything larger
+// means the engines were not fed the same prompt.
+export function promptTokensMatch(zincTokens, baselineTokens) {
+  if (zincTokens == null || baselineTokens == null) return null;
+  return Math.abs(zincTokens - baselineTokens) <= Math.max(2, Math.round(0.02 * Math.max(zincTokens, baselineTokens)));
+}
+
 export function buildComparison(zincSummary, baselineSummary, options = {}) {
   if (!zincSummary || !baselineSummary) return null;
   const zincDecode = finiteMetric(zincSummary.decode_tps?.median ?? zincSummary.decode_tps?.avg ?? null);
@@ -826,8 +833,15 @@ export function buildComparison(zincSummary, baselineSummary, options = {}) {
 
   const pctOfBaseline = (zincDecode / baselineDecode) * 100;
   const gapTps = zincDecode - baselineDecode;
+  const promptTokenDelta = zincPromptTokens != null && baselinePromptTokens != null
+    ? zincPromptTokens - baselinePromptTokens
+    : null;
   return {
     baseline_name: baselineSummary.name,
+    zinc_prompt_tokens: zincPromptTokens,
+    baseline_prompt_tokens: baselinePromptTokens,
+    prompt_token_delta: promptTokenDelta,
+    prompt_parity: promptTokensMatch(zincPromptTokens, baselinePromptTokens),
     zinc_prompt_tps: zincPrefill,
     baseline_prompt_tps: baselinePrefill,
     zinc_decode_tps: zincDecode,
@@ -1648,14 +1662,27 @@ async function httpJson(url, payload, timeoutMs) {
   return JSON.parse(text);
 }
 
-function buildOpenAiPayload(caseDef) {
+// Both servers get the same explicit system turn and the same explicit
+// thinking switch. Left to their defaults they render different prompts:
+// ZINC's server injects its own short system turn and closes the think block,
+// while the GGUF Jinja that llama.cpp runs adds a long "Reasoning effort"
+// directive and opens one (Qwen 3.8: 47-66 prompt tokens vs 87).
+export const BENCH_SYSTEM_PROMPT = "You are a helpful assistant.";
+
+export function buildOpenAiPayload(caseDef) {
   if (caseDef.prompt_mode === "chat") {
     return {
       model: "q",
-      messages: [{ role: "user", content: caseDef.prompt }],
+      messages: [
+        { role: "system", content: caseDef.system_prompt ?? BENCH_SYSTEM_PROMPT },
+        { role: "user", content: caseDef.prompt },
+      ],
       max_tokens: caseDef.max_tokens,
       temperature: 0,
       stream: false,
+      // ZINC reads the top-level flag, llama.cpp the template kwargs.
+      enable_thinking: false,
+      chat_template_kwargs: { enable_thinking: false },
     };
   }
   return {

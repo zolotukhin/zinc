@@ -6,6 +6,9 @@ import {
   buildComparison,
   buildMeasurementPhases,
   buildZincOpenAiPayload,
+  buildOpenAiPayload,
+  BENCH_SYSTEM_PROMPT,
+  promptTokensMatch,
   benchmarkStatisticsNote,
   benchmarkFailureReason,
   canonicalModelIdFromPath,
@@ -833,12 +836,39 @@ test("RDNA ZINC server payload keeps the preloaded GGUF active", () => {
     max_tokens: 48,
   });
   expect(chat).toEqual({
-    messages: [{ role: "user", content: "Tell me about C++" }],
+    messages: [
+      { role: "system", content: BENCH_SYSTEM_PROMPT },
+      { role: "user", content: "Tell me about C++" },
+    ],
     max_tokens: 48,
     temperature: 0,
     stream: false,
+    enable_thinking: false,
+    chat_template_kwargs: { enable_thinking: false },
   });
   expect(chat).not.toHaveProperty("model");
+});
+
+test("both engines get the same chat prompt apart from the model id", () => {
+  const caseDef = { prompt_mode: "chat", prompt: "Tell me about C++", max_tokens: 48 };
+  const { model, ...llama } = buildOpenAiPayload(caseDef);
+  expect(model).toBe("q");
+  expect(buildZincOpenAiPayload(caseDef)).toEqual(llama);
+});
+
+test("prompt parity tolerates a BOS but flags a different template", () => {
+  expect(promptTokensMatch(46, 47)).toBe(true);
+  expect(promptTokensMatch(49, 51)).toBe(true);
+  expect(promptTokensMatch(47, 87)).toBe(false);
+  expect(promptTokensMatch(66, 87)).toBe(false);
+  expect(promptTokensMatch(null, 87)).toBe(null);
+  const metric = (m: number) => ({ median: m });
+  const cmp = buildComparison(
+    { prompt_tokens: 47, decode_tps: metric(30), prefill_tps: metric(300) },
+    { prompt_tokens: 87, decode_tps: metric(28), prefill_tps: metric(200) },
+  )!;
+  expect(cmp.prompt_token_delta).toBe(-40);
+  expect(cmp.prompt_parity).toBe(false);
 });
 
 test("remote llama-server baselines disable prompt cache for prefill timing", () => {
