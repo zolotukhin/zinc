@@ -441,10 +441,13 @@ test "Vulkan Gemma grouped MoE prefill wires Q5_1 route-column down projection" 
     try expectContains(build, "\"moe_weighted_acc_scaled_batch\"");
 
     const q5_cols = @embedFile("shaders/dmmv_q5_1_moe_cols.comp");
-    try expectContains(q5_cols, "Q5_1_BYTES = 24u");
+    // A Q5_1 block is 24 bytes = six words: d|m halves, qh, then four qs words.
+    try expectContains(q5_cols, "Q5_1_WORDS = 6u");
     try expectContains(q5_cols, "ROWS_PER_WG = 8u");
     try expectContains(q5_cols, "LANES_PER_ROW = 8u");
-    try expectContains(q5_cols, "const float w0 = d * float(lo | (bit_lo << 4)) + m;");
+    try expectContains(q5_cols, "const vec2 dm = unpackHalf2x16(a_u32[w]);");
+    try expectContains(q5_cols, "const vec4 wl = dm.x * q5_lo(qs, qh, 4u * i) + dm.y;");
+    try expectContains(q5_cols, "(((qh >> (j + 16u)) & 1u) << 4)");
     try expectContains(q5_cols, "x_route_divisor");
 }
 
