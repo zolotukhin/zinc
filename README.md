@@ -40,8 +40,8 @@ Reading that honestly:
   here. The lead narrows as prompts grow: across all four workloads llama.cpp is
   ahead in three of the 24 prompt-processing rows (Qwen 3.6 35B-A3B on 150- and
   300-token prompts, Gemma 4 31B on the longest).
-- **Token generation** is ahead on all six models, from level (Gemma 4 31B,
-  101%) to 1.27x (Qwen 3.6 35B-A3B).
+- **Token generation** is ahead in all 24 rows, from 1.01x (Gemma 4 31B on the
+  longest prompt) to 1.27x (Gemma 4 26B-A4B and Qwen 3.6 35B-A3B).
 - **Qwen 3.8 can speculate, and the chart does not count it.** That model ships
   an extra "NextN" block, and ZINC uses it to draft tokens the full model then
   verifies in one batched pass: identical output, fewer passes, 1.9x the
