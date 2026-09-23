@@ -9,6 +9,7 @@ import {
   buildOpenAiPayload,
   BENCH_SYSTEM_PROMPT,
   promptTokensMatch,
+  provenanceDirtyCommand,
   benchmarkStatisticsNote,
   benchmarkFailureReason,
   canonicalModelIdFromPath,
@@ -1496,4 +1497,12 @@ test("parseZincSpeculative reads the acceptance line both servers log", () => {
   expect(parseZincSpeculative(vulkan)).toEqual({ kind: "nextn", accepted: 12, drafted: 16, acceptancePct: 75 });
   expect(parseZincSpeculative(rocm)).toEqual({ kind: "nextn", accepted: 56, drafted: 78, acceptancePct: 71.8 });
   expect(parseZincSpeculative("no speculation here")).toBeNull();
+});
+
+test("provenance dirtiness ignores files that cannot change a measurement", () => {
+  const cmd = provenanceDirtyCommand();
+  expect(cmd).toContain("git status --porcelain --untracked-files=no -- .");
+  for (const p of ["site", "docs", "README.md", "assets"]) expect(cmd).toContain(`:(exclude)${p}`);
+  expect(cmd).not.toContain("exclude)src");
+  expect(cmd).not.toContain("exclude)tools");
 });

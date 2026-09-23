@@ -53,8 +53,25 @@ function targetById(id: string) {
   return benchmarkData.targets.find((target: any) => target.id === id) ?? null;
 }
 
+// The landing page quotes like-for-like numbers only. Where ZINC speculated
+// (Qwen 3.8's NextN block) and llama.cpp did not, use the measured
+// non-speculative variant, as the benchmark page does by default.
+function likeForLikeScenario(scenario: any) {
+  const off = scenario?.variants?.mtp_off;
+  if (!off?.zinc) return scenario;
+  return { ...scenario, zinc: off.zinc, comparison: off.comparison ?? scenario.comparison };
+}
+
+function likeForLikeModel(model: any) {
+  if (!model) return null;
+  const scenarios = (model.scenarios ?? []).map(likeForLikeScenario);
+  const primary = scenarios.find((scenario: any) => scenario.id === 'core') ?? scenarios[0];
+  if (!primary?.variants?.mtp_off?.zinc) return { ...model, scenarios };
+  return { ...model, scenarios, zinc: primary.zinc, comparison: primary.comparison ?? model.comparison };
+}
+
 function modelById(target: any, id: string) {
-  return target?.models?.find((model: any) => model.id === id) ?? null;
+  return likeForLikeModel(target?.models?.find((model: any) => model.id === id) ?? null);
 }
 
 function displayModelLabel(label: string) {
@@ -82,7 +99,7 @@ const metal35Decode = metricMedian(metal35?.zinc?.decode_tps);
 
 const homeDescription = `Run GGUF models locally with ZINC. Use ROCm or Vulkan on AMD Radeon, Vulkan on Intel Arc, Metal on Apple Silicon, or the experimental CUDA backend on NVIDIA RTX.`;
 const appDescription = `A Zig inference engine for running GGUF models on consumer GPUs, with ROCm, Vulkan, Metal, and experimental CUDA backends.`;
-const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent ROCm and Vulkan server comparisons against llama.cpp, and ROCm is the headline Radeon result. On ROCm, Qwen 3.8 27B reaches ${formatTokNumber(rdnaRocmQwen38Decode)} tok/s decode versus ${formatTokNumber(rdnaRocmQwen38BaselineDecode)}, and ${formatTokNumber(rdnaRocmQwen38Prefill)} tok/s prefill versus ${formatTokNumber(rdnaRocmQwen38BaselinePrefill)}, with ZINC ahead in all four workloads against the latest upstream llama.cpp build used for the run. The portable Vulkan build reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
+const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent ROCm and Vulkan server comparisons against llama.cpp, and ROCm is the headline Radeon result. On ROCm, Qwen 3.8 27B reaches ${formatTokNumber(rdnaRocmQwen38Decode)} tok/s decode versus ${formatTokNumber(rdnaRocmQwen38BaselineDecode)}, and ${formatTokNumber(rdnaRocmQwen38Prefill)} tok/s prefill versus ${formatTokNumber(rdnaRocmQwen38BaselinePrefill)}, both measured without speculative decoding against llama.cpp's ${rdnaRocmTarget?.methodology?.llama_backend ?? 'GPU'} backend on the same card. The portable Vulkan build reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
 
 function ratioX(zinc: number | null | undefined, baseline: number | null | undefined) {
   if (zinc == null || baseline == null || Number.isNaN(zinc) || Number.isNaN(baseline) || baseline <= 0) return null;
@@ -175,7 +192,7 @@ const amdBackends = [
     overallWins: rdnaRocmOverallWins,
     headline: formatTokNumber(rdnaRocmQwen38Decode, 1),
     headlineLabel: 'Qwen 3.8 decode tok/s',
-    headlineNote: `${formatTokNumber(rdnaRocmQwen38BaselineDecode, 1)} in latest llama.cpp`,
+    headlineNote: `${formatTokNumber(rdnaRocmQwen38BaselineDecode, 1)} in llama.cpp, neither speculating`,
   },
   {
     id: 'vulkan',

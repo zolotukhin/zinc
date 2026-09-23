@@ -12,6 +12,10 @@ Remote machine details are intentionally supplied by `.env` or CLI flags. Do not
 
 Use the suite's server-vs-server path for any headline "ZINC vs baseline" claim on RDNA. That means one reusable ZINC server per model, one reusable baseline server per model, the same GGUF, the same prompt matrix, the same warmup/run count, and server-side timing for prefill/decode. Do not compare a one-shot ZINC CLI run against a warmed baseline server and call that a result; the CLI path is useful for local engine diagnostics only.
 
+Both engines must read the same prompt. Chat requests therefore carry an explicit system turn and `enable_thinking: false` (top level for ZINC, `chat_template_kwargs` for llama.cpp). Without them the two servers render different prompts from the same request: ZINC injects its own short system turn and closes the think block, while the GGUF Jinja that llama.cpp runs can add a long reasoning directive and open one (Qwen 3.8 read 47–66 prompt tokens in ZINC against 87 in llama.cpp). Every comparison records both prompt token counts and a `prompt_parity` flag, and the dashboard shows how many rows matched.
+
+Compare like with like: a ROCm ZINC row is measured against llama.cpp's HIP backend, a Vulkan row against llama.cpp's Vulkan backend, both from the same llama.cpp commit. Speculative decoding (NextN/MTP) is published as a separate variant; the headline bars compare both engines without it.
+
 The RDNA ZINC requests intentionally omit the OpenAI `model` field. The model is selected by the server process at launch with `-m <gguf>`; sending `model: "q"` to ZINC can trigger managed-model routing instead of measuring the loaded GGUF.
 
 ```bash
@@ -158,10 +162,12 @@ bun tools/performance_suite.mjs \\
 
 The published ROCm target records both backend identities in its methodology.
 ZINC runs its native ROCm/HIP backend; the comparison server uses the selected
-llama.cpp device on the same Radeon GPU and the same GGUF. Use
-`--rdna-llama-device ROCm0` for a llama.cpp HIP comparison or a Vulkan device
-such as `Vulkan0` for the cross-backend baseline. Never relabel one as the
-other. The benchmark artifact records the exact choice, binary checksum, and
+llama.cpp device on the same Radeon GPU and the same GGUF. Published
+ROCm rows use `--rdna-llama-device ROCm0` with a llama.cpp HIP build
+(`-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1201`) at the same commit as the Vulkan
+baseline, passed through `--rdna-llama-server`. A Vulkan device such as
+`Vulkan0` gives a cross-backend baseline, which is not the headline
+comparison. Never relabel one as the other. The benchmark artifact records the exact choice, binary checksum, and
 revision.
 
 The current results and raw samples live on the

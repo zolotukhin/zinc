@@ -1460,12 +1460,23 @@ export function llamaDeviceArgs(device) {
   return !device || device === "none" ? [] : ["--device", device];
 }
 
+// Paths that cannot change a measurement. The suite rewrites the site data file
+// itself, so without this every run after the first in a session reads -dirty.
+export const PROVENANCE_IGNORED_PATHS = ["site", "docs", "README.md", "assets"];
+
+export function provenanceDirtyCommand() {
+  const excludes = PROVENANCE_IGNORED_PATHS.map((p) => shellQuote(`:(exclude)${p}`)).join(" ");
+  return `git status --porcelain --untracked-files=no -- . ${excludes}`;
+}
+
 async function captureGitProvenance(cwd = ROOT, timeoutMs = 10_000) {
   try {
-    const version = await runShell("git describe --tags --always --dirty --abbrev=12", { cwd, timeoutMs });
+    const version = await runShell("git describe --tags --always --abbrev=12", { cwd, timeoutMs });
+    const dirty = await runShell(provenanceDirtyCommand(), { cwd, timeoutMs });
     const commit = await runShell("git rev-parse HEAD", { cwd, timeoutMs });
+    const base = version.stdout.trim();
     return {
-      version: version.stdout.trim() || null,
+      version: base ? `${base}${dirty.stdout.trim() ? "-dirty" : ""}` : null,
       commit: commit.stdout.trim() || null,
     };
   } catch {

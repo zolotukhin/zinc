@@ -956,6 +956,13 @@ const jsonLd = {
       ? `${methodology.llama_backend}${methodology.llama_device ? ` (${methodology.llama_device})` : ''}`
       : null;
     const configNotes = Array.isArray(methodology.notes) ? methodology.notes : [];
+    // Did both engines read the same prompt? Recorded per row since the suite
+    // started sending an identical system turn and thinking switch to both.
+    const parityRows = (target.models ?? [])
+      .flatMap((model: any) => ensureScenarios(model))
+      .map((scenario: any) => scenario?.comparison?.prompt_parity)
+      .filter((value: any) => value === true || value === false);
+    const parityMatched = parityRows.filter((value: boolean) => value).length;
     const sourceRef = zincProvenance.commit ?? 'main';
     const suiteSourceHref = githubBlobUrl(sourceRef, 'tools/performance_suite.mjs');
     const promptSourceHref = githubBlobUrl(sourceRef, 'tools/performance_suite.mjs', 1502, 1640);
@@ -1015,6 +1022,12 @@ const jsonLd = {
                   <dd>{llamaBackend}</dd>
                 </div>
               )}
+              <div>
+                <dt>Prompt parity</dt>
+                <dd>{parityRows.length > 0
+                  ? `${parityMatched}/${parityRows.length} rows read the same prompt tokens in both engines`
+                  : 'Not recorded for this run'}</dd>
+              </div>
               {methodology.zinc_build && (
                 <div class="config-wide">
                   <dt>Build</dt>
