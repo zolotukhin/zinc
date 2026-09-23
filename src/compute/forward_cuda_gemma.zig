@@ -62,6 +62,7 @@ const GemmaAttnPush = extern struct {
     scale_bits: u32,
     window: u32,
 };
+const GemmaAttnSoftmaxCausalPush = extern struct { head_dim: u32, n_rows: u32, row_stride: u32, q_base: u32, scale_bits: u32, window: u32 };
 const GemmaAttnBatchPush = extern struct {
     head_dim: u32,
     n_heads: u32,
@@ -145,6 +146,11 @@ const Dmmv3Push = extern struct { M0: u32, M1: u32, M2: u32, K: u32 };
 /// vector (Gemma 4 31B), which made the fused norm+residual kernels 19 us each;
 /// 1024 threads measured +3.8% Gemma 4 31B decode on the R9700.
 /// ZINC_GEMMA_NORM_BLOCK overrides (multiple of 32, <= 1024).
+// Below this many prompt tokens the per-(head, query) kernel is cheap enough.
+const blas_prefill_attn_min_t: u32 = 32;
+// Score scratch target for BLAS prefill attention (floats): 16M = 64 MiB.
+const blas_prefill_attn_score_floats: usize = 16 * 1024 * 1024;
+
 var gemma_norm_block_cached: u32 = 0;
 fn gemmaNormBlock() u32 {
     if (gemma_norm_block_cached != 0) return gemma_norm_block_cached;
@@ -247,6 +253,7 @@ const Pipelines = struct {
     muse_attention_batched_seq_q8: CudaPipeline,
     muse_attention_softmax_inplace: CudaPipeline,
     gemma_attention_softmax_f32_inplace: CudaPipeline,
+    gemma_attention_softmax_causal_f32: CudaPipeline,
     muse_kv_f32_to_f16: CudaPipeline,
     geglu: CudaPipeline,
     swiglu: CudaPipeline,
@@ -541,6 +548,9 @@ pub const ForwardGemma = struct {
     // Effort 24: lazily-allocated batched-prefill scratch (null until the first
     // ZINC_BATCHED_PREFILL run; freed in deinit).
     batch: ?BatchScratch = null,
+    // ROCm prefill attention scores for hipBLAS Q·K^T (grown on demand).
+    prefill_attn_scores: ?CudaBuffer = null,
+    prefill_attn_scores_bytes: usize = 0,
     // Effort 28 (perf lever): when a decodeBatch step has B==1 (the common
     // serving case — ALL per-token prefill + single-client decode), route the
     // per-layer projection/FFN GEMMs through the tuned `dmmv` matvec (exactly
@@ -728,6 +738,7 @@ pub const ForwardGemma = struct {
         pipes.muse_attention_batched_seq_q8 = try pipeline.createPipeline(ctx, src.ptr, "muse_attention_batched_seq_q8");
         pipes.muse_attention_softmax_inplace = try pipeline.createPipeline(ctx, src.ptr, "muse_attention_softmax_inplace");
         pipes.gemma_attention_softmax_f32_inplace = try pipeline.createPipeline(ctx, src.ptr, "gemma_attention_softmax_f32_inplace");
+        pipes.gemma_attention_softmax_causal_f32 = try pipeline.createPipeline(ctx, src.ptr, "gemma_attention_softmax_causal_f32");
         pipes.muse_kv_f32_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "muse_kv_f32_to_f16");
         pipes.geglu = try pipeline.createPipeline(ctx, src.ptr, "geglu");
         pipes.swiglu = try pipeline.createPipeline(ctx, src.ptr, "swiglu");
@@ -1003,6 +1014,7 @@ pub const ForwardGemma = struct {
         }
         for (self.kv_k) |*b| buffer.freeBuffer(b);
         for (self.kv_v) |*b| buffer.freeBuffer(b);
+        if (self.prefill_attn_scores) |*b| buffer.freeBuffer(b);
         a.free(self.kv_k);
         a.free(self.kv_v);
         a.free(self.geom);
@@ -1537,6 +1549,81 @@ pub const ForwardGemma = struct {
     /// causal softmax LOOPED per token (reusing the single-token kernels through
     /// token-major aliases). Mirrors `attentionLayer` op-for-op so the output is
     /// the same residual stream, batched. One stream-ordered command per layer.
+    /// hipBLAS prefill attention on ROCm. The per-(head, query) kernel re-reads
+    /// K and V for every query; at 357 tokens it was a quarter of a Gemma 4 31B
+    /// prefill (rocprofv3: 135 of 549 ms). ZINC_GEMMA_BLAS_PREFILL_ATTN=0 opts out.
+    /// Gemma only: Muse measured -1.3% at 190 tokens (+2.5% at 330).
+    fn blasPrefillAttnOn(self: *const ForwardGemma, T: u32, g: LayerGeom) bool {
+        if (comptime !is_rocm) return false;
+        if (self.d.is_muse or T < blas_prefill_attn_min_t or g.n_kv_head == 0) return false;
+        if (self.d.n_head % g.n_kv_head != 0) return false;
+        return envFlag("ZINC_GEMMA_BLAS_PREFILL_ATTN", true);
+    }
+
+    /// Causal (optionally sliding-window) attention for prompt tokens [0, T) as
+    ///   S = Q·K^T  (strided-batched SGEMM, one call per head slot j in a GQA group)
+    ///   P = causal softmax(S * scale)  (gemma_attention_softmax_causal_f32)
+    ///   O = P·V    (strided-batched SGEMM)
+    /// Queries are processed in chunks so the score buffer stays near
+    /// blas_prefill_attn_score_floats. Layouts: Q/O token-major [T, n_head, hd];
+    /// K/V cache [ctx, n_kv_head, hd]; scores [n_head][rows][keys].
+    fn blasPrefillAttention(self: *ForwardGemma, cmd: *command.CudaCommand, L: u32, T: u32, b: *BatchScratch, window: u32) !void {
+        const d = self.d;
+        const g = self.geom[L];
+        const hd = g.head_dim;
+        const n_head = d.n_head;
+        const n_kv = g.n_kv_head;
+        const group = n_head / n_kv;
+        const f4 = @sizeOf(f32);
+        const rows_budget: usize = @max(@as(usize, 16), blas_prefill_attn_score_floats / (@as(usize, n_head) * T));
+        const chunk: u32 = @intCast(@min(@as(usize, T), rows_budget));
+        const need_bytes = @as(usize, n_head) * chunk * T * f4;
+        if (self.prefill_attn_scores == null or self.prefill_attn_scores_bytes < need_bytes) {
+            self.waitPending();
+            if (self.prefill_attn_scores) |*old| buffer.freeBuffer(old);
+            self.prefill_attn_scores = try buffer.createBuffer(self.ctx, need_bytes);
+            self.prefill_attn_scores_bytes = need_bytes;
+        }
+        const scores = &self.prefill_attn_scores.?;
+        var t0: u32 = 0;
+        while (t0 < T) : (t0 += chunk) {
+            const rows = @min(chunk, T - t0);
+            const keys = t0 + rows;
+            const head_stride: i64 = @as(i64, rows) * keys;
+            var j: u32 = 0;
+            while (j < group) : (j += 1) {
+                // S_h(i, r) = K_g(i, :) · Q_h(t0 + r, :), batched over groups g (h = g*group + j).
+                shim.cuda_cublas_sgemm_strided_batched(
+                    self.ctx, 1, 0, keys, rows, hd,
+                    self.kv_k[L].handle, 0, g.kv_dim, hd,
+                    b.q.handle, (@as(usize, t0) * g.q_dim + @as(usize, j) * hd) * f4, g.q_dim, @as(i64, group) * hd,
+                    scores.handle, @as(usize, j) * @as(usize, @intCast(head_stride)) * f4, keys, @as(i64, group) * head_stride,
+                    n_kv, 0.0,
+                );
+            }
+            const sp = GemmaAttnSoftmaxCausalPush{
+                .head_dim = hd,
+                .n_rows = rows,
+                .row_stride = keys,
+                .q_base = t0,
+                .scale_bits = if (d.attn_scale != 0) @bitCast(d.attn_scale) else 0,
+                .window = window,
+            };
+            cmd.dispatch(&self.pipes.gemma_attention_softmax_causal_f32, .{ n_head, rows, 1 }, .{ 256, 1, 1 }, &.{scores}, &sp, @sizeOf(GemmaAttnSoftmaxCausalPush), 0);
+            j = 0;
+            while (j < group) : (j += 1) {
+                // O_h(:, t0 + r) = V_g(:, keys) · P_h(keys, r).
+                shim.cuda_cublas_sgemm_strided_batched(
+                    self.ctx, 0, 0, hd, rows, keys,
+                    self.kv_v[L].handle, 0, g.kv_dim, hd,
+                    scores.handle, @as(usize, j) * @as(usize, @intCast(head_stride)) * f4, keys, @as(i64, group) * head_stride,
+                    b.attn_out.handle, (@as(usize, t0) * g.q_dim + @as(usize, j) * hd) * f4, g.q_dim, @as(i64, group) * hd,
+                    n_kv, 0.0,
+                );
+            }
+        }
+    }
+
     fn attentionLayerBatched(self: *ForwardGemma, L: u32, T: u32, b: *BatchScratch) !void {
         const d = self.d;
         const ctx = self.ctx;
@@ -1612,7 +1699,9 @@ pub const ForwardGemma = struct {
             .scale_bits = if (d.attn_scale != 0) @bitCast(d.attn_scale) else 0,
             .window = window,
         };
-        if (self.use_attn_v2) {
+        if (self.blasPrefillAttnOn(T, g)) {
+            try self.blasPrefillAttention(&cmd, L, T, b, window);
+        } else if (self.use_attn_v2) {
             cmd.dispatch(&self.pipes.gemma_attention_v2, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), (T + g.head_dim) * 4);
         } else {
             cmd.dispatch(&self.pipes.gemma_attention_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), T * 4);

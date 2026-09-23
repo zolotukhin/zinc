@@ -10791,6 +10791,48 @@ extern "C" __global__ void gemma_attention_softmax_f32_inplace(float* scores, Mu
         row[i] *= s_inv;
 }
 
+// ---- gemma_attention_softmax_causal_f32 (ROCm BLAS prefill attention) -------
+// Row-wise causal softmax over hipBLAS Q·K^T scores for a chunk of queries:
+// block (head = blockIdx.x, r = blockIdx.y) owns query t = q_base + r, whose row
+// is scores + (head * n_rows + r) * row_stride with row_stride >= t + 1 keys.
+// Keys [start, t] (start from the optional sliding window) get
+// softmax(score * scale); every other key in the row is zeroed so the following
+// P·V GEMM can run over the full rectangle. Same scale/window/masking as
+// gemma_attention_batched_v2; the per-row sums are reduced in a different order.
+struct GemmaAttnSoftmaxCausalPush { unsigned head_dim, n_rows, row_stride, q_base, scale_bits, window; };
+extern "C" __global__ void gemma_attention_softmax_causal_f32(float* scores, GemmaAttnSoftmaxCausalPush pc) {
+    const unsigned head = blockIdx.x;
+    const unsigned r = blockIdx.y;
+    if (r >= pc.n_rows) return;
+    const unsigned tid = threadIdx.x;
+    const unsigned t = pc.q_base + r;
+    const unsigned seq_len = t + 1u;
+    const unsigned start = (pc.window != 0u && seq_len > pc.window) ? seq_len - pc.window : 0u;
+    float* row = scores + ((size_t)head * pc.n_rows + r) * pc.row_stride;
+    const float scale = pc.scale_bits != 0u ? __uint_as_float(pc.scale_bits) : rsqrtf((float)pc.head_dim);
+
+    float lmax = -3.4e38f;
+    for (unsigned i = start + tid; i < seq_len; i += blockDim.x) lmax = fmaxf(lmax, row[i] * scale);
+    lmax = zinc_block_reduce_max(lmax);
+    __shared__ float s_max, s_inv;
+    if (tid == 0u) s_max = lmax;
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (unsigned i = start + tid; i < seq_len; i += blockDim.x) {
+        const float e = expf(row[i] * scale - s_max);
+        row[i] = e;
+        lsum += e;
+    }
+    lsum = zinc_block_reduce_sum(lsum);
+    if (tid == 0u) s_inv = lsum > 0.0f ? 1.0f / lsum : 0.0f;
+    __syncthreads();
+    const float inv = s_inv;
+    for (unsigned i = tid; i < pc.row_stride; i += blockDim.x) {
+        row[i] = (i >= start && i < seq_len) ? row[i] * inv : 0.0f;
+    }
+}
+
 // Muse single-client decode specialization: fold the post-attention sigmoid
 // gate and Q8_1 packing into attention's output pass. The following O projection
 // consumes only Q8_1, so the intermediate f32 attention row and a full extra
