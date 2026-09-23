@@ -2852,8 +2852,13 @@ pub const ForwardCuda = struct {
         // n_experts× redundant), the grouped TC reads each expert weight ~once/tile.
         // The down + any non-Q4_K layer (the model's 1 Q5_K gate/up layer) stay on the
         // matvec. fp16 → token-tolerance, not bit-identical.
+        // ROCm also groups Q5_K gate/up (Qwen 3.6 35B-A3B has one such layer):
+        // the i8 grouped template covers both quants, and the per-token matvec
+        // fallback made that single layer cost ~14 ms of a 315-token prefill.
+        const gate_up_q5k_grouped = is_rocm and wge.info.type_ == .q5_k and wue.info.type_ == .q5_k and
+            envFlag("ZINC_MOE_Q5K_GATE_UP_GROUPED", true);
         const use_tc = self.use_tc_experts and (self.tc_experts_forced or T >= self.moe_tc_min_t) and
-            wge.info.type_ == .q4_k and wue.info.type_ == .q4_k;
+            ((wge.info.type_ == .q4_k and wue.info.type_ == .q4_k) or gate_up_q5k_grouped);
         if (std.posix.getenv("ZINC_PREFILL_PROFILE") != null and L < 2) {
             log.info("MoE layer {d}: gate={} up={} grouped={}", .{ L, wge.info.type_, wue.info.type_, use_tc });
         }
@@ -2884,7 +2889,9 @@ pub const ForwardCuda = struct {
                 const use_m32 = route_tile == 16 and std.posix.getenv("ZINC_MOE_M32") != null;
                 const use_m64 = route_tile == 16 and !use_m32 and std.posix.getenv("ZINC_MOE_M64") != null;
                 const use_direct = route_tile == 16 and !use_m32 and !use_m64 and envFlag("ZINC_MOE_DIRECT_A", is_rocm);
-                const grouped_pipe = if (use_m32)
+                const grouped_pipe = if (gate_up_q5k_grouped)
+                    (if (route_tile == 16) &self.pipes.gemm_q5k_experts_grouped_i8_t16 else &self.pipes.gemm_q5k_experts_grouped_i8)
+                else if (use_m32)
                     &self.pipes.gemm_q4k_experts_grouped_i8_t16_m32
                 else if (use_m64)
                     &self.pipes.gemm_q4k_experts_grouped_i8_t16_m64
@@ -2896,8 +2903,8 @@ pub const ForwardCuda = struct {
                     &self.pipes.gemm_q4k_experts_grouped_i8_t16
                 else
                     &self.pipes.gemm_q4k_experts_grouped_i8;
-                const grouped_rows: u32 = if (use_m32) 32 else if (use_m64) 64 else 128;
-                const grouped_threads: u32 = if (use_m32) 64 else if (use_m64) 128 else 256;
+                const grouped_rows: u32 = if (gate_up_q5k_grouped) 128 else if (use_m32) 32 else if (use_m64) 64 else 128;
+                const grouped_threads: u32 = if (gate_up_q5k_grouped) 256 else if (use_m32) 64 else if (use_m64) 128 else 256;
                 const pg = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = gate_slice, .dst_tok_stride = n_used * ef, .route_stride = 0 };
                 cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, grouped_rows), max_tiles, 1 }, .{ grouped_threads, 1, 1 }, &.{ &wge.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedI8Push), 0);
                 const pu = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = up_slice, .dst_tok_stride = n_used * ef, .route_stride = 0 };
