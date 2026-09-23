@@ -124,7 +124,13 @@ export function renderSvg(data, targetId) {
   const pctToX = (pct) => barX + (Math.min(pct, axisMax) / axisMax) * barW;
   const hundred = pctToX(100);
 
-  const zincVersion = target.provenance?.zinc?.version ?? "unknown";
+  // A partial re-run leaves rows from more than one ZINC build; name them all.
+  const rowVersions = [...new Set((target.models ?? [])
+    .map((m) => m.provenance?.zinc?.version)
+    .filter(Boolean))];
+  const zincVersion = rowVersions.length > 1
+    ? rowVersions.join(" + ")
+    : (target.provenance?.zinc?.version ?? rowVersions[0] ?? "unknown");
   const llamaCommit = target.provenance?.llama_cpp?.commit ?? "unknown";
   const measured = (target.generated_at ?? "").slice(0, 10);
   const gpu = target.machine?.gpu ?? "GPU";

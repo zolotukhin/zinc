@@ -95,3 +95,11 @@ test("renderSvg keeps every bar and label inside the card", () => {
 test("renderSvg rejects a target that is not in the artifact", () => {
   expect(() => renderSvg(artifact(), "metal")).toThrow(/No target 'metal'/);
 });
+
+test("renderSvg names every ZINC build when rows come from more than one run", () => {
+  const data = artifact() as any;
+  data.targets[0].models[0].provenance = { zinc: { version: "aaa111" } };
+  data.targets[0].models[1].provenance = { zinc: { version: "bbb222" } };
+  const svg = renderSvg(data, "rdna-rocm");
+  expect(svg).toContain("ZINC aaa111 + bbb222");
+});
