@@ -1112,6 +1112,15 @@ fn museEmbedRmsNorm(row: []f32, eps: f32) void {
 /// enforced on Vulkan, same as Gemma here).
 /// Dense models with the Gemma prefill skeleton whose activation-agnostic DP4a
 /// batched paths (attention projections, down GEMM, int8 scratch) apply.
+fn growGemmaMoeScratchSlot(instance: *const @import("../vulkan/instance.zig").Instance, slot: *?Buffer, size: u64, usage: u32) !void {
+    if (slot.*) |*existing| {
+        if (existing.size >= size) return;
+        existing.deinit();
+        slot.* = null;
+    }
+    slot.* = try Buffer.initDeviceLocal(instance, size, usage);
+}
+
 fn isGemmaStyleDenseArch(arch: loader.Architecture) bool {
     return arch == .gemma or arch == .muse_glimmer;
 }
@@ -1873,6 +1882,12 @@ pub const InferenceEngine = struct {
     // Q4_K bias term (see quantize_act_q8_1.comp /
     // mul_mm_q4k_gate_up_swiglu_full_dp4a.comp).
     batched_scratch_hidden_i8: ?Buffer = null,
+    /// Gemma grouped-MoE prefill: shared-expert gate / up / GeGLU outputs when the
+    /// shared expert is overlapped with the routed experts (the sequential path
+    /// reuses router-logit and route-id scratch the routed experts still need).
+    gemma_shared_gate: ?Buffer = null,
+    gemma_shared_up: ?Buffer = null,
+    gemma_shared_geglu: ?Buffer = null,
     /// Batched Gemma prefill: prompt token ids for the device-side embedding gather.
     prefill_token_ids: ?Buffer = null,
     batched_scratch_hidden_scale_dsum: ?Buffer = null,
@@ -13959,6 +13974,12 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaPrepareProjectionQ8(self: *InferenceEngine, src: Buffer, K: u32, n_tokens: u32) !u32 {
+        return self.gemmaPrepareProjectionQ8Ex(src, K, n_tokens, true);
+    }
+
+    /// `emit_barrier = false` leaves the quantize output unbarriered so the
+    /// caller can share one barrier with other work recorded in the same stage.
+    fn gemmaPrepareProjectionQ8Ex(self: *InferenceEngine, src: Buffer, K: u32, n_tokens: u32, emit_barrier: bool) !u32 {
         if (!self.gemmaDenseProjectionDp4aEnabled(n_tokens)) return 0;
         if (K == 0 or (K & 31) != 0) return 0;
         if (self.dmmv.pipeline_quantize_act_q8 == null) return 0;
@@ -13998,11 +14019,13 @@ pub const InferenceEngine = struct {
             full_cols,
             K,
         );
-        const q8_ranges = [_]CommandBuffer.BufferRange{
-            .{ .buffer = packed_i8.handle, .size = packed_i8.size },
-            .{ .buffer = scale.handle, .size = scale.size },
-        };
-        self.decode_cmd.computeBuffersBarrier(&q8_ranges);
+        if (emit_barrier) {
+            const q8_ranges = [_]CommandBuffer.BufferRange{
+                .{ .buffer = packed_i8.handle, .size = packed_i8.size },
+                .{ .buffer = scale.handle, .size = scale.size },
+            };
+            self.decode_cmd.computeBuffersBarrier(&q8_ranges);
+        }
         return full_cols;
     }
 
@@ -27611,7 +27634,48 @@ pub const InferenceEngine = struct {
             const expert_down_row_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
 
             const moe_phase = self.beginProfilePhase();
-
+            // Shared expert overlapped with the routed experts: each shared step is
+            // recorded beside a routed step and they share one full barrier
+            // (router | topk | route pack | gate/up | down). Q8_0 shared weights on
+            // the DP4a projection path only; otherwise the sequential order below.
+            const ov_gate = lt.ffn_gate_shexp;
+            const ov_up = lt.ffn_up_shexp;
+            const ov_down = lt.ffn_down_shexp;
+            const ov_inter: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
+            var ov_q8_cols: u32 = 0;
+            const overlap_shared = ov_blk: {
+                if (!envFlagEnabled("ZINC_GEMMA_PREFILL_SHARED_OVERLAP", true)) break :ov_blk false;
+                if (collect_route_profile or lt.ffn_gate_inp_shexp != null) break :ov_blk false;
+                const g = ov_gate orelse break :ov_blk false;
+                const u = ov_up orelse break :ov_blk false;
+                const dn = ov_down orelse break :ov_blk false;
+                if (g.info.type_ != .q8_0 or u.info.type_ != .q8_0 or dn.info.type_ != .q8_0) break :ov_blk false;
+                if (!self.gemmaDenseProjectionDp4aSupported(g, ov_inter, hidden_dim, n_tokens) or
+                    !self.gemmaDenseProjectionDp4aSupported(u, ov_inter, hidden_dim, n_tokens) or
+                    !self.gemmaDenseProjectionDp4aSupported(dn, hidden_dim, ov_inter, n_tokens)) break :ov_blk false;
+                const padded = self.gemmaProjectionPrefillPaddedTokenCount(n_tokens);
+                const bytes: u64 = @as(u64, @max(padded, n_tokens)) * ov_inter * @sizeOf(f32);
+                const usage = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                try growGemmaMoeScratchSlot(self.instance, &self.gemma_shared_gate, bytes, usage);
+                try growGemmaMoeScratchSlot(self.instance, &self.gemma_shared_up, bytes, usage);
+                try growGemmaMoeScratchSlot(self.instance, &self.gemma_shared_geglu, bytes, usage);
+                ov_q8_cols = try self.gemmaPrepareProjectionQ8Ex(scratch_shared_norm, hidden_dim, n_tokens, false);
+                break :ov_blk ov_q8_cols > 0;
+            };
+            if (overlap_shared) {
+                // pre_ffw_norm_2 depends only on hidden; record it in stage 1 too.
+                try self.dispatchRmsNorm(
+                    scratch_hidden.handle,
+                    scratch_hidden.size,
+                    pre_norm_t.gpu_buffer.handle,
+                    pre_norm_t.gpu_buffer.size,
+                    scratch_norm.handle,
+                    scratch_norm.size,
+                    hidden_dim,
+                    n_tokens,
+                    cfg.rms_norm_eps,
+                );
+            }
             const router_phase = self.beginProfilePhase();
             try self.dispatchRmsNormScaleDmmvF32Batch(
                 scratch_hidden.handle,
@@ -27627,7 +27691,7 @@ pub const InferenceEngine = struct {
                 n_tokens,
                 cfg.rms_norm_eps,
             );
-            self.decode_cmd.computeBufferBarrier(scratch_router_logits.handle, router_logits_bytes);
+            if (overlap_shared) self.decode_cmd.computeBarrier() else self.decode_cmd.computeBufferBarrier(scratch_router_logits.handle, router_logits_bytes);
             self.endProfilePhase(.moe_router, router_phase);
 
             const topk_phase = self.beginProfilePhase();
@@ -27644,7 +27708,14 @@ pub const InferenceEngine = struct {
                 route_stride_u32,
                 gemma_router_scale,
             );
-            self.decode_cmd.computeBufferBarrier(route_buf.handle, route_bytes);
+            if (overlap_shared) {
+                const g_done = try self.dispatchGemmaProjectionBatchedDp4a(ov_gate.?, scratch_shared_norm, self.gemma_shared_gate.?, ov_inter, hidden_dim, n_tokens, 0, ov_q8_cols);
+                const u_done = try self.dispatchGemmaProjectionBatchedDp4a(ov_up.?, scratch_shared_norm, self.gemma_shared_up.?, ov_inter, hidden_dim, n_tokens, 0, ov_q8_cols);
+                if (!g_done or !u_done) return error.UnsupportedConfiguration;
+                self.decode_cmd.computeBarrier();
+            } else {
+                self.decode_cmd.computeBufferBarrier(route_buf.handle, route_bytes);
+            }
             self.endProfilePhase(.moe_topk, topk_phase);
 
             try self.dmmv.recordMoeRoutePack(
@@ -27676,7 +27747,20 @@ pub const InferenceEngine = struct {
                 .{ .buffer = scratch_route_ids.handle, .size = route_pack_ids_bytes },
                 .{ .buffer = route_pack_active_blocks.handle, .size = route_pack_active_blocks_bytes },
             };
-            self.decode_cmd.computeBuffersBarrier(&route_pack_ranges);
+            if (overlap_shared) {
+                try self.dispatchFfnActivation(
+                    self.gemma_shared_gate.?.handle,
+                    self.gemma_shared_gate.?.size,
+                    self.gemma_shared_up.?.handle,
+                    self.gemma_shared_up.?.size,
+                    self.gemma_shared_geglu.?.handle,
+                    self.gemma_shared_geglu.?.size,
+                    n_tokens * ov_inter,
+                );
+                self.decode_cmd.computeBarrier();
+            } else {
+                self.decode_cmd.computeBuffersBarrier(&route_pack_ranges);
+            }
             self.decode_cmd.computeToIndirectBufferBarrier(route_pack_dispatch_args.handle, route_pack_dispatch_args_bytes);
             if (collect_route_profile) {
                 self.decode_cmd.computeToTransferBarrier();
@@ -27688,19 +27772,20 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.transferToComputeBarrier();
             }
 
-            try self.dispatchRmsNorm(
-                scratch_hidden.handle,
-                scratch_hidden.size,
-                pre_norm_t.gpu_buffer.handle,
-                pre_norm_t.gpu_buffer.size,
-                scratch_norm.handle,
-                scratch_norm.size,
-                hidden_dim,
-                n_tokens,
-                cfg.rms_norm_eps,
-            );
-            self.decode_cmd.computeBufferBarrier(scratch_norm.handle, hidden_batch_bytes);
-
+            if (!overlap_shared) {
+                try self.dispatchRmsNorm(
+                    scratch_hidden.handle,
+                    scratch_hidden.size,
+                    pre_norm_t.gpu_buffer.handle,
+                    pre_norm_t.gpu_buffer.size,
+                    scratch_norm.handle,
+                    scratch_norm.size,
+                    hidden_dim,
+                    n_tokens,
+                    cfg.rms_norm_eps,
+                );
+                self.decode_cmd.computeBufferBarrier(scratch_norm.handle, hidden_batch_bytes);
+            }
             const gate_up_phase = self.beginProfilePhase();
             try self.dmmv.recordGemmaTop1GateUpGegluColsDispatchIndirect(
                 &self.decode_cmd,
@@ -27728,7 +27813,14 @@ pub const InferenceEngine = struct {
                 0,
                 0,
             );
-            self.decode_cmd.computeBufferBarrier(scratch_swiglu.handle, route_inter_bytes);
+            var ov_down_cols: u32 = 0;
+            if (overlap_shared) {
+                ov_down_cols = try self.gemmaPrepareProjectionQ8Ex(self.gemma_shared_geglu.?, ov_inter, n_tokens, false);
+                if (ov_down_cols == 0) return error.UnsupportedConfiguration;
+                self.decode_cmd.computeBarrier();
+            } else {
+                self.decode_cmd.computeBufferBarrier(scratch_swiglu.handle, route_inter_bytes);
+            }
             self.endProfilePhase(.moe_gate_up, gate_up_phase);
 
             const down_phase = self.beginProfilePhase();
@@ -27760,7 +27852,13 @@ pub const InferenceEngine = struct {
                 0,
                 false,
             );
-            self.decode_cmd.computeBufferBarrier(scratch_down.handle, route_hidden_bytes);
+            if (overlap_shared) {
+                if (!try self.dispatchGemmaProjectionBatchedDp4a(ov_down.?, self.gemma_shared_geglu.?, scratch_shared_down, hidden_dim, ov_inter, n_tokens, 0, ov_down_cols))
+                    return error.UnsupportedConfiguration;
+                self.decode_cmd.computeBarrier();
+            } else {
+                self.decode_cmd.computeBufferBarrier(scratch_down.handle, route_hidden_bytes);
+            }
             self.endProfilePhase(.moe_down, down_phase);
 
             self.decode_cmd.computeToTransferBarrier();
@@ -27816,6 +27914,7 @@ pub const InferenceEngine = struct {
                     return error.BufferTooSmall;
                 }
                 const shexp_gate = lt.ffn_gate_inp_shexp;
+                if (!overlap_shared) {
                 const shared_proj_phase = self.beginProfilePhase();
                 if (shexp_gate) |sg| {
                     try self.dispatchProjectionBatched(sg, scratch_shared_norm, route_buf, 1, hidden_dim, n_tokens);
@@ -27919,7 +28018,7 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.computeBufferBarrier(scratch_shared_down.handle, hidden_batch_bytes);
                 self.endProfilePhase(.shared_down, shared_down_phase);
-
+                }
                 if (lt.post_ffw_norm_1) |pfn1_t| {
                     try self.dispatchRmsNorm(
                         scratch_shared_down.handle,
@@ -32353,6 +32452,9 @@ pub const InferenceEngine = struct {
         if (self.batched_scratch_swiglu_scale) |*b| b.deinit();
         if (self.batched_scratch_swiglu_scale_dsum) |*b| b.deinit();
         if (self.batched_scratch_hidden_i8) |*b| b.deinit();
+        if (self.gemma_shared_gate) |*b| b.deinit();
+        if (self.gemma_shared_up) |*b| b.deinit();
+        if (self.gemma_shared_geglu) |*b| b.deinit();
         if (self.prefill_token_ids) |*b| b.deinit();
         if (self.batched_scratch_hidden_scale_dsum) |*b| b.deinit();
         if (self.batched_scratch_norm_q8) |*b| b.deinit();
