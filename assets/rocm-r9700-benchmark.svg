@@ -12,57 +12,57 @@
 <text x="242" y="122" font-size="13" fill="#5c6670">token generation</text>
 <text x="1000" y="122" font-size="13" text-anchor="end" fill="#5c6670">bar length = ZINC speed ÷ llama.cpp speed</text>
 <line x1="40" y1="124" x2="1000" y2="124" stroke="#d7d2c8"/>
-<line x1="604" y1="138" x2="604" y2="600" stroke="#9aa4ae" stroke-dasharray="4 5"/>
-<text x="604" y="618" font-size="11.5" text-anchor="middle" fill="#5c6670">llama.cpp speed</text>
+<line x1="546" y1="138" x2="546" y2="600" stroke="#9aa4ae" stroke-dasharray="4 5"/>
+<text x="546" y="618" font-size="11.5" text-anchor="middle" fill="#5c6670">llama.cpp speed</text>
 <text x="40" y="170" font-size="16" font-weight="600">Gemma 4 31B</text>
-<text x="40" y="190" font-size="12.5" fill="#5c6670">571 vs 298 tok/s · 28.5 vs 27.5 tok/s</text>
+<text x="40" y="190" font-size="12.5" fill="#5c6670">590 vs 295 tok/s · 28.5 vs 27.4 tok/s</text>
 <rect x="314.0" y="154" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="154" width="555.1" height="17" rx="4" fill="#d35400"/>
-<text x="879.07819199" y="167" font-size="13.5" font-weight="700" fill="#1f2428">191%</text>
+<rect x="314.0" y="154" width="464.4" height="17" rx="4" fill="#d35400"/>
+<text x="788.4161611359999" y="167" font-size="13.5" font-weight="700" fill="#1f2428">200%</text>
 <rect x="314.0" y="177" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="177" width="301.1" height="17" rx="4" fill="#f0a06a"/>
-<text x="625.0745489999999" y="190" font-size="13.5" font-weight="700" fill="#1f2428">104%</text>
+<rect x="314.0" y="177" width="241.3" height="17" rx="4" fill="#f0a06a"/>
+<text x="565.2802320000001" y="190" font-size="13.5" font-weight="700" fill="#1f2428">104%</text>
 <text x="40" y="248" font-size="16" font-weight="600">Gemma 4 26B-A4B MoE</text>
-<text x="40" y="268" font-size="12.5" fill="#5c6670">1340 vs 713 tok/s · 98.9 vs 78.8 tok/s</text>
+<text x="40" y="268" font-size="12.5" fill="#5c6670">1361 vs 722 tok/s · 99.3 vs 77.4 tok/s</text>
 <rect x="314.0" y="232" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="232" width="545.1" height="17" rx="4" fill="#d35400"/>
-<text x="869.11844504" y="245" font-size="13.5" font-weight="700" fill="#1f2428">188%</text>
+<rect x="314.0" y="232" width="437.0" height="17" rx="4" fill="#d35400"/>
+<text x="761.0214116693332" y="245" font-size="13.5" font-weight="700" fill="#1f2428">188%</text>
 <rect x="314.0" y="255" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="255" width="363.8" height="17" rx="4" fill="#f0a06a"/>
-<text x="687.7681864231579" y="268" font-size="13.5" font-weight="700" fill="#1f2428">125%</text>
+<rect x="314.0" y="255" width="297.6" height="17" rx="4" fill="#f0a06a"/>
+<text x="621.5986931671579" y="268" font-size="13.5" font-weight="700" fill="#1f2428">128%</text>
 <text x="40" y="326" font-size="16" font-weight="600">Qwen 3.5 9B</text>
 <text x="40" y="346" font-size="12.5" fill="#5c6670">1226 vs 668 tok/s · 90.9 vs 76.4 tok/s</text>
 <rect x="314.0" y="310" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="310" width="532.2" height="17" rx="4" fill="#d35400"/>
-<text x="856.1862758999999" y="323" font-size="13.5" font-weight="700" fill="#1f2428">184%</text>
+<rect x="314.0" y="310" width="425.7" height="17" rx="4" fill="#d35400"/>
+<text x="749.7490207200001" y="323" font-size="13.5" font-weight="700" fill="#1f2428">184%</text>
 <rect x="314.0" y="333" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="333" width="345.1" height="17" rx="4" fill="#f0a06a"/>
-<text x="669.0994572726316" y="346" font-size="13.5" font-weight="700" fill="#1f2428">119%</text>
+<rect x="314.0" y="333" width="276.1" height="17" rx="4" fill="#f0a06a"/>
+<text x="600.0795658181053" y="346" font-size="13.5" font-weight="700" fill="#1f2428">119%</text>
 <text x="40" y="404" font-size="16" font-weight="600">Muse Glimmer 30B</text>
 <text x="40" y="424" font-size="12.5" fill="#5c6670">676 vs 384 tok/s · 33.3 vs 30.7 tok/s</text>
 <rect x="314.0" y="388" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="388" width="510.8" height="17" rx="4" fill="#d35400"/>
-<text x="834.8252832253731" y="401" font-size="13.5" font-weight="700" fill="#1f2428">176%</text>
+<rect x="314.0" y="388" width="408.7" height="17" rx="4" fill="#d35400"/>
+<text x="732.6602265802985" y="401" font-size="13.5" font-weight="700" fill="#1f2428">176%</text>
 <rect x="314.0" y="411" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="411" width="315.0" height="17" rx="4" fill="#f0a06a"/>
-<text x="638.9701147600001" y="424" font-size="13.5" font-weight="700" fill="#1f2428">109%</text>
+<rect x="314.0" y="411" width="252.0" height="17" rx="4" fill="#f0a06a"/>
+<text x="575.9760918080001" y="424" font-size="13.5" font-weight="700" fill="#1f2428">109%</text>
 <text x="40" y="482" font-size="16" font-weight="600">Qwen 3.8 27B Dense *</text>
 <text x="40" y="502" font-size="12.5" fill="#5c6670">403 vs 233 tok/s · 32.8 vs 28.2 tok/s</text>
 <rect x="314.0" y="466" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="466" width="501.2" height="17" rx="4" fill="#d35400"/>
-<text x="825.1923006999999" y="479" font-size="13.5" font-weight="700" fill="#1f2428">173%</text>
+<rect x="314.0" y="466" width="401.0" height="17" rx="4" fill="#d35400"/>
+<text x="724.9538405599999" y="479" font-size="13.5" font-weight="700" fill="#1f2428">173%</text>
 <rect x="314.0" y="489" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="489" width="338.2" height="17" rx="4" fill="#f0a06a"/>
-<text x="662.1633380705263" y="502" font-size="13.5" font-weight="700" fill="#1f2428">117%</text>
+<rect x="314.0" y="489" width="270.5" height="17" rx="4" fill="#f0a06a"/>
+<text x="594.530670456421" y="502" font-size="13.5" font-weight="700" fill="#1f2428">117%</text>
 <text x="40" y="560" font-size="16" font-weight="600">Qwen 3.6 35B A3B</text>
 <text x="40" y="580" font-size="12.5" fill="#5c6670">514 vs 482 tok/s · 96.8 vs 75.3 tok/s</text>
 <rect x="314.0" y="544" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="544" width="309.7" height="17" rx="4" fill="#d35400"/>
-<text x="633.6949108571429" y="557" font-size="13.5" font-weight="700" fill="#1f2428">107%</text>
+<rect x="314.0" y="544" width="247.8" height="17" rx="4" fill="#d35400"/>
+<text x="571.7559286857143" y="557" font-size="13.5" font-weight="700" fill="#1f2428">107%</text>
 <rect x="314.0" y="567" width="580.0" height="17" rx="4" fill="#e8e4db"/>
-<rect x="314.0" y="567" width="372.6" height="17" rx="4" fill="#f0a06a"/>
-<text x="696.5850969010527" y="580" font-size="13.5" font-weight="700" fill="#1f2428">128%</text>
-<text x="40" y="640" font-size="12" fill="#5c6670">Measured 2026-09-24 · ZINC 9c9edc03fb78 + 547016dcebaa + 20c08b0a0c14 + c50b4add3402 · llama.cpp 5f436dddb · medians of repeated runs after warmup</text>
+<rect x="314.0" y="567" width="298.1" height="17" rx="4" fill="#f0a06a"/>
+<text x="622.068077520842" y="580" font-size="13.5" font-weight="700" fill="#1f2428">128%</text>
+<text x="40" y="640" font-size="12" fill="#5c6670">Measured 2026-09-24 · ZINC d7a5ed9bf0f8 + 547016dcebaa + 20c08b0a0c14 + c50b4add3402 · llama.cpp 5f436dddb · medians of repeated runs after warmup</text>
 <text x="40" y="660" font-size="12" fill="#5c6670">* both engines shown without speculative decoding. Qwen 3.8 27B Dense reaches 54.9 tok/s (195%) using its NextN block; llama.cpp</text>
 <text x="40" y="676" font-size="12" fill="#5c6670">can use that block as a separate draft model, which these runs do not do, so that number is not a like-for-like comparison.</text>
 </g></svg>
