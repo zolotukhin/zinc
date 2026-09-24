@@ -1,0 +1,256 @@
+#version 460
+// ZINC - grouped Gemma top-1 Q4_K MoE gate+up+GEGLU with Q8_1 activations.
+//
+// The DP4a sibling of dmmv_q4k_moe_fused_gate_up_geglu_cols_top1: route ids
+// are expert-major, input activations are pre-quantized in token-major Q8_1
+// layout by quantize_act_q8_1.comp (the scheme llama.cpp's MMQ uses), and the
+// fused gate_up tensor is bound twice with the up rows at up_offset. Eight
+// rows per workgroup and eight lanes per row (one 32-value sub-block each),
+// matching the f32 kernel's grid.
+
+#include "dp4a_compat.glsl"
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint expert_stride;
+    uint up_offset;
+    uint y_offset;
+    uint ids_stride;
+    uint x_route_divisor;
+    uint x_token_base;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixAGate { uint gate_u32[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixAUp { uint up_u32[]; };
+layout(set = 0, binding = 2) readonly buffer ActPacked { uint x_q8[]; };
+layout(set = 0, binding = 3) readonly buffer ActScaleDsum { vec2 x_sd[]; };
+layout(set = 0, binding = 4) writeonly buffer Output { float y_data[]; };
+layout(set = 0, binding = 5) readonly buffer Counts { uint counts[]; };
+layout(set = 0, binding = 6) readonly buffer PackedIds { uint packed_ids[]; };
+layout(set = 0, binding = 7) readonly buffer ActiveBlocks { uint active_blocks[]; };
+
+const uint NUM_COLS = 8u;
+const uint ROWS_PER_WG = 8u;
+const uint LANES_PER_ROW = 8u;
+const uint Q4K_BLOCK_U32 = 36u;
+
+uint q4k_scale_byte(uint sc0, uint sc1, uint sc2, uint idx) {
+    uint word = (idx < 4u) ? sc0 : ((idx < 8u) ? sc1 : sc2);
+    return (word >> ((idx & 3u) * 8u)) & 0xFFu;
+}
+
+void q4k_scale_min(uint sb, uint sc0, uint sc1, uint sc2, out float sc_val, out float mn_val) {
+    if (sb < 4u) {
+        const uint b0 = q4k_scale_byte(sc0, sc1, sc2, sb);
+        const uint b4 = q4k_scale_byte(sc0, sc1, sc2, sb + 4u);
+        sc_val = float(b0 & 63u);
+        mn_val = float(b4 & 63u);
+    } else {
+        const uint b = q4k_scale_byte(sc0, sc1, sc2, sb);
+        const uint b4 = q4k_scale_byte(sc0, sc1, sc2, sb + 4u);
+        const uint bm4 = q4k_scale_byte(sc0, sc1, sc2, sb - 4u);
+        sc_val = float((b4 & 0xFu) | ((bm4 >> 6) << 4));
+        mn_val = float(((b4 >> 4) & 0xFu) | ((b >> 6) << 4));
+    }
+}
+
+uint q4k_pack_nibbles(uint qs_word, bool high) {
+    if (high) qs_word >>= 4u;
+    const uint q0 = qs_word & 0xFu;
+    const uint q1 = (qs_word >> 8u) & 0xFu;
+    const uint q2 = (qs_word >> 16u) & 0xFu;
+    const uint q3 = (qs_word >> 24u) & 0xFu;
+    return q0 | (q1 << 8u) | (q2 << 16u) | (q3 << 24u);
+}
+
+float gate_block_dot(uint row_u32, uint q4_block, uint sb, uint token_idx) {
+    const uint blk_u32 = row_u32 + q4_block * Q4K_BLOCK_U32;
+    const uint d_dmin = gate_u32[blk_u32];
+    const float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+    const float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+    const uint sc0 = gate_u32[blk_u32 + 1u];
+    const uint sc1 = gate_u32[blk_u32 + 2u];
+    const uint sc2 = gate_u32[blk_u32 + 3u];
+
+    float sc_val;
+    float mn_val;
+    q4k_scale_min(sb, sc0, sc1, sc2, sc_val, mn_val);
+
+    const uint q_group = sb >> 1u;
+    const bool high = (sb & 1u) != 0u;
+    const uint qs_base = blk_u32 + 4u + q_group * 8u;
+    const uint x_base = token_idx * (K / 4u) + q4_block * 64u + sb * 8u;
+    int isum = 0;
+    [[unroll]] for (uint p = 0u; p < 8u; p++) {
+        const uint q_packed = q4k_pack_nibbles(gate_u32[qs_base + p], high);
+        isum = dotPacked4x8AccSatEXT(int(q_packed), int(x_q8[x_base + p]), isum);
+    }
+
+    const vec2 ds = x_sd[token_idx * (K / 32u) + q4_block * 8u + sb];
+    return ds.x * (d_val * sc_val) * float(isum) - (dmin_val * mn_val) * ds.y;
+}
+
+float up_block_dot(uint row_u32, uint q4_block, uint sb, uint token_idx) {
+    const uint blk_u32 = row_u32 + q4_block * Q4K_BLOCK_U32;
+    const uint d_dmin = up_u32[blk_u32];
+    const float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+    const float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+    const uint sc0 = up_u32[blk_u32 + 1u];
+    const uint sc1 = up_u32[blk_u32 + 2u];
+    const uint sc2 = up_u32[blk_u32 + 3u];
+
+    float sc_val;
+    float mn_val;
+    q4k_scale_min(sb, sc0, sc1, sc2, sc_val, mn_val);
+
+    const uint q_group = sb >> 1u;
+    const bool high = (sb & 1u) != 0u;
+    const uint qs_base = blk_u32 + 4u + q_group * 8u;
+    const uint x_base = token_idx * (K / 4u) + q4_block * 64u + sb * 8u;
+    int isum = 0;
+    [[unroll]] for (uint p = 0u; p < 8u; p++) {
+        const uint q_packed = q4k_pack_nibbles(up_u32[qs_base + p], high);
+        isum = dotPacked4x8AccSatEXT(int(q_packed), int(x_q8[x_base + p]), isum);
+    }
+
+    const vec2 ds = x_sd[token_idx * (K / 32u) + q4_block * 8u + sb];
+    return ds.x * (d_val * sc_val) * float(isum) - (dmin_val * mn_val) * ds.y;
+}
+
+float geglu(float gate, float up) {
+    const float g3 = gate * gate * gate;
+    float inner = 0.7978845608 * (gate + 0.044715 * g3);
+    inner = clamp(inner, -15.0, 15.0);
+    const float gelu_g = 0.5 * gate * (1.0 + tanh(inner));
+    return gelu_g * up;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row_group = tid / LANES_PER_ROW;
+    const uint lane = tid - row_group * LANES_PER_ROW;
+    const uint row = gl_WorkGroupID.x * ROWS_PER_WG + row_group;
+    if (row >= M) return;
+
+    const uint block_entry = active_blocks[gl_WorkGroupID.y];
+    if (block_entry == 0xFFFFFFFFu) return;
+
+    const uint expert_id = block_entry & 0xFFFFu;
+    const uint packed_base = (block_entry >> 16u) * NUM_COLS;
+    const uint count = counts[expert_id];
+    if (packed_base >= count) return;
+
+    const bool active0 = packed_base + 0u < count;
+    const bool active1 = packed_base + 1u < count;
+    const bool active2 = packed_base + 2u < count;
+    const bool active3 = packed_base + 3u < count;
+    const bool active4 = packed_base + 4u < count;
+    const bool active5 = packed_base + 5u < count;
+    const bool active6 = packed_base + 6u < count;
+    const bool active7 = packed_base + 7u < count;
+
+    const uint ids_base = expert_id * ids_stride + packed_base;
+    const uint route0 = active0 ? packed_ids[ids_base + 0u] : 0u;
+    const uint route1 = active1 ? packed_ids[ids_base + 1u] : 0u;
+    const uint route2 = active2 ? packed_ids[ids_base + 2u] : 0u;
+    const uint route3 = active3 ? packed_ids[ids_base + 3u] : 0u;
+    const uint route4 = active4 ? packed_ids[ids_base + 4u] : 0u;
+    const uint route5 = active5 ? packed_ids[ids_base + 5u] : 0u;
+    const uint route6 = active6 ? packed_ids[ids_base + 6u] : 0u;
+    const uint route7 = active7 ? packed_ids[ids_base + 7u] : 0u;
+
+    const uint x_div = max(x_route_divisor, 1u);
+    const uint tok0 = x_token_base + route0 / x_div;
+    const uint tok1 = x_token_base + route1 / x_div;
+    const uint tok2 = x_token_base + route2 / x_div;
+    const uint tok3 = x_token_base + route3 / x_div;
+    const uint tok4 = x_token_base + route4 / x_div;
+    const uint tok5 = x_token_base + route5 / x_div;
+    const uint tok6 = x_token_base + route6 / x_div;
+    const uint tok7 = x_token_base + route7 / x_div;
+
+    const uint sb = lane;
+    const uint blocks_per_row = K / 256u;
+    const uint expert_base_u32 = (a_offset + expert_id * expert_stride) / 4u;
+    const uint row_u32 = expert_base_u32 + row * blocks_per_row * Q4K_BLOCK_U32;
+    const uint up_row_u32 = row_u32 + up_offset / 4u;
+
+    vec4 gate0 = vec4(0.0);
+    vec4 gate1 = vec4(0.0);
+    vec4 up0 = vec4(0.0);
+    vec4 up1 = vec4(0.0);
+
+    for (uint b = 0u; b < blocks_per_row; b++) {
+        if (active0) {
+            gate0.x += gate_block_dot(row_u32, b, sb, tok0);
+            up0.x += up_block_dot(up_row_u32, b, sb, tok0);
+        }
+        if (active1) {
+            gate0.y += gate_block_dot(row_u32, b, sb, tok1);
+            up0.y += up_block_dot(up_row_u32, b, sb, tok1);
+        }
+        if (active2) {
+            gate0.z += gate_block_dot(row_u32, b, sb, tok2);
+            up0.z += up_block_dot(up_row_u32, b, sb, tok2);
+        }
+        if (active3) {
+            gate0.w += gate_block_dot(row_u32, b, sb, tok3);
+            up0.w += up_block_dot(up_row_u32, b, sb, tok3);
+        }
+        if (active4) {
+            gate1.x += gate_block_dot(row_u32, b, sb, tok4);
+            up1.x += up_block_dot(up_row_u32, b, sb, tok4);
+        }
+        if (active5) {
+            gate1.y += gate_block_dot(row_u32, b, sb, tok5);
+            up1.y += up_block_dot(up_row_u32, b, sb, tok5);
+        }
+        if (active6) {
+            gate1.z += gate_block_dot(row_u32, b, sb, tok6);
+            up1.z += up_block_dot(up_row_u32, b, sb, tok6);
+        }
+        if (active7) {
+            gate1.w += gate_block_dot(row_u32, b, sb, tok7);
+            up1.w += up_block_dot(up_row_u32, b, sb, tok7);
+        }
+    }
+
+    const float gate_out0 = subgroupClusteredAdd(gate0.x, LANES_PER_ROW);
+    const float gate_out1 = subgroupClusteredAdd(gate0.y, LANES_PER_ROW);
+    const float gate_out2 = subgroupClusteredAdd(gate0.z, LANES_PER_ROW);
+    const float gate_out3 = subgroupClusteredAdd(gate0.w, LANES_PER_ROW);
+    const float gate_out4 = subgroupClusteredAdd(gate1.x, LANES_PER_ROW);
+    const float gate_out5 = subgroupClusteredAdd(gate1.y, LANES_PER_ROW);
+    const float gate_out6 = subgroupClusteredAdd(gate1.z, LANES_PER_ROW);
+    const float gate_out7 = subgroupClusteredAdd(gate1.w, LANES_PER_ROW);
+    const float up_out0 = subgroupClusteredAdd(up0.x, LANES_PER_ROW);
+    const float up_out1 = subgroupClusteredAdd(up0.y, LANES_PER_ROW);
+    const float up_out2 = subgroupClusteredAdd(up0.z, LANES_PER_ROW);
+    const float up_out3 = subgroupClusteredAdd(up0.w, LANES_PER_ROW);
+    const float up_out4 = subgroupClusteredAdd(up1.x, LANES_PER_ROW);
+    const float up_out5 = subgroupClusteredAdd(up1.y, LANES_PER_ROW);
+    const float up_out6 = subgroupClusteredAdd(up1.z, LANES_PER_ROW);
+    const float up_out7 = subgroupClusteredAdd(up1.w, LANES_PER_ROW);
+
+    if (lane == 0u) {
+        const uint y_base = y_offset / 4u;
+        if (active0) y_data[y_base + route0 * M + row] = geglu(gate_out0, up_out0);
+        if (active1) y_data[y_base + route1 * M + row] = geglu(gate_out1, up_out1);
+        if (active2) y_data[y_base + route2 * M + row] = geglu(gate_out2, up_out2);
+        if (active3) y_data[y_base + route3 * M + row] = geglu(gate_out3, up_out3);
+        if (active4) y_data[y_base + route4 * M + row] = geglu(gate_out4, up_out4);
+        if (active5) y_data[y_base + route5 * M + row] = geglu(gate_out5, up_out5);
+        if (active6) y_data[y_base + route6 * M + row] = geglu(gate_out6, up_out6);
+        if (active7) y_data[y_base + route7 * M + row] = geglu(gate_out7, up_out7);
+    }
+}

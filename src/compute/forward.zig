@@ -1900,6 +1900,10 @@ pub const InferenceEngine = struct {
     gemma_shared_gate: ?Buffer = null,
     gemma_shared_up: ?Buffer = null,
     gemma_shared_geglu: ?Buffer = null,
+    // Q8_1 copy of the Gemma MoE input (pre_ffw_norm_2 output) for the DP4a
+    // routed gate/up kernel: packed int8 and per-32-block (scale, sum).
+    gemma_moe_in_i8: ?Buffer = null,
+    gemma_moe_in_sd: ?Buffer = null,
     /// Batched Gemma prefill: prompt token ids for the device-side embedding gather.
     prefill_token_ids: ?Buffer = null,
     batched_scratch_hidden_scale_dsum: ?Buffer = null,
@@ -13991,6 +13995,25 @@ pub const InferenceEngine = struct {
 
     /// `emit_barrier = false` leaves the quantize output unbarriered so the
     /// caller can share one barrier with other work recorded in the same stage.
+    /// Quantize the Gemma MoE input rows to Q8_1 (packed int8 + per-32-block
+    /// scale and sum) for the DP4a routed gate/up kernel. No barrier.
+    fn recordGemmaMoeInputQ8_1(self: *InferenceEngine, src: Buffer, n_tokens: u32, hidden_dim: u32) !void {
+        const x_i8 = self.gemma_moe_in_i8 orelse return error.BufferTooSmall;
+        const x_sd = self.gemma_moe_in_sd orelse return error.BufferTooSmall;
+        try self.dmmv.recordQuantizeActQ8_1(
+            &self.decode_cmd,
+            self.instance.push_descriptor_fn,
+            src.handle,
+            src.size,
+            x_i8.handle,
+            x_i8.size,
+            x_sd.handle,
+            x_sd.size,
+            n_tokens,
+            hidden_dim,
+        );
+    }
+
     fn gemmaPrepareProjectionQ8Ex(self: *InferenceEngine, src: Buffer, K: u32, n_tokens: u32, emit_barrier: bool) !u32 {
         if (!self.gemmaDenseProjectionDp4aEnabled(n_tokens)) return 0;
         if (K == 0 or (K & 31) != 0) return 0;
@@ -27613,6 +27636,19 @@ pub const InferenceEngine = struct {
         // on the last token.
         const batch_last_layer = envFlagEnabled("ZINC_GEMMA_PREFILL_BATCH_LAST_LAYER", true);
         const batched_layers: u32 = if (batch_last_layer) cfg.n_layers else cfg.n_layers - 1;
+        // Routed gate/up on DP4a with Q8_1 activations (llama.cpp's MMQ scheme)
+        // instead of f32 activations: -12% prefill time on the R9700 at 357
+        // tokens, first tokens unchanged against llama.cpp.
+        // ZINC_GEMMA_MOE_Q8_1_GATE_UP=0 restores the f32 kernel.
+        const moe_q8_1_gate_up = envFlagEnabled("ZINC_GEMMA_MOE_Q8_1_GATE_UP", true) and
+            self.dmmv.pipeline_q4k_moe_fused_gate_up_geglu_cols_top1_q8_1 != null and
+            self.dmmv.pipeline_quantize_act_q8_1 != null and
+            (hidden_dim & 255) == 0;
+        if (moe_q8_1_gate_up) {
+            const usage = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            try growGemmaMoeScratchSlot(self.instance, &self.gemma_moe_in_i8, @as(u64, n_tokens) * hidden_dim, usage);
+            try growGemmaMoeScratchSlot(self.instance, &self.gemma_moe_in_sd, @as(u64, n_tokens) * (hidden_dim / 32) * 2 * @sizeOf(f32), usage);
+        }
         var open_layers: u32 = 0;
         var layer: u32 = 0;
         while (layer < batched_layers) : (layer += 1) {
@@ -27766,6 +27802,7 @@ pub const InferenceEngine = struct {
                 .{ .buffer = route_pack_active_blocks.handle, .size = route_pack_active_blocks_bytes },
             };
             if (overlap_shared) {
+                if (moe_q8_1_gate_up) try self.recordGemmaMoeInputQ8_1(scratch_norm, n_tokens, hidden_dim);
                 try self.dispatchFfnActivation(
                     self.gemma_shared_gate.?.handle,
                     self.gemma_shared_gate.?.size,
@@ -27804,33 +27841,68 @@ pub const InferenceEngine = struct {
                 );
                 self.decode_cmd.computeBufferBarrier(scratch_norm.handle, hidden_batch_bytes);
             }
+            if (moe_q8_1_gate_up and !overlap_shared) {
+                try self.recordGemmaMoeInputQ8_1(scratch_norm, n_tokens, hidden_dim);
+                self.decode_cmd.computeBarrier();
+            }
             const gate_up_phase = self.beginProfilePhase();
-            try self.dmmv.recordGemmaTop1GateUpGegluColsDispatchIndirect(
-                &self.decode_cmd,
-                self.instance.push_descriptor_fn,
-                gate_up.gpu_buffer.handle,
-                gate_up.gpu_buffer.size,
-                scratch_norm.handle,
-                scratch_norm.size,
-                scratch_swiglu.handle,
-                scratch_swiglu.size,
-                route_pack_counts.handle,
-                route_pack_counts_bytes,
-                scratch_route_ids.handle,
-                route_pack_ids_bytes,
-                route_pack_active_blocks.handle,
-                route_pack_active_blocks_bytes,
-                route_pack_dispatch_args.handle,
-                0,
-                inter_dim,
-                hidden_dim,
-                expert_gate_row_bytes,
-                up_base_offset,
-                ids_stride,
-                n_used,
-                0,
-                0,
-            );
+            if (moe_q8_1_gate_up) {
+                const x_i8 = self.gemma_moe_in_i8.?;
+                const x_sd = self.gemma_moe_in_sd.?;
+                try self.dmmv.recordGemmaTop1GateUpGegluColsQ8_1DispatchIndirect(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    gate_up.gpu_buffer.handle,
+                    gate_up.gpu_buffer.size,
+                    x_i8.handle,
+                    x_i8.size,
+                    x_sd.handle,
+                    x_sd.size,
+                    scratch_swiglu.handle,
+                    scratch_swiglu.size,
+                    route_pack_counts.handle,
+                    route_pack_counts_bytes,
+                    scratch_route_ids.handle,
+                    route_pack_ids_bytes,
+                    route_pack_active_blocks.handle,
+                    route_pack_active_blocks_bytes,
+                    route_pack_dispatch_args.handle,
+                    0,
+                    inter_dim,
+                    hidden_dim,
+                    expert_gate_row_bytes,
+                    up_base_offset,
+                    ids_stride,
+                    n_used,
+                );
+            } else {
+                try self.dmmv.recordGemmaTop1GateUpGegluColsDispatchIndirect(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    gate_up.gpu_buffer.handle,
+                    gate_up.gpu_buffer.size,
+                    scratch_norm.handle,
+                    scratch_norm.size,
+                    scratch_swiglu.handle,
+                    scratch_swiglu.size,
+                    route_pack_counts.handle,
+                    route_pack_counts_bytes,
+                    scratch_route_ids.handle,
+                    route_pack_ids_bytes,
+                    route_pack_active_blocks.handle,
+                    route_pack_active_blocks_bytes,
+                    route_pack_dispatch_args.handle,
+                    0,
+                    inter_dim,
+                    hidden_dim,
+                    expert_gate_row_bytes,
+                    up_base_offset,
+                    ids_stride,
+                    n_used,
+                    0,
+                    0,
+                );
+            }
             var ov_down_cols: u32 = 0;
             if (overlap_shared) {
                 ov_down_cols = try self.gemmaPrepareProjectionQ8Ex(self.gemma_shared_geglu.?, ov_inter, n_tokens, false);
@@ -32512,6 +32584,8 @@ pub const InferenceEngine = struct {
         if (self.gemma_shared_gate) |*b| b.deinit();
         if (self.gemma_shared_up) |*b| b.deinit();
         if (self.gemma_shared_geglu) |*b| b.deinit();
+        if (self.gemma_moe_in_i8) |*b| b.deinit();
+        if (self.gemma_moe_in_sd) |*b| b.deinit();
         if (self.prefill_token_ids) |*b| b.deinit();
         if (self.batched_scratch_hidden_scale_dsum) |*b| b.deinit();
         if (self.batched_scratch_norm_q8) |*b| b.deinit();

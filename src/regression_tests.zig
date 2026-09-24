@@ -415,7 +415,7 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, marker, "scratch_route_ids.handle", 28000);
     try expectContainsNear(src, marker, "try self.dispatchMoeWeightedAccScaledBatch", 34000);
     try expectContainsNear(src, marker, "const shared_proj_phase = self.beginProfilePhase();", 36000);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_proj, shared_proj_phase);", 40000);
+    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_proj, shared_proj_phase);", 48500);
     try expectContainsNear(src, marker, "const shared_down_phase = self.beginProfilePhase();", 40500);
     try expectContainsNear(src, marker, "self.endProfilePhase(.shared_down, shared_down_phase);", 42000);
     try expectContainsNear(src, marker, "const shared_acc_phase = self.beginProfilePhase();", 44000);
