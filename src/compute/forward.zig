@@ -27873,9 +27873,8 @@ pub const InferenceEngine = struct {
             }
             self.endProfilePhase(.moe_down, down_phase);
 
-            self.decode_cmd.computeToTransferBarrier();
-            vk.c.vkCmdFillBuffer(self.decode_cmd.handle, scratch_norm.handle, 0, hidden_batch_bytes, 0);
-            self.decode_cmd.transferToComputeBarrier();
+            // The combine overwrites scratch_norm, so no zero fill (and no
+            // transfer barriers around one) is needed first.
             const acc_phase = self.beginProfilePhase();
             try self.dispatchMoeWeightedAccScaledBatch(
                 scratch_norm.handle,

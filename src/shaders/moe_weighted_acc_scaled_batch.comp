@@ -4,6 +4,7 @@
 // src is laid out as [(token * k + slot) * hidden_dim + i].
 // routing is token-major softmax_topk output with ids first, then weights.
 // accum is token-major hidden/moe output and may start at accum_token_base.
+// Each accum row is overwritten, so the caller does not need to zero it.
 
 layout(local_size_x = 64) in;
 
@@ -39,5 +40,5 @@ void main() {
             src[(route_base + slot) * hidden_dim + i];
     }
 
-    accum[(accum_token_base + tok) * hidden_dim + i] += sum;
+    accum[(accum_token_base + tok) * hidden_dim + i] = sum;
 }
