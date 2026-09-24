@@ -3074,6 +3074,7 @@ fn handleChatCompletions(
     // the tokens appended after it, which is the case that used to drop to
     // ordinary decode and give up most of the speedup.
     var mtp_src = runtime.MtpSource{ .eos_id = tokenizer.eos_id };
+    defer mtp_src.finish(engine);
     if (!sampling.requiresLogitsReadback()) {
         mtp_src.active = if (reused_prefix_len == 0)
             runtime.mtpPrime(engine, &state, engine_prompt_tokens)

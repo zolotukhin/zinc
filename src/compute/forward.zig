@@ -1704,6 +1704,17 @@ pub const InferenceEngine = struct {
     // prefillBatch() owns the host-side waits between pipelined iterations and
     // forces the terminal token back onto the sync path.
     prefill_pipeline_mode: bool = false,
+    // Chained greedy decode (decodeChained): the step for the next position is
+    // recorded and submitted before the current one is waited on, with its
+    // input token gathered on the GPU from the current step's argmax, so the
+    // GPU never idles between tokens. The in-flight step lives in decode_cmd.
+    chain_inflight: bool = false,
+    chain_recording: bool = false,
+    chain_pos: u32 = 0, // position the in-flight step consumes
+    chain_token: u32 = 0, // token it consumes (the previous step's argmax)
+    chain_slot: u32 = 0, // chain_token_staging slot it writes its argmax to
+    chain_token_staging: ?Buffer = null,
+    chain_embed_buf: ?Buffer = null,
     // Host-mapped staging buffer holding every prompt-token embedding for the
     // current prefillBatch. decodeStep's layer-0 vkCmdCopyBuffer reads from
     // here with srcOffset = prefill_current_token_idx * hidden_size, and
@@ -7407,6 +7418,176 @@ pub const InferenceEngine = struct {
     /// Submit the decode command buffer so far, copy `hidden_buf` to host and
     /// log its first/last three values and RMS as the output of `layer` at
     /// position `pos`, then reopen the command buffer (diagnostic only).
+    /// Whether decodeChained can stand in for decodeStep + sampleGreedy: GPU
+    /// argmax, push descriptors, an embedding type embed_gather reads, and no
+    /// profiling, logits readback, diagnostics or primed NextN/MTP.
+    pub fn chainedDecodeAvailable(self: *const InferenceEngine) bool {
+        if (!envFlagEnabled("ZINC_DECODE_CHAIN", true)) return false;
+        if (self.instance.push_descriptor_fn == null) return false;
+        if (self.argmax.pipeline == null or self.argmax_descriptor_set == null or self.force_cpu_argmax) return false;
+        if (self.profile_enabled or self.validation_diagnostics_enabled or self.logits_readback_enabled) return false;
+        if (layerDiagPosition() != null) return false;
+        if (self.elementwise.pipeline_embed_gather == null) return false;
+        if (self.mtp) |m| {
+            if (m.primed) return false;
+        }
+        const cfg = self.model.config;
+        // Muse normalizes its embedding row on the host (museEmbedRmsNorm).
+        if (cfg.architecture == .muse_glimmer) return false;
+        if (cfg.architecture == .gemma and self.elementwise.pipeline_scale_in_place == null) return false;
+        const embd = self.tensor_map.get("token_embd.weight") orelse return false;
+        return switch (embd.info.type_) {
+            .f32, .f16 => true,
+            .q8_0 => (cfg.hidden_dim % 32) == 0,
+            .q4_k, .q6_k => (cfg.hidden_dim % 256) == 0,
+            else => false,
+        };
+    }
+
+    /// Wait for the in-flight chained step, if any, and forget it. Its KV write
+    /// sits at state.position, past the committed tokens, and is overwritten by
+    /// whatever is decoded or prefilled there next.
+    pub fn chainDrain(self: *InferenceEngine) !void {
+        if (!self.chain_inflight) return;
+        self.chain_inflight = false;
+        try self.decode_cmd.waitForCompletion();
+    }
+
+    fn chainEnsureBuffers(self: *InferenceEngine) !void {
+        if (self.chain_token_staging == null) {
+            var buf = try Buffer.init(
+                self.instance,
+                2 * @sizeOf(u32),
+                vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            );
+            errdefer buf.deinit();
+            try mtpMapWhole(self.instance, &buf);
+            self.chain_token_staging = buf;
+        }
+        if (self.chain_embed_buf == null) {
+            const hidden_size = @as(vk.c.VkDeviceSize, self.model.config.hidden_dim) * @sizeOf(f32);
+            self.chain_embed_buf = try Buffer.initDeviceLocal(
+                self.instance,
+                hidden_size,
+                vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            );
+        }
+    }
+
+    /// Append the argmax -> chain slot copy to the open decode_cmd (decodeStep
+    /// already put a compute->transfer barrier before its own argmax copy),
+    /// then close and submit it without waiting.
+    fn chainSubmit(self: *InferenceEngine, slot: u32) !void {
+        const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = @as(vk.c.VkDeviceSize, slot) * @sizeOf(u32), .size = @sizeOf(u32) };
+        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.argmax_result_buf.handle, self.chain_token_staging.?.handle, 1, &region);
+        try self.decode_cmd.end();
+        try self.decode_cmd.submit(self.instance.compute_queue);
+    }
+
+    /// Greedy decode with the next step always queued behind the current one.
+    /// Same contract as decodeStep(state, token_id, true) + sampleGreedy():
+    /// consumes token_id at state.position, advances it by one and returns the
+    /// argmax. When the caller feeds back the returned token, the step for it
+    /// is already on the GPU; any other token (or any other engine call) first
+    /// drains the speculative step. Requires chainedDecodeAvailable().
+    pub fn decodeChained(self: *InferenceEngine, state: *DecodeState, token_id: u32) !u32 {
+        const cur_slot: u32 = blk: {
+            if (self.chain_inflight and self.chain_pos == state.position and self.chain_token == token_id) {
+                // The in-flight step already consumes token_id at this position.
+                self.chain_inflight = false;
+                state.position += 1;
+                break :blk self.chain_slot;
+            }
+            try self.chainDrain();
+            try self.chainEnsureBuffers();
+            const slot: u32 = self.chain_slot ^ 1;
+            self.chain_recording = true;
+            defer self.chain_recording = false;
+            self.decode_defer_submit = true;
+            defer self.decode_defer_submit = false;
+            try self.decodeStep(state, token_id, true);
+            try self.chainSubmit(slot);
+            break :blk slot;
+        };
+        // decode_cmd now holds the step for position state.position - 1.
+
+        var spec_submitted = false;
+        const spec_slot: u32 = cur_slot ^ 1;
+        if (state.position < self.max_context_tokens) spec: {
+            const cfg = self.model.config;
+            const hidden_size = @as(vk.c.VkDeviceSize, cfg.hidden_dim) * @sizeOf(f32);
+            const embed_buf = self.chain_embed_buf.?;
+            std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
+            // decode_cmd is the one waited on by the previous call; the current
+            // step is in prefill_cmd_alt.
+            try self.decode_cmd.reset();
+            try self.decode_cmd.beginOneTime();
+            // Everything submitted earlier (the current step's argmax, its
+            // copies of argmax_result_buf) before this step reads or rewrites it.
+            const full = vk.c.VkMemoryBarrier{
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
+                .srcAccessMask = vk.c.VK_ACCESS_MEMORY_WRITE_BIT | vk.c.VK_ACCESS_MEMORY_READ_BIT,
+                .dstAccessMask = vk.c.VK_ACCESS_MEMORY_WRITE_BIT | vk.c.VK_ACCESS_MEMORY_READ_BIT,
+            };
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, vk.c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &full, 0, null, 0, null);
+            self.mtpRecordEmbedGather(self.argmax_result_buf, 0, embed_buf, 0) catch |err| {
+                // Nothing submitted yet: put the command buffers back and fall
+                // through to a plain wait.
+                try self.decode_cmd.end();
+                std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
+                if (err == error.UnsupportedEmbeddingType) break :spec;
+                return err;
+            };
+            if (cfg.architecture == .gemma) {
+                self.decode_cmd.computeBufferBarrier(embed_buf.handle, hidden_size);
+                try self.dispatchScaleInPlace(embed_buf.handle, hidden_size, cfg.hidden_dim, @floatCast(@sqrt(@as(f64, @floatFromInt(cfg.hidden_dim)))));
+            }
+            self.decode_cmd.computeToTransferBarrier();
+
+            const saved_hidden_in = self.partial_decode_hidden_in;
+            const saved_hidden_in_offset = self.partial_decode_hidden_in_offset;
+            const saved_allow_tail = self.partial_decode_allow_final_tail;
+            defer {
+                self.partial_decode_hidden_in = saved_hidden_in;
+                self.partial_decode_hidden_in_offset = saved_hidden_in_offset;
+                self.partial_decode_allow_final_tail = saved_allow_tail;
+            }
+            self.partial_decode_hidden_in = embed_buf.handle;
+            self.partial_decode_hidden_in_offset = 0;
+            self.partial_decode_allow_final_tail = true;
+            self.decode_cmd_preopened = true;
+            self.chain_recording = true;
+            defer self.chain_recording = false;
+            self.decode_defer_submit = true;
+            defer self.decode_defer_submit = false;
+            // token_id is unused when the hidden state comes from embed_buf.
+            try self.decodeStep(state, 0, true);
+            try self.chainSubmit(spec_slot);
+            state.position -= 1;
+            spec_submitted = true;
+        }
+
+        // Wait for the current step and read its token.
+        if (spec_submitted) {
+            try self.prefill_cmd_alt.waitForCompletion();
+        } else {
+            try self.decode_cmd.waitForCompletion();
+        }
+        const slots: [*]const u32 = @ptrCast(@alignCast(self.chain_token_staging.?.mapped.?));
+        const token = slots[cur_slot];
+        if (spec_submitted) {
+            self.chain_inflight = true;
+            self.chain_pos = state.position;
+            self.chain_token = token;
+            self.chain_slot = spec_slot;
+        } else {
+            self.chain_slot = cur_slot;
+        }
+        return token;
+    }
+
     fn layerDiagDump(self: *InferenceEngine, pos: u32, layer: usize, tag: []const u8) !void {
         const hidden_dim = self.model.config.hidden_dim;
         try self.decode_cmd.end();
@@ -7431,6 +7612,7 @@ pub const InferenceEngine = struct {
     }
 
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32, collect_output: bool) !void {
+        if (self.chain_inflight and !self.chain_recording) try self.chainDrain();
         if (state.position >= self.max_context_tokens) {
             return error.ContextLengthExceeded;
         }
@@ -28808,6 +28990,7 @@ pub const InferenceEngine = struct {
     /// @param state Decode state for the current request.
     /// @param prompt_tokens Tokenized prompt sequence to prefill.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        try self.chainDrain();
         try self.mtpFlushPending(state);
         // Rebuilding the context from scratch leaves the NextN cache describing a
         // conversation that no longer exists.
@@ -31524,6 +31707,7 @@ pub const InferenceEngine = struct {
     /// Prime the NextN KV cache over a freshly prefilled prompt (positions
     /// 0..N-1). Requires the prefill capture to hold every prompt row.
     pub fn mtpPrime(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !bool {
+        try self.chainDrain();
         const mtp = &(self.mtp orelse return false);
         const N: u32 = @intCast(prompt_tokens.len);
         if (N == 0) return false;
@@ -31580,6 +31764,7 @@ pub const InferenceEngine = struct {
     /// primes its appended rows in ~3 ms and decodes at speculative speed with
     /// the same answer. ZINC_MTP_REUSE=0 disables it.
     pub fn mtpPrimeSuffix(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32, reused_prefix_len: u32) !bool {
+        try self.chainDrain();
         if (!envFlagEnabled("ZINC_MTP_REUSE", true)) return false;
         const mtp = &(self.mtp orelse return false);
         const N: u32 = @intCast(prompt_tokens.len);
@@ -31770,6 +31955,7 @@ pub const InferenceEngine = struct {
     /// consumed `seed` plus `n_accepted` drafts and state.position is advanced
     /// accordingly; `next_token` is the target's prediction after them.
     pub fn mtpCycle(self: *InferenceEngine, state: *DecodeState, seed: u32, pos: u32, max_drafts: u32, eos_id: u32) !MtpCycleResult {
+        try self.chainDrain();
         const mtp = &(self.mtp orelse return error.MtpNotPrimed);
         if (!mtp.primed) return error.MtpNotPrimed;
         const hidden_dim = self.model.config.hidden_dim;
@@ -32459,6 +32645,9 @@ pub const InferenceEngine = struct {
 
     /// Release GPU buffers, graphs, command objects, and dispatch helpers owned by the engine.
     pub fn deinit(self: *InferenceEngine) void {
+        self.chainDrain() catch {};
+        if (self.chain_token_staging) |*b| b.deinit();
+        if (self.chain_embed_buf) |*b| b.deinit();
         if (self.timestamp_query_pool != null) vk.c.vkDestroyQueryPool(self.instance.device, self.timestamp_query_pool, null);
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
         self.tensor_map.deinit();
@@ -33389,14 +33578,18 @@ pub fn generate(
         generated = effective_max_tokens; // skip the per-token loop below
     }
 
+    const use_chain = engine.chainedDecodeAvailable() and !mtp_debug_draft;
+    defer engine.chainDrain() catch {};
     while (generated < effective_max_tokens) : (generated += 1) {
         const tok_start = std.time.nanoTimestamp();
 
         // Feed the last generated token as input
         const input_token = state.generated_tokens.items[state.generated_tokens.items.len - 1];
 
-        try engine.decodeStep(&state, input_token, true);
-        const token = engine.sampleGreedy();
+        const token = if (use_chain) try engine.decodeChained(&state, input_token) else blk: {
+            try engine.decodeStep(&state, input_token, true);
+            break :blk engine.sampleGreedy();
+        };
         try state.generated_tokens.append(allocator, token);
         if (mtp_debug_draft) {
             if (mtp_dbg_pending) |d| {

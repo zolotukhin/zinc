@@ -213,8 +213,19 @@ pub const MtpSource = struct {
                 self.active = false;
             }
         }
+        if (comptime gpu.is_vulkan) {
+            if (!_params.requiresLogitsReadback() and _engine.chainedDecodeAvailable()) {
+                return _engine.decodeChained(_state, prev);
+            }
+        }
         try decodeStep(_engine, _state, prev, true);
         return sample(_engine, _state, _params, _random);
+    }
+
+    /// Wait for any decode step queued ahead by `step` (Vulkan chained greedy
+    /// decode) so the engine is idle when the request ends.
+    pub fn finish(_: *MtpSource, _engine: *InferenceEngine) void {
+        if (comptime gpu.is_vulkan) _engine.chainDrain() catch {};
     }
 };
 
