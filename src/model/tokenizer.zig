@@ -350,7 +350,9 @@ pub const Tokenizer = struct {
             .bos_id = bos_id,
             .eos_id = eos_id,
             .eot_id = eot_id,
-            .prepend_bos = prepend_bos,
+            // Gemma 4 always starts with BOS, whatever add_bos_token says
+            // (the reference tokenizer overrides it too, llama.cpp PR 21500).
+            .prepend_bos = prepend_bos or (pretokenizer == .gemma4_bpe and bos_id != null),
             .add_eos_token = add_eos_token,
             .chat_template = chat_template,
             .pretokenizer = pretokenizer,
@@ -455,12 +457,11 @@ pub const Tokenizer = struct {
             }
         }
 
-        // Gemma4 uses SentencePiece-style BPE. Its GGUF metadata carries both
-        // token scores and a merge list, but the scored piece merges match the
-        // reference tokenizer behavior more closely than the raw merge ranks.
-        if (self.pretokenizer == .gemma4_bpe and self.scores != null) {
-            try self.applySentencePieceMerges(&symbols, &owned_symbols);
-        } else if (self.merges.len > 0) {
+        // Gemma4 is BPE over raw UTF-8 with spaces normalized to ▁ (the GGUF
+        // also carries token scores). Merge by rank like the reference
+        // tokenizer: merging by score splits common words (" refrigerator"
+        // became " ref" + "riger" + "ator").
+        if (self.merges.len > 0) {
             // GPT-2/tiktoken-style merge ranks.
             try self.applyMerges(&symbols, &owned_symbols);
         } else if (self.scores != null) {
@@ -1854,7 +1855,7 @@ test "initFromGGUF omits BOS for gpt-oss prompts by default" {
     try std.testing.expect(!tok.shouldPrependBos());
 }
 
-test "initFromGGUF respects gemma4 add_bos_token=false" {
+test "initFromGGUF prepends BOS for gemma4 even when add_bos_token=false" {
     const allocator = std.testing.allocator;
 
     var gf = gguf.GGUFFile{
@@ -1882,7 +1883,7 @@ test "initFromGGUF respects gemma4 add_bos_token=false" {
     var tok = try Tokenizer.initFromGGUF(&gf, allocator);
     defer tok.deinit();
 
-    try std.testing.expect(!tok.shouldPrependBos());
+    try std.testing.expect(tok.shouldPrependBos());
 }
 
 test "initFromGGUF respects gemma4 add_bos_token=true" {
@@ -2526,7 +2527,7 @@ test "encode gemma4_bpe keeps newline runs as direct tokens when present" {
     try std.testing.expectEqualSlices(u32, &.{0}, tokens);
 }
 
-test "encode gemma4_bpe prefers score merges over merge ranks when both exist" {
+test "encode gemma4_bpe merges by rank even when token scores exist" {
     const vocab = [_][]const u8{ "a", "b", "c", "ab", "bc" };
     const merges = [_]Tokenizer.Merge{
         .{ .first = "a", .second = "b", .rank = 0 },
@@ -2563,7 +2564,7 @@ test "encode gemma4_bpe prefers score merges over merge ranks when both exist" {
     const tokens = try tok.encode("abc");
     defer std.testing.allocator.free(tokens);
 
-    try std.testing.expectEqualSlices(u32, &.{ 0, 4 }, tokens);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 2 }, tokens);
 }
 
 test "encodeWithSpecialTokens maps known special tokens to their IDs" {
