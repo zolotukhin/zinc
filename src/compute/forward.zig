@@ -7432,8 +7432,6 @@ pub const InferenceEngine = struct {
             if (m.primed) return false;
         }
         const cfg = self.model.config;
-        // Muse normalizes its embedding row on the host (museEmbedRmsNorm).
-        if (cfg.architecture == .muse_glimmer) return false;
         if (cfg.architecture == .gemma and self.elementwise.pipeline_scale_in_place == null) return false;
         const embd = self.tensor_map.get("token_embd.weight") orelse return false;
         return switch (embd.info.type_) {
@@ -7540,9 +7538,14 @@ pub const InferenceEngine = struct {
                 if (err == error.UnsupportedEmbeddingType) break :spec;
                 return err;
             };
+            // The same post-processing embedToken does on the host.
             if (cfg.architecture == .gemma) {
                 self.decode_cmd.computeBufferBarrier(embed_buf.handle, hidden_size);
                 try self.dispatchScaleInPlace(embed_buf.handle, hidden_size, cfg.hidden_dim, @floatCast(@sqrt(@as(f64, @floatFromInt(cfg.hidden_dim)))));
+            } else if (cfg.architecture == .muse_glimmer) {
+                // Weightless RMS norm (museEmbedRmsNorm), in f32 on the GPU.
+                self.decode_cmd.computeBufferBarrier(embed_buf.handle, hidden_size);
+                try self.dispatchRmsNorm(embed_buf.handle, hidden_size, self.unit_norm_weights.handle, self.unit_norm_weights.size, embed_buf.handle, hidden_size, cfg.hidden_dim, 1, cfg.rms_norm_eps);
             }
             self.decode_cmd.computeToTransferBarrier();
 
