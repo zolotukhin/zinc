@@ -429,6 +429,15 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, "fn prefillBatchedImpl", "return self.prefillGemmaGroupedMoeExact(state, prompt_tokens);", 1800);
 }
 
+test "Gemma grouped Q4_K gate/up GEGLU kernel covers both halves of each super-block" {
+    // Eight lanes per row only reach values 0-63 and 128-191 of a 256-value
+    // Q4_K block unless each lane also walks v_im = 1 (b14ae3bd dropped half of
+    // every gate/up dot product until 2026-09-24).
+    const shader = @embedFile("shaders/dmmv_q4k_moe_fused_gate_up_geglu_cols_top1.comp");
+    try expectContains(shader, "const uint LANES_PER_ROW = 8u;");
+    try expectContains(shader, "for (uint v_im = 0u; v_im < 2u; v_im++) {");
+}
+
 test "Vulkan Gemma grouped MoE prefill wires Q5_1 route-column down projection" {
     const dmmv = @embedFile("compute/dmmv.zig");
     try expectContains(dmmv, "pipeline_q5_1_moe_cols");

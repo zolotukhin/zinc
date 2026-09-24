@@ -27602,7 +27602,7 @@ pub const InferenceEngine = struct {
         // token-layer budget as the other batched prefills keeps each
         // submission under the R9700's ~2 s kernel limit. Profiling, route-count
         // collection and descriptor-set pools keep one layer per submission.
-        const layers_per_submit: u32 = if (enable_gpu_phase_timing or collect_route_profile or
+        const layers_per_submit: u32 = if (enable_gpu_phase_timing or collect_route_profile or layerDiagPosition() != null or
             self.instance.push_descriptor_fn == null or !envFlagEnabled("ZINC_GEMMA_PREFILL_LAYER_BATCH", true))
             1
         else
@@ -28113,6 +28113,24 @@ pub const InferenceEngine = struct {
             const layer_submit_wait_start = std.time.nanoTimestamp();
             try self.decode_cmd.submitAndWait(self.instance.compute_queue);
             self.prefill_submit_wait_ns += @intCast(std.time.nanoTimestamp() - layer_submit_wait_start);
+            // ZINC_LAYER_DIAG_POS=<p>: dump the residual leaving each layer at
+            // prompt position p, in the same format as decodeStep's dump, for
+            // comparison with the reference eval-callback `l_out-N` row.
+            if (layerDiagPosition()) |dp| {
+                if (dp >= base_token and dp < base_token + n_tokens) {
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.beginOneTime();
+                    const diag_region = vk.c.VkBufferCopy{ .srcOffset = @as(vk.c.VkDeviceSize, dp - base_token) * hidden_size, .dstOffset = 0, .size = hidden_size };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, scratch_hidden.handle, self.logits_staging.handle, 1, &diag_region);
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                    const dv: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    var ss: f64 = 0.0;
+                    for (0..hidden_dim) |di| ss += @as(f64, dv[di]) * @as(f64, dv[di]);
+                    const dn = hidden_dim;
+                    log.info("LAYER_DIAG: pos={d} layer {d} out: first3={d:.4},{d:.4},{d:.4} last3={d:.4},{d:.4},{d:.4} rms={d:.4}", .{ dp, layer, dv[0], dv[1], dv[2], dv[dn - 3], dv[dn - 2], dv[dn - 1], @sqrt(ss / @as(f64, @floatFromInt(dn))) });
+                }
+            }
             if (enable_gpu_phase_timing) self.recordProfilingSample();
             if (collect_route_profile) {
                 const counts_ptr: [*]const u32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
@@ -28126,7 +28144,7 @@ pub const InferenceEngine = struct {
             }
         }
 
-        if (batch_last_layer) {
+        if (batched_layers == cfg.n_layers) {
             // Every layer is done; run just the final norm + LM head on the
             // last prompt token's hidden state.
             const last_idx = n_tokens - 1;
@@ -28153,7 +28171,7 @@ pub const InferenceEngine = struct {
                 base_token,
                 n_tokens,
                 hidden_size,
-                cfg.n_layers - 1,
+                batched_layers,
                 cfg.n_layers,
                 scratch_hidden,
                 null,

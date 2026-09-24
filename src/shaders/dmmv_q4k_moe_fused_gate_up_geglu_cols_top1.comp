@@ -2,8 +2,11 @@
 // ZINC - grouped Gemma top-1 Q4_K MoE fused gate+up+GEGLU.
 //
 // Route ids are packed expert-major by moe_route_pack.comp. Each workgroup
-// computes four output rows for up to eight token routes that all selected the
-// same expert, reusing the packed Q4_K gate/up rows across those token columns.
+// computes eight output rows (eight lanes per row) for up to eight token routes
+// that all selected the same expert, reusing the packed Q4_K gate/up rows
+// across those token columns. With eight lanes per row each lane walks both
+// 128-value halves of every 256-value super-block (v_im = 0 and 1); the
+// sixteen-lane kernels get the second half from lanes 8-15.
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
@@ -186,12 +189,8 @@ void main() {
 
     const uint il = lane / 4u;
     const uint ir = lane & 3u;
-    const uint v_im = il / 2u;
     const uint v_in = il & 1u;
     const uint l0 = 4u * (2u * ir + v_in);
-    const uint q_offset_in_half = 32u * v_im + l0;
-    const uint y_offset_local = 64u * v_im + l0;
-    const uint shift = v_im * 16u;
 
     const uint blocks_per_row = K / 256u;
     const uint expert_base_u32 = (a_offset + expert_id * expert_stride) / 4u;
@@ -205,13 +204,18 @@ void main() {
     vec4 up1 = vec4(0.0);
 
     for (uint b = 0u; b < blocks_per_row; b++) {
-        const uint idx0 = (b * 256u + y_offset_local) / 4u;
-        const uint idx1 = idx0 + 8u;
-        const uint idx2 = (b * 256u + y_offset_local + 128u) / 4u;
-        const uint idx3 = idx2 + 8u;
+        for (uint v_im = 0u; v_im < 2u; v_im++) {
+            const uint q_offset_in_half = 32u * v_im + l0;
+            const uint y_offset_local = 64u * v_im + l0;
+            const uint shift = v_im * 16u;
+            const uint idx0 = (b * 256u + y_offset_local) / 4u;
+            const uint idx1 = idx0 + 8u;
+            const uint idx2 = (b * 256u + y_offset_local + 128u) / 4u;
+            const uint idx3 = idx2 + 8u;
 
-        accumulate_q4k_row(gate_row_u32, b, q_offset_in_half, shift, idx0, idx1, idx2, idx3, x0, x1, x2, x3, x4, x5, x6, x7, active0, active1, active2, active3, active4, active5, active6, active7, gate0, gate1);
-        accumulate_q4k_row(up_row_u32, b, q_offset_in_half, shift, idx0, idx1, idx2, idx3, x0, x1, x2, x3, x4, x5, x6, x7, active0, active1, active2, active3, active4, active5, active6, active7, up0, up1);
+            accumulate_q4k_row(gate_row_u32, b, q_offset_in_half, shift, idx0, idx1, idx2, idx3, x0, x1, x2, x3, x4, x5, x6, x7, active0, active1, active2, active3, active4, active5, active6, active7, gate0, gate1);
+            accumulate_q4k_row(up_row_u32, b, q_offset_in_half, shift, idx0, idx1, idx2, idx3, x0, x1, x2, x3, x4, x5, x6, x7, active0, active1, active2, active3, active4, active5, active6, active7, up0, up1);
+        }
     }
 
     const float gate_out0 = subgroupClusteredAdd(gate0.x, LANES_PER_ROW);
