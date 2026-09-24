@@ -1873,6 +1873,8 @@ pub const InferenceEngine = struct {
     // Q4_K bias term (see quantize_act_q8_1.comp /
     // mul_mm_q4k_gate_up_swiglu_full_dp4a.comp).
     batched_scratch_hidden_i8: ?Buffer = null,
+    /// Batched Gemma prefill: prompt token ids for the device-side embedding gather.
+    prefill_token_ids: ?Buffer = null,
     batched_scratch_hidden_scale_dsum: ?Buffer = null,
     // int8 DP4a SSM wqkv prefill: Q8_0-style (scale only) packed activations of
     // the post-RMS-norm hidden vector. Q6_K weights are symmetric (q-32), so the
@@ -27367,8 +27369,36 @@ pub const InferenceEngine = struct {
             self.prefill_embed_big = try Buffer.initStaging(self.instance, total_embed_bytes);
             self.prefill_embed_big_capacity_bytes = total_embed_bytes;
         }
+        // Dequantize the prompt's embedding rows on the GPU (embed_gather over
+        // grid.y = tokens, then the Gemma sqrt(hidden) scale) instead of a serial
+        // host loop that took ~16 ms for 346 tokens before any GPU work started.
+        // embed_gather mirrors the host dequant exactly. ZINC_GEMMA_GPU_EMBED=0
+        // restores the host path.
+        const gpu_embed_type: ?u32 = blk: {
+            if (!envFlagEnabled("ZINC_GEMMA_GPU_EMBED", true)) break :blk null;
+            if (self.elementwise.pipeline_embed_gather == null or self.elementwise.pipeline_scale_in_place == null) break :blk null;
+            const embd_t = self.tensor_map.get("token_embd.weight") orelse break :blk null;
+            if (embd_t.gpu_buffer.handle == null) break :blk null;
+            break :blk switch (embd_t.info.type_) {
+                .f32 => 0,
+                .f16 => 1,
+                .q8_0 => if ((hidden_dim % 32) == 0) 2 else null,
+                .q4_k => if ((hidden_dim % 256) == 0) 3 else null,
+                .q6_k => if ((hidden_dim % 256) == 0) 4 else null,
+                else => null,
+            };
+        };
+        if (gpu_embed_type != null) {
+            const ids_bytes: u64 = @as(u64, n_tokens) * @sizeOf(u32);
+            if (self.prefill_token_ids == null or self.prefill_token_ids.?.size < ids_bytes) {
+                if (self.prefill_token_ids) |*b| b.deinit();
+                self.prefill_token_ids = try Buffer.initHostVisibleStorage(self.instance, @max(ids_bytes, 256));
+            }
+            const ids_ptr: [*]u32 = @ptrCast(@alignCast(self.prefill_token_ids.?.mapped.?));
+            @memcpy(ids_ptr[0..n_tokens], prompt_tokens[0..n_tokens]);
+        }
         const cpu_embed_start = std.time.nanoTimestamp();
-        {
+        if (gpu_embed_type == null) {
             const big_f32: [*]f32 = @ptrCast(@alignCast(self.prefill_embed_big.?.mapped.?));
             const embd = self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
             const mmap = self.model.mmap_data orelse return error.NoMmapData;
@@ -27383,7 +27413,9 @@ pub const InferenceEngine = struct {
             }
         }
         const cpu_embed_elapsed_ns: u64 = @intCast(std.time.nanoTimestamp() - cpu_embed_start);
-        self.prefill_embed_big_hidden = hidden_dim;
+        // decodeStep copies prompt rows from prefill_embed_big only when the hidden
+        // size matches; with the GPU gather that host buffer is not filled.
+        self.prefill_embed_big_hidden = if (gpu_embed_type == null) hidden_dim else 0;
         self.prefill_embed_big_token_count = n_tokens;
         self.prefill_current_token_idx = 0;
         defer {
@@ -27435,11 +27467,26 @@ pub const InferenceEngine = struct {
         const initial_record_start = std.time.nanoTimestamp();
         try self.decode_cmd.reset();
         try self.decode_cmd.beginOneTime();
-        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.prefill_embed_big.?.handle, scratch_hidden.handle, 1, &vk.c.VkBufferCopy{
-            .srcOffset = 0,
-            .dstOffset = 0,
-            .size = total_embed_bytes,
-        });
+        if (gpu_embed_type) |qtype| {
+            const embd_t = self.tensor_map.get("token_embd.weight").?;
+            const push = elementwise_mod.EmbedGatherPush{
+                .cols = hidden_dim,
+                .index_offset = 0,
+                .out_offset = 0,
+                .vocab_last = cfg.vocab_size -| 1,
+                .qtype = qtype,
+            };
+            const ids = self.prefill_token_ids.?;
+            self.pushDispatch3(&self.elementwise.pipeline_embed_gather.?, std.mem.asBytes(&push), embd_t.gpu_buffer.handle, embd_t.gpu_buffer.size, ids.handle, ids.size, scratch_hidden.handle, scratch_hidden.size, 1, n_tokens, 1);
+            self.decode_cmd.computeBufferBarrier(scratch_hidden.handle, total_embed_bytes);
+            try self.dispatchScaleInPlace(scratch_hidden.handle, total_embed_bytes, n_tokens * hidden_dim, @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim)))));
+        } else {
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.prefill_embed_big.?.handle, scratch_hidden.handle, 1, &vk.c.VkBufferCopy{
+                .srcOffset = 0,
+                .dstOffset = 0,
+                .size = total_embed_bytes,
+            });
+        }
         try self.decode_cmd.end();
         const initial_record_elapsed_ns: u64 = @intCast(std.time.nanoTimestamp() - initial_record_start);
         const initial_submit_wait_start = std.time.nanoTimestamp();
@@ -32287,6 +32334,7 @@ pub const InferenceEngine = struct {
         if (self.batched_scratch_swiglu_scale) |*b| b.deinit();
         if (self.batched_scratch_swiglu_scale_dsum) |*b| b.deinit();
         if (self.batched_scratch_hidden_i8) |*b| b.deinit();
+        if (self.prefill_token_ids) |*b| b.deinit();
         if (self.batched_scratch_hidden_scale_dsum) |*b| b.deinit();
         if (self.batched_scratch_norm_q8) |*b| b.deinit();
         if (self.batched_scratch_norm_q8_scale) |*b| b.deinit();

@@ -48,13 +48,17 @@ void scale_min_k4(uint sc_off, uint j, out uint sc, out uint m) {
 
 void main() {
     uint t = gl_LocalInvocationID.x;
-    uint row = min(idx[index_offset], vocab_last);
+    // grid.y gathers consecutive ids into consecutive rows (batched prefill);
+    // single-row callers dispatch y = 1.
+    uint wy = gl_WorkGroupID.y;
+    uint row = min(idx[index_offset + wy], vocab_last);
+    uint out_base = out_offset + wy * cols;
     if (qtype == 0u) {
         uint row_u32 = row * cols;
-        for (uint i = t; i < cols; i += 256u) o[out_offset + i] = uintBitsToFloat(t_u32[row_u32 + i]);
+        for (uint i = t; i < cols; i += 256u) o[out_base + i] = uintBitsToFloat(t_u32[row_u32 + i]);
     } else if (qtype == 1u) {
         uint row_b = row * cols * 2u;
-        for (uint i = t; i < cols; i += 256u) o[out_offset + i] = f16_at(row_b + i * 2u);
+        for (uint i = t; i < cols; i += 256u) o[out_base + i] = f16_at(row_b + i * 2u);
     } else if (qtype == 2u) {
         // Q8_0: 32 elements per 34-byte block (f16 d, 32 x int8).
         uint row_b = row * (cols / 32u) * 34u;
@@ -62,7 +66,7 @@ void main() {
             uint bo = row_b + (i / 32u) * 34u;
             float d = f16_at(bo);
             precise float r = float(s8_at(bo + 2u + (i % 32u))) * d;
-            o[out_offset + i] = r;
+            o[out_base + i] = r;
         }
     } else if (qtype == 3u) {
         // Q4_K: 256 elements per 144-byte block (d, dmin, scales[12], qs[128]).
@@ -83,7 +87,7 @@ void main() {
             uint q = rd8(bb + 16u + grp * 32u + l);
             uint nib = (hf == 0u) ? (q & 0xFu) : (q >> 4);
             precise float r = dd * float(nib) - mm;
-            o[out_offset + b * 256u + grp * 64u + hf * 32u + l] = r;
+            o[out_base + b * 256u + grp * 64u + hf * 32u + l] = r;
         }
     } else {
         // Q6_K: 256 elements per 210-byte block (ql[128], qh[64], scales[16], d).
@@ -111,7 +115,7 @@ void main() {
             float q = float(int(rq) - 32);
             precise float ds = d * float(s8_at(sc_o + is + 2u * k));
             precise float r = ds * q;
-            o[out_offset + b * 256u + n * 128u + k * 32u + l] = r;
+            o[out_base + b * 256u + n * 128u + k * 32u + l] = r;
         }
     }
 }
