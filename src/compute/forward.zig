@@ -27562,14 +27562,27 @@ pub const InferenceEngine = struct {
             self.instance.push_descriptor_fn != null and
             self.isAmdRdna();
 
+        // Record several layers per submission: a per-layer submit + fence wait
+        // left the GPU idle while the host recorded the next layer. The same
+        // token-layer budget as the other batched prefills keeps each
+        // submission under the R9700's ~2 s kernel limit. Profiling, route-count
+        // collection and descriptor-set pools keep one layer per submission.
+        const layers_per_submit: u32 = if (enable_gpu_phase_timing or collect_route_profile or
+            self.instance.push_descriptor_fn == null or !envFlagEnabled("ZINC_GEMMA_PREFILL_LAYER_BATCH", true))
+            1
+        else
+            @intCast(std.math.clamp(prefill_submit_token_layers / @as(usize, @max(n_tokens, 1)), 1, prefill_submit_max_layers));
+        var open_layers: u32 = 0;
         var layer: u32 = 0;
         while (layer + 1 < cfg.n_layers) : (layer += 1) {
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             const layer_record_start = std.time.nanoTimestamp();
-            try self.decode_cmd.reset();
-            try self.decode_cmd.beginOneTime();
-            self.resetTimestamps();
-            _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+            if (open_layers == 0) {
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+                self.resetTimestamps();
+                _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+            }
             self.decode_cmd.transferToComputeBarrier();
             try self.prefillGemmaRecordBatchedAttentionToFfnNorm(
                 base_token,
@@ -27972,6 +27985,12 @@ pub const InferenceEngine = struct {
             }
             self.endProfilePhase(.moe_routed, moe_phase);
             self.decode_cmd.computeToTransferBarrier();
+            open_layers += 1;
+            if (open_layers < layers_per_submit and layer + 2 < cfg.n_layers) {
+                self.prefill_cpu_record_ns += @intCast(std.time.nanoTimestamp() - layer_record_start);
+                continue;
+            }
+            open_layers = 0;
             _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             try self.decode_cmd.end();
             self.prefill_cpu_record_ns += @intCast(std.time.nanoTimestamp() - layer_record_start);
