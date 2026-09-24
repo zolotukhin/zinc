@@ -113,6 +113,18 @@ const muse_prefill_chunk_tokens: u32 = 384;
 /// and never more than prefill_submit_max_layers layers.
 const prefill_submit_token_layers: usize = 4096;
 const prefill_submit_max_layers: usize = 16;
+/// Gemma MoE layers cost ~25 us per token-layer on the R9700 (Gemma 4 26B-A4B,
+/// 357 tokens x 29 layers in ~250 ms), so the grouped MoE prefill can put far
+/// more token-layers in one submission than the dense-layer budget above while
+/// staying well under the ~2 s kernel limit: 16384 token-layers is ~0.4 s.
+/// Fewer submissions also leave fewer host-recording gaps on a loaded host.
+const gemma_moe_prefill_submit_token_layers: usize = 16384;
+const gemma_moe_prefill_submit_max_layers: usize = 64;
+
+fn gemmaMoePrefillSubmitTokenLayers() usize {
+    const raw = std.posix.getenv("ZINC_GEMMA_MOE_PREFILL_SUBMIT_TOKEN_LAYERS") orelse return gemma_moe_prefill_submit_token_layers;
+    return std.fmt.parseUnsigned(usize, std.mem.trim(u8, raw, " \t\r\n"), 10) catch gemma_moe_prefill_submit_token_layers;
+}
 const gemma_prefill_long_draft_prompt_guard_tokens: u32 = 2;
 const gemma_prefill_shared_skip_max_tokens: u32 = 72;
 const gemma_prefill_tiny_prompt_topk: u32 = 2;
@@ -27594,7 +27606,7 @@ pub const InferenceEngine = struct {
             self.instance.push_descriptor_fn == null or !envFlagEnabled("ZINC_GEMMA_PREFILL_LAYER_BATCH", true))
             1
         else
-            @intCast(std.math.clamp(prefill_submit_token_layers / @as(usize, @max(n_tokens, 1)), 1, prefill_submit_max_layers));
+            @intCast(std.math.clamp(gemmaMoePrefillSubmitTokenLayers() / @as(usize, @max(n_tokens, 1)), 1, gemma_moe_prefill_submit_max_layers));
         var open_layers: u32 = 0;
         var layer: u32 = 0;
         while (layer + 1 < cfg.n_layers) : (layer += 1) {
