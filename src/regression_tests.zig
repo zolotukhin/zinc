@@ -410,22 +410,22 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, "fn gemmaDenseGegluDp4aEnabled", "cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()", 900);
     try expectContainsNear(src, marker, "const scratch_route_ids = scratch_shared_up;", 4600);
     try expectContainsNear(src, marker, "if (scratch_route_ids.size < route_pack_ids_bytes) return error.BufferTooSmall;", 16000);
-    try expectContainsNear(src, marker, "const collect_route_profile =", 13000);
-    try expectContainsNear(src, marker, "self.recordPrefillRoutePackCounts(", 36000);
-    try expectContainsNear(src, marker, "scratch_route_ids.handle", 22000);
-    try expectContainsNear(src, marker, "try self.dispatchMoeWeightedAccScaledBatch", 24000);
-    try expectContainsNear(src, marker, "const shared_proj_phase = self.beginProfilePhase();", 28500);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_proj, shared_proj_phase);", 30000);
-    try expectContainsNear(src, marker, "const shared_down_phase = self.beginProfilePhase();", 30500);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_down, shared_down_phase);", 32000);
-    try expectContainsNear(src, marker, "const shared_acc_phase = self.beginProfilePhase();", 32500);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_gate_acc, shared_acc_phase);", 34000);
-    try expectContainsNear(src, marker, "const layer_record_start = std.time.nanoTimestamp();", 18000);
-    try expectContainsNear(src, marker, "self.prefill_cpu_record_ns += @intCast(std.time.nanoTimestamp() - layer_record_start);", 36000);
-    try expectContainsNear(src, marker, "try self.gemmaPrepareProjectionQ8(scratch_shared_norm", 34000);
-    try expectContainsNear(src, marker, "try self.gemmaPrepareProjectionQ8(scratch_swiglu", 38000);
-    try expectContainsNear(src, marker, "const enable_gpu_phase_timing =", 11800);
-    try expectContainsNear(src, marker, "self.resetTimestamps();", 15200);
+    try expectContainsNear(src, marker, "const collect_route_profile =", 18000);
+    try expectContainsNear(src, marker, "self.recordPrefillRoutePackCounts(", 48000);
+    try expectContainsNear(src, marker, "scratch_route_ids.handle", 28000);
+    try expectContainsNear(src, marker, "try self.dispatchMoeWeightedAccScaledBatch", 34000);
+    try expectContainsNear(src, marker, "const shared_proj_phase = self.beginProfilePhase();", 36000);
+    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_proj, shared_proj_phase);", 40000);
+    try expectContainsNear(src, marker, "const shared_down_phase = self.beginProfilePhase();", 40500);
+    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_down, shared_down_phase);", 42000);
+    try expectContainsNear(src, marker, "const shared_acc_phase = self.beginProfilePhase();", 44000);
+    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_gate_acc, shared_acc_phase);", 45000);
+    try expectContainsNear(src, marker, "const layer_record_start = std.time.nanoTimestamp();", 22000);
+    try expectContainsNear(src, marker, "self.prefill_cpu_record_ns += @intCast(std.time.nanoTimestamp() - layer_record_start);", 48000);
+    try expectContainsNear(src, marker, "try self.gemmaPrepareProjectionQ8(scratch_shared_norm", 42000);
+    try expectContainsNear(src, marker, "try self.gemmaPrepareProjectionQ8(scratch_swiglu", 46000);
+    try expectContainsNear(src, marker, "const enable_gpu_phase_timing =", 16000);
+    try expectContainsNear(src, marker, "self.resetTimestamps();", 22000);
     try expectContainsNear(src, "fn prefillBatchedImpl", "return self.prefillGemmaGroupedMoeExact(state, prompt_tokens);", 1800);
 }
 
