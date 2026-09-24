@@ -10833,6 +10833,45 @@ extern "C" __global__ void gemma_attention_softmax_causal_f32(float* scores, Gem
     }
 }
 
+// gemma_attention_softmax_causal_f32 that also writes the probabilities as
+// f16 (same layout) for an f16 P·V GEMM on the matrix cores. The f32 row is
+// left normalized as well.
+extern "C" __global__ void gemma_attention_softmax_causal_f16out(float* scores, half* probs, GemmaAttnSoftmaxCausalPush pc) {
+    const unsigned head = blockIdx.x;
+    const unsigned r = blockIdx.y;
+    if (r >= pc.n_rows) return;
+    const unsigned tid = threadIdx.x;
+    const unsigned t = pc.q_base + r;
+    const unsigned seq_len = t + 1u;
+    const unsigned start = (pc.window != 0u && seq_len > pc.window) ? seq_len - pc.window : 0u;
+    const size_t row_base = ((size_t)head * pc.n_rows + r) * pc.row_stride;
+    float* row = scores + row_base;
+    half* prow = probs + row_base;
+    const float scale = pc.scale_bits != 0u ? __uint_as_float(pc.scale_bits) : rsqrtf((float)pc.head_dim);
+
+    float lmax = -3.4e38f;
+    for (unsigned i = start + tid; i < seq_len; i += blockDim.x) lmax = fmaxf(lmax, row[i] * scale);
+    lmax = zinc_block_reduce_max(lmax);
+    __shared__ float s_max, s_inv;
+    if (tid == 0u) s_max = lmax;
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (unsigned i = start + tid; i < seq_len; i += blockDim.x) {
+        const float e = expf(row[i] * scale - s_max);
+        row[i] = e;
+        lsum += e;
+    }
+    lsum = zinc_block_reduce_sum(lsum);
+    if (tid == 0u) s_inv = lsum > 0.0f ? 1.0f / lsum : 0.0f;
+    __syncthreads();
+    const float inv = s_inv;
+    for (unsigned i = tid; i < pc.row_stride; i += blockDim.x) {
+        const float pv = (i >= start && i < seq_len) ? row[i] * inv : 0.0f;
+        prow[i] = __float2half(pv);
+    }
+}
+
 // Muse single-client decode specialization: fold the post-attention sigmoid
 // gate and Q8_1 packing into attention's output pass. The following O projection
 // consumes only Q8_1, so the intermediate f32 attention row and a full extra

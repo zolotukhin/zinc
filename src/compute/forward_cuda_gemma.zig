@@ -254,6 +254,7 @@ const Pipelines = struct {
     muse_attention_softmax_inplace: CudaPipeline,
     gemma_attention_softmax_f32_inplace: CudaPipeline,
     gemma_attention_softmax_causal_f32: CudaPipeline,
+    gemma_attention_softmax_causal_f16out: CudaPipeline,
     muse_kv_f32_to_f16: CudaPipeline,
     geglu: CudaPipeline,
     swiglu: CudaPipeline,
@@ -551,6 +552,10 @@ pub const ForwardGemma = struct {
     // ROCm prefill attention scores for hipBLAS Q·K^T (grown on demand).
     prefill_attn_scores: ?CudaBuffer = null,
     prefill_attn_scores_bytes: usize = 0,
+    // ROCm f16 prefill attention scratch: Q, K, V (prompt rows) and the
+    // probabilities as f16, one allocation grown on demand.
+    prefill_attn_f16: ?CudaBuffer = null,
+    prefill_attn_f16_bytes: usize = 0,
     // Effort 28 (perf lever): when a decodeBatch step has B==1 (the common
     // serving case — ALL per-token prefill + single-client decode), route the
     // per-layer projection/FFN GEMMs through the tuned `dmmv` matvec (exactly
@@ -739,6 +744,7 @@ pub const ForwardGemma = struct {
         pipes.muse_attention_softmax_inplace = try pipeline.createPipeline(ctx, src.ptr, "muse_attention_softmax_inplace");
         pipes.gemma_attention_softmax_f32_inplace = try pipeline.createPipeline(ctx, src.ptr, "gemma_attention_softmax_f32_inplace");
         pipes.gemma_attention_softmax_causal_f32 = try pipeline.createPipeline(ctx, src.ptr, "gemma_attention_softmax_causal_f32");
+        pipes.gemma_attention_softmax_causal_f16out = try pipeline.createPipeline(ctx, src.ptr, "gemma_attention_softmax_causal_f16out");
         pipes.muse_kv_f32_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "muse_kv_f32_to_f16");
         pipes.geglu = try pipeline.createPipeline(ctx, src.ptr, "geglu");
         pipes.swiglu = try pipeline.createPipeline(ctx, src.ptr, "swiglu");
@@ -1007,6 +1013,7 @@ pub const ForwardGemma = struct {
     }
 
     pub fn deinit(self: *ForwardGemma) void {
+        if (self.prefill_attn_f16) |*buf| buffer.freeBuffer(buf);
         @setEvalBranchQuota(2000);
         const a = self.allocator;
         inline for (.{ &self.hidden, &self.norm_buf, &self.q_buf, &self.k_buf, &self.v_buf, &self.attn_out_buf, &self.o_buf, &self.ffn_norm_buf, &self.gate_buf, &self.up_buf, &self.geglu_buf, &self.down_buf, &self.logits_buf, &self.argmax_buf, &self.argmax_partial_buf, &self.inv_freq_swa, &self.inv_freq_full, &self.shared_buf, &self.moe_norm_buf, &self.moe_out_buf, &self.router_logits_buf, &self.router_out_buf }) |b| {
@@ -1585,6 +1592,9 @@ pub const ForwardGemma = struct {
             self.prefill_attn_scores_bytes = need_bytes;
         }
         const scores = &self.prefill_attn_scores.?;
+        if (is_rocm and envFlag("ZINC_ROCM_GEMMA_ATTN_F16", true)) {
+            return self.blasPrefillAttentionF16(cmd, L, T, b, window, chunk, scores);
+        }
         var t0: u32 = 0;
         while (t0 < T) : (t0 += chunk) {
             const rows = @min(chunk, T - t0);
@@ -1617,6 +1627,85 @@ pub const ForwardGemma = struct {
                     self.ctx, 0, 0, hd, rows, keys,
                     self.kv_v[L].handle, 0, g.kv_dim, hd,
                     scores.handle, @as(usize, j) * @as(usize, @intCast(head_stride)) * f4, keys, @as(i64, group) * head_stride,
+                    b.attn_out.handle, (@as(usize, t0) * g.q_dim + @as(usize, j) * hd) * f4, g.q_dim, @as(i64, group) * hd,
+                    n_kv, 0.0,
+                );
+            }
+        }
+    }
+
+    /// blasPrefillAttention on the matrix cores: Q, K and V are cast to f16,
+    /// S = Q·K^T and O = P·V run as f16-input / f32-output strided-batched GEMMs,
+    /// and the causal softmax writes f16 probabilities for the second GEMM.
+    /// ZINC_ROCM_GEMMA_ATTN_F16=0 keeps the f32 GEMMs.
+    fn blasPrefillAttentionF16(self: *ForwardGemma, cmd: *command.CudaCommand, L: u32, T: u32, b: *BatchScratch, window: u32, chunk: u32, scores: *const CudaBuffer) !void {
+        const d = self.d;
+        const g = self.geom[L];
+        const hd = g.head_dim;
+        const n_head = d.n_head;
+        const n_kv = g.n_kv_head;
+        const group = n_head / n_kv;
+        const h2 = @sizeOf(u16);
+        const f4 = @sizeOf(f32);
+        const q_elems = @as(usize, T) * g.q_dim;
+        const kv_elems = @as(usize, T) * g.kv_dim;
+        const p_elems = @as(usize, n_head) * chunk * T;
+        const need = (q_elems + 2 * kv_elems + p_elems) * h2;
+        if (self.prefill_attn_f16 == null or self.prefill_attn_f16_bytes < need) {
+            self.waitPending();
+            if (self.prefill_attn_f16) |*old| buffer.freeBuffer(old);
+            self.prefill_attn_f16 = try buffer.createBuffer(self.ctx, need);
+            self.prefill_attn_f16_bytes = need;
+        }
+        const base = &self.prefill_attn_f16.?;
+        var q16 = try buffer.aliasBuffer(base, 0, q_elems * h2);
+        defer buffer.freeBuffer(&q16);
+        var k16 = try buffer.aliasBuffer(base, q_elems * h2, kv_elems * h2);
+        defer buffer.freeBuffer(&k16);
+        var v16 = try buffer.aliasBuffer(base, (q_elems + kv_elems) * h2, kv_elems * h2);
+        defer buffer.freeBuffer(&v16);
+        var p16 = try buffer.aliasBuffer(base, (q_elems + 2 * kv_elems) * h2, p_elems * h2);
+        defer buffer.freeBuffer(&p16);
+        var k32 = try buffer.aliasBuffer(&self.kv_k[L], 0, kv_elems * f4);
+        defer buffer.freeBuffer(&k32);
+        var v32 = try buffer.aliasBuffer(&self.kv_v[L], 0, kv_elems * f4);
+        defer buffer.freeBuffer(&v32);
+        const cq = F32ToF16Push{ .N = @intCast(q_elems) };
+        cmd.dispatch(&self.pipes.f32_to_f16, .{ ceilDiv(cq.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &q16 }, &cq, @sizeOf(F32ToF16Push), 0);
+        const ckv = F32ToF16Push{ .N = @intCast(kv_elems) };
+        cmd.dispatch(&self.pipes.f32_to_f16, .{ ceilDiv(ckv.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &k32, &k16 }, &ckv, @sizeOf(F32ToF16Push), 0);
+        cmd.dispatch(&self.pipes.f32_to_f16, .{ ceilDiv(ckv.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &v32, &v16 }, &ckv, @sizeOf(F32ToF16Push), 0);
+
+        var t0: u32 = 0;
+        while (t0 < T) : (t0 += chunk) {
+            const rows = @min(chunk, T - t0);
+            const keys = t0 + rows;
+            const head_stride: i64 = @as(i64, rows) * keys;
+            var j: u32 = 0;
+            while (j < group) : (j += 1) {
+                shim.cuda_cublas_hgemm_strided_batched(
+                    self.ctx, 1, 0, keys, rows, hd,
+                    k16.handle, 0, g.kv_dim, hd,
+                    q16.handle, (@as(usize, t0) * g.q_dim + @as(usize, j) * hd) * h2, g.q_dim, @as(i64, group) * hd,
+                    scores.handle, @as(usize, j) * @as(usize, @intCast(head_stride)) * f4, keys, @as(i64, group) * head_stride,
+                    n_kv, 0.0,
+                );
+            }
+            const sp = GemmaAttnSoftmaxCausalPush{
+                .head_dim = hd,
+                .n_rows = rows,
+                .row_stride = keys,
+                .q_base = t0,
+                .scale_bits = if (d.attn_scale != 0) @bitCast(d.attn_scale) else 0,
+                .window = window,
+            };
+            cmd.dispatch(&self.pipes.gemma_attention_softmax_causal_f16out, .{ n_head, rows, 1 }, .{ 256, 1, 1 }, &.{ scores, &p16 }, &sp, @sizeOf(GemmaAttnSoftmaxCausalPush), 0);
+            j = 0;
+            while (j < group) : (j += 1) {
+                shim.cuda_cublas_hgemm_strided_batched(
+                    self.ctx, 0, 0, hd, rows, keys,
+                    v16.handle, 0, g.kv_dim, hd,
+                    p16.handle, @as(usize, j) * @as(usize, @intCast(head_stride)) * h2, keys, @as(i64, group) * head_stride,
                     b.attn_out.handle, (@as(usize, t0) * g.q_dim + @as(usize, j) * hd) * f4, g.q_dim, @as(i64, group) * hd,
                     n_kv, 0.0,
                 );
