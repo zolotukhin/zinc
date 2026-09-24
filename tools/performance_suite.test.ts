@@ -861,7 +861,9 @@ test("both engines get the same chat prompt apart from the model id", () => {
 
 test("prompt parity tolerates a BOS but flags a different template", () => {
   expect(promptTokensMatch(46, 47)).toBe(true);
-  expect(promptTokensMatch(49, 51)).toBe(true);
+  expect(promptTokensMatch(60, 60)).toBe(true);
+  expect(promptTokensMatch(49, 51)).toBe(false);
+  expect(promptTokensMatch(357, 353)).toBe(false);
   expect(promptTokensMatch(47, 87)).toBe(false);
   expect(promptTokensMatch(66, 87)).toBe(false);
   expect(promptTokensMatch(null, 87)).toBe(null);

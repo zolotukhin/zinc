@@ -792,11 +792,13 @@ function scenarioNeedsOutputReview(scenario) {
   ).tone === "caution";
 }
 
-// Two tokenizers may disagree by a BOS or a trailing newline; anything larger
-// means the engines were not fed the same prompt.
+// Both engines render the same chat template, so their token counts may
+// differ only by how BOS is counted. Anything larger means the tokenizers
+// split the prompt differently: a 2% allowance once hid a Gemma 4 tokenizer
+// bug that turned 353 tokens into 357.
 export function promptTokensMatch(zincTokens, baselineTokens) {
   if (zincTokens == null || baselineTokens == null) return null;
-  return Math.abs(zincTokens - baselineTokens) <= Math.max(2, Math.round(0.02 * Math.max(zincTokens, baselineTokens)));
+  return Math.abs(zincTokens - baselineTokens) <= 1;
 }
 
 export function buildComparison(zincSummary, baselineSummary, options = {}) {
