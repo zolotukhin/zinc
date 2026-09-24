@@ -27607,9 +27607,15 @@ pub const InferenceEngine = struct {
             1
         else
             @intCast(std.math.clamp(gemmaMoePrefillSubmitTokenLayers() / @as(usize, @max(n_tokens, 1)), 1, gemma_moe_prefill_submit_max_layers));
+        // The last layer used to run token by token through decodeStep (one
+        // submission per prompt token), which cost 25-115 ms per prompt on a
+        // loaded host. Batch it like the others and run only the output tail
+        // on the last token.
+        const batch_last_layer = envFlagEnabled("ZINC_GEMMA_PREFILL_BATCH_LAST_LAYER", true);
+        const batched_layers: u32 = if (batch_last_layer) cfg.n_layers else cfg.n_layers - 1;
         var open_layers: u32 = 0;
         var layer: u32 = 0;
-        while (layer + 1 < cfg.n_layers) : (layer += 1) {
+        while (layer < batched_layers) : (layer += 1) {
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             const layer_record_start = std.time.nanoTimestamp();
             if (open_layers == 0) {
@@ -28096,7 +28102,7 @@ pub const InferenceEngine = struct {
             self.endProfilePhase(.moe_routed, moe_phase);
             self.decode_cmd.computeToTransferBarrier();
             open_layers += 1;
-            if (open_layers < layers_per_submit and layer + 2 < cfg.n_layers) {
+            if (open_layers < layers_per_submit and layer + 1 < batched_layers) {
                 self.prefill_cpu_record_ns += @intCast(std.time.nanoTimestamp() - layer_record_start);
                 continue;
             }
@@ -28120,23 +28126,45 @@ pub const InferenceEngine = struct {
             }
         }
 
-        try self.prefillQwen36RunPartialTokenLoop(
-            state,
-            prompt_tokens,
-            base_token,
-            n_tokens,
-            hidden_size,
-            cfg.n_layers - 1,
-            cfg.n_layers,
-            scratch_hidden,
-            null,
-            false,
-            0,
-            false,
-            false,
-            true,
-            pipeline_tail,
-        );
+        if (batch_last_layer) {
+            // Every layer is done; run just the final norm + LM head on the
+            // last prompt token's hidden state.
+            const last_idx = n_tokens - 1;
+            self.prefill_current_token_idx = last_idx;
+            state.position = base_token + last_idx;
+            self.partial_decode_start_layer = cfg.n_layers;
+            self.partial_decode_end_layer = cfg.n_layers;
+            self.partial_decode_hidden_in = scratch_hidden.handle;
+            self.partial_decode_hidden_in_offset = @as(vk.c.VkDeviceSize, last_idx) * hidden_size;
+            self.partial_decode_hidden_out = null;
+            self.partial_decode_hidden_out_offset = 0;
+            self.partial_decode_advance_position = false;
+            self.partial_decode_allow_final_tail = true;
+            self.partial_decode_stop_before_ffn_norm = false;
+            self.partial_decode_stop_after_ffn_norm = false;
+            self.partial_decode_ffn_norm_out = null;
+            self.partial_decode_ffn_norm_out_offset = 0;
+            self.prefill_pipeline_mode = false;
+            try self.decodeStep(state, prompt_tokens[last_idx], true);
+        } else {
+            try self.prefillQwen36RunPartialTokenLoop(
+                state,
+                prompt_tokens,
+                base_token,
+                n_tokens,
+                hidden_size,
+                cfg.n_layers - 1,
+                cfg.n_layers,
+                scratch_hidden,
+                null,
+                false,
+                0,
+                false,
+                false,
+                true,
+                pipeline_tail,
+            );
+        }
 
         self.prefill_token_samples = n_tokens;
         state.position = base_token + n_tokens;
