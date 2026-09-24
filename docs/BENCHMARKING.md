@@ -14,6 +14,21 @@ Use the suite's server-vs-server path for any headline "ZINC vs baseline" claim 
 
 Both engines must read the same prompt. Chat requests therefore carry an explicit system turn and `enable_thinking: false` (top level for ZINC, `chat_template_kwargs` for llama.cpp). Without them the two servers render different prompts from the same request: ZINC injects its own short system turn and closes the think block, while the GGUF Jinja that llama.cpp runs can add a long reasoning directive and open one (Qwen 3.8 read 47–66 prompt tokens in ZINC against 87 in llama.cpp). Every comparison records both prompt token counts and a `prompt_parity` flag, and the dashboard shows how many rows matched.
 
+`prompt_parity` holds only when the two token counts differ by at most one (BOS accounting). A looser allowance once hid a Gemma 4 tokenizer bug that turned a 353-token prompt into 357.
+
+### Check the output against llama.cpp before publishing
+
+Fast is only interesting if it is right, and ZINC agreeing with itself proves nothing: a Gemma 4 tokenizer that merged by score instead of rank, and a Vulkan gate/up kernel that skipped half of every Q4_K block, both stayed "token-identical" from run to run for months while the model read misspelled words and its hidden states drifted from the reference. Before publishing a model's numbers, or after any tokenizer or kernel change, run the parity check on the GPU machine with no server holding the GPU:
+
+```bash
+zig build -Doptimize=ReleaseFast && zig build tokenize-tool -Doptimize=ReleaseFast
+tools/llama_parity.sh --zinc-dir zig-out --llama-dir <llama.cpp>/build/bin \
+  --llama-args "--device <llama-device> -ngl 99" \
+  --prompt-file <long prompt> <model.gguf>...
+```
+
+It compares `zinc-tokenize` with `llama-tokenize --ids` over a built-in multilingual/code corpus, then lets llama-server render each chat prompt and has both engines greedily continue the identical text, comparing the first token and the continuation. Any difference exits non-zero. To localize a numeric difference, dump per-layer residuals with `ZINC_LAYER_DIAG_POS=<position>` (decode and the grouped Gemma prefill both support it) and compare them with `llama-eval-callback` rows (`l_out-N`, and stage tensors such as `attn_out-N`, `ffn_moe_out-N`).
+
 Compare like with like: a ROCm ZINC row is measured against llama.cpp's HIP backend, a Vulkan row against llama.cpp's Vulkan backend, both from the same llama.cpp commit. Speculative decoding (NextN/MTP) is published as a separate variant; the headline bars compare both engines without it.
 
 The RDNA ZINC requests intentionally omit the OpenAI `model` field. The model is selected by the server process at launch with `-m <gguf>`; sending `model: "q"` to ZINC can trigger managed-model routing instead of measuring the loaded GGUF.
