@@ -44,14 +44,16 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
 ```
 
 Qwen 3.8 GGUFs that include the model's appended NextN block use it
-automatically. ZINC drafts two tokens, verifies the seed and drafts together
+automatically. ZINC drafts three tokens, verifies the seed and drafts together
 with the full 64-layer model, and restores the recurrent state at the accepted
 boundary when a draft is rejected. Only tokens the full model agreed with are
 emitted, so output is identical to ordinary greedy decode — on the R9700 it
 measures byte-for-byte equal with speculation on and off. `ZINC_MTP=0` returns
-to ordinary greedy decode. `ZINC_MTP_DRAFTS=2` is the measured R9700 default;
-`1` and `3` remain available for GPUs or workloads with a different acceptance
-profile.
+to ordinary greedy decode. `ZINC_MTP_DRAFTS=3` is the measured R9700 default
+(a four-row verify costs about 4% more than a three-row one);
+`1` and `2` remain available for GPUs or workloads with a different acceptance
+profile, and `ZINC_MTP_ADAPT_C=<c>` picks two or three per cycle from the
+running acceptance.
 
 The server uses it too, but only when it owns a single request slot
 (`--parallel 1`): drafting writes the single-sequence KV cache and rewinds it on

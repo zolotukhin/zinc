@@ -642,6 +642,7 @@ const DecodeBatch = struct {
 
 const mtp_max_draft: u32 = 3;
 const mtp_max_verify: u32 = mtp_max_draft + 1;
+const mtp_default_drafts: u32 = 3;
 
 /// Lazily allocated state for Qwen3.8's appended NextN block. The target's
 /// attention KV remains in ForwardCuda's ordinary layer arrays; this owns only
@@ -2366,7 +2367,7 @@ pub const ForwardCuda = struct {
 
         try self.mtpCatchup(prompt_tokens, pairs, 0);
         self.mtp.?.primed = true;
-        log.info("Qwen NextN/MTP enabled: {d} prompt rows primed, draft window={d}", .{ T, @min(mtp_max_draft, envU32("ZINC_MTP_DRAFTS", 2)) });
+        log.info("Qwen NextN/MTP enabled: {d} prompt rows primed, draft window={d}", .{ T, @min(mtp_max_draft, envU32("ZINC_MTP_DRAFTS", mtp_default_drafts)) });
         return true;
     }
 
@@ -2386,16 +2387,18 @@ pub const ForwardCuda = struct {
     /// The caller commits `seed` plus the returned accepted draft prefix only.
     pub fn mtpCycle(self: *ForwardCuda, seed: u32, pos: u32, max_drafts: u32, eos_id: u32) !MtpCycleResult {
         if (self.mtp == null or !self.mtp.?.primed) return error.MtpNotPrimed;
-        const want_drafts: u32 = if (std.posix.getenv("ZINC_MTP_DRAFTS") != null)
-            @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 2))
+        // Three drafts by default: with the v2 Q4_K verifiers a 4-row verify
+        // costs only ~1.4 ms more than a 3-row one, and fixed 3 beat the
+        // acceptance-adaptive 2/3 choice on all four suite prompts (server,
+        // R9700). ZINC_MTP_ADAPT_C=<c> re-enables it: a third draft when
+        // p1*p2*p3 > c*(1 + p1 + p1*p2).
+        const want_drafts: u32 = if (std.posix.getenv("ZINC_MTP_ADAPT_C") == null)
+            @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", mtp_default_drafts))
         else blk: {
-            // Expected tokens per cycle with two drafts: 1 + p1 + p1*p2. A third
-            // draft adds p1*p2*p3 tokens for one more draft step and verify row;
-            // 0.19 measured best over the suite prompts through the server.
             const m = &self.mtp.?;
             const e2 = 1.0 + m.ema_p1 + m.ema_p1 * m.ema_p2;
             const p3_est = if (m.p3_observed >= 8) m.ema_p3 else 0.9 * m.ema_p2;
-            const c: f32 = if (std.posix.getenv("ZINC_MTP_ADAPT_C")) |v| std.fmt.parseFloat(f32, v) catch 0.19 else 0.19;
+            const c: f32 = std.fmt.parseFloat(f32, std.posix.getenv("ZINC_MTP_ADAPT_C").?) catch 0.19;
             break :blk if (m.ema_p1 * m.ema_p2 * p3_est > c * e2) @as(u32, 3) else @as(u32, 2);
         };
         const n_limit = @min(max_drafts, @min(mtp_max_draft, want_drafts));
