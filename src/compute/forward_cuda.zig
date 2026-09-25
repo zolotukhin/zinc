@@ -5481,9 +5481,11 @@ fn mtpQ8On() bool {
 
 /// Vocabulary rows the NextN draft head scores (0 or >= vocab = all of them).
 fn mtpDraftVocab(vocab: u32) u32 {
-    // 100k rows measured best on Qwen 3.8 27B (acceptance 66-74%, -1.6 ms per
-    // cycle); 64k starts to cost acceptance and 32k clearly does.
-    const n = envU32("ZINC_MTP_DRAFT_VOCAB", 100000);
+    // With three drafts per cycle the draft LM head runs three times, and 64K
+    // rows measured best on Qwen 3.8 27B through the server (R9700, suite
+    // prompts, tok/s): 63.2/72.0/69.1/70.1 vs 61.9/72.0/65.2/70.4 at 100K and
+    // 62.1/71.4/69.5/69.3 at 48K.
+    const n = envU32("ZINC_MTP_DRAFT_VOCAB", 65536);
     return if (n == 0 or n >= vocab) vocab else n;
 }
 
