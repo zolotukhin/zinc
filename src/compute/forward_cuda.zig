@@ -648,6 +648,12 @@ const MtpState = struct {
     cycles: u32 = 0,
     drafted: u32 = 0,
     accepted: u32 = 0,
+    // Per-position acceptance estimates (exponential moving averages) that
+    // pick two or three drafts per cycle.
+    ema_p1: f32 = 0.7,
+    ema_p2: f32 = 0.6,
+    ema_p3: f32 = 0.5,
+    p3_observed: u32 = 0,
     draft_ns: u64 = 0,
     target_ns: u64 = 0,
     restore_ns: u64 = 0,
@@ -771,6 +777,8 @@ pub const ForwardCuda = struct {
     // token_embd.weight device buffer; null/false → fall back to the CPU path.
     embed_weight: ?*const CudaBuffer = null,
     embed_gpu: bool = false,
+    // acc_mode for the speculative btok verifier dispatches (1 = y += W·x).
+    spec_acc_mode: u32 = 0,
     // Effort 28 B==1 matvec fast path (qwen analog of ForwardGemma.decode_b1).
     // When a `decodeBatch` step batches a single sequence — every per-token
     // prefill and any single-client decode — its per-layer projection/FFN GEMMs
@@ -2189,8 +2197,12 @@ pub const ForwardCuda = struct {
         const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &head_norm.gpu_buffer, &self.norm_buf, d.n_embd, want_q8);
         const save_h = CopyPush{ .N = d.n_embd };
         cmd.dispatch(&self.pipes.copy_f32, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &state.h_input }, &save_h, @sizeOf(CopyPush), 0);
-        self.lmHeadDispatch(&cmd, &head.gpu_buffer, head.info.type_, norm_q8_ready);
-        self.argmaxDispatch(&cmd, &self.argmax_buf);
+        // Drafts are only proposals; the target verifies every token. Scoring
+        // just the first ZINC_MTP_DRAFT_VOCAB rows (BPE ids run roughly from
+        // frequent to rare) skips most of the 1 GB LM head per draft.
+        const draft_rows = mtpDraftVocab(d.vocab);
+        self.lmHeadDispatchRows(&cmd, &head.gpu_buffer, head.info.type_, norm_q8_ready, draft_rows);
+        self.argmaxDispatchFromN(&cmd, &self.logits_buf, &self.argmax_buf, draft_rows);
         cmd.commitAndWait();
         self.drainPending();
 
@@ -2319,7 +2331,18 @@ pub const ForwardCuda = struct {
     /// The caller commits `seed` plus the returned accepted draft prefix only.
     pub fn mtpCycle(self: *ForwardCuda, seed: u32, pos: u32, max_drafts: u32, eos_id: u32) !MtpCycleResult {
         if (self.mtp == null or !self.mtp.?.primed) return error.MtpNotPrimed;
-        const n_limit = @min(max_drafts, @min(mtp_max_draft, @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 2))));
+        const want_drafts: u32 = if (std.posix.getenv("ZINC_MTP_DRAFTS") != null)
+            @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 2))
+        else blk: {
+            // Expected tokens per cycle with two drafts: 1 + p1 + p1*p2. A third
+            // draft adds p1*p2*p3 tokens for roughly 13% more cycle time on the
+            // R9700 (one draft step plus one verify row).
+            const m = &self.mtp.?;
+            const e2 = 1.0 + m.ema_p1 + m.ema_p1 * m.ema_p2;
+            const p3_est = if (m.p3_observed >= 8) m.ema_p3 else 0.9 * m.ema_p2;
+            break :blk if (m.ema_p1 * m.ema_p2 * p3_est > 0.13 * e2) @as(u32, 3) else @as(u32, 2);
+        };
+        const n_limit = @min(max_drafts, @min(mtp_max_draft, want_drafts));
         std.debug.assert(n_limit > 0);
 
         var phase_timer = try std.time.Timer.start();
@@ -2364,6 +2387,17 @@ pub const ForwardCuda = struct {
         try self.mtpCatchup(target_tokens[0..committed], self.mtp.?.pair_h[0 .. @as(usize, committed) * width], pos);
         self.mtp.?.catchup_ns += phase_timer.lap();
 
+        {
+            const m = &self.mtp.?;
+            const alpha: f32 = 0.1;
+            if (n_drafted >= 1) m.ema_p1 += alpha * ((if (accepted >= 1) @as(f32, 1.0) else @as(f32, 0.0)) - m.ema_p1);
+            if (n_drafted >= 2 and accepted >= 1) m.ema_p2 += alpha * ((if (accepted >= 2) @as(f32, 1.0) else @as(f32, 0.0)) - m.ema_p2);
+            if (n_drafted >= 3 and accepted >= 2) {
+                if (m.p3_observed == 0) m.ema_p3 = m.ema_p2;
+                m.ema_p3 += alpha * ((if (accepted >= 3) @as(f32, 1.0) else @as(f32, 0.0)) - m.ema_p3);
+                m.p3_observed += 1;
+            }
+        }
         self.mtp.?.cycles += 1;
         self.mtp.?.drafted += n_drafted;
         self.mtp.?.accepted += accepted;
@@ -2523,9 +2557,11 @@ pub const ForwardCuda = struct {
         const sm = SigmoidMulPush{ .N = T * d.q_dim };
         cmd.dispatch(&self.pipes.sigmoid_mul, .{ ceilDiv(T * d.q_dim, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.attn_out, &b.attn_gate, &b.attn_out }, &sm, @sizeOf(SigmoidMulPush), 0);
         // O projection → b.o, then fold into the residual stream.
-        self.gemmDispatchPrefill(&cmd, wo, &b.attn_out, &b.o, d.n_embd, d.q_dim, T);
-        const add = AddPush{ .N = T * d.n_embd };
-        cmd.dispatch(&self.pipes.add_inplace, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &b.o }, &add, @sizeOf(AddPush), 0);
+        if (!self.gemmAccumulateSpec(&cmd, wo, &b.attn_out, &b.hidden, d.n_embd, d.q_dim, T)) {
+            self.gemmDispatchPrefill(&cmd, wo, &b.attn_out, &b.o, d.n_embd, d.q_dim, T);
+            const add = AddPush{ .N = T * d.n_embd };
+            cmd.dispatch(&self.pipes.add_inplace, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &b.o }, &add, @sizeOf(AddPush), 0);
+        }
         self.submit(cmd);
     }
 
@@ -2715,9 +2751,11 @@ pub const ForwardCuda = struct {
         const norm_per_head: u32 = if (wnorm.info.numElements() == d.d_inner) 1 else 0;
         const gn = GatedNormBatchPush{ .d_inner = d.d_inner, .dt_rank = d.dt_rank, .head_v_dim = d.head_v_dim, .d_state = d.d_state, .norm_per_head = norm_per_head, .n_tok = T };
         cmd.dispatch(&self.pipes.ssm_gated_norm_batched, .{ d.dt_rank, T, 1 }, .{ d.head_v_dim, 1, 1 }, &.{ &b.delta_out, &b.z, &wnorm.gpu_buffer, &b.ssm_gn }, &gn, @sizeOf(GatedNormBatchPush), 0);
-        self.gemmDispatchPrefill(&cmd, wout, &b.ssm_gn, &b.o, d.n_embd, d.d_inner, T);
-        const add = AddPush{ .N = T * d.n_embd };
-        cmd.dispatch(&self.pipes.add_inplace, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &b.o }, &add, @sizeOf(AddPush), 0);
+        if (!self.gemmAccumulateSpec(&cmd, wout, &b.ssm_gn, &b.hidden, d.n_embd, d.d_inner, T)) {
+            self.gemmDispatchPrefill(&cmd, wout, &b.ssm_gn, &b.o, d.n_embd, d.d_inner, T);
+            const add = AddPush{ .N = T * d.n_embd };
+            cmd.dispatch(&self.pipes.add_inplace, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &b.o }, &add, @sizeOf(AddPush), 0);
+        }
 
         if (ssm_profile) {
             const t0 = std.time.milliTimestamp();
@@ -2776,9 +2814,11 @@ pub const ForwardCuda = struct {
             const sg = SwigluPush{ .N = T * d.n_ff };
             cmd.dispatch(&self.pipes.swiglu, .{ ceilDiv(T * d.n_ff, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.gate_ff, &b.up_ff, &b.swiglu_ff }, &sg, @sizeOf(SwigluPush), 0);
         }
-        self.gemmDispatchPrefill(&cmd, wdown, &b.swiglu_ff, &b.o, d.n_embd, d.n_ff, T);
-        const add = AddPush{ .N = T * d.n_embd };
-        cmd.dispatch(&self.pipes.add_inplace, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &b.o }, &add, @sizeOf(AddPush), 0);
+        if (!self.gemmAccumulateSpec(&cmd, wdown, &b.swiglu_ff, &b.hidden, d.n_embd, d.n_ff, T)) {
+            self.gemmDispatchPrefill(&cmd, wdown, &b.swiglu_ff, &b.o, d.n_embd, d.n_ff, T);
+            const add = AddPush{ .N = T * d.n_embd };
+            cmd.dispatch(&self.pipes.add_inplace, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &b.o }, &add, @sizeOf(AddPush), 0);
+        }
         self.submit(cmd);
     }
 
@@ -3020,6 +3060,24 @@ pub const ForwardCuda = struct {
         self.gemmDispatchPrefillImpl(cmd, w, x, y, M, K, T, false);
     }
 
+    /// y += W·x for 2..4 speculative verification rows, when a btok verifier
+    /// kernel takes the projection (they accumulate in place with acc_mode);
+    /// returns false and does nothing otherwise. Replaces the projection into
+    /// a scratch row plus a separate add_inplace launch with the same float
+    /// addition. ZINC_SPEC_ACC=0 keeps the separate add.
+    fn gemmAccumulateSpec(self: *ForwardCuda, cmd: *command.CudaCommand, w: *const LoadedTensor, x: *const CudaBuffer, y: *const CudaBuffer, M: u32, K: u32, T: u32) bool {
+        if (!self.use_spec_btok or T < 2 or T > mtp_max_verify) return false;
+        const idx = dmmvIdx(w.info.type_);
+        if (idx >= 4) return false;
+        const q8_btok = is_rocm and (idx == 0 or idx == 2) and self.batch != null and mtpQ8TypeOn(idx);
+        if (!q8_btok and (idx == 0 or idx == 2) and is_rocm and self.batch != null) return false;
+        if (!envFlag("ZINC_SPEC_ACC", true)) return false;
+        self.spec_acc_mode = 1;
+        defer self.spec_acc_mode = 0;
+        self.gemmDispatchPrefill(cmd, w, x, y, M, K, T);
+        return true;
+    }
+
     /// Whether this projection takes the shared Q8-activation GEMM path. Paired
     /// projections can use this to safely retain the quantized activation tile.
     fn prefillUsesQ8(self: *ForwardCuda, w: *const LoadedTensor, M: u32, T: u32) bool {
@@ -3094,7 +3152,7 @@ pub const ForwardCuda = struct {
                 },
                 else => unreachable,
             };
-            const push = DmmvPush{ .M = M, .K = K };
+            const push = DmmvPush{ .M = M, .K = K, .acc_mode = self.spec_acc_mode };
             // Decode's Q6_K dense FFN down projection deliberately uses one
             // wave; mirror that work partition so each verifier row follows
             // the same accumulation tree. Other projections use two waves.
@@ -3115,7 +3173,7 @@ pub const ForwardCuda = struct {
                 3 => &self.pipes.dmmv_q8_0_btok[T - 2],
                 else => unreachable,
             };
-            const push = DmmvPush{ .M = M, .K = K };
+            const push = DmmvPush{ .M = M, .K = K, .acc_mode = self.spec_acc_mode };
             cmd.dispatch(pipe, .{ M, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &w.gpu_buffer, x, y }, &push, @sizeOf(DmmvPush), 0);
             return;
         }
@@ -4473,19 +4531,24 @@ pub const ForwardCuda = struct {
     }
 
     fn lmHeadDispatch(self: *ForwardCuda, cmd: *command.CudaCommand, lm_head: *const CudaBuffer, lm_type: gguf.GGMLType, q8_ready: bool) void {
+        self.lmHeadDispatchRows(cmd, lm_head, lm_type, q8_ready, self.d.vocab);
+    }
+
+    /// LM head over the first `rows` vocabulary rows only (rows <= vocab).
+    fn lmHeadDispatchRows(self: *ForwardCuda, cmd: *command.CudaCommand, lm_head: *const CudaBuffer, lm_type: gguf.GGMLType, q8_ready: bool, rows: u32) void {
         const d = self.d;
-        const lm = DmmvPush{ .M = d.vocab, .K = d.n_embd };
+        const lm = DmmvPush{ .M = rows, .K = d.n_embd };
         const lm_idx = dmmvIdx(lm_type);
         if (self.use_decode_q8_lm and lm_type == .q6_k and self.batch != null and (d.n_embd & 255) == 0) {
             if (!q8_ready) {
                 const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             }
-            cmd.dispatch(&self.pipes.dmmv_q6k_q8_fast, .{ d.vocab, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ lm_head, &self.batch.?.act_q8, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
+            cmd.dispatch(&self.pipes.dmmv_q6k_q8_fast, .{ rows, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ lm_head, &self.batch.?.act_q8, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         } else if (lm_idx < 4) {
-            cmd.dispatch(&self.pipes.dmmv_fast[lm_idx], .{ d.vocab, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ lm_head, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
+            cmd.dispatch(&self.pipes.dmmv_fast[lm_idx], .{ rows, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ lm_head, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         } else {
-            cmd.dispatch(&self.pipes.dmmv[lm_idx], .{ d.vocab, 1, 1 }, .{ 256, 1, 1 }, &.{ lm_head, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
+            cmd.dispatch(&self.pipes.dmmv[lm_idx], .{ rows, 1, 1 }, .{ 256, 1, 1 }, &.{ lm_head, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         }
     }
 
@@ -5133,12 +5196,16 @@ pub const ForwardCuda = struct {
     }
 
     fn argmaxDispatchFrom(self: *ForwardCuda, cmd: *command.CudaCommand, logits: *const CudaBuffer, out: *const CudaBuffer) void {
+        self.argmaxDispatchFromN(cmd, logits, out, self.d.vocab);
+    }
+
+    fn argmaxDispatchFromN(self: *ForwardCuda, cmd: *command.CudaCommand, logits: *const CudaBuffer, out: *const CudaBuffer, n: u32) void {
         if (self.use_argmax_v2) {
-            const push = ArgmaxV2Push{ .N = self.d.vocab, .partials = 128 };
+            const push = ArgmaxV2Push{ .N = n, .partials = 128 };
             cmd.dispatch(&self.pipes.argmax_partials, .{ 128, 1, 1 }, .{ 256, 1, 1 }, &.{ logits, &self.argmax_partial_buf }, &push, @sizeOf(ArgmaxV2Push), 0);
             cmd.dispatch(&self.pipes.argmax_finalize, .{ 1, 1, 1 }, .{ 128, 1, 1 }, &.{ &self.argmax_partial_buf, out }, &push, @sizeOf(ArgmaxV2Push), 0);
         } else {
-            const push = ArgmaxPush{ .N = self.d.vocab };
+            const push = ArgmaxPush{ .N = n };
             cmd.dispatch(&self.pipes.argmax, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ logits, out }, &push, @sizeOf(ArgmaxPush), 0);
         }
     }
@@ -5335,6 +5402,14 @@ fn mtpQ8On() bool {
     const v = std.posix.getenv("ZINC_MTP_Q8") orelse return is_rocm;
     return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
         std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no"));
+}
+
+/// Vocabulary rows the NextN draft head scores (0 or >= vocab = all of them).
+fn mtpDraftVocab(vocab: u32) u32 {
+    // 100k rows measured best on Qwen 3.8 27B (acceptance 66-74%, -1.6 ms per
+    // cycle); 64k starts to cost acceptance and 32k clearly does.
+    const n = envU32("ZINC_MTP_DRAFT_VOCAB", 100000);
+    return if (n == 0 or n >= vocab) vocab else n;
 }
 
 fn mtpQ8TypeOn(idx: usize) bool {
