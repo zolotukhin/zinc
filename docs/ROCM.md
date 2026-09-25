@@ -59,8 +59,9 @@ The server uses it too, but only when it owns a single request slot
 (`--parallel 1`): drafting writes the single-sequence KV cache and rewinds it on
 a rejected draft, which needs the whole sequence, while multi-slot serving keeps
 the batched loop that amortizes weights across concurrent requests. On the
-R9700 with Qwen 3.8 27B Q4_K_M, single-slot serving measures 60-63 tok/s decode
-against 32 tok/s with `ZINC_MTP=0`, at 72-81% draft acceptance.
+R9700 with Qwen 3.8 27B Q4_K_M, single-slot serving measures 61-72 tok/s decode
+on the suite prompts against 32 tok/s with `ZINC_MTP=0` (llama.cpp HIP: 29 tok/s),
+at 50-65% acceptance of three drafts.
 
 Start the OpenAI-compatible server:
 
