@@ -3061,6 +3061,90 @@ extern "C" __global__ void dmmv_q5k_q8_fast(
     }
 }
 
+// Multi-token verification twin of dmmv_q5k_q8_fast: each Q5_K super-block
+// row slice is decoded once and dotted against B packed-Q8 activation rows
+// (ROCm MMQ layout [K/128][B][144]). Per token the arithmetic, thread mapping
+// and reduction tree match dmmv_q5k_q8_fast, so each row equals a single-token
+// decode of it. The old f32-activation btok ran near 58% of DRAM bandwidth on
+// Qwen 3.8 27B's ssm_out (5120 x 6144).
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_q5k_q8_btok(
+    const unsigned* __restrict__ a,
+    const unsigned char* __restrict__ xq,
+    float* __restrict__ y, DmmvPush pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M) return;
+    const unsigned tid = threadIdx.x, itid = tid & 15u, grp = tid >> 4;
+    const unsigned il = itid >> 2, ir = itid & 3u;
+    const unsigned v_im = il >> 1, v_in = il & 1u;
+    const unsigned l0 = 4u * (2u * ir + v_in);
+    const unsigned q_off = 32u * v_im + l0;
+    const unsigned shift = v_im * 16u;
+    const unsigned ngrp = blockDim.x >> 4;
+    const unsigned bpr = pc.K >> 8;
+    const unsigned row_base = (pc.a_offset >> 2) + row * bpr * 44u;
+    float sum[B] = {};
+
+    for (unsigned sb = grp; sb < bpr; sb += ngrp) {
+        const unsigned blk = row_base + sb * 44u;
+        const unsigned dd = a[blk];
+        const float d = zinc_half_to_float((unsigned short)(dd & 0xffffu));
+        const float dm = zinc_half_to_float((unsigned short)(dd >> 16));
+        const unsigned sc0 = a[blk + 1u], sc1 = a[blk + 2u], sc2 = a[blk + 3u];
+        const unsigned qh = a[blk + 4u + (l0 >> 2)];
+        const unsigned qs0 = a[blk + 12u + (q_off >> 2)];
+        const unsigned qs1 = a[blk + 12u + (q_off >> 2) + 16u];
+        const unsigned s0 = sc0 >> shift, s1 = sc1 >> shift, s2 = sc2 >> shift;
+        const float f0 = d * (float)(s0 & 0x3fu), b0 = dm * (float)(s1 & 0x3fu);
+        const float f1 = d * (float)((s0 >> 8) & 0x3fu), b1 = dm * (float)((s1 >> 8) & 0x3fu);
+        const float f2 = d * (float)((s2 & 0xfu) | ((s0 & 0xc0u) >> 2));
+        const float b2 = dm * (float)(((s2 & 0xf0u) >> 4) | ((s1 & 0xc0u) >> 2));
+        const float f3 = d * (float)(((s2 >> 8) & 0xfu) | (((s0 >> 8) & 0xc0u) >> 2));
+        const float b3 = dm * (float)((((s2 >> 8) & 0xf0u) >> 4) | (((s1 >> 8) & 0xc0u) >> 2));
+        const unsigned hb = 2u * (shift >> 4);
+        const int v0 = (int)((qs0 & 0x0f0f0f0fu) | (((qh >> hb) & 0x01010101u) << 4));
+        const int v1 = (int)(((qs0 >> 4) & 0x0f0f0f0fu) | (((qh >> (hb + 1u)) & 0x01010101u) << 4));
+        const int v2 = (int)((qs1 & 0x0f0f0f0fu) | (((qh >> (hb + 4u)) & 0x01010101u) << 4));
+        const int v3 = (int)(((qs1 >> 4) & 0x0f0f0f0fu) | (((qh >> (hb + 5u)) & 0x01010101u) << 4));
+        const unsigned g = 2u * v_im;
+        const bool min_lane = l0 == 0u;
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned char* h0 = xq + ((size_t)(2u * sb) * B + tok) * 144u;
+            const unsigned char* h1 = xq + ((size_t)(2u * sb + 1u) * B + tok) * 144u;
+            const int q0 = *(const int*)(h0 + 16u + g * 32u + l0);
+            const int q1 = *(const int*)(h0 + 16u + (g + 1u) * 32u + l0);
+            const int q2 = *(const int*)(h1 + 16u + g * 32u + l0);
+            const int q3 = *(const int*)(h1 + 16u + (g + 1u) * 32u + l0);
+            const float2 ds0 = __half22float2(*(const half2*)(h0 + g * 4u));
+            const float2 ds1 = __half22float2(*(const half2*)(h0 + (g + 1u) * 4u));
+            const float2 ds2 = __half22float2(*(const half2*)(h1 + g * 4u));
+            const float2 ds3 = __half22float2(*(const half2*)(h1 + (g + 1u) * 4u));
+            float s = f0 * ds0.x * (float)__dp4a(v0, q0, 0);
+            s += f1 * ds1.x * (float)__dp4a(v1, q1, 0);
+            s += f2 * ds2.x * (float)__dp4a(v2, q2, 0);
+            s += f3 * ds3.x * (float)__dp4a(v3, q3, 0);
+            if (min_lane) s -= b0 * ds0.y + b1 * ds1.y + b2 * ds2.y + b3 * ds3.y;
+            sum[tok] += s;
+        }
+    }
+
+    zinc_block_reduce_sum_many<B>(sum);
+    if (tid == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned yi = (pc.y_offset >> 2) + tok * pc.M + row;
+            if (pc.acc_mode != 0u) y[yi] += sum[tok];
+            else y[yi] = sum[tok];
+        }
+    }
+}
+
+extern "C" __global__ void dmmv_q5k_q8_btok2(const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok<2u>(a, xq, y, pc); }
+extern "C" __global__ void dmmv_q5k_q8_btok3(const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok<3u>(a, xq, y, pc); }
+extern "C" __global__ void dmmv_q5k_q8_btok4(const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok<4u>(a, xq, y, pc); }
+
 extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8(
     const unsigned* __restrict__ gate,
     const unsigned* __restrict__ up,
@@ -3535,6 +3619,9 @@ extern "C" __global__ void dmmv_q8_0_q8_fast(
 #else
 extern "C" __global__ void dmmv_q4k_q8_fast() {}
 extern "C" __global__ void dmmv_q5k_q8_fast() {}
+extern "C" __global__ void dmmv_q5k_q8_btok2() {}
+extern "C" __global__ void dmmv_q5k_q8_btok3() {}
+extern "C" __global__ void dmmv_q5k_q8_btok4() {}
 extern "C" __global__ void dmmv_q4k_q8_btok2() {}
 extern "C" __global__ void dmmv_q4k_q8_btok3() {}
 extern "C" __global__ void dmmv_q4k_q8_btok4() {}

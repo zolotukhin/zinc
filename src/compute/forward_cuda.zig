@@ -370,6 +370,9 @@ const Pipelines = struct {
     dmmv_q4k_q8_btok2: CudaPipeline, // two-token Q4_K x packed-Q8 verifier
     dmmv_q4k_q8_btok3: CudaPipeline, // three-token Q4_K x packed-Q8 verifier
     dmmv_q4k_q8_btok4: CudaPipeline, // four-token Q4_K x packed-Q8 verifier
+    dmmv_q5k_q8_btok2: CudaPipeline, // Q5_K x packed-Q8 verifiers (T = 2..4)
+    dmmv_q5k_q8_btok3: CudaPipeline,
+    dmmv_q5k_q8_btok4: CudaPipeline,
     dmmv_q6k_q8_btok2: CudaPipeline, // two-token Q6_K x packed-Q8 verifier
     dmmv_q6k_q8_btok3: CudaPipeline, // three-token Q6_K x packed-Q8 verifier
     dmmv_q6k_q8_btok4: CudaPipeline, // four-token Q6_K x packed-Q8 verifier
@@ -1017,6 +1020,9 @@ pub const ForwardCuda = struct {
         pipes.dmmv_q5k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_fast");
         pipes.dmmv_q4k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok2");
         pipes.dmmv_q4k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok3");
+        pipes.dmmv_q5k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok2");
+        pipes.dmmv_q5k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok3");
+        pipes.dmmv_q5k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok4");
         pipes.dmmv_q4k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok4");
         pipes.dmmv_q6k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok2");
         pipes.dmmv_q6k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok3");
@@ -2335,12 +2341,13 @@ pub const ForwardCuda = struct {
             @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 2))
         else blk: {
             // Expected tokens per cycle with two drafts: 1 + p1 + p1*p2. A third
-            // draft adds p1*p2*p3 tokens for roughly 13% more cycle time on the
-            // R9700 (one draft step plus one verify row).
+            // draft adds p1*p2*p3 tokens for one more draft step and verify row;
+            // 0.19 measured best over the suite prompts through the server.
             const m = &self.mtp.?;
             const e2 = 1.0 + m.ema_p1 + m.ema_p1 * m.ema_p2;
             const p3_est = if (m.p3_observed >= 8) m.ema_p3 else 0.9 * m.ema_p2;
-            break :blk if (m.ema_p1 * m.ema_p2 * p3_est > 0.13 * e2) @as(u32, 3) else @as(u32, 2);
+            const c: f32 = if (std.posix.getenv("ZINC_MTP_ADAPT_C")) |v| std.fmt.parseFloat(f32, v) catch 0.19 else 0.19;
+            break :blk if (m.ema_p1 * m.ema_p2 * p3_est > c * e2) @as(u32, 3) else @as(u32, 2);
         };
         const n_limit = @min(max_drafts, @min(mtp_max_draft, want_drafts));
         std.debug.assert(n_limit > 0);
@@ -3069,7 +3076,7 @@ pub const ForwardCuda = struct {
         if (!self.use_spec_btok or T < 2 or T > mtp_max_verify) return false;
         const idx = dmmvIdx(w.info.type_);
         if (idx >= 4) return false;
-        const q8_btok = is_rocm and (idx == 0 or idx == 2) and self.batch != null and mtpQ8TypeOn(idx);
+        const q8_btok = is_rocm and idx <= 2 and self.batch != null and mtpQ8TypeOn(idx);
         if (!q8_btok and (idx == 0 or idx == 2) and is_rocm and self.batch != null) return false;
         if (!envFlag("ZINC_SPEC_ACC", true)) return false;
         self.spec_acc_mode = 1;
@@ -3131,7 +3138,7 @@ pub const ForwardCuda = struct {
             cmd.dispatch(&self.pipes.dmmv_f32_batched, .{ M, T, 1 }, .{ 256, 1, 1 }, &.{ &w.gpu_buffer, x, y }, &bp, @sizeOf(MatvecBatchPush), 0);
             return;
         }
-        if (is_rocm and self.use_spec_btok and T >= 2 and T <= mtp_max_verify and (idx == 0 or idx == 2) and self.batch != null and mtpQ8TypeOn(idx)) {
+        if (is_rocm and self.use_spec_btok and T >= 2 and T <= mtp_max_verify and idx <= 2 and self.batch != null and mtpQ8TypeOn(idx)) {
             const b = &self.batch.?;
             if (!reuse_q8) {
                 const qp = QuantActPush{ .K = K, .T = T };
@@ -3142,6 +3149,12 @@ pub const ForwardCuda = struct {
                     2 => &self.pipes.dmmv_q4k_q8_btok2,
                     3 => &self.pipes.dmmv_q4k_q8_btok3,
                     4 => &self.pipes.dmmv_q4k_q8_btok4,
+                    else => unreachable,
+                },
+                1 => switch (T) {
+                    2 => &self.pipes.dmmv_q5k_q8_btok2,
+                    3 => &self.pipes.dmmv_q5k_q8_btok3,
+                    4 => &self.pipes.dmmv_q5k_q8_btok4,
                     else => unreachable,
                 },
                 2 => switch (T) {
@@ -5414,7 +5427,7 @@ fn mtpDraftVocab(vocab: u32) u32 {
 
 fn mtpQ8TypeOn(idx: usize) bool {
     if (!mtpQ8On() or idx >= 4) return false;
-    const enabled = std.posix.getenv("ZINC_MTP_Q8_TYPES") orelse "02";
+    const enabled = std.posix.getenv("ZINC_MTP_Q8_TYPES") orelse "012";
     return std.mem.indexOfScalar(u8, enabled, @as(u8, '0') + @as(u8, @intCast(idx))) != null;
 }
 
