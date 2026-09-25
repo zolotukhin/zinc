@@ -660,6 +660,7 @@ const MtpState = struct {
     conv_off_snapshot: []u32,
     verify_logits: CudaBuffer, // [mtp_max_verify, vocab]
     verify_argmax: CudaBuffer, // [mtp_max_verify] u32
+    draft_tokens: CudaBuffer, // [mtp_max_draft] u32, chained draft outputs
     h_input: CudaBuffer, // one target/MTP hidden row for single-token drafting
     pending_h: []f32, // normalized target hidden preceding the next seed token
     target_h: []f32, // downloaded verification h rows
@@ -689,6 +690,7 @@ const MtpState = struct {
         allocator.free(self.conv_off_snapshot);
         buffer.freeBuffer(&self.verify_logits);
         buffer.freeBuffer(&self.verify_argmax);
+        buffer.freeBuffer(&self.draft_tokens);
         buffer.freeBuffer(&self.h_input);
         allocator.free(self.pending_h);
         allocator.free(self.target_h);
@@ -2078,6 +2080,11 @@ pub const ForwardCuda = struct {
             var b = verify_argmax;
             buffer.freeBuffer(&b);
         }
+        const draft_tokens = try buffer.createBuffer(self.ctx, @as(usize, mtp_max_draft) * @sizeOf(u32));
+        errdefer {
+            var b = draft_tokens;
+            buffer.freeBuffer(&b);
+        }
         const h_input = try buffer.createBuffer(self.ctx, @as(usize, d.n_embd) * f4);
         errdefer {
             var b = h_input;
@@ -2097,6 +2104,7 @@ pub const ForwardCuda = struct {
             .conv_off_snapshot = conv_off,
             .verify_logits = verify_logits,
             .verify_argmax = verify_argmax,
+            .draft_tokens = draft_tokens,
             .h_input = h_input,
             .pending_h = pending_h,
             .target_h = target_h,
@@ -2230,6 +2238,17 @@ pub const ForwardCuda = struct {
     /// the preceding target hidden row or the prior draft head's normalized row;
     /// the latter is copied back in-place for recursive draft steps.
     fn mtpDraftStep(self: *ForwardCuda, token: u32, pos: u32) !u32 {
+        try self.mtpDraftRecord(null, token, pos, &self.argmax_buf, true);
+        var tok: u32 = 0;
+        buffer.download(self.ctx, &self.argmax_buf, std.mem.asBytes(&tok));
+        return tok;
+    }
+
+    /// Record one draft step. The token comes from `tok_buf` on the device
+    /// (GPU embedding lookup, so steps chain without a host round trip) or,
+    /// when null, from `host_tok`. The greedy draft lands in `out`; `wait`
+    /// synchronizes the stream after the step.
+    fn mtpDraftRecord(self: *ForwardCuda, tok_buf: ?*const CudaBuffer, host_tok: u32, pos: u32, out: *const CudaBuffer, wait: bool) !void {
         const d = self.d;
         const L = d.n_layers;
         const state = &self.mtp.?;
@@ -2239,10 +2258,16 @@ pub const ForwardCuda = struct {
         const head_norm = self.mtpHeadNorm() orelse return error.MissingTensor;
         const head = self.mtpHead() orelse return error.MissingTensor;
 
-        self.model.dequantEmbeddingRow(token, self.host_embed);
-        buffer.upload(self.ctx, &self.hidden, std.mem.sliceAsBytes(self.host_embed));
+        if (tok_buf == null) {
+            self.model.dequantEmbeddingRow(host_tok, self.host_embed);
+            buffer.upload(self.ctx, &self.hidden, std.mem.sliceAsBytes(self.host_embed));
+        }
 
         var cmd = try command.beginCommand(self.ctx);
+        if (tok_buf) |tb| {
+            const push = EmbedPush{ .K = d.n_embd, .vocab = d.vocab };
+            cmd.dispatch(&self.pipes.embed_q4k, .{ d.n_embd / 256, 1, 1 }, .{ 256, 1, 1 }, &.{ self.embed_weight.?, tb, &self.hidden }, &push, @sizeOf(EmbedPush), 0);
+        }
         const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
         cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &enorm.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
         cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &state.h_input, &hnorm.gpu_buffer, &self.up_buf }, &rms, @sizeOf(RmsPush), 0);
@@ -2264,13 +2289,13 @@ pub const ForwardCuda = struct {
         // frequent to rare) skips most of the 1 GB LM head per draft.
         const draft_rows = mtpDraftVocab(d.vocab);
         self.lmHeadDispatchRows(&cmd, &head.gpu_buffer, head.info.type_, norm_q8_ready, draft_rows);
-        self.argmaxDispatchFromN(&cmd, &self.logits_buf, &self.argmax_buf, draft_rows);
-        cmd.commitAndWait();
-        self.drainPending();
-
-        var tok: u32 = 0;
-        buffer.download(self.ctx, &self.argmax_buf, std.mem.asBytes(&tok));
-        return tok;
+        self.argmaxDispatchFromN(&cmd, &self.logits_buf, out, draft_rows);
+        if (wait) {
+            cmd.commitAndWait();
+            self.drainPending();
+        } else {
+            self.submit(cmd);
+        }
     }
 
     /// Run 1..4 proposed tokens through the real target in one weight-amortized
@@ -2414,14 +2439,37 @@ pub const ForwardCuda = struct {
         buffer.upload(self.ctx, &self.mtp.?.h_input, std.mem.sliceAsBytes(self.mtp.?.pending_h));
         var drafts: [mtp_max_draft]u32 = @splat(0);
         var n_drafted: u32 = 0;
-        var fed = seed;
-        while (n_drafted < n_limit) : (n_drafted += 1) {
-            const draft = try self.mtpDraftStep(fed, pos + n_drafted);
-            drafts[n_drafted] = draft;
-            fed = draft;
-            if (draft == eos_id) {
+        if (self.embed_gpu and envFlag("ZINC_MTP_DRAFT_CHAIN", true)) {
+            // All draft steps queue back to back: each embeds the previous
+            // step's argmax on the device, so the host waits once per cycle.
+            self.host_tok_in[0] = seed;
+            buffer.upload(self.ctx, &self.tok_in_buf, std.mem.sliceAsBytes(self.host_tok_in));
+            var slots: [mtp_max_draft]CudaBuffer = undefined;
+            var n_slots: usize = 0;
+            defer for (slots[0..n_slots]) |*s| buffer.freeBuffer(s);
+            for (0..n_limit) |k| {
+                slots[k] = try buffer.aliasBuffer(&self.mtp.?.draft_tokens, k * @sizeOf(u32), @sizeOf(u32));
+                n_slots += 1;
+            }
+            for (0..n_limit) |k| {
+                const src: *const CudaBuffer = if (k == 0) &self.tok_in_buf else &slots[k - 1];
+                try self.mtpDraftRecord(src, 0, pos + @as(u32, @intCast(k)), &slots[k], k + 1 == n_limit);
+            }
+            buffer.download(self.ctx, &self.mtp.?.draft_tokens, std.mem.sliceAsBytes(drafts[0..n_limit]));
+            while (n_drafted < n_limit) {
                 n_drafted += 1;
-                break;
+                if (drafts[n_drafted - 1] == eos_id) break;
+            }
+        } else {
+            var fed = seed;
+            while (n_drafted < n_limit) : (n_drafted += 1) {
+                const draft = try self.mtpDraftStep(fed, pos + n_drafted);
+                drafts[n_drafted] = draft;
+                fed = draft;
+                if (draft == eos_id) {
+                    n_drafted += 1;
+                    break;
+                }
             }
         }
         self.mtp.?.draft_ns += phase_timer.lap();
