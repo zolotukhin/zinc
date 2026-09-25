@@ -391,6 +391,9 @@ const Pipelines = struct {
     dmmv_q4k_pair_q8_btok2_v2: CudaPipeline,
     dmmv_q4k_pair_q8_btok3_v2: CudaPipeline,
     dmmv_q4k_pair_q8_btok4_v2: CudaPipeline,
+    dmmv_q5k_q8_btok2_v2: CudaPipeline,
+    dmmv_q5k_q8_btok3_v2: CudaPipeline,
+    dmmv_q5k_q8_btok4_v2: CudaPipeline,
     dmmv_q6k_q8_fast: CudaPipeline, // experimental Q6_K x Q8_1 decode matvec
     dmmv_f32_dual: CudaPipeline, // fused SSM alpha/beta projection
     dmmv_f32_dual_btok2: CudaPipeline, // packed two-token SSM alpha/beta projection
@@ -1057,6 +1060,9 @@ pub const ForwardCuda = struct {
         pipes.dmmv_q4k_pair_q8_btok2_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok2_v2");
         pipes.dmmv_q4k_pair_q8_btok3_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok3_v2");
         pipes.dmmv_q4k_pair_q8_btok4_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok4_v2");
+        pipes.dmmv_q5k_q8_btok2_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok2_v2");
+        pipes.dmmv_q5k_q8_btok3_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok3_v2");
+        pipes.dmmv_q5k_q8_btok4_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok4_v2");
         pipes.dmmv_q6k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_fast");
         pipes.dmmv_f32_dual = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual");
         pipes.dmmv_f32_dual_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok2");
@@ -3198,6 +3204,7 @@ pub const ForwardCuda = struct {
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), T, 1 }, .{ 256, 1, 1 }, &.{ x, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             }
             const q4k_v2 = idx == 0 and q4kBtokV2On();
+            const q5k_v2 = idx == 1 and envFlag("ZINC_Q5K_BTOK_V2", true);
             const pipe: *CudaPipeline = switch (idx) {
                 0 => switch (T) {
                     2 => if (q4k_v2) &self.pipes.dmmv_q4k_q8_btok2_v2 else &self.pipes.dmmv_q4k_q8_btok2,
@@ -3206,9 +3213,9 @@ pub const ForwardCuda = struct {
                     else => unreachable,
                 },
                 1 => switch (T) {
-                    2 => &self.pipes.dmmv_q5k_q8_btok2,
-                    3 => &self.pipes.dmmv_q5k_q8_btok3,
-                    4 => &self.pipes.dmmv_q5k_q8_btok4,
+                    2 => if (q5k_v2) &self.pipes.dmmv_q5k_q8_btok2_v2 else &self.pipes.dmmv_q5k_q8_btok2,
+                    3 => if (q5k_v2) &self.pipes.dmmv_q5k_q8_btok3_v2 else &self.pipes.dmmv_q5k_q8_btok3,
+                    4 => if (q5k_v2) &self.pipes.dmmv_q5k_q8_btok4_v2 else &self.pipes.dmmv_q5k_q8_btok4,
                     else => unreachable,
                 },
                 2 => switch (T) {
@@ -3223,7 +3230,7 @@ pub const ForwardCuda = struct {
             // Decode's Q6_K dense FFN down projection deliberately uses one
             // wave; mirror that work partition so each verifier row follows
             // the same accumulation tree. Other projections use two waves.
-            const block: u32 = if (q4k_v2 or (idx == 2 and M == self.d.n_embd and K == self.d.n_ff)) 32 else dmmv_fast_block;
+            const block: u32 = if (q4k_v2 or q5k_v2 or (idx == 2 and M == self.d.n_embd and K == self.d.n_ff)) 32 else dmmv_fast_block;
             cmd.dispatch(pipe, .{ M, 1, 1 }, .{ block, 1, 1 }, &.{ &w.gpu_buffer, &b.act_q8, y }, &push, @sizeOf(DmmvPush), 0);
             return;
         }

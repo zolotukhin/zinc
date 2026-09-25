@@ -3326,6 +3326,87 @@ __device__ __forceinline__ void zinc_dmmv_q5k_q8_btok(
     }
 }
 
+// Q5_K twin of zinc_dmmv_q4k_q8_btok_v2: same lane split and scale packing;
+// the fifth bit of each value comes from the shared 32-byte qh plane (bit j
+// of byte l belongs to sub-block j). Block: d,dmin | scales[12] | qh[32] | qs[128].
+__device__ __forceinline__ uint4 zinc_q5_lane_values(uint4 w, uint4 qh, unsigned nib_shift, unsigned bit) {
+    uint4 r;
+    r.x = ((w.x >> nib_shift) & 0x0f0f0f0fu) | (((qh.x >> bit) & 0x01010101u) << 4);
+    r.y = ((w.y >> nib_shift) & 0x0f0f0f0fu) | (((qh.y >> bit) & 0x01010101u) << 4);
+    r.z = ((w.z >> nib_shift) & 0x0f0f0f0fu) | (((qh.z >> bit) & 0x01010101u) << 4);
+    r.w = ((w.w >> nib_shift) & 0x0f0f0f0fu) | (((qh.w >> bit) & 0x01010101u) << 4);
+    return r;
+}
+
+__device__ __forceinline__ int zinc_dp4a16_raw(uint4 v, int4 x) {
+    int acc = __dp4a((int)v.x, x.x, 0);
+    acc = __dp4a((int)v.y, x.y, acc);
+    acc = __dp4a((int)v.z, x.z, acc);
+    return __dp4a((int)v.w, x.w, acc);
+}
+
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_q5k_q8_btok_v2(
+    const unsigned char* __restrict__ a,
+    const unsigned char* __restrict__ xq,
+    float* __restrict__ y, DmmvPush pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M) return;
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned sbl = lane >> 3, i = (lane >> 1) & 3u, h = lane & 1u;
+    const unsigned g = 2u * (i & 1u);
+    const unsigned bpr = pc.K >> 8;
+    const unsigned char* arow = a + pc.a_offset + (size_t)row * bpr * 176u;
+    const unsigned qh_off = 16u + 16u * h, qs_off = 48u + 32u * i + 16u * h;
+    float sum[B] = {};
+
+    uint4 meta = {}, qh = {}, w = {};
+    if (sbl < bpr) {
+        const unsigned char* bb = arow + (size_t)sbl * 176u;
+        meta = *(const uint4*)bb;
+        qh = *(const uint4*)(bb + qh_off);
+        w = *(const uint4*)(bb + qs_off);
+    }
+    for (unsigned sb = sbl; sb < bpr; sb += 4u) {
+        uint4 meta_n = {}, qh_n = {}, w_n = {};
+        if (sb + 4u < bpr) {
+            const unsigned char* bn = arow + (size_t)(sb + 4u) * 176u;
+            meta_n = *(const uint4*)bn;
+            qh_n = *(const uint4*)(bn + qh_off);
+            w_n = *(const uint4*)(bn + qs_off);
+        }
+        const ZincQ4kLaneScales s = zinc_q4k_lane_scales(meta, i);
+        const uint4 v0 = zinc_q5_lane_values(w, qh, 0u, 2u * i);
+        const uint4 v1 = zinc_q5_lane_values(w, qh, 4u, 2u * i + 1u);
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const ZincQ8LaneAct x = zinc_q8_lane_act(xq + ((size_t)(2u * sb + (i >> 1)) * B + tok) * 144u, g, h);
+            float r = s.f0 * x.ds0.x * (float)zinc_dp4a16_raw(v0, x.a0) + s.f1 * x.ds1.x * (float)zinc_dp4a16_raw(v1, x.a1);
+            if (h == 0u) r -= s.b0 * x.ds0.y + s.b1 * x.ds1.y;
+            sum[tok] += r;
+        }
+        meta = meta_n;
+        qh = qh_n;
+        w = w_n;
+    }
+
+    #pragma unroll
+    for (unsigned tok = 0u; tok < B; ++tok) sum[tok] = zinc_warp_reduce_sum(sum[tok]);
+    if (lane == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned yi = (pc.y_offset >> 2) + tok * pc.M + row;
+            if (pc.acc_mode != 0u) y[yi] += sum[tok];
+            else y[yi] = sum[tok];
+        }
+    }
+}
+
+extern "C" __global__ void dmmv_q5k_q8_btok2_v2(const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok_v2<2u>(a, xq, y, pc); }
+extern "C" __global__ void dmmv_q5k_q8_btok3_v2(const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok_v2<3u>(a, xq, y, pc); }
+extern "C" __global__ void dmmv_q5k_q8_btok4_v2(const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok_v2<4u>(a, xq, y, pc); }
+
 extern "C" __global__ void dmmv_q5k_q8_btok2(const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok<2u>(a, xq, y, pc); }
 extern "C" __global__ void dmmv_q5k_q8_btok3(const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok<3u>(a, xq, y, pc); }
 extern "C" __global__ void dmmv_q5k_q8_btok4(const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) { zinc_dmmv_q5k_q8_btok<4u>(a, xq, y, pc); }
@@ -3823,6 +3904,9 @@ extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok4_v2() {}
 extern "C" __global__ void dmmv_q4k_pair_q8_btok2_v2() {}
 extern "C" __global__ void dmmv_q4k_pair_q8_btok3_v2() {}
 extern "C" __global__ void dmmv_q4k_pair_q8_btok4_v2() {}
+extern "C" __global__ void dmmv_q5k_q8_btok2_v2() {}
+extern "C" __global__ void dmmv_q5k_q8_btok3_v2() {}
+extern "C" __global__ void dmmv_q5k_q8_btok4_v2() {}
 extern "C" __global__ void dmmv_q4k_experts_grouped_q8_dual() {}
 extern "C" __global__ void dmmv_q5_1_experts_grouped_q8() {}
 extern "C" __global__ void dmmv_q5_1_experts_grouped_q8_m8() {}
