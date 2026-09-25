@@ -1362,7 +1362,9 @@ struct EmbedPush { unsigned K; unsigned vocab; };
 extern "C" __global__ void embed_lookup_q4k(const unsigned char* W,
                                             const unsigned* tok, float* out,
                                             EmbedPush pc) {
-    unsigned t = tok[0];
+    // grid.y rows: row r embeds tok[r] into out[r * K ..] (decode uses one row).
+    unsigned t = tok[blockIdx.y];
+    out += (size_t)blockIdx.y * pc.K;
     unsigned vmax = pc.vocab ? pc.vocab - 1u : 0u;
     if (t > vmax) t = vmax;
     unsigned nsb = pc.K >> 8;          // superblocks per row (K / 256)

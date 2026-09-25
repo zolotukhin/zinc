@@ -660,7 +660,9 @@ const MtpState = struct {
     conv_off_snapshot: []u32,
     verify_logits: CudaBuffer, // [mtp_max_verify, vocab]
     verify_argmax: CudaBuffer, // [mtp_max_verify] u32
-    draft_tokens: CudaBuffer, // [mtp_max_draft] u32, chained draft outputs
+    // [mtp_max_verify] u32: seed then each chained draft; the verify batch
+    // embeds straight from it.
+    verify_tokens: CudaBuffer,
     h_input: CudaBuffer, // one target/MTP hidden row for single-token drafting
     pending_h: []f32, // normalized target hidden preceding the next seed token
     target_h: []f32, // downloaded verification h rows
@@ -690,7 +692,7 @@ const MtpState = struct {
         allocator.free(self.conv_off_snapshot);
         buffer.freeBuffer(&self.verify_logits);
         buffer.freeBuffer(&self.verify_argmax);
-        buffer.freeBuffer(&self.draft_tokens);
+        buffer.freeBuffer(&self.verify_tokens);
         buffer.freeBuffer(&self.h_input);
         allocator.free(self.pending_h);
         allocator.free(self.target_h);
@@ -2080,9 +2082,9 @@ pub const ForwardCuda = struct {
             var b = verify_argmax;
             buffer.freeBuffer(&b);
         }
-        const draft_tokens = try buffer.createBuffer(self.ctx, @as(usize, mtp_max_draft) * @sizeOf(u32));
+        const verify_tokens = try buffer.createBuffer(self.ctx, @as(usize, mtp_max_verify) * @sizeOf(u32));
         errdefer {
-            var b = draft_tokens;
+            var b = verify_tokens;
             buffer.freeBuffer(&b);
         }
         const h_input = try buffer.createBuffer(self.ctx, @as(usize, d.n_embd) * f4);
@@ -2104,7 +2106,7 @@ pub const ForwardCuda = struct {
             .conv_off_snapshot = conv_off,
             .verify_logits = verify_logits,
             .verify_argmax = verify_argmax,
-            .draft_tokens = draft_tokens,
+            .verify_tokens = verify_tokens,
             .h_input = h_input,
             .pending_h = pending_h,
             .target_h = target_h,
@@ -2304,15 +2306,22 @@ pub const ForwardCuda = struct {
     fn mtpTargetBatch(self: *ForwardCuda, tokens: []const u32, base_position: u32, predictions: ?*[mtp_max_verify]u32) !void {
         const T: u32 = @intCast(tokens.len);
         std.debug.assert(T >= 1 and T <= mtp_max_verify);
-        const d = self.d;
-        const rows: usize = @intCast(T);
-        const width: usize = @intCast(d.n_embd);
         const b = try self.ensureBatch(T);
-
+        const rows: usize = @intCast(T);
+        const width: usize = @intCast(self.d.n_embd);
         const embeddings = try self.allocator.alloc(f32, rows * width);
         defer self.allocator.free(embeddings);
         for (0..rows) |t| self.model.dequantEmbeddingRow(tokens[t], embeddings[t * width ..][0..width]);
         buffer.upload(self.ctx, &b.hidden, std.mem.sliceAsBytes(embeddings));
+        try self.mtpTargetBatchEmbedded(T, base_position, predictions);
+    }
+
+    /// mtpTargetBatch over T rows whose embeddings are already in batch.hidden.
+    fn mtpTargetBatchEmbedded(self: *ForwardCuda, T: u32, base_position: u32, predictions: ?*[mtp_max_verify]u32) !void {
+        const d = self.d;
+        const rows: usize = @intCast(T);
+        const width: usize = @intCast(d.n_embd);
+        const b = try self.ensureBatch(T);
 
         const saved_spec_btok = self.use_spec_btok;
         const saved_capture = self.capture_spec_state;
@@ -2432,30 +2441,50 @@ pub const ForwardCuda = struct {
             const c: f32 = std.fmt.parseFloat(f32, std.posix.getenv("ZINC_MTP_ADAPT_C").?) catch 0.19;
             break :blk if (m.ema_p1 * m.ema_p2 * p3_est > c * e2) @as(u32, 3) else @as(u32, 2);
         };
-        const n_limit = @min(max_drafts, @min(mtp_max_draft, want_drafts));
+        const n_limit: u32 = @min(max_drafts, @min(mtp_max_draft, want_drafts));
         std.debug.assert(n_limit > 0);
 
         var phase_timer = try std.time.Timer.start();
         buffer.upload(self.ctx, &self.mtp.?.h_input, std.mem.sliceAsBytes(self.mtp.?.pending_h));
         var drafts: [mtp_max_draft]u32 = @splat(0);
         var n_drafted: u32 = 0;
+        var target_tokens: [mtp_max_verify]u32 = @splat(0);
+        target_tokens[0] = seed;
+        var predictions: [mtp_max_verify]u32 = @splat(0);
+        // Rows the verify batch actually ran; rejection restores below this.
+        var verify_rows: u32 = 0;
         if (self.embed_gpu and envFlag("ZINC_MTP_DRAFT_CHAIN", true)) {
-            // All draft steps queue back to back: each embeds the previous
-            // step's argmax on the device, so the host waits once per cycle.
-            self.host_tok_in[0] = seed;
-            buffer.upload(self.ctx, &self.tok_in_buf, std.mem.sliceAsBytes(self.host_tok_in));
-            var slots: [mtp_max_draft]CudaBuffer = undefined;
+            // Drafts and verification queue back to back on the device: each
+            // draft embeds the previous token from verify_tokens and writes its
+            // argmax to the next slot, and the verify batch embeds all rows
+            // from there, so the host waits once per cycle. An EOS draft still
+            // gets verified rows after it; only the accepted prefix is used.
+            const state = &self.mtp.?;
+            // Size the batch scratch before queueing drafts: they use its Q8 tile.
+            const b = try self.ensureBatch(n_limit + 1);
+            var slots: [mtp_max_verify]CudaBuffer = undefined;
             var n_slots: usize = 0;
             defer for (slots[0..n_slots]) |*s| buffer.freeBuffer(s);
-            for (0..n_limit) |k| {
-                slots[k] = try buffer.aliasBuffer(&self.mtp.?.draft_tokens, k * @sizeOf(u32), @sizeOf(u32));
+            for (0..n_limit + 1) |k| {
+                slots[k] = try buffer.aliasBuffer(&state.verify_tokens, k * @sizeOf(u32), @sizeOf(u32));
                 n_slots += 1;
             }
+            self.host_tok_in[0] = seed;
+            buffer.upload(self.ctx, &slots[0], std.mem.sliceAsBytes(self.host_tok_in));
             for (0..n_limit) |k| {
-                const src: *const CudaBuffer = if (k == 0) &self.tok_in_buf else &slots[k - 1];
-                try self.mtpDraftRecord(src, 0, pos + @as(u32, @intCast(k)), &slots[k], k + 1 == n_limit);
+                try self.mtpDraftRecord(&slots[k], 0, pos + @as(u32, @intCast(k)), &slots[k + 1], false);
             }
-            buffer.download(self.ctx, &self.mtp.?.draft_tokens, std.mem.sliceAsBytes(drafts[0..n_limit]));
+            self.mtp.?.draft_ns += phase_timer.lap();
+
+            verify_rows = n_limit + 1;
+            @memcpy(state.conv_off_snapshot, self.conv_off[0..self.d.n_layers]);
+            var cmd = try command.beginCommand(self.ctx);
+            const push = EmbedPush{ .K = self.d.n_embd, .vocab = self.d.vocab };
+            cmd.dispatch(&self.pipes.embed_q4k, .{ self.d.n_embd / 256, verify_rows, 1 }, .{ 256, 1, 1 }, &.{ self.embed_weight.?, &state.verify_tokens, &b.hidden }, &push, @sizeOf(EmbedPush), 0);
+            self.submit(cmd);
+            try self.mtpTargetBatchEmbedded(verify_rows, pos, &predictions);
+            buffer.download(self.ctx, &state.verify_tokens, std.mem.sliceAsBytes(target_tokens[0..verify_rows]));
+            @memcpy(drafts[0..n_limit], target_tokens[1 .. n_limit + 1]);
             while (n_drafted < n_limit) {
                 n_drafted += 1;
                 if (drafts[n_drafted - 1] == eos_id) break;
@@ -2471,21 +2500,18 @@ pub const ForwardCuda = struct {
                     break;
                 }
             }
+            self.mtp.?.draft_ns += phase_timer.lap();
+            @memcpy(target_tokens[1 .. 1 + n_drafted], drafts[0..n_drafted]);
+            verify_rows = n_drafted + 1;
+            try self.mtpCheckpointTarget();
+            try self.mtpTargetBatch(target_tokens[0..verify_rows], pos, &predictions);
         }
-        self.mtp.?.draft_ns += phase_timer.lap();
-
-        var target_tokens: [mtp_max_verify]u32 = @splat(0);
-        target_tokens[0] = seed;
-        @memcpy(target_tokens[1 .. 1 + n_drafted], drafts[0..n_drafted]);
-        try self.mtpCheckpointTarget();
-        var predictions: [mtp_max_verify]u32 = @splat(0);
-        try self.mtpTargetBatch(target_tokens[0 .. n_drafted + 1], pos, &predictions);
         self.mtp.?.target_ns += phase_timer.lap();
 
         var accepted: u32 = 0;
         while (accepted < n_drafted and predictions[accepted] == drafts[accepted]) : (accepted += 1) {}
         const committed = accepted + 1;
-        if (accepted < n_drafted) {
+        if (committed < verify_rows) {
             try self.mtpRestoreTarget(committed);
         }
         self.mtp.?.restore_ns += phase_timer.lap();
