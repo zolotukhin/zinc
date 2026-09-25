@@ -1187,6 +1187,19 @@ pub const Tokenizer = struct {
         return false;
     }
 
+    /// True when the embedded chat template renders `bos_token` before anything else
+    /// (`{{- bos_token }}...`, as MiniCPM5's does). The built-in renderers then emit the
+    /// BOS text too, as a Jinja renderer would; without it MiniCPM5 answers a ChatML turn
+    /// with an immediate <|im_end|>.
+    pub fn templateStartsWithBos(self: *const Tokenizer) bool {
+        const tmpl = self.chat_template orelse return false;
+        if (self.bos_id == null) return false;
+        var rest = std.mem.trimLeft(u8, tmpl, " \t\r\n");
+        if (!std.mem.startsWith(u8, rest, "{{")) return false;
+        rest = std.mem.trimLeft(u8, rest[2..], "-+ ");
+        return std.mem.startsWith(u8, rest, "bos_token");
+    }
+
     /// Return the model's beginning-of-sequence token ID.
     /// Falls back to `eos_id` when no BOS token was found in GGUF metadata.
     pub fn bosId(self: *const Tokenizer) u32 {
@@ -1396,6 +1409,12 @@ pub const Tokenizer = struct {
         const n = @min(roles.len, contents.len);
         switch (template_kind) {
             .chatml => {
+                if (self.templateStartsWithBos()) {
+                    const bos_text = self.vocab[self.bos_id.?];
+                    if (pos + bos_text.len > buf.len) return error.BufferTooSmall;
+                    @memcpy(buf[pos .. pos + bos_text.len], bos_text);
+                    pos += bos_text.len;
+                }
                 // Tool rendering uses a caller-supplied allocator for transient
                 // scratch buffers. When neither tools nor a tool_format are set
                 // (the common path), tool_alloc is never touched, so the field
@@ -1717,6 +1736,32 @@ test "shouldPrependBos is false when BOS metadata is absent" {
 
     try std.testing.expect(!tok.shouldPrependBos());
     try std.testing.expectEqual(@as(u32, 2), tok.bosId());
+}
+
+test "templateStartsWithBos only for templates that open with bos_token" {
+    var tok = Tokenizer{
+        .vocab = &.{ "<s>", "</s>" },
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 0,
+        .eos_id = 1,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    tok.chat_template = "{{- bos_token }}{%- for message in messages %}<|im_start|>";
+    try std.testing.expect(tok.templateStartsWithBos());
+    tok.chat_template = "\n{{ bos_token }}<|im_start|>";
+    try std.testing.expect(tok.templateStartsWithBos());
+    tok.chat_template = "{%- for message in messages %}<|im_start|>{{ bos_token }}";
+    try std.testing.expect(!tok.templateStartsWithBos());
+    tok.chat_template = null;
+    try std.testing.expect(!tok.templateStartsWithBos());
+    tok.chat_template = "{{- bos_token }}<|im_start|>";
+    tok.bos_id = null;
+    try std.testing.expect(!tok.templateStartsWithBos());
 }
 
 test "initFromGGUF populates merge_ranks cache when merges are present" {
