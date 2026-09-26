@@ -967,7 +967,13 @@ pub const DmmvDispatch = struct {
         // Specialization constant: SPEC_K (id=1) = max_k to size the shared memory
         // array in the Q4_K shader (s_x[SPEC_K]). Must be >= the largest K value
         // used in any Q4_K dispatch (hidden_dim, inter_dim, q_dim, d_inner).
-        const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = hidden_dim }};
+        // Clamp it to the device's shared memory (1 KiB left for the shaders' other shared
+        // arrays): a larger s_x fails pipeline creation, and RADV's compiler raises SIGFPE on it
+        // (Qwen2.5-7B, intermediate 18944 -> 75776 bytes > 64 KiB). dmmv_f32 reads x from global
+        // memory when K > SPEC_K; the MoE shaders' K (hidden or expert width) stays below it.
+        const lds_bytes = instance.device_props.limits.maxComputeSharedMemorySize;
+        const lds_floats: u32 = if (lds_bytes > 1024) (lds_bytes - 1024) / 4 else hidden_dim;
+        const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = @min(hidden_dim, lds_floats) }};
         const has_push_desc = instance.push_descriptor_fn != null;
         const push_desc_options = pipeline_mod.PipelineOptions{
             .push_descriptors = has_push_desc,

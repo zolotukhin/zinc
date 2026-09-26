@@ -38,10 +38,14 @@ void main() {
     uint row = gl_WorkGroupID.x;
     if (row >= M) return;
 
-    // Cooperatively load input vector into shared memory
+    // Cooperatively load input vector into shared memory. SPEC_K is clamped to the device's
+    // shared memory, so a wider K reads x from global memory instead.
     uint x_base = x_offset / 4;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
+    bool x_in_lds = K <= SPEC_K;
+    if (x_in_lds) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_base + i];
+        }
     }
     barrier();
 
@@ -50,7 +54,7 @@ void main() {
     uint w_base = a_offset / 4 + row * K;
     float partial = 0.0;
     for (uint j = tid; j < K; j += 64u) {
-        partial += w[w_base + j] * s_x[j];
+        partial += w[w_base + j] * (x_in_lds ? s_x[j] : x[x_base + j]);
     }
 
     float sum = subgroupAdd(partial);
