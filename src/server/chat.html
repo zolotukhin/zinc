@@ -1528,12 +1528,16 @@ function addMsg(role,text){
 
 function clearConversation(){
   if(isGenerating)return;
+  let oldSessionId=chatSessionId;
   I.value='';
   I.style.height='auto';
   removeStorage(chatStateKey);
   resetConversation();
   SS.textContent='conversation cleared';
   I.focus();
+  // Drop the server's prompt-reuse entry and zero the ctx gauge for the old session.
+  fetch(base+'/chat/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:oldSessionId})})
+    .then(()=>scheduleHealthRefresh(0)).catch(()=>{});
 }
 
 async function send(){
@@ -1838,6 +1842,12 @@ MS.addEventListener('change',()=>{
   updateModelAction();
 });
 CB.addEventListener('click',clearConversation);
+// Another tab changed the shared chat state (e.g. cleared it): adopt it, so this tab's
+// stale in-memory history is not written back over the other tab's clear.
+if(typeof window!=='undefined')window.addEventListener('storage',e=>{
+  if(e.key!==chatStateKey||isGenerating)return;
+  restoreChatState();
+});
 MB.addEventListener('click',async()=>{
   let m=selectedModel();if(!m||!m.managed||m.active||m.downloading||m.download_phase==='verifying')return;
   MB.disabled=true;

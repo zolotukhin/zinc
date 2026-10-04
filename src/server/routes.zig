@@ -405,6 +405,8 @@ pub fn handleConnection(
         }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/completions")) {
         try handleChatCompletions(conn, manager, server_state, request.body, allocator);
+    } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/reset")) {
+        try handleChatReset(conn, server_state, request.body, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/completions")) {
         try handleCompletions(conn, manager, server_state, request.body, allocator);
     } else if (request.method == .OPTIONS) {
@@ -415,6 +417,33 @@ pub fn handleConnection(
     } else {
         try conn.sendError(404, "not_found", "Unknown endpoint");
     }
+}
+
+const ChatResetBody = struct {
+    session_id: []const u8 = "",
+};
+
+/// Drop a chat session's prompt-reuse entry and zero the active-context gauge.
+/// Called by the chat UI's Clear button. Waits for the generation lock: a finished
+/// request keeps holding it while it warms the reuse cache after the response.
+fn handleChatReset(
+    conn: *http.Connection,
+    server_state: *ServerState,
+    body: []const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    const parsed = std.json.parseFromSlice(ChatResetBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
+        return;
+    };
+    defer parsed.deinit();
+
+    server_state.generation_mutex.lock();
+    defer server_state.generation_mutex.unlock();
+
+    if (parsed.value.session_id.len > 0) server_state.clearChatReuseSession(parsed.value.session_id);
+    server_state.clearActiveContext();
+    try conn.sendJson(200, "{\"object\":\"chat.reset\",\"reset\":true}");
 }
 
 fn sendUnsupportedModelManagement(conn: *http.Connection) !void {
