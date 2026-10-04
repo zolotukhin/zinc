@@ -2588,14 +2588,20 @@ pub const ForwardCuda = struct {
         if (ssm_profile) cmd = try command.beginCommand(ctx);
         const use_chunked = !self.capture_spec_state and std.posix.getenv("ZINC_SSM_CHUNKED") != null and
             std.mem.eql(u8, std.posix.getenv("ZINC_SSM_CHUNKED").?, "1");
-        // Delta-net scan: warp-level kernel (no __syncthreads in hot loop).
-        // FIXED (2026-06-30): warp kernel now computes S@k (row-wise) matching
-        // the block kernel. Safe for all T values.
-        // A/B toggle: ZINC_SSM_WARP=0 falls back to the block-reduce kernel.
-        const use_warp = (self.capture_spec_state and !is_rocm) or
-            (!self.capture_spec_state and !self.force_block_ssm and !use_chunked and
-                (std.posix.getenv("ZINC_SSM_WARP") == null or
-                    !std.mem.eql(u8, std.posix.getenv("ZINC_SSM_WARP").?, "0")));
+        // ROCm prefill uses the prepared column scan when the state shape matches.
+        // The row-warp kernel repeats Q/K normalization on every state row.
+        // ZINC_SSM_WARP=1 keeps that kernel. CUDA stays on it by default.
+        const warp_env = std.posix.getenv("ZINC_SSM_WARP");
+        const warp_disabled = if (warp_env) |v|
+            std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
+                std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no")
+        else
+            false;
+        const warp_explicit = warp_env != null and !warp_disabled;
+        const prepared_shape = d.d_state == d.head_v_dim and d.d_state <= 128 and ssmPreparedOn() and ssmColWarpOn();
+        const use_warp = !use_chunked and !self.force_block_ssm and !warp_disabled and
+            ((self.capture_spec_state and !is_rocm) or
+                (!self.capture_spec_state and (warp_explicit or !is_rocm or !prepared_shape)));
         const use_preprocessed = !use_chunked and !use_warp and d.d_state == d.head_v_dim and d.d_state <= 128 and ssmPreparedOn();
         const use_col_warp = use_preprocessed and ssmColWarpOn();
         if (ssm_profile and L == 0) log.info("SSM_PROFILE L0: prepared={}", .{use_preprocessed});

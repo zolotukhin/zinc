@@ -1740,6 +1740,12 @@ test "ROCm dense Qwen decode keeps the measured Q4 and attention fast paths" {
     // The measured single-reduction state scan is the ROCm default, with the
     // environment variable above it retaining the explicit diagnostic opt-out.
     try expectContainsNear(forward, "const decode_ssm_fast = std.posix.getenv(\"ZINC_ROCM_DECODE_SSM_FAST\")", "else true;", 500);
+
+    // Prefill must not hide that scan behind the row-warp kernel. The row-warp
+    // path stays available only as an explicit opt-in, and only when the
+    // prepared column scan is not the matching ROCm shape.
+    try expectContainsNear(forward, "const prepared_shape =", "ssmPreparedOn() and ssmColWarpOn()", 200);
+    try expectContainsNear(forward, "const use_warp =", "warp_explicit or !is_rocm or !prepared_shape", 400);
 }
 
 test "ROCm command completion events are allocated only for async waits" {

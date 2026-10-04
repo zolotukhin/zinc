@@ -6574,7 +6574,10 @@ __device__ __forceinline__ void zinc_gemm_q6k_wmma_i8(
             __syncthreads();
 
             const unsigned row_base = wid * 16u;
-            #pragma unroll
+            // Keep the eight K groups rolled. Fully unrolling them with the
+            // seven token fragments spills private memory and overflows the
+            // gfx12 instruction cache, same limit as the Q4 K-group loop.
+            #pragma unroll 1
             for (int kg = 0; kg < 8; ++kg) {
                 const unsigned g16 = (unsigned)ah * 8u + (unsigned)kg;
                 const unsigned ag = (unsigned)kg >> 1;
