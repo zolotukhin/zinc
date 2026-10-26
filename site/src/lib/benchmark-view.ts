@@ -28,10 +28,6 @@ export function formatRatio(value: number | null) {
   return value != null && Number.isFinite(value) ? `${value.toFixed(2)}×` : 'Not comparable';
 }
 
-export function ratioTone(value: number | null) {
-  return value == null ? 'neutral' : value >= 1 ? 'ahead' : 'behind';
-}
-
 export function formatDate(iso: string | null | undefined) {
   if (!iso || !Number.isFinite(Date.parse(iso))) return 'Not recorded';
   return new Intl.DateTimeFormat('en-US', {

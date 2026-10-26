@@ -144,3 +144,12 @@ test('dates use a fixed UTC calendar regardless of the build machine timezone', 
   expect(formatDate('2026-09-25T00:05:00Z')).toBe('Sep 25, 2026');
   expect(formatDate('invalid')).toBe('Not recorded');
 });
+
+test('historical flat model records normalize to a usable core workload', () => {
+  const target = { models: [{ id: 'legacy', label: 'Legacy model', ...row() }] };
+  const legacy = rowsFor(target, 'core', 'off');
+  expect(legacy).toHaveLength(1);
+  expect(legacy[0].id).toBe('core');
+  expect(metric(legacy[0].zinc.decode_tps)).toBe(10);
+  expect(overallRatio(legacy[0])).toBe(0.75);
+});

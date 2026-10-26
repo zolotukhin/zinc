@@ -8,7 +8,7 @@ import benchmarkData from '../../data/zinc-performance.json';
 import {
   aggregate, backendLabel, barWidth, formatDate, formatNumber, formatRatio,
   hasMtpVariants, metric, overallRatio, phaseSeconds, platformLabel, promptParity,
-  qualityStatus, rateRatio, ratioTone, rowsFor, sampleCount, scenarioNames, scenarioOrder,
+  qualityStatus, rateRatio, rowsFor, sampleCount, scenarioNames, scenarioOrder,
   scenarios, sourceUrl,
 } from '../../lib/benchmark-view';
 
@@ -20,12 +20,29 @@ const order = ['rdna-rocm', 'rdna', 'intel', 'metal', 'cuda'];
 const rank = (id: string) => order.includes(id) ? order.indexOf(id) : order.length;
 const targets = ([...benchmarkData.targets] as BenchmarkRecord[]).sort((a, b) => rank(a.id) - rank(b.id));
 const modelCount = new Set(targets.flatMap((target) => target.models.map((model) => model.id))).size;
+// Ratios use a unit scale: 1.00 means parity. Keep CSS tone selection with the view.
+function ratioTone(value: number | null) {
+  return value == null ? 'neutral' : value >= 1 ? 'ahead' : 'behind';
+}
+function measuredRuns(methodology: BenchmarkRecord) {
+  const min = methodology.runs_min ?? methodology.runs ?? methodology.runs_max;
+  const max = methodology.runs_max ?? methodology.runs ?? min;
+  return min == null ? 'Not recorded' : min === max ? String(min) : `${min}–${max}`;
+}
+const keywords = 'ZINC benchmarks, llama.cpp comparison, ROCm, Vulkan, Metal, CUDA, Intel Arc, local LLM, prefill throughput, decode throughput, inference latency';
 const dataUrl = '/zinc/benchmarks.json';
 const guideUrl = '/zinc/docs/benchmarking/';
 const jsonLd = {
   '@context': 'https://schema.org',
   '@graph': [
-    { '@type': 'CollectionPage', name: 'ZINC Benchmarks vs llama.cpp', url: `${siteUrl}${canonicalPath}` },
+    {
+      '@type': 'CollectionPage', name: 'ZINC Benchmarks vs llama.cpp', url: `${siteUrl}${canonicalPath}`,
+      keywords,
+      about: {
+        '@type': 'SoftwareApplication', name: 'ZINC', applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, macOS', codeRepository: 'https://github.com/zolotukhin/zinc',
+      },
+    },
     {
       '@type': 'Dataset', name: 'ZINC benchmark measurements',
       description: 'Recorded same-machine ZINC and llama.cpp prefill, decode, timing, and speculative-decoding measurements.',
@@ -42,6 +59,7 @@ const jsonLd = {
 <BaseLayout
   title="ZINC Benchmarks vs llama.cpp"
   description="Compare ZINC and llama.cpp on the same GPU and GGUF: explicit backends, recorded commits, prompts, timings, and downloadable benchmark data."
+  keywords={keywords}
   canonicalUrl={`${siteUrl}${canonicalPath}`}
   jsonLd={jsonLd}
 >
@@ -75,38 +93,44 @@ const jsonLd = {
     <section class="platform-picker" aria-labelledby="platform-heading">
       <div class="section-heading"><span class="step">01</span><h2 id="platform-heading">Choose a platform &amp; backend</h2></div>
       <div class="target-tabs" role="tablist" aria-label="Benchmark platform and backend">
-        {targets.map((target, index) => (
+        {targets.map((target, index) => {
+          const coverage = aggregate(rowsFor(target, 'core', 'off'));
+          return (
           <button type="button" role="tab" id={`tab-${target.id}`} aria-controls={`panel-${target.id}`}
             aria-selected={index === 0 ? 'true' : 'false'} tabindex={index === 0 ? 0 : -1}
             class:list={['target-tab', { active: index === 0 }]} data-bench-target-tab={target.id}>
             <span class="tab-identity">{platformLabel(target)} <b class={`backend-badge ${target.id}`}>{backendLabel(target)}</b></span>
-            <span class="tab-gpu">{target.machine.gpu}</span>
+            <span class="tab-gpu">{target.machine?.gpu ?? 'GPU not recorded'}</span>
             <span class="tab-date">{formatDate(target.generated_at)}</span>
+            <span class="tab-coverage">Quick chat: {coverage.comparable}/{coverage.total} comparable{hasMtpVariants(target) ? ' · MTP off' : ''}</span>
           </button>
-        ))}
+        );})}
       </div>
     </section>
 
     <noscript><p class="notice">All platforms and workloads are shown below. Enable JavaScript to filter results or share a selected view.</p></noscript>
 
     {targets.map((target) => {
-      const methodology = target.methodology;
+      const methodology = target.methodology ?? {};
+      const machine = target.machine ?? {};
+      const notes = Array.isArray(methodology.notes) ? methodology.notes : [];
       const provenance = target.provenance ?? {};
       const zincSource = sourceUrl(provenance.zinc?.commit, 'tools/performance_suite.mjs');
       const scenarioIds = scenarioOrder.filter((id) => target.models.some((model) => scenarios(model).some((scenario) => scenario.id === id)));
       const supportsMtp = hasMtpVariants(target);
       const modes = supportsMtp ? ['off', 'on'] as const : ['off'] as const;
-      const historicalCli = /ZINC CLI/i.test(methodology.runner);
+      const historicalCli = /ZINC CLI/i.test(methodology.runner ?? '');
+      const protocol = historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : /server/i.test(methodology.runner ?? '') ? 'Server protocol (CLI fallback allowed)' : 'Protocol not recorded';
       return (
         <section id={`panel-${target.id}`} class="target-panel" role="tabpanel" aria-labelledby={`tab-${target.id}`}
           tabindex="0" data-bench-target-panel={target.id} data-default-scenario={scenarioIds[0]}>
           <header class="panel-header">
             <div>
               <p class="eyebrow">{platformLabel(target)}</p>
-              <h2>{target.machine.gpu}</h2>
-              <p class="hardware">{target.machine.memory} · {target.machine.os}</p>
+              <h2>{machine.gpu ?? 'GPU not recorded'}</h2>
+              <p class="hardware">{machine.memory ?? 'Memory not recorded'} · {machine.os ?? 'OS not recorded'}</p>
               <p class="backend-comparison"><strong>ZINC: {methodology.zinc_backend?.replace(/\bROCM\b/g, 'ROCm') ?? 'Not recorded'}</strong><span aria-hidden="true">/</span><strong>llama.cpp: {methodology.llama_backend ?? 'Not recorded'}</strong></p>
-              <p class="run-meta"><time datetime={target.generated_at}>{formatDate(target.generated_at)}</time> · {historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : 'Server protocol (CLI fallback allowed)'} · {methodology.runs_min !== methodology.runs_max ? `${methodology.runs_min}–${methodology.runs_max}` : methodology.runs} measured · {methodology.warmup_runs} warmup</p>
+              <p class="run-meta"><time datetime={target.generated_at}>{formatDate(target.generated_at)}</time> · {protocol} · {measuredRuns(methodology)} measured · {methodology.warmup_runs ?? 'Not recorded'} warmup</p>
             </div>
             <button type="button" class="share-button" data-bench-share>Copy link to this view</button>
           </header>
@@ -120,7 +144,7 @@ const jsonLd = {
                 <div><dt>ZINC backend</dt><dd>{methodology.zinc_backend?.replace(/\bROCM\b/g, 'ROCm') ?? 'Not recorded'}</dd></div>
                 <div><dt>llama.cpp backend</dt><dd>{methodology.llama_backend ?? 'Not recorded'}</dd></div>
                 <div><dt>Recorded llama.cpp device</dt><dd><code>{methodology.llama_device ?? 'Not recorded'}</code></dd></div>
-                <div><dt>Protocol</dt><dd>{methodology.runner}</dd></div>
+                <div><dt>Protocol</dt><dd>{methodology.runner ?? 'Not recorded'}</dd></div>
                 <div><dt>ZINC commit</dt><dd><CommitReference project="zinc" provenance={provenance.zinc} /></dd></div>
                 <div><dt>llama.cpp commit</dt><dd><CommitReference project="llama.cpp" provenance={provenance.llama_cpp} />{provenance.llama_cpp?.version && <small>Version {provenance.llama_cpp.version}</small>}</dd></div>
                 <div class="full-width"><dt>Recorded ZINC build</dt><dd><code>{methodology.zinc_build ?? 'Not recorded'}</code></dd></div>
@@ -134,7 +158,7 @@ const jsonLd = {
                 <a href={guideUrl}>Reproduction guide</a>
                 <a href={dataUrl}>Published data &amp; samples</a>
               </nav>
-              <ul class="method-notes">{methodology.notes.map((note) => <li>{note}</li>)}</ul>
+              <ul class="method-notes">{notes.map((note) => <li>{note}</li>)}</ul>
             </div>
           </details>
 
@@ -270,8 +294,8 @@ const jsonLd = {
   .target-tab:hover { border-color: var(--color-accent); }
   .tab-identity { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; font-size: .82rem; font-weight: 650; }
   .backend-badge { padding: .06rem .35rem; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-accent); background: var(--color-bg); font-size: .65rem; }
-  .tab-gpu, .tab-date { display: block; margin-top: .45rem; font-size: .7rem; line-height: 1.5; color: var(--muted); }
-  .tab-date { margin-top: .2rem; }
+  .tab-gpu, .tab-date, .tab-coverage { display: block; margin-top: .45rem; font-size: .7rem; line-height: 1.5; color: var(--muted); }
+  .tab-date, .tab-coverage { margin-top: .2rem; }
   .target-panel { padding-top: 2.3rem; scroll-margin-top: 6rem; }
   .panel-header { display: flex; justify-content: space-between; align-items: start; gap: 1.2rem; }
   .panel-header h2 { margin: 0 0 .35rem; font-size: clamp(1.35rem, 3vw, 2rem); letter-spacing: -.035em; }

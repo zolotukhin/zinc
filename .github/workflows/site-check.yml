@@ -64,7 +64,8 @@ jobs:
         run: bun run build
 
       - name: Check benchmark calculations
-        run: bun test site/src/lib/benchmark-view.test.ts
+        working-directory: site
+        run: bun test src/lib/benchmark-view.test.ts
 
       - name: Install browser for benchmark checks
         working-directory: site

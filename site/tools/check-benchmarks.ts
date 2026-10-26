@@ -104,9 +104,11 @@ try {
               );
             }
           }
+          const overall = overallRatio(row);
+          assert.equal(await card.locator('[data-overall]').innerText(), formatRatio(overall));
           assert.equal(
-            await card.locator('[data-overall]').innerText(),
-            formatRatio(overallRatio(row)),
+            await card.locator('[data-overall]').getAttribute('class'),
+            overall == null ? 'neutral' : overall >= 1 ? 'ahead' : 'behind',
           );
           await card.locator('.row-evidence > summary').click();
           const measured = await card.locator('tbody tr').nth(3).locator('td').first().innerText();
