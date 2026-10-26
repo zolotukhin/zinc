@@ -19,7 +19,7 @@ src/.zig-api-cache/
 
 # Release packaging outputs
 dist/
-release/
+/release/
 *.tar.gz
 *.tgz
 *.zip
@@ -44,6 +44,10 @@ bun.lockb
 # Environment
 .env
 .env.*
+
+# Development release tooling
+__pycache__/
+*.pyc
 
 # Local analytics exports/reports
 .seo/

@@ -1,0 +1,78 @@
+name: Release packaging
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      [
+        'src/**',
+        'build.zig',
+        'config/release/**',
+        'scripts/*release*',
+        'scripts/install.sh',
+        'tools/release*',
+        '.github/workflows/release*.yml',
+        '.zig-version',
+      ]
+  push:
+    branches: [main]
+    paths:
+      [
+        'src/**',
+        'build.zig',
+        'config/release/**',
+        'scripts/*release*',
+        'scripts/install.sh',
+        'tools/release*',
+        '.github/workflows/release*.yml',
+        '.zig-version',
+      ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-packaging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      targets: ${{ steps.policy.outputs.targets }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: policy
+        run: echo "targets=$(python3 tools/release.py matrix build)" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.targets) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    name: Package ${{ matrix.id }} (CPU only)
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: '0.17.0'
+          use-cache: false
+      - name: Build, audit, package and install outside the checkout
+        env:
+          RELEASE_TARGET: ${{ matrix.id }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: 0.1.0-dev.${{ github.run_id }}
+        run: python3 tools/release_build.py --target "$RELEASE_TARGET" --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --output "$RUNNER_TEMP/release-build"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-${{ matrix.id }}
+          path: ${{ runner.temp }}/release-build/prefix/archives/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

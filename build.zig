@@ -35,6 +35,16 @@ fn createModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Bui
 }
 
 fn addMetalBindings(b: *std.Build, target: std.Build.ResolvedTarget, module: *std.Build.Module) void {
+    // An explicit minimum macOS target is considered cross-compilation even
+    // on ARM64 macOS. Supply the chosen SDK's framework/library paths rather
+    // than relying on native SDK discovery (which skips those paths then).
+    if (b.graph.environ_map.get("SDKROOT")) |sdk| {
+        if (sdk.len > 0) {
+            module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
+            module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "lib" }) });
+            module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
+        }
+    }
     const translated = b.addTranslateC(.{
         .root_source_file = b.path("src/metal/shim.h"),
         .target = target,
@@ -504,6 +514,7 @@ pub fn build(b: *std.Build) void {
     // SPIR-V is only the Vulkan backend's kernel format. CUDA uses NVRTC `.cu`
     // kernels (and Metal uses MSL), so don't require glslc for those backends.
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse (selected_backend == .vulkan);
+    const release_shaders_step = b.step("release-shaders", "Compile and install SPIR-V without building executables");
 
     if (compile_shaders) {
         inline for (shader_sources) |name| {
@@ -519,7 +530,9 @@ pub fn build(b: *std.Build) void {
             const spv_output = compile_cmd.addOutputFileArg(spv_file);
             compile_cmd.addFileArg(b.path(comp_file));
 
-            b.getInstallStep().dependOn(&b.addInstallFile(spv_output, "share/zinc/shaders/" ++ spv_file).step);
+            const install_shader = b.addInstallFile(spv_output, "share/zinc/shaders/" ++ spv_file);
+            b.getInstallStep().dependOn(&install_shader.step);
+            release_shaders_step.dependOn(&install_shader.step);
         }
     }
     if (selected_backend == .metal) {
@@ -530,6 +543,36 @@ pub fn build(b: *std.Build) void {
         });
         b.getInstallStep().dependOn(&metal_shaders_install.step);
     }
+
+    // Release packages verify the complete installed asset set, not merely
+    // that one shader exists. ROCm/CUDA kernels are embedded in the binary.
+    var runtime_assets: std.ArrayList([]const u8) = .empty;
+    if (selected_backend == .vulkan) {
+        inline for (shader_sources) |name| {
+            runtime_assets.append(b.allocator, b.fmt("share/zinc/shaders/{s}.spv", .{name})) catch @panic("OOM");
+        }
+    } else if (selected_backend == .metal) {
+        var directory = b.root.openDir(b.graph.io, "src/shaders/metal", .{ .iterate = true }) catch @panic("missing Metal shaders");
+        defer directory.close(b.graph.io);
+        var iterator = directory.iterate();
+        while (iterator.next(b.graph.io) catch @panic("cannot enumerate Metal shaders")) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".metal")) {
+                runtime_assets.append(b.allocator, b.fmt("share/zinc/shaders/metal/{s}", .{entry.name})) catch @panic("OOM");
+            }
+        }
+    }
+    std.mem.sort([]const u8, runtime_assets.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, c: []const u8) bool {
+            return std.mem.lessThan(u8, a, c);
+        }
+    }.lessThan);
+    const asset_manifest = std.json.Stringify.valueAlloc(b.allocator, .{
+        .schema_version = 1,
+        .backend = @tagName(selected_backend),
+        .files = runtime_assets.items,
+    }, .{ .whitespace = .indent_2 }) catch @panic("OOM");
+    const generated_assets = b.addWriteFiles();
+    b.getInstallStep().dependOn(&b.addInstallFile(generated_assets.add("asset-manifest.json", asset_manifest), "share/zinc/asset-manifest.json").step);
 
     // --- Main executable ---
     const exe_mod = createModule(b, .{

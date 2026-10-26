@@ -1,0 +1,237 @@
+name: Release candidate
+run-name: Candidate ${{ inputs.version || 'nightly' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Final embedded version, e.g. 0.1.0 (no v prefix). Candidate bytes will be promoted unchanged.'
+        required: true
+        type: string
+      source:
+        description: 'main or a full commit SHA already on main'
+        default: main
+        type: string
+  schedule:
+    - cron: '17 8 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zinc-release-candidates
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'zolotukhin/zinc' && (github.event_name != 'schedule' || vars.ZINC_ENABLE_RELEASE_NIGHTLY == 'true')
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      epoch: ${{ steps.resolve.outputs.epoch }}
+      builds: ${{ steps.resolve.outputs.build_matrix }}
+      gpus: ${{ steps.resolve.outputs.gpu_matrix }}
+    steps:
+      - name: Require trusted workflow branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Freeze source and require all hardware assignments
+        id: resolve
+        env:
+          RELEASE_VERSION: ${{ inputs.version || format('0.1.0-nightly.{0}', github.run_id) }}
+          RELEASE_SOURCE: ${{ inputs.source || 'main' }}
+          RELEASE_VARIABLES: ${{ toJSON(vars) }}
+        run: python3 tools/release.py resolve --version "$RELEASE_VERSION" --ref "$RELEASE_SOURCE"
+
+  tests:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: '0.17.0'
+          use-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: '.bun-version'
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan-dev
+      - run: bun install --frozen-lockfile
+      - name: Host tests, including release failure paths
+        run: ./scripts/zig.sh build test -Dshaders=false -Doptimize=ReleaseFast --summary all
+
+  build:
+    needs: [prepare, tests]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.builds) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: '0.17.0'
+          use-cache: false
+      - name: Build and audit final-version binaries
+        env:
+          RELEASE_TARGET: ${{ matrix.id }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: python3 tools/release_build.py --target "$RELEASE_TARGET" --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --output "$RUNNER_TEMP/release-build"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raw-${{ matrix.id }}
+          path: ${{ runner.temp }}/release-build/prefix/archives/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  sign:
+    needs: [prepare, build]
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: raw-macos-aarch64-metal
+          path: unsigned
+      - name: Developer ID signing and Apple notarization
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+          ZINC_APPLE_CERTIFICATE_BASE64: ${{ secrets.ZINC_APPLE_CERTIFICATE_BASE64 }}
+          ZINC_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.ZINC_APPLE_CERTIFICATE_PASSWORD }}
+          ZINC_APPLE_SIGNING_IDENTITY: ${{ secrets.ZINC_APPLE_SIGNING_IDENTITY }}
+          ZINC_APPLE_API_KEY_BASE64: ${{ secrets.ZINC_APPLE_API_KEY_BASE64 }}
+          ZINC_APPLE_API_KEY_ID: ${{ secrets.ZINC_APPLE_API_KEY_ID }}
+          ZINC_APPLE_API_ISSUER: ${{ secrets.ZINC_APPLE_API_ISSUER }}
+        run: python3 tools/release_sign.py --archive "unsigned/zinc-v$RELEASE_VERSION-macos-aarch64-metal.tar.gz" --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --output signed
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-metal
+          path: signed/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  manifest:
+    needs: [prepare, build, sign]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: raw-linux-*
+          merge-multiple: true
+          path: candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-metal
+          path: candidate
+      - name: Freeze final archive digests
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: python3 tools/release.py manifest --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --directory candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-inputs
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 14
+
+  hardware:
+    needs: [prepare, manifest]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.gpus) }}
+    runs-on: ${{ matrix.runner }}
+    concurrency:
+      group: zinc-gpu-${{ matrix.runner_variable }}
+      cancel-in-progress: false
+    timeout-minutes: 150
+    name: Packaged GPU ${{ matrix.id }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+          clean: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-inputs
+          path: candidate
+      - name: Test installed archives against pinned models and reference
+        env:
+          RELEASE_PROFILE: ${{ matrix.id }}
+        run: python3 tools/release_gpu.py --directory candidate --profile "$RELEASE_PROFILE" --output "$RELEASE_PROFILE.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: report-${{ matrix.id }}
+          path: ${{ matrix.id }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  certify:
+    needs: [prepare, hardware]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-inputs
+          path: candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: report-*
+          merge-multiple: true
+          path: reports
+      - name: Require every profile, model and exact artifact digest
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          python3 tools/release.py aggregate --directory candidate --results reports --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT"
+          python3 tools/release.py finalize --directory candidate
+      - name: Attest the final tested candidate and evidence
+        id: attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: candidate/*
+      - name: Include offline provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" candidate/provenance.jsonl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 14

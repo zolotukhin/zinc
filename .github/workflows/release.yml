@@ -1,244 +1,106 @@
-name: Release
+name: Publish release
+run-name: Publish candidate ${{ inputs.candidate_run }}
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag to build"
+      candidate_run:
+        description: 'Successful manual Release candidate run ID; review the preflight summary before approving.'
         required: true
-        default: "v0.1.0"
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
+  attestations: read
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  group: zinc-release-publication
   cancel-in-progress: false
 
-env:
-  ZIG_VERSION: "0.17.0"
-
 jobs:
-  validate:
-    name: Validate release source
-    runs-on: ubuntu-latest
+  preflight:
+    if: github.repository == 'zolotukhin/zinc'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.review.outputs.version }}
+      commit: ${{ steps.review.outputs.commit }}
+      targets: ${{ steps.review.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v5
+      - run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          ref: main
           fetch-depth: 0
-
-      - name: Resolve release metadata
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          case "$tag" in
-            v*) ;;
-            *) echo "Release tag must start with v: $tag" >&2; exit 1 ;;
-          esac
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-          echo "RELEASE_VERSION=${tag#v}" >> "$GITHUB_ENV"
-          echo "RELEASE_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-
-      - name: Install Vulkan SDK
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
-          UB_CODENAME=$(lsb_release -cs)
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-${UB_CODENAME}.list \
-            https://packages.lunarg.com/vulkan/lunarg-vulkan-${UB_CODENAME}.list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk libvulkan-dev vulkan-tools
-          glslc --version
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Run tests
-        run: ./scripts/zig.sh build test --summary all
-
-      - name: Build release configuration
-        run: |
-          ./scripts/zig.sh build \
-            -Doptimize=ReleaseFast \
-            -Dbackend=vulkan \
-            -Dshaders=true \
-            -Dversion="$RELEASE_VERSION" \
-            -Dcommit="$RELEASE_COMMIT"
-
-  build-linux-x86_64:
-    name: Build Linux x86_64
-    runs-on: ubuntu-latest
-    needs: validate
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Resolve release metadata
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "RELEASE_VERSION=${tag#v}" >> "$GITHUB_ENV"
-          echo "RELEASE_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-
-      - name: Install Vulkan SDK
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
-          UB_CODENAME=$(lsb_release -cs)
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-${UB_CODENAME}.list \
-            https://packages.lunarg.com/vulkan/lunarg-vulkan-${UB_CODENAME}.list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk libvulkan-dev vulkan-tools
-          glslc --version
-
-      - name: Build
-        run: |
-          ./scripts/zig.sh build \
-            -Dtarget=x86_64-linux-gnu \
-            -Doptimize=ReleaseFast \
-            -Dbackend=vulkan \
-            -Dshaders=true \
-            -Dversion="$RELEASE_VERSION" \
-            -Dcommit="$RELEASE_COMMIT"
-
-      - name: Package
-        run: |
-          scripts/package_release.sh \
-            --version "$RELEASE_VERSION" \
-            --commit "$RELEASE_COMMIT" \
-            --target linux-x86_64 \
-            --backend vulkan
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zinc-linux-x86_64
-          path: dist/zinc-v${{ env.RELEASE_VERSION }}-linux-x86_64.tar.gz
-          if-no-files-found: error
-
-  build-macos-aarch64:
-    name: Build macOS aarch64
-    runs-on: macos-14
-    needs: validate
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Resolve release metadata
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "RELEASE_VERSION=${tag#v}" >> "$GITHUB_ENV"
-          echo "RELEASE_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-
-      - name: Build
-        run: |
-          ./scripts/zig.sh build \
-            -Dtarget=aarch64-macos \
-            -Doptimize=ReleaseFast \
-            -Dbackend=metal \
-            -Dversion="$RELEASE_VERSION" \
-            -Dcommit="$RELEASE_COMMIT"
-
-      - name: Package
-        run: |
-          scripts/package_release.sh \
-            --version "$RELEASE_VERSION" \
-            --commit "$RELEASE_COMMIT" \
-            --target macos-aarch64 \
-            --backend metal
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zinc-macos-aarch64
-          path: dist/zinc-v${{ env.RELEASE_VERSION }}-macos-aarch64.tar.gz
-          if-no-files-found: error
-
-  draft-release:
-    name: Draft GitHub Release
-    runs-on: ubuntu-latest
-    needs:
-      - build-linux-x86_64
-      - build-macos-aarch64
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Resolve release metadata
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          version="${tag#v}"
-          notes="docs/releases/${version}-notes.md"
-          test -f "$notes"
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-          echo "RELEASE_NOTES=$notes" >> "$GITHUB_ENV"
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Generate checksums
-        working-directory: dist
-        run: |
-          sha256sum *.tar.gz > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-
-      - name: Refuse to mutate published release
+          persist-credentials: false
+      - name: Prepare the exact candidate for review; require a protected environment
+        id: review
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > /tmp/zinc_release_is_draft 2>/dev/null; then
-            if [ "$(cat /tmp/zinc_release_is_draft)" != "true" ]; then
-              echo "Release $RELEASE_TAG already exists and is published; refusing to replace assets." >&2
-              exit 1
-            fi
-          fi
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: python3 tools/release_publish.py --run "$CANDIDATE_RUN" --directory candidate
 
-      - name: Create draft release
-        uses: softprops/action-gh-release@v2
+  publish:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    environment:
+      name: release
+      url: https://github.com/zolotukhin/zinc/releases
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ZINC ${{ env.RELEASE_TAG }}
-          body_path: ${{ env.RELEASE_NOTES }}
-          draft: true
-          prerelease: false
-          fail_on_unmatched_files: true
-          overwrite_files: true
-          files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS.txt
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reverify, create the final tag, upload and verify the same bytes, publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: python3 tools/release_publish.py --run "$CANDIDATE_RUN" --directory candidate --publish
+
+  post-publish:
+    needs: [preflight, publish]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.targets) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    name: Public install ${{ matrix.id }} (CPU only)
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Re-download public release and verify all bytes and provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: python3 tools/release_publish.py --run "$CANDIDATE_RUN" --directory candidate --public-download public-release
+      - if: matrix.backend == 'vulkan'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1
+      - if: matrix.backend != 'rocm'
+        name: Clean install from the public archive
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_TARGET: ${{ matrix.id }}
+        run: python3 tools/release.py install-smoke --directory public-release --version "$RELEASE_VERSION" --target "$RELEASE_TARGET"
+      - if: matrix.backend == 'rocm'
+        name: Clean install on the supported ROCm userspace
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm -i --platform linux/amd64 -v "$GITHUB_WORKSPACE:/src:ro" -e RELEASE_VERSION "$RELEASE_IMAGE" bash -seu <<'SCRIPT'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update
+          apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends python3 curl ca-certificates hipblas-dev=3.2.0.70204-93~24.04 rocwmma-dev=2.2.0.70204-93~24.04
+          export LD_LIBRARY_PATH=/opt/rocm/lib
+          cd /tmp
+          python3 /src/tools/release.py install-smoke --directory /src/public-release --version "$RELEASE_VERSION" --target linux-x86_64-rocm
+          SCRIPT
