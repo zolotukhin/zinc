@@ -12,7 +12,7 @@
         "label": "AMD RDNA bench node",
         "machine_model": "Remote Linux host",
         "chip": "AMD Radeon AI PRO R9700",
-        "memory": "32 GB VRAM · 640 GB/s",
+        "memory": "32 GB VRAM · 576 GB/s",
         "gpu": "Radeon AI PRO R9700",
         "os": "Ubuntu Linux"
       },
@@ -36,7 +36,7 @@
         "llama_backend": "Vulkan",
         "llama_device": "Vulkan0",
         "notes": [
-          "Hardware: one AMD Radeon AI PRO R9700 benchmark node with 32 GB VRAM and 640 GB/s memory bandwidth. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
+          "Hardware: one AMD Radeon AI PRO R9700 benchmark node with 32 GB VRAM and 576 GB/s memory bandwidth. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
           "ZINC path: sync the current source tree to the RDNA node, build ReleaseFast with the selected vulkan backend, then measure generation through one reusable single-slot ZINC server per model.",
           "ZINC RDNA backend: vulkan.",
           "Baseline backend: llama.cpp Vulkan (Vulkan0) on the same node and the same model file.",
@@ -9158,7 +9158,7 @@
         "label": "AMD RDNA bench node",
         "machine_model": "Remote Linux host",
         "chip": "AMD Radeon AI PRO R9700",
-        "memory": "32 GB VRAM · 640 GB/s",
+        "memory": "32 GB VRAM · 576 GB/s",
         "gpu": "Radeon AI PRO R9700",
         "os": "Ubuntu Linux"
       },
@@ -9182,7 +9182,7 @@
         "llama_backend": "ROCm",
         "llama_device": "ROCm0",
         "notes": [
-          "Hardware: one AMD Radeon AI PRO R9700 benchmark node with 32 GB VRAM and 640 GB/s memory bandwidth. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
+          "Hardware: one AMD Radeon AI PRO R9700 benchmark node with 32 GB VRAM and 576 GB/s memory bandwidth. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
           "ZINC path: sync the current source tree to the RDNA node, build ReleaseFast with the selected rocm backend, then measure generation through one reusable single-slot ZINC server per model.",
           "ZINC RDNA backend: rocm.",
           "Baseline backend: llama.cpp ROCm (ROCm0) on the same node and the same model file.",
@@ -23082,7 +23082,8 @@
         "llama_cpp": {
           "binary": "llama-server",
           "version": "8863",
-          "commit": "43c0ac9"
+          "commit": "43c0ac9",
+          "source_unavailable": true
         }
       },
       "methodology": {

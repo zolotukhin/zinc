@@ -4,7 +4,21 @@ How to reproduce ZINC's published numbers, run an ad-hoc llama.cpp baseline, and
 
 ## Published benchmarks (the canonical numbers)
 
-The site at [zolotukhin.ai/zinc/benchmarks](https://zolotukhin.ai/zinc/benchmarks) is generated from `tools/performance_suite.mjs`. Every published run pairs ZINC against llama.cpp on the same hardware, same model file, and the same four-scenario matrix (`core`, `context-medium`, `context-long`, `decode-extended`). Those scenarios are real workload prompts: quick chat, coding review, incident-context QA, and longer coding-plan generation. The full run is what gets pushed to `site/src/data/zinc-performance.json` and Cloudflare Pages picks it up on every push to `main`.
+The [benchmark dashboard](https://zolotukhin.ai/zinc/benchmarks/) renders the measurements in `site/src/data/zinc-performance.json`, collected by `tools/performance_suite.mjs`. Runs pair ZINC against llama.cpp on the same hardware and model file across four workloads: quick chat (`core`), coding review (`context-medium`), incident context (`context-long`), and long coding draft (`decode-extended`). Production is published with a manual Cloudflare Pages upload after validation; a push to `main` does not deploy it.
+
+### Inspect a published result
+
+1. Select a platform and read **both backend labels**. AMD Vulkan and ROCm are separate targets. Open **Exact configuration & methodology** for the recorded build, llama.cpp device, linked source commits, binary checksum when available, and run policy.
+2. Select a workload. Expand a model's **Prompt, timings & source** for its user prompt, both engines' prompt/output counts, requested cap, sample counts, phase times, request latency, and model-specific source revisions. Model dates and revisions can differ within a partially refreshed target.
+3. Download the [published JSON](https://zolotukhin.ai/zinc/benchmarks.json) for individual samples, output previews, provenance, and MTP variants. The JSON is the same artifact used by the page. **Copy link to this view** preserves the backend, workload, and MTP setting.
+
+The overall ratio is `llama.cpp phase time / ZINC phase time`, where each engine's phase time is `prefill_tokens / prefill_tps + generated_tokens / decode_tps`. It excludes HTTP, process startup, and model loading. `1.00×` is parity; larger ratios favor ZINC. The summary divides the sum of comparable llama.cpp phase times by the sum of ZINC phase times, rather than averaging ratios. Rate summaries are means of model medians. Missing measurements are not zeroes.
+
+The page excludes mismatched prompt counts, unequal or incomplete output budgets, flagged previews, and incomplete phase telemetry from overall comparisons. The recorded prompt-parity check allows a one-token BOS accounting difference. A preview is a sanity check, not an evaluation of answer quality. Older Metal, Intel, and CUDA records used ZINC CLI runs against a baseline that preferred a persistent server; the page labels those protocols as historical diagnostics. Their request latencies must not be compared as if both engines were reusable servers.
+
+Follow the runner link at the **recorded revision** to reproduce historical flags, templates, and system messages. Current defaults may have changed. Some older artifacts lack driver versions, model checksums, or exact build metadata; the page says **Not recorded** instead of filling those gaps from today's machine. Reproducing those records exactly may require a new run with the missing metadata captured.
+
+The historical Intel baseline's recorded short commit `43c0ac9` could not be resolved in the upstream llama.cpp repository. It is preserved as text and labeled unavailable, rather than linked to a broken source page. The R9700 hardware metadata has also been corrected from 640 to **576 GB/s**, matching [AMD's datasheet](https://www.amd.com/content/dam/amd/en/documents/partner-hub/radeon-pro/radeon-ai-pro-r9700-datasheet.pdf). Recorded timings and sample values were not changed.
 
 Remote machine details are intentionally supplied by `.env` or CLI flags. Do not commit public hostnames, public IP addresses, private SSH ports, or one-off benchmark node aliases into this document or into published site data.
 
@@ -37,10 +51,12 @@ The RDNA ZINC requests intentionally omit the OpenAI `model` field. The model is
 # Metal target (Apple Silicon, runs locally)
 bun tools/performance_suite.mjs --target metal
 
-# RDNA4 target (remote node from .env). Published RDNA runs use the
-# Vulkan backend; ZINC_RT is a separate bring-up runtime and must be
-# requested explicitly with --rdna-backend zinc_rt.
-bun tools/performance_suite.mjs --target rdna --rdna-sync --rdna-build --rdna-start-llama --rdna-backend vulkan
+# AMD Vulkan, remote node from .env. Select the baseline device from
+# vulkaninfo and set ZINC_RDNA_LLAMA_DEVICE to that device's llama.cpp name.
+ZINC_MTP=0 bun tools/performance_suite.mjs --target rdna --phase all \
+  --rdna-sync --rdna-build --rdna-start-llama --rdna-backend vulkan \
+  --rdna-llama-device "${ZINC_RDNA_LLAMA_DEVICE:?Set the llama.cpp Vulkan device}" \
+  --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-vulkan.json
 
 # Pick a specific RDNA node when .env defines ZINC_RDNA1_* and ZINC_RDNA2_*.
 bun tools/performance_suite.mjs --target rdna --rdna-node rdna2 --rdna-sync --rdna-build --rdna-backend vulkan
@@ -75,8 +91,12 @@ it. llama.cpp is not incapable here: its converter can export the same NextN
 block as a standalone draft model (`--mtp`, `supports_mtp_export` on the Qwen
 conversion class) and drive it with `--model-draft`. Our runs do not do that
 yet, so rows that speculate carry both measurements, the published comparison
-uses the non-speculative one, and the dashboard shows an on/off switch. Only `qwen38-27b-q4k-m` has NextN weights today, and
-only on the Vulkan backend.
+uses the non-speculative one, and the dashboard shows an on/off switch. The
+published artifact has paired `qwen38-27b-q4k-m` measurements on both AMD Vulkan
+and ROCm. The switch selects a complete recorded variant, including its prefill,
+decode, request timing, token counts, source revision, and output preview.
+The baseline remains non-speculative in both views. A speculative run without a
+recorded MTP-off variant is shown as unavailable in the off view.
 
 Measure the pair with two passes over the same model, then fold the second one
 into the published row:
@@ -166,13 +186,15 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
 Use the same full server-vs-server suite for ROCm claims:
 
 ```bash
-bun tools/performance_suite.mjs \\
-  --target rdna \\
-  --phase all \\
-  --rdna-backend rocm \\
-  --rdna-sync \\
-  --rdna-build \\
-  --rdna-start-llama
+ZINC_MTP=0 bun tools/performance_suite.mjs \
+  --target rdna \
+  --phase all \
+  --rdna-backend rocm \
+  --rdna-sync \
+  --rdna-build \
+  --rdna-start-llama \
+  --rdna-llama-device "${ZINC_RDNA_LLAMA_DEVICE:?Set the llama.cpp ROCm device}" \
+  --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-rocm.json
 ```
 
 The published ROCm target records both backend identities in its methodology.

@@ -11,6 +11,7 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
+    "check:benchmarks": "bun tools/check-benchmarks.ts",
     "astro": "astro"
   },
   "overrides": {
@@ -33,5 +34,8 @@
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
     "unified": "^11.0.5"
+  },
+  "devDependencies": {
+    "axe-core": "4.14.0"
   }
 }

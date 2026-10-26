@@ -20,6 +20,16 @@ bun run dev
 | `bun run dev`     | Start the development server         |
 | `bun run build`   | Build all pages into `dist/`         |
 | `bun run preview` | Preview the production build locally |
+| `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts |
+
+After `bun run build`, run `bun run check:benchmarks`. Install the test browser
+with `bunx playwright install chromium` if needed. The check serves `dist/` on a
+temporary loopback port and stops it afterward. Use `BENCHMARK_BASE_URL` to
+check a running dev server instead, or `BENCHMARK_SCREENSHOTS=/tmp/benchmarks`
+to save desktop/mobile screenshots in both themes. The check includes axe-core
+accessibility scans with evidence expanded. CI runs the same browser checks,
+plus the benchmark calculation tests. These are site development tools; they do
+not ship in the dashboard's client bundle.
 
 The site uses Astro 7 and the unified Markdown processor so existing
 remark/rehype plugins keep working. KaTeX styles and fonts are bundled from

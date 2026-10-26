@@ -1,0 +1,12 @@
+---
+import { commitUrl, type BenchmarkRecord } from '../../lib/benchmark-view';
+interface Props { project: 'zinc' | 'llama.cpp'; provenance?: BenchmarkRecord; }
+const { project, provenance } = Astro.props;
+const commit = provenance?.commit;
+---
+{commit ? provenance?.source_unavailable ? (
+  <span><code>{commit.slice(0, 12)}</code><small>Revision unavailable upstream</small></span>
+) : (
+  <a href={commitUrl(project, commit)} title={commit}><code>{commit.slice(0, 12)}</code></a>
+) : <span>Not recorded</span>}
+<style>small { display: block; font-size: .7rem; color: var(--color-text-muted); margin-top: .25rem; }</style>

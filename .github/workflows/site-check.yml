@@ -13,6 +13,7 @@ on:
       - 'bunfig.toml'
       - 'scripts/zig.sh'
       - 'tools/setup_opencode.mjs'
+      - 'tools/benchmark_quality.mjs'
       - '.github/workflows/site-check.yml'
   pull_request:
     paths:
@@ -25,6 +26,7 @@ on:
       - 'bunfig.toml'
       - 'scripts/zig.sh'
       - 'tools/setup_opencode.mjs'
+      - 'tools/benchmark_quality.mjs'
       - '.github/workflows/site-check.yml'
 
 jobs:
@@ -60,6 +62,17 @@ jobs:
       - name: Build site
         working-directory: site
         run: bun run build
+
+      - name: Check benchmark calculations
+        run: bun test site/src/lib/benchmark-view.test.ts
+
+      - name: Install browser for benchmark checks
+        working-directory: site
+        run: bunx playwright install --with-deps chromium
+
+      - name: Check rendered benchmarks
+        working-directory: site
+        run: bun run check:benchmarks
 
       - name: Check output
         working-directory: site
