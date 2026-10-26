@@ -1031,6 +1031,18 @@ pub fn build(b: *std.Build) void {
         .root_module = b.modules.get("host_io").?,
     });
     const run_host_io_tests = b.addRunArtifact(host_io_tests);
+    // The minimal server is only reached by CUDA/ROCm executable paths, so
+    // ordinary root-module tests can leave its embedded tests unanalyzed.
+    // Keep discovery's pure CPU contract covered on every backend.
+    const model_discovery_tests = addTest(b, .{
+        .name = "model-discovery-tests",
+        .root_module = createModule(b, .{
+            .root_source_file = b.path("src/server/model_discovery.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_model_discovery_tests = b.addRunArtifact(model_discovery_tests);
 
     // Compile Metal tests on a workstation without opening a GPU or a model.
     const test_build_step = b.step("test-build", "Compile all Zig tests without executing them");
@@ -1038,6 +1050,7 @@ pub fn build(b: *std.Build) void {
     test_build_step.dependOn(&zinc_rt_unit_tests.step);
     test_build_step.dependOn(&forward_zinc_rt_tests.step);
     test_build_step.dependOn(&host_io_tests.step);
+    test_build_step.dependOn(&model_discovery_tests.step);
     // In partial mode (`full_tests = false`) restrict `bun test` to the
     // fast unit-test files. The slow `tests/test_qwen_smoke.test.ts`
     // file launches multiple managed servers and loads four GGUFs
@@ -1087,6 +1100,7 @@ pub fn build(b: *std.Build) void {
     print_summary.step.dependOn(&run_zinc_rt_unit_tests.step);
     print_summary.step.dependOn(&run_forward_zinc_rt_tests.step);
     print_summary.step.dependOn(&run_host_io_tests.step);
+    print_summary.step.dependOn(&run_model_discovery_tests.step);
     print_summary.step.dependOn(&run_bun_tests.step);
 
     const test_step = b.step("test", "Run unit tests");
