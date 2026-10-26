@@ -135,6 +135,10 @@ export function parseArgs(argv = process.argv.slice(2)) {
     if (!key) throw new Error(`Unknown option: ${arg}`);
     const value = args[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${arg}`);
+    if (key === 'context' && value === 'auto') {
+      opts.context = 'auto';
+      continue;
+    }
     opts[key] = ['context', 'output', 'steps', 'timeoutMs', 'roundTimeoutMs', 'attempts'].includes(
       key,
     )
@@ -251,6 +255,62 @@ export function runtimeConfig(config, env = process.env) {
   // runtime URL or secret is written to the portable configuration on disk.
   copy.provider.zinc.options.apiKey = '{env:ZINC_API_KEY}';
   return copy;
+}
+
+// Resolve the actual server context for `--context auto` with a single GET to
+// the runtime /v1/models endpoint. The endpoint and key come from the same
+// validated runtime configuration as check/run, and neither value is ever
+// included in an error message.
+export async function resolveAutoContext(
+  { model = 'qwen38-27b-q4k-m' } = {},
+  { env = process.env, fetchImpl = fetch } = {},
+) {
+  const live = runtimeConfig({ provider: { zinc: { options: {} } } }, env);
+  const base = live.provider.zinc.options.baseURL;
+  const signal = AbortSignal.timeout(10000);
+  let response;
+  try {
+    response = await fetchImpl(`${base}/models`, {
+      headers: { authorization: `Bearer ${env.ZINC_API_KEY || 'local'}` },
+      signal,
+    });
+  } catch {
+    throw new Error('ZINC model discovery request failed or timed out');
+  }
+  if (!response.ok) throw new Error(`ZINC model discovery returned HTTP ${response.status}`);
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    if (signal.aborted) throw new Error('ZINC model discovery lookup timed out');
+    throw new Error('ZINC model discovery returned malformed JSON');
+  }
+  const models = data?.data;
+  if (!Array.isArray(models) || models.length === 0)
+    throw new Error('ZINC model discovery returned no loaded models');
+  const ids = new Set();
+  for (const item of models) {
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      Array.isArray(item) ||
+      typeof item.id !== 'string' ||
+      !item.id.length ||
+      ids.has(item.id)
+    )
+      throw new Error('ZINC model discovery returned invalid or duplicate model IDs');
+    ids.add(item.id);
+  }
+  const entry =
+    models.find((item) => item.id === model) ?? (models.length === 1 ? models[0] : undefined);
+  if (!entry)
+    throw new Error(
+      'ZINC model discovery is ambiguous: the requested model is not loaded and multiple models are available',
+    );
+  const context = entry?.context_length;
+  if (!Number.isSafeInteger(context) || context < 8192)
+    throw new Error('ZINC model discovery returned a missing or invalid context length');
+  return context;
 }
 
 export async function checkServer(config, { env = process.env, fetchImpl = fetch } = {}) {
@@ -693,7 +753,8 @@ async function main() {
 
   --project DIR     Project directory (default: current directory)
   --model ID        Loaded model ID (default: qwen38-27b-q4k-m)
-  --context N       Actual server context (default: 16384; minimum: 8192)
+  --context N|auto  Actual server context (default: 16384; minimum: 8192).
+                    auto queries the running server's /v1/models once (setup only)
   --output N        Output budget per turn (default: min(4096, context / 4))
   --steps N         Maximum agent steps (default: 24)
   --timeout-ms N    Task timeout (default: 900000; timeout exits 124)
@@ -730,9 +791,14 @@ Interactive: OPENCODE_CONFIG=./opencode.zinc.json opencode
     throw new Error('Round timeout requires --verify');
   if (opts.dryRun && opts.command !== 'setup')
     throw new Error('--dry-run is only available for setup');
+  if (opts.context === 'auto' && opts.command !== 'setup')
+    throw new Error('--context auto is setup-only; run setup first, then check or run');
   if (opts.command === 'run') requireTask(opts);
   if (opts.command === 'setup') {
-    const config = buildConfig(opts);
+    const config =
+      opts.context === 'auto'
+        ? buildConfig({ ...opts, context: await resolveAutoContext(opts) })
+        : buildConfig(opts);
     if (opts.dryRun) {
       console.log(JSON.stringify(config, null, 2));
       return;
@@ -759,7 +825,7 @@ if (import.meta.main)
   main().catch((error) => {
     // Do not print fetch/child errors that could include a private URL or token.
     const known =
-      /^(Bun 1\.4\.4|Unknown option:|Missing value for|Use a model ID|Context must|Output must|Steps must|Timeout must|Round timeout |Verification |Attempts |ZINC_API_BASE_URL|ZINC .*check|ZINC returned|ZINC context hook|Pass a task|--dry-run is only available for setup)/.test(
+      /^(Bun 1\.4\.4|Unknown option:|Missing value for|Use a model ID|Context must|Output must|Steps must|Timeout must|Round timeout |Verification |Attempts |ZINC_API_BASE_URL|ZINC .*check|ZINC returned|ZINC context hook|ZINC model discovery|Pass a task|--dry-run is only available for setup|--context auto is setup-only)/.test(
         error.message,
       );
     console.error(

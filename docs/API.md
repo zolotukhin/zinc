@@ -314,8 +314,13 @@ CUDA/ROCm builds return a minimal list containing the loaded model:
 
 The ID is the file basename, including its extension. `context_length` is the
 capacity of one request slot. Parent directories are omitted. These backends
-do not expose managed catalog/download/activation routes. Live validation of
-this new discovery route is [pending test GPU recovery](ROCM_AGENT_CONTEXT.md#remaining-hardware-validation).
+do not expose managed catalog/download/activation routes. Live discovery and generation passed after
+[GPU recovery](ROCM_AGENT_CONTEXT.md#remaining-hardware-validation).
+
+Model basenames must be valid UTF-8. The serializer returns a recoverable
+`InvalidUtf8` error before allocation for an invalid basename; it validates only
+the basename, so parent-directory bytes stay private and do not change a valid
+model ID. Valid Unicode, JSON escaping and allocation ownership are preserved.
 
 Vulkan/Metal builds provide the fuller response below.
 

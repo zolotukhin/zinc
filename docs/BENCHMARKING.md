@@ -75,6 +75,8 @@ bun tools/performance_suite.mjs --target all --rdna-sync --rdna-build --rdna-sta
 
 Defaults are 1 warmup + 3 measured runs per scenario; pass `--runs N --warmup M` to override. Pass `--no-site-write` to leave `site/src/data/zinc-performance.json` alone (the run still emits a `/tmp` artifact via `--output`). The suite stamps `provenance.zinc.version` from `git describe --dirty`; when `--rdna-sync` is used, provenance comes from the local tree that was synced, not from the remote workdir's stale `.git` metadata. Commit (or stash) before publishing — a `-dirty` tag means reviewers cannot reproduce the exact tree.
 
+The run count, warmup count, timeout and RDNA device-index arguments require complete unsigned decimal safe integers. Leading zeroes are accepted. Fractions, exponents, signs, surrounding whitespace, suffixes and unsafe integers fail before a benchmark starts. Run count must be positive; the other three retain their existing zero behavior. The environment-based RDNA device selector follows the same validation.
+
 RDNA suite runs sync into `/root/zinc-bench` by default. Keep that checkout isolated from optimization loops and ad-hoc experiments; sharing `/root/zinc` can overwrite `zig-out/bin/zinc` mid-suite and invalidate later model rows. The suite verifies `zinc --version` reports the requested backend before RDNA measurements, and before every ZINC scenario, so a stale or overwritten binary fails loudly instead of publishing mixed Vulkan/ZINC_RT data.
 
 `bun tools/performance_suite.mjs --help` lists every flag (target subset, model filtering, baseline binary overrides, remote workdir / libc / model-root overrides, etc.).

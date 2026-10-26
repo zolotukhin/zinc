@@ -43,8 +43,11 @@ function shellQuote(value) {
 }
 
 function parseInteger(arg, flag) {
-  const value = Number.parseInt(arg ?? '', 10);
-  if (!Number.isFinite(value) || value < 0) {
+  if (typeof arg !== 'string' || !/^\d+$/.test(arg)) {
+    throw new Error(`Invalid ${flag} value '${arg}'`);
+  }
+  const value = Number(arg);
+  if (!Number.isSafeInteger(value)) {
     throw new Error(`Invalid ${flag} value '${arg}'`);
   }
   return value;
