@@ -40,6 +40,10 @@ const uint Q4K_U32        = 36u;   // 144 bytes / 4
 
 shared float s_x[SPEC_K];
 
+float load_x(uint index, uint base, bool cached) {
+    return cached ? s_x[index] : x_data[base + index];
+}
+
 vec4 unpack_nibbles_lo(uint v) {
     return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
                 float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
@@ -49,7 +53,7 @@ vec4 unpack_nibbles_hi(uint v) {
                 float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
 }
 
-void main() {
+void compute_rows(bool cached) {
     uint tid = gl_LocalInvocationID.x;
     uint expert_slot = gl_WorkGroupID.y;
 
@@ -59,10 +63,12 @@ void main() {
 
     const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
 
-    // Load input vector into shared memory
+    // Wide inputs bypass the device-bounded shared cache.
     uint x_global_base = x_offset / 4u + expert_slot * x_expert_stride;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x_data[x_global_base + i];
+    if (cached) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x_data[x_global_base + i];
+        }
     }
     barrier();
 
@@ -133,10 +139,10 @@ void main() {
                 vec4 q_lo = unpack_nibbles_lo(qs_word);
                 vec4 q_hi = unpack_nibbles_hi(qs_word);
 
-                vec4 xv_lo = vec4(s_x[x_sb_lo + e_base], s_x[x_sb_lo + e_base + 1u],
-                                  s_x[x_sb_lo + e_base + 2u], s_x[x_sb_lo + e_base + 3u]);
-                vec4 xv_hi = vec4(s_x[x_sb_hi + e_base], s_x[x_sb_hi + e_base + 1u],
-                                  s_x[x_sb_hi + e_base + 2u], s_x[x_sb_hi + e_base + 3u]);
+                vec4 xv_lo = vec4(load_x(x_sb_lo + e_base, x_global_base, cached), load_x(x_sb_lo + e_base + 1u, x_global_base, cached),
+                                  load_x(x_sb_lo + e_base + 2u, x_global_base, cached), load_x(x_sb_lo + e_base + 3u, x_global_base, cached));
+                vec4 xv_hi = vec4(load_x(x_sb_hi + e_base, x_global_base, cached), load_x(x_sb_hi + e_base + 1u, x_global_base, cached),
+                                  load_x(x_sb_hi + e_base + 2u, x_global_base, cached), load_x(x_sb_hi + e_base + 3u, x_global_base, cached));
 
                 sum += dot(vec4(factor_lo) * q_lo - vec4(bias_lo), xv_lo);
                 sum += dot(vec4(factor_hi) * q_hi - vec4(bias_hi), xv_hi);
@@ -147,4 +153,11 @@ void main() {
     // Output at expert_slot * M offset
     uint y_base = y_offset / 4u + expert_slot * M;
     y_data[y_base + row] = sum;
+}
+
+void main() {
+    // Literal arguments let the optimizer remove input-source branches from
+    // each dot-product loop. The whole workgroup takes the same path.
+    if (K <= SPEC_K) compute_rows(true);
+    else compute_rows(false);
 }

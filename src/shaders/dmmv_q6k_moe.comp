@@ -31,12 +31,19 @@ float fp16_to_fp32(uint h) {
 
 shared float s_x[SPEC_K];
 
-void main() {
+float load_x(uint index, uint base, bool cached) {
+    return cached ? s_x[index] : x[base + index];
+}
+
+void compute_rows(bool cached) {
     uint expert_slot = gl_WorkGroupID.y;
     uint tid = gl_LocalInvocationID.x;
     uint x_base = x_offset / 4u + expert_slot * x_expert_stride;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
+    // Wide inputs bypass the device-bounded shared cache.
+    if (cached) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_base + i];
+        }
     }
     barrier();
 
@@ -81,14 +88,21 @@ void main() {
                 float s4 = float(int(w[sc_off + is + 4u])) - (w[sc_off + is + 4u] >= 128u ? 256.0 : 0.0);
                 float s6 = float(int(w[sc_off + is + 6u])) - (w[sc_off + is + 6u] >= 128u ? 256.0 : 0.0);
 
-                sum += d * s0 * (float(q1) - 32.0) * s_x[xi + l];
-                sum += d * s2 * (float(q2) - 32.0) * s_x[xi + l + 32u];
-                sum += d * s4 * (float(q3) - 32.0) * s_x[xi + l + 64u];
-                sum += d * s6 * (float(q4) - 32.0) * s_x[xi + l + 96u];
+                sum += d * s0 * (float(q1) - 32.0) * load_x(xi + l, x_base, cached);
+                sum += d * s2 * (float(q2) - 32.0) * load_x(xi + l + 32u, x_base, cached);
+                sum += d * s4 * (float(q3) - 32.0) * load_x(xi + l + 64u, x_base, cached);
+                sum += d * s6 * (float(q4) - 32.0) * load_x(xi + l + 96u, x_base, cached);
             }
             xi += 128u;
         }
     }
 
     y[y_base + row] = sum;
+}
+
+void main() {
+    // Literal arguments let the optimizer remove input-source branches from
+    // each dot-product loop. The whole workgroup takes the same path.
+    if (K <= SPEC_K) compute_rows(true);
+    else compute_rows(false);
 }

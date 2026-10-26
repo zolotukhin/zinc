@@ -40,7 +40,11 @@ const uint Q5_1_BYTES      = 24;
 
 shared float s_x[SPEC_K];
 
-void main() {
+float load_x(uint index, uint base, bool cached) {
+    return cached ? s_x[index] : x[base + index];
+}
+
+void compute_rows(bool cached) {
     uint tid = gl_LocalInvocationID.x;
     uint expert_slot = gl_WorkGroupID.y;
 
@@ -48,10 +52,12 @@ void main() {
     uint expert_id = routing_data[expert_slot];
     uint a_offset = expert_id * expert_stride;
 
-    // Load input vector into shared memory
+    // Wide inputs bypass the device-bounded shared cache.
     uint x_global_base = x_offset / 4u + expert_slot * x_expert_stride;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_global_base + i];
+    if (cached) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_global_base + i];
+        }
     }
     barrier();
 
@@ -90,8 +96,8 @@ void main() {
             uint q0 = lo | (bit_lo << 4);
             uint q1 = hi | (bit_hi << 4);
 
-            float x0 = s_x[x_base + j];
-            float x1 = s_x[x_base + 16u + j];
+            float x0 = load_x(x_base + j, x_global_base, cached);
+            float x1 = load_x(x_base + 16u + j, x_global_base, cached);
 
             sum_qx += float(q0) * x0 + float(q1) * x1;
             sum_x  += x0 + x1;
@@ -103,4 +109,11 @@ void main() {
     // Output at expert_slot * M offset
     uint y_base = y_offset / 4u + expert_slot * M;
     y[y_base + row] = sum;
+}
+
+void main() {
+    // Literal arguments let the optimizer remove input-source branches from
+    // each dot-product loop. The whole workgroup takes the same path.
+    if (K <= SPEC_K) compute_rows(true);
+    else compute_rows(false);
 }

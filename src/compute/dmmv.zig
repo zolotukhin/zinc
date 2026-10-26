@@ -18,6 +18,25 @@ const log = std.log.scoped(.dmmv);
 const descriptor_pool_max_sets: u32 = 256;
 const descriptors_per_set: u32 = 3;
 
+// Leave room for other workgroup variables (including F32 subgroup sums).
+const shared_input_reserve_bytes: u32 = 1024;
+
+fn sharedInputCapacity(max_k: u32, shared_bytes: u32) !u32 {
+    const capacity = @min(max_k, (shared_bytes -| shared_input_reserve_bytes) / @sizeOf(f32));
+    if (capacity == 0) return error.InsufficientComputeSharedMemory;
+    return capacity;
+}
+
+test "shared input cache is bounded by the device and model" {
+    try std.testing.expectEqual(@as(u32, 4096), try sharedInputCapacity(4096, 64 * 1024));
+    try std.testing.expectEqual(@as(u32, 16128), try sharedInputCapacity(18944, 64 * 1024));
+    try std.testing.expectEqual(@as(u32, 7936), try sharedInputCapacity(16384, 32 * 1024));
+    try std.testing.expectEqual(@as(u32, 18944), try sharedInputCapacity(18944, 128 * 1024));
+    try std.testing.expectError(error.InsufficientComputeSharedMemory, sharedInputCapacity(4096, 1024));
+    try std.testing.expectError(error.InsufficientComputeSharedMemory, sharedInputCapacity(4096, 0));
+    try std.testing.expectError(error.InsufficientComputeSharedMemory, sharedInputCapacity(0, 64 * 1024));
+}
+
 /// Push constants for DMMV shaders (must match GLSL layout).
 pub const DmmvPushConstants = extern struct {
     M: u32,
@@ -926,7 +945,7 @@ pub const DmmvDispatch = struct {
     /// @param instance Active Vulkan instance and logical device.
     /// @param gpu_config Derived GPU tuning parameters (wave size, push-descriptor support).
     /// @param shader_dir Directory containing compiled SPIR-V shader binaries (`.spv` files).
-    /// @param hidden_dim Maximum K value used by the Q4_K and F32 shaders' shared-memory array; must be >= hidden_dim, inter_dim, q_dim, and d_inner.
+    /// @param max_k Maximum projection input width (hidden, intermediate, query, and SSM dimensions).
     /// @param allocator Allocator used for temporary pipeline creation state.
     /// @returns A fully-initialised DmmvDispatch ready to record projection work; missing shaders are silently set to null.
     pub fn init(
@@ -935,12 +954,13 @@ pub const DmmvDispatch = struct {
         /// GPU capabilities.
         gpu_config: *const GpuConfig,
         shader_dir: []const u8,
-        /// Hidden state width.
-        hidden_dim: u32,
+        /// Largest projection input width.
+        max_k: u32,
         /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         const use_wave64 = gpu_config.wave_size == 64;
+        const cache_k = try sharedInputCapacity(max_k, instance.device_props.limits.maxComputeSharedMemorySize);
 
         // Create descriptor pool
         const pool_size = vk.c.VkDescriptorPoolSize{
@@ -965,10 +985,11 @@ pub const DmmvDispatch = struct {
         // Load pipelines (3 bindings: A matrix, x vector, y output)
         const push_size = @sizeOf(DmmvPushConstants);
 
-        // Specialization constant: SPEC_K (id=1) = max_k to size the shared memory
-        // array in the Q4_K shader (s_x[SPEC_K]). Must be >= the largest K value
-        // used in any Q4_K dispatch (hidden_dim, inter_dim, q_dim, d_inner).
-        const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = hidden_dim }};
+        // SPEC_K bounds the shared input arrays in F32 and the legacy MoE
+        // shaders. Oversized arrays can fail pipeline creation (or crash RADV's
+        // compiler). Every consumer bypasses the cache when runtime K exceeds
+        // this capacity; expert intermediate widths can exceed it too.
+        const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = cache_k }};
         const has_push_desc = instance.push_descriptor_fn != null;
         const push_desc_options = pipeline_mod.PipelineOptions{
             .push_descriptors = has_push_desc,

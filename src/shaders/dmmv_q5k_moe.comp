@@ -30,12 +30,19 @@ float fp16_to_fp32(uint h) {
 
 shared float s_x[SPEC_K];
 
-void main() {
+float load_x(uint index, uint base, bool cached) {
+    return cached ? s_x[index] : x[base + index];
+}
+
+void compute_rows(bool cached) {
     uint expert_slot = gl_WorkGroupID.y;
     uint tid = gl_LocalInvocationID.x;
     uint x_base = x_offset / 4u + expert_slot * x_expert_stride;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
+    // Wide inputs bypass the device-bounded shared cache.
+    if (cached) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_base + i];
+        }
     }
     barrier();
 
@@ -104,12 +111,19 @@ void main() {
                 float v_lo = float(q_lo | (hb_lo << 4));
                 float v_hi = float(q_hi | (hb_hi << 4));
 
-                sum += (factor_lo * v_lo - bias_lo) * s_x[x_grp + e];
-                sum += (factor_hi * v_hi - bias_hi) * s_x[x_grp + 32u + e];
+                sum += (factor_lo * v_lo - bias_lo) * load_x(x_grp + e, x_base, cached);
+                sum += (factor_hi * v_hi - bias_hi) * load_x(x_grp + 32u + e, x_base, cached);
             }
             xi += 64;
         }
     }
 
     y[y_base + row] = sum;
+}
+
+void main() {
+    // Literal arguments let the optimizer remove input-source branches from
+    // each dot-product loop. The whole workgroup takes the same path.
+    if (K <= SPEC_K) compute_rows(true);
+    else compute_rows(false);
 }

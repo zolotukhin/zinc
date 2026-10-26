@@ -33,15 +33,18 @@ shared float s_x[SPEC_K];
 // For cross-subgroup reduction when gl_NumSubgroups > 1 (e.g. Intel Xe2 SIMD16).
 shared float s_sg_sums[4];
 
-void main() {
+void compute_row(bool x_in_lds) {
     uint tid = gl_LocalInvocationID.x;
     uint row = gl_WorkGroupID.x;
     if (row >= M) return;
 
-    // Cooperatively load input vector into shared memory
+    // Cooperatively load input vector into shared memory. SPEC_K is clamped to the device's
+    // shared memory, so a wider K reads x from global memory instead.
     uint x_base = x_offset / 4;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
+    if (x_in_lds) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_base + i];
+        }
     }
     barrier();
 
@@ -50,7 +53,7 @@ void main() {
     uint w_base = a_offset / 4 + row * K;
     float partial = 0.0;
     for (uint j = tid; j < K; j += 64u) {
-        partial += w[w_base + j] * s_x[j];
+        partial += w[w_base + j] * (x_in_lds ? s_x[j] : x[x_base + j]);
     }
 
     float sum = subgroupAdd(partial);
@@ -69,4 +72,10 @@ void main() {
         else
             y[y_offset / 4 + row] = sum;
     }
+}
+
+void main() {
+    // Keep the input-source branch outside both dot-product loops.
+    if (K <= SPEC_K) compute_row(true);
+    else compute_row(false);
 }

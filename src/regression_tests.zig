@@ -1364,8 +1364,8 @@ test "Q5_K shader uses wave64 K-parallel layout with 2 rows per workgroup" {
 
 test "Q5_K MoE shader keeps GGML contiguous half ordering" {
     const src = @embedFile("shaders/dmmv_q5k_moe.comp");
-    try expectContains(src, "x[x_grp + e]");
-    try expectContains(src, "x[x_grp + 32u + e]");
+    try expectContains(src, "load_x(x_grp + e, x_base, cached)");
+    try expectContains(src, "load_x(x_grp + 32u + e, x_base, cached)");
     try expectNotContains(src, "2u * e");
 }
 
