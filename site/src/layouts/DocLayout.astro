@@ -235,11 +235,12 @@ function isActive(slug: string): boolean {
     outline-offset: 4px;
   }
 
-  .doc-content :is(h1, h2, h3, h4, h5, h6) {
+  /* Markdown descendants do not carry this component's scoped attribute. */
+  .doc-content :global(:is(h1, h2, h3, h4, h5, h6)) {
     scroll-margin-top: 1.25rem;
   }
 
-  .doc-content .heading-anchor {
+  .doc-content :global(.heading-anchor) {
     margin-left: 0.45rem;
     color: var(--color-text-muted);
     opacity: 0;
@@ -248,9 +249,9 @@ function isActive(slug: string): boolean {
     transition: opacity 0.12s ease;
   }
 
-  .doc-content :is(h1, h2, h3, h4, h5, h6):hover .heading-anchor,
-  .doc-content :is(h1, h2, h3, h4, h5, h6):focus-within .heading-anchor,
-  .doc-content .heading-anchor:focus {
+  .doc-content :global(:is(h1, h2, h3, h4, h5, h6):hover .heading-anchor),
+  .doc-content :global(:is(h1, h2, h3, h4, h5, h6):focus-within .heading-anchor),
+  .doc-content :global(.heading-anchor:focus) {
     opacity: 1;
   }
 

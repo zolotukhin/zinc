@@ -24,7 +24,10 @@ ZINC_KV_CACHE=q8 ZINC_Q8_ATTN_F16=1 ZINC_MTP=1 ZINC_PROMPT_CACHE=0 \
 
 The FP16 switch explicitly selects the faster precision mode described below.
 Omit it for FP32-input attention with Q8 cache storage. Match the coding client's
-capacity with `bun tools/setup_opencode.mjs --context 262144 --project ../my-project`.
+capacity with `bun tools/setup_opencode.mjs --context 262144 --project ../my-project`,
+or use setup-only `--context auto` to read the live server's advertised capacity.
+The [repository end-to-end report](OPENCODE_E2E_REPORT.md) records actual OpenCode
+coding requests above 32K, separately from the near-native retrieval below.
 The window includes input and generated output, so leave space for the answer.
 OpenCode may compact history earlier to reserve room for output and tool results.
 At this capacity, the current helper previews a 4,096-token output limit and

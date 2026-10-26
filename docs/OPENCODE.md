@@ -87,6 +87,25 @@ to change the other limits. A coding session needs at least 8,192 tokens;
 the model and cache fit your GPU. At smaller
 context limits, the default output budget is one quarter of the context.
 
+Use **`--context auto`** during setup or preview to query the running server's
+`/v1/models` once. An exact `--model` ID takes precedence; a single returned
+model can supply capacity for a client alias. An unmatched multi-model list
+is ambiguous and fails. The selected `context_length` must be a safe integer
+of at least 8,192. Missing or malformed metadata, duplicate model IDs, HTTP
+errors and a ten-second lookup deadline fail before project/config/hook writes.
+The deadline covers the response body as well as the connection.
+
+```bash
+bun tools/setup_opencode.mjs --project ../my-project --context auto --dry-run
+bun tools/setup_opencode.mjs --project ../my-project --context auto
+```
+
+Discovery uses the validated runtime endpoint and `ZINC_API_KEY`; their values
+stay out of generated configuration and error messages. Numeric context remains
+offline. `check` and `run` reject `--context auto` before project/task access:
+rerun setup with `--force` when changing a generated config's capacity. Auto
+requires discovery metadata from the server; it does not increase GPU capacity.
+
 The configuration uses `@ai-sdk/openai-compatible`, keeps both the main model
 and small-model requests on ZINC, and disables automatic sharing. The local
 coding agent uses greedy decoding and excludes delegation and web tools.
@@ -204,10 +223,13 @@ results remain separate from this repository-level result. See the
 [ROCm context limits](ROCM.md#long-coding-sessions).
 
 The [follow-up](ROCM_AGENT_CONTEXT.md#repository-coding-result) fixes the backend
-memory/attention failures and records further supervised attempts. The latest
-27B repair produced code passing CPU tests and ROCm compilation, but the overall
-verified run still timed out. A later GPU power-resume failure blocks the next
-live acceptance run. General repository coding remains a supervised workflow.
+memory/attention failures and records the later reviewed `--dry-run` feature.
+GPU recovery and live acceptance completed. The
+[repository end-to-end report](OPENCODE_E2E_REPORT.md) tests three further real
+Zinc tasks with native-capacity Q8 and 32K FP32 serving. It distinguishes
+functional checks from complete delivery: omitted regressions and review
+findings still count against the assigned task. General repository coding
+remains a supervised workflow.
 
 ## Use your own endpoint
 

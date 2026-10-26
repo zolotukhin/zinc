@@ -1,0 +1,906 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-26",
+  "scope": "Actual OpenCode repository coding, frozen functional acceptance and separate manual completion review",
+  "source_commit": "571b85182953c7af761cdd41e019252c5fee48c4",
+  "runtime": {
+    "commit": "59e91681e097e76015be7cb34223b93d28b60a7e",
+    "binary_sha256": "e0fa8a40ed81743e2ccc32f276dc3faf0cbbb6b9047466f72c97a71c8ddbd038",
+    "inference_source_matched_task_base": true,
+    "source_sha256": {
+      "src/main.zig": "3527b4cbe76417907fb5ac4e76add9b74ce2ec2a44186fbe383eb57f4661be2c",
+      "src/compute/forward_cuda.zig": "4c7e0a87a29b1090bfa6abc8d5af2cb0e0a8138a2512ef53a4aaca27a21f4a3b",
+      "src/compute/kv_storage.zig": "3e9f272bb8a443a64f540a97d65306e9562147a86f7c7653a9900d81291227e0",
+      "src/shaders/cuda/kernels.cu": "acd1149e8a877f5e6a3d0fac57c5ba53d176aebc67ad8e89e48a298859f96c6d"
+    },
+    "toolchain": {
+      "bun": "1.4.4",
+      "opencode": "1.19.4",
+      "zig": "0.17.0"
+    }
+  },
+  "model": {
+    "name": "Qwen3.8-27B-Q4_K_M",
+    "gguf_bytes": 17106775008,
+    "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+  },
+  "hardware": {
+    "gpu": "AMD Radeon AI PRO R9700",
+    "vram_total_bytes": 34208743424,
+    "cpu": "AMD Ryzen 7 9800X3D",
+    "unrelated_cpu_workers_retained": 8
+  },
+  "conditions": [
+    {
+      "id": "q8-native",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true
+    },
+    {
+      "id": "f32-32k",
+      "context": 32768,
+      "kv": "f32",
+      "f16_attention": false
+    }
+  ],
+  "protocol": {
+    "one_slot": true,
+    "mtp": true,
+    "prompt_cache": true,
+    "output_tokens": 3072,
+    "configured_agent_steps": 24,
+    "maximum_steps_per_verified_editing_round": 8,
+    "attempts": 4,
+    "round_timeout_ms": 300000,
+    "task_timeout_ms": 1200000,
+    "fresh_worktree_per_task": true,
+    "isolated_sessions": true,
+    "proxy": "transparent; no synthetic responses or repairs",
+    "client_isolated_from_gpu_tuning": true,
+    "supervisor_edits_during_trials": false,
+    "trace_response_preview_bytes": 65536,
+    "traced_prompt_usage_is_lower_bound_when_preview_truncated": true
+  },
+  "acceptance": {
+    "files_sha256": {
+      "manifest.json": "ea4027e8b957311151ccea1e96c63749fb5b792fa05784fd0a012c555be521f2",
+      "strict-numbers.mjs": "40c3f578a0569f1ea530f9ef2a8f31a7dc517fb1e3a76fe1823f5f84ed1fe100",
+      "discovery-utf8.zig": "dc22280dc1e276b43872c4a52e6ae65dd6b753ea8daab2627373dd51836d5205",
+      "auto-context.mjs": "4743aa0c1e09bfadaf2ac54f37feeead2470f133fd9a1f05809dab805c049ff7"
+    },
+    "original_source_failed_all_three_functional_checks": true,
+    "original_existing_cpu_suite_passed": true,
+    "strict_integer_cases": 80,
+    "discovery_utf8_groups": 3,
+    "auto_context_categories_including_live_discovery": 22,
+    "requested_regression_tests_and_docs_not_fully_enforced": true,
+    "original_checks_retained_after_review": true
+  },
+  "setup_attempts_excluded_from_six_run_matrix": [
+    {
+      "issue": "Dependency-directory symlink was misclassified by the change guard.",
+      "correction": "Fresh real dependency directories in all worktrees.",
+      "owned_processes_stopped": true,
+      "power_restored": true
+    },
+    {
+      "issue": "GPU-server tuning environment leaked into client CPU-test fixtures.",
+      "correction": "Separate client environment with GPU tuning removed.",
+      "owned_processes_stopped": true,
+      "power_restored": true
+    }
+  ],
+  "runs": [
+    {
+      "condition": "q8-native",
+      "task": "strict-numbers",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "task_timeout_ms": 1200000,
+      "round_timeout_ms": 300000,
+      "attempts": 4,
+      "started_at": "2026-10-26T22:10:04.401855+00:00",
+      "host_load_before": [
+        12.55224609375,
+        13.4765625,
+        12.90478515625
+      ],
+      "host_load_after": [
+        13.5546875,
+        13.705078125,
+        13.2197265625
+      ],
+      "seconds": 365.073,
+      "tool_counts": {
+        "read": 8,
+        "grep": 5,
+        "glob": 1,
+        "edit": 1,
+        "bash": 1
+      },
+      "tool_calls": 16,
+      "tool_failures": 0,
+      "api_errors": 0,
+      "sessions": 1,
+      "max_input_tokens": 28176,
+      "generated_tokens": 3342,
+      "independent_checks": [
+        [
+          "1",
+          "failed"
+        ],
+        [
+          "2",
+          "passed"
+        ]
+      ],
+      "vram_used_bytes": 33166688256,
+      "wrapper_exit": 0,
+      "protected_inputs_unchanged": true,
+      "accepted_by_wrapper": true,
+      "changed_files": [
+        "tools/performance_suite.mjs"
+      ],
+      "new_files_sha256": {},
+      "patch_sha256": "f3518f3b3ca4fb80655d62b60b2f69fc5a89f553f990d050a83db978af73b3dd",
+      "trace_files": 17,
+      "human_interventions": 0,
+      "owned_wrapper_stopped": true,
+      "owned_proxy_stopped": true,
+      "review": {
+        "functional_acceptance": "passed",
+        "implementation_review": "passed",
+        "regression_tests_added": false,
+        "documentation_updated": false,
+        "assigned_task_complete": false,
+        "review_findings": [
+          "Requested regression tests were omitted.",
+          "Requested documentation update was omitted."
+        ],
+        "reviewer_implementation_edits": false
+      },
+      "trace_audit": {
+        "trace_files": 17,
+        "synthetic_shortcuts": 0,
+        "repaired_events": 0,
+        "suppressed_content_events": 0,
+        "max_response_prompt_tokens": 25983,
+        "responses_with_usage_in_preview": 15
+      }
+    },
+    {
+      "condition": "q8-native",
+      "task": "discovery-utf8",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "task_timeout_ms": 1200000,
+      "round_timeout_ms": 300000,
+      "attempts": 4,
+      "started_at": "2026-10-26T22:16:10.041300+00:00",
+      "host_load_before": [
+        13.5908203125,
+        13.71044921875,
+        13.22412109375
+      ],
+      "host_load_after": [
+        13.251953125,
+        13.7568359375,
+        13.38330078125
+      ],
+      "seconds": 240.045,
+      "tool_counts": {
+        "read": 4,
+        "grep": 5,
+        "edit": 1
+      },
+      "tool_calls": 10,
+      "tool_failures": 0,
+      "api_errors": 0,
+      "sessions": 1,
+      "max_input_tokens": 17461,
+      "generated_tokens": 1856,
+      "independent_checks": [
+        [
+          "1",
+          "passed"
+        ]
+      ],
+      "vram_used_bytes": 33166696448,
+      "wrapper_exit": 0,
+      "protected_inputs_unchanged": true,
+      "accepted_by_wrapper": true,
+      "changed_files": [
+        "src/server/model_discovery.zig"
+      ],
+      "new_files_sha256": {},
+      "patch_sha256": "1adec96dad2aa1d3722ba4f5a7d130533705adb0238a6ca4e766fc64edf4b7a4",
+      "trace_files": 9,
+      "human_interventions": 0,
+      "owned_wrapper_stopped": true,
+      "owned_proxy_stopped": true,
+      "review": {
+        "functional_acceptance": "passed",
+        "implementation_review": "passed",
+        "regression_tests_added": false,
+        "documentation_updated": false,
+        "assigned_task_complete": false,
+        "review_findings": [
+          "Requested regression tests were omitted.",
+          "Requested documentation update was omitted."
+        ],
+        "reviewer_implementation_edits": false
+      },
+      "trace_audit": {
+        "trace_files": 9,
+        "synthetic_shortcuts": 0,
+        "repaired_events": 0,
+        "suppressed_content_events": 0,
+        "max_response_prompt_tokens": 17041,
+        "responses_with_usage_in_preview": 8
+      }
+    },
+    {
+      "condition": "q8-native",
+      "task": "auto-context",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "task_timeout_ms": 1200000,
+      "round_timeout_ms": 300000,
+      "attempts": 4,
+      "started_at": "2026-10-26T22:20:10.651388+00:00",
+      "host_load_before": [
+        13.251953125,
+        13.7568359375,
+        13.38330078125
+      ],
+      "host_load_after": [
+        13.2412109375,
+        13.861328125,
+        13.8193359375
+      ],
+      "seconds": 850.296,
+      "tool_counts": {
+        "read": 17,
+        "glob": 1,
+        "bash": 7,
+        "grep": 1,
+        "edit": 8
+      },
+      "tool_calls": 34,
+      "tool_failures": 0,
+      "api_errors": 0,
+      "sessions": 1,
+      "max_input_tokens": 46520,
+      "generated_tokens": 8973,
+      "independent_checks": [
+        [
+          "1",
+          "failed"
+        ],
+        [
+          "2",
+          "failed"
+        ],
+        [
+          "3",
+          "failed"
+        ],
+        [
+          "4",
+          "passed"
+        ]
+      ],
+      "vram_used_bytes": 33166721024,
+      "wrapper_exit": 0,
+      "protected_inputs_unchanged": true,
+      "accepted_by_wrapper": true,
+      "changed_files": [
+        "docs/OPENCODE.md",
+        "tools/setup_opencode.mjs"
+      ],
+      "new_files_sha256": {},
+      "patch_sha256": "dff06759696d10feac703adc0217087b6bab261cfbeb8b6d0fc9f06d7e7d0612",
+      "trace_files": 33,
+      "human_interventions": 0,
+      "owned_wrapper_stopped": true,
+      "owned_proxy_stopped": true,
+      "review": {
+        "functional_acceptance": "passed",
+        "implementation_review": "changes_requested",
+        "regression_tests_added": false,
+        "documentation_updated": true,
+        "assigned_task_complete": false,
+        "review_findings": [
+          "Requested regression tests were omitted.",
+          "A suffixed .gguf alias can override an exact requested model ID.",
+          "An unmatched multi-model list is accepted if a suffixed alias is present, contrary to the requested ambiguity rule."
+        ],
+        "reviewer_implementation_edits": false,
+        "additional_review_cases_passed": 0,
+        "additional_review_cases_total": 2
+      },
+      "trace_audit": {
+        "trace_files": 33,
+        "synthetic_shortcuts": 0,
+        "repaired_events": 0,
+        "suppressed_content_events": 0,
+        "max_response_prompt_tokens": 45852,
+        "responses_with_usage_in_preview": 29
+      }
+    },
+    {
+      "condition": "f32-32k",
+      "task": "strict-numbers",
+      "context": 32768,
+      "kv": "f32",
+      "f16_attention": false,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "task_timeout_ms": 1200000,
+      "round_timeout_ms": 300000,
+      "attempts": 4,
+      "started_at": "2026-10-26T22:34:24.534152+00:00",
+      "host_load_before": [
+        13.2412109375,
+        13.861328125,
+        13.8193359375
+      ],
+      "host_load_after": [
+        13.240234375,
+        13.95703125,
+        13.97021484375
+      ],
+      "seconds": 595.169,
+      "tool_counts": {
+        "read": 10,
+        "grep": 3,
+        "glob": 2,
+        "edit": 1
+      },
+      "tool_calls": 16,
+      "tool_failures": 0,
+      "api_errors": 0,
+      "sessions": 1,
+      "max_input_tokens": 25734,
+      "generated_tokens": 2525,
+      "independent_checks": [
+        [
+          "1",
+          "failed"
+        ],
+        [
+          "2",
+          "passed"
+        ]
+      ],
+      "vram_used_bytes": 26626183168,
+      "wrapper_exit": 0,
+      "protected_inputs_unchanged": true,
+      "accepted_by_wrapper": true,
+      "changed_files": [
+        "tools/performance_suite.mjs"
+      ],
+      "new_files_sha256": {},
+      "patch_sha256": "f3518f3b3ca4fb80655d62b60b2f69fc5a89f553f990d050a83db978af73b3dd",
+      "trace_files": 16,
+      "human_interventions": 0,
+      "owned_wrapper_stopped": true,
+      "owned_proxy_stopped": true,
+      "review": {
+        "functional_acceptance": "passed",
+        "implementation_review": "passed",
+        "regression_tests_added": false,
+        "documentation_updated": false,
+        "assigned_task_complete": false,
+        "review_findings": [
+          "Same correct production change as the native run.",
+          "Requested regression tests and documentation were omitted."
+        ],
+        "reviewer_implementation_edits": false
+      },
+      "trace_audit": {
+        "trace_files": 16,
+        "synthetic_shortcuts": 0,
+        "repaired_events": 0,
+        "suppressed_content_events": 0,
+        "max_response_prompt_tokens": 27341,
+        "responses_with_usage_in_preview": 15
+      }
+    },
+    {
+      "condition": "f32-32k",
+      "task": "discovery-utf8",
+      "context": 32768,
+      "kv": "f32",
+      "f16_attention": false,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "task_timeout_ms": 1200000,
+      "round_timeout_ms": 300000,
+      "attempts": 4,
+      "started_at": "2026-10-26T22:44:20.270355+00:00",
+      "host_load_before": [
+        13.30126953125,
+        13.9580078125,
+        13.970703125
+      ],
+      "host_load_after": [
+        13.1455078125,
+        14.2802734375,
+        14.18701171875
+      ],
+      "seconds": 650.163,
+      "tool_counts": {
+        "read": 5,
+        "grep": 6,
+        "edit": 3,
+        "bash": 3
+      },
+      "tool_calls": 17,
+      "tool_failures": 0,
+      "api_errors": 0,
+      "sessions": 1,
+      "max_input_tokens": 22923,
+      "generated_tokens": 4678,
+      "independent_checks": [
+        [
+          "1",
+          "failed"
+        ],
+        [
+          "2",
+          "passed"
+        ]
+      ],
+      "vram_used_bytes": 26626195456,
+      "wrapper_exit": 0,
+      "protected_inputs_unchanged": true,
+      "accepted_by_wrapper": true,
+      "changed_files": [
+        "src/server/model_discovery.zig"
+      ],
+      "new_files_sha256": {},
+      "patch_sha256": "86baf37a4d00ca3743552b3bf5af95c4eb48981357d8955abe07d89d687d9a1a",
+      "trace_files": 17,
+      "human_interventions": 0,
+      "owned_wrapper_stopped": true,
+      "owned_proxy_stopped": true,
+      "review": {
+        "functional_acceptance": "passed",
+        "implementation_review": "production_fix_passed; added_tests_do_not_compile",
+        "regression_tests_added": true,
+        "regression_tests_valid": false,
+        "documentation_updated": false,
+        "assigned_task_complete": false,
+        "review_findings": [
+          "The production UTF-8 validation is correct.",
+          "New embedded tests contain out-of-range Unicode u8 literals and invalid allocator construction.",
+          "The default project test/check-cuda paths did not analyze the new embedded tests; standalone compilation exposes the errors.",
+          "Requested documentation was omitted."
+        ],
+        "reviewer_implementation_edits": false
+      },
+      "trace_audit": {
+        "trace_files": 17,
+        "synthetic_shortcuts": 0,
+        "repaired_events": 0,
+        "suppressed_content_events": 0,
+        "max_response_prompt_tokens": 22923,
+        "responses_with_usage_in_preview": 15
+      }
+    },
+    {
+      "condition": "f32-32k",
+      "task": "auto-context",
+      "context": 32768,
+      "kv": "f32",
+      "f16_attention": false,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "task_timeout_ms": 1200000,
+      "round_timeout_ms": 300000,
+      "attempts": 4,
+      "started_at": "2026-10-26T22:55:11.001006+00:00",
+      "host_load_before": [
+        13.1455078125,
+        14.2802734375,
+        14.18701171875
+      ],
+      "host_load_after": [
+        6.6259765625,
+        6.6630859375,
+        9.1669921875
+      ],
+      "seconds": 1145.25,
+      "tool_counts": {
+        "read": 20,
+        "glob": 3,
+        "grep": 1,
+        "bash": 2
+      },
+      "tool_calls": 26,
+      "tool_failures": 0,
+      "api_errors": 0,
+      "sessions": 1,
+      "max_input_tokens": 31519,
+      "generated_tokens": 5051,
+      "independent_checks": [
+        [
+          "1",
+          "failed"
+        ],
+        [
+          "2",
+          "failed"
+        ],
+        [
+          "3",
+          "failed"
+        ],
+        [
+          "4",
+          "failed"
+        ]
+      ],
+      "vram_used_bytes": 26626162688,
+      "wrapper_exit": 124,
+      "protected_inputs_unchanged": true,
+      "accepted_by_wrapper": false,
+      "changed_files": [],
+      "new_files_sha256": {},
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trace_files": 27,
+      "human_interventions": 0,
+      "owned_wrapper_stopped": true,
+      "owned_proxy_stopped": true,
+      "review": {
+        "functional_acceptance": "failed",
+        "implementation_review": "no_implementation",
+        "regression_tests_added": false,
+        "documentation_updated": false,
+        "assigned_task_complete": false,
+        "review_findings": [
+          "No tracked or untracked feature edits after four failed verification rounds.",
+          "Wrapper exited 124 after 1145.25 seconds.",
+          "All original acceptance/config/hook/controller inputs remained unchanged; no API errors were recorded."
+        ],
+        "reviewer_implementation_edits": false
+      },
+      "trace_audit": {
+        "trace_files": 27,
+        "synthetic_shortcuts": 0,
+        "repaired_events": 0,
+        "suppressed_content_events": 0,
+        "max_response_prompt_tokens": 31519,
+        "responses_with_usage_in_preview": 24
+      }
+    }
+  ],
+  "summary": {
+    "functional_passes": 5,
+    "assigned_tasks_complete_after_manual_review": 0,
+    "runs": 6,
+    "max_reported_input_tokens": 46520,
+    "api_errors": 0
+  },
+  "reviewer_adoption": {
+    "production_fixes_based_on": "q8-native candidate patches",
+    "strict_numbers": "Model implementation retained; reviewer added tests and documentation.",
+    "discovery_utf8": "Model implementation retained; reviewer added tests and documentation.",
+    "auto_context": "Reviewer corrected exact-ID/alias selection, validated malformed/duplicate IDs, sanitized request errors and added regressions/documentation.",
+    "project_cpu_suite": {
+      "main_zig_passed": 772,
+      "independent_discovery_passed": 13,
+      "previously_passed_auxiliary_zig_cases_cached": 66,
+      "bun_passed": 744,
+      "failed": 0,
+      "model_smokes": "not executed locally"
+    },
+    "cuda_host_compilation": "passed; x86_64 Linux cross-target; no CUDA GPU execution",
+    "negative_controls": {
+      "original_integer_parser": "5 regression tests failed",
+      "original_utf8_serializer": "2 regression tests failed",
+      "f32_candidate_embedded_tests": "Standalone compilation failed locally and on the node; dedicated project test target added"
+    }
+  },
+  "limitations": [
+    "One ordered run per task/configuration; all native tasks ran before all control tasks.",
+    "Capacity, cache representation and attention precision changed together.",
+    "Shared CPU load and independent check time are included in elapsed times; a lower-priority two-job adoption build overlapped part of the F32 Zig trial.",
+    "No randomized coding benchmark, general success rate or new tokens-per-second claim.",
+    "Coding inputs above 32K are not proof of 262K-token coding quality.",
+    "Functional acceptance missed requested tests/documentation and model-selection edge cases.",
+    "Review/adoption fixes do not retroactively change the original model outcomes.",
+    "VRAM values are per-run samples, not a peak-memory trace."
+  ],
+  "cleanup": {
+    "all_owned_processes_stopped": true,
+    "power_settings_restored": true,
+    "remaining_inference_process_count": 0
+  },
+  "privacy": {
+    "raw_transcripts_published": false,
+    "host_endpoints_paths_and_session_state_published": false
+  },
+  "adoption_smoke": {
+    "scope": "Adaptive fixture follow-up, separate from six matched repository trials",
+    "initial": {
+      "source_commit": "cb7832df0311964c704633664e3fdaa9054bf739",
+      "fixture": "python-log-cli with required new regressions and usage documentation",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "attempts": 3,
+      "started_at": "2026-10-26T23:14:58.462777+00:00",
+      "runtime_binary_sha256": "728294b8415b7633e8b4544435f5e8d64783fd6b1ce83ac753d043f8f5181bbf",
+      "helper_sha256": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+      "toolchain": {
+        "bun": "1.4.4",
+        "opencode": "1.19.4",
+        "zig": "0.17.0"
+      },
+      "host_load_before": [
+        5.46923828125,
+        6.34228515625,
+        8.92529296875
+      ],
+      "host_load_after": [
+        6.0732421875,
+        6.35400390625,
+        8.65185546875
+      ],
+      "total_seconds": 113.759,
+      "task_seconds": 70.006,
+      "auto_setup_preview_matches_written_config": true,
+      "discovered_context": 262144,
+      "live_protocol_preflight_passed": true,
+      "wrapper_exit": 0,
+      "api_errors": 0,
+      "tool_counts": {
+        "read": 2,
+        "write": 3,
+        "bash": 1
+      },
+      "tool_calls": 6,
+      "max_input_tokens": 7804,
+      "independent_checks": [
+        [
+          "1",
+          "passed"
+        ]
+      ],
+      "protected_inputs_unchanged": true,
+      "candidate_source_sha256": "415dfdf16f418f1934daf940b12e897d81292747e37f49da0711622c90ce20ee",
+      "candidate_deliverables_sha256": {
+        "README.md": "c775fad3792075b5ff0a6dfe914769ddddabb67695c5f73d88815e873630195d",
+        "test/additional_test.py": "3c0dd25a25699ec8eeadcb00167cd6d6a3016f04a040dbe77d8a37a445a24fc4"
+      },
+      "accepted_by_wrapper": true,
+      "cleanup": {
+        "all_owned_processes_stopped": true,
+        "power_settings_restored": true,
+        "remaining_inference_process_count": 0
+      }
+    },
+    "api_validation": {
+      "model": "qwen38-27b-q4k-m",
+      "context": 262144,
+      "passed": 23,
+      "total": 23,
+      "checks": [
+        {
+          "name": "JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 907
+        },
+        {
+          "name": "JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 978
+        },
+        {
+          "name": "JSON/SSE parity at 7 output tokens",
+          "pass": true,
+          "ms": 987
+        },
+        {
+          "name": "Unicode JSON/SSE parity",
+          "pass": true,
+          "ms": 1438
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 1123
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 1191
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 3 output tokens",
+          "pass": true,
+          "ms": 1197
+        },
+        {
+          "name": "JSON tool arguments and unique ID",
+          "pass": true,
+          "ms": 744
+        },
+        {
+          "name": "SSE tool arguments and unique ID",
+          "pass": true,
+          "ms": 745
+        },
+        {
+          "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 1515
+        },
+        {
+          "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 1258
+        },
+        {
+          "name": "Truncated tool calls remain text without an executable call",
+          "pass": true,
+          "ms": 695
+        },
+        {
+          "name": "Null assistant content and tool-result history",
+          "pass": true,
+          "ms": 246
+        },
+        {
+          "name": "tool_choice none",
+          "pass": true,
+          "ms": 128
+        },
+        {
+          "name": "Text content arrays",
+          "pass": true,
+          "ms": 497
+        },
+        {
+          "name": "Malformed JSON returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Invalid message content returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Empty messages returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Negative token budget returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Context overflow returns HTTP 400",
+          "pass": true,
+          "ms": 42
+        },
+        {
+          "name": "Queued requests keep conversations separate",
+          "pass": true,
+          "ms": 1621
+        },
+        {
+          "name": "Streaming cancellation releases the slot",
+          "pass": true,
+          "ms": 665
+        },
+        {
+          "name": "Long prompt above the former 8192-token SSM limit",
+          "pass": true,
+          "ms": 16766
+        }
+      ],
+      "complete": true
+    },
+    "initial_manual_review": "Changes requested: nonstandard JSON constants were accepted and emitted.",
+    "same_session_review_repair": {
+      "source_commit": "cb7832df0311964c704633664e3fdaa9054bf739",
+      "fixture": "python-log-cli; same-session repair after strict JSON review",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true,
+      "mtp": true,
+      "prompt_cache": true,
+      "output_tokens": 3072,
+      "attempts": 1,
+      "started_at": "2026-10-26T23:21:38.307976+00:00",
+      "runtime_binary_sha256": "728294b8415b7633e8b4544435f5e8d64783fd6b1ce83ac753d043f8f5181bbf",
+      "helper_sha256": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+      "toolchain": {
+        "bun": "1.4.4",
+        "opencode": "1.19.4",
+        "zig": "0.17.0"
+      },
+      "host_load_before": [
+        4.22705078125,
+        4.994140625,
+        7.43798828125
+      ],
+      "host_load_after": [
+        5.67041015625,
+        5.3232421875,
+        7.25732421875
+      ],
+      "total_seconds": 125.87,
+      "task_seconds": 115.008,
+      "discovered_context": 262144,
+      "reused_original_portable_config": true,
+      "live_protocol_preflight_passed": true,
+      "continued_original_session": true,
+      "wrapper_exit": 0,
+      "api_errors": 0,
+      "tool_counts": {
+        "read": 3,
+        "edit": 4,
+        "bash": 2
+      },
+      "tool_calls": 9,
+      "max_input_tokens": 11715,
+      "independent_checks": [
+        [
+          "1",
+          "passed"
+        ]
+      ],
+      "protected_inputs_unchanged": true,
+      "candidate_source_sha256": "c4382e00247d336a7ac7d3aed2abb5301955699ba661f30013018d808920382e",
+      "candidate_deliverables_sha256": {
+        "README.md": "420132db44602ca77066ce12aa7a0b733ab155703fb6086322f97452a743eaa4",
+        "test/additional_test.py": "530aa002056753c0b9d522d5f85b7393a7a23079ddb7612be0984b077c80b161"
+      },
+      "accepted_by_wrapper": true,
+      "cleanup": {
+        "all_owned_processes_stopped": true,
+        "power_settings_restored": true,
+        "remaining_inference_process_count": 0
+      }
+    },
+    "review_checks": {
+      "unit_tests_passed": 7,
+      "external_nonstandard_json_cases_passed": 6,
+      "new_regressions_fail_original_source": true,
+      "original_tests_and_generated_config_unchanged": true,
+      "supervisor_implementation_edits": false
+    },
+    "limits": [
+      "Small input history; this does not validate native-length coding quality.",
+      "Ordinary finite numeric amounts were exercised; numeric overflow and general record-schema validation were outside this fixture acceptance.",
+      "The initial functional pass and review repair remain separate outcomes."
+    ]
+  }
+}

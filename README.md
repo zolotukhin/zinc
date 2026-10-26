@@ -102,7 +102,8 @@ bun tools/setup_opencode.mjs run --project ../my-project --auto \
 ```
 
 Start ZINC with `-c 32768 --parallel 1` to match this repository-task example.
-Setup defaults to 16K; always match the actual server context. Replace `bun test`
+Setup defaults to 16K; always match the actual server context. Use setup-only
+`--context auto` to discover it from a running server. Replace `bun test`
 with the project's acceptance command. Failed checks feed real diagnostics
 back into short editing rounds; a failed check cannot produce a successful
 harness exit. The config uses localhost; custom endpoints
@@ -113,6 +114,8 @@ and API keys come from environment variables at runtime.
 The [full-worktree trial](docs/OPENCODE_WORKTREE_REPORT.md) records the original
 coding failures. The [ROCm follow-up](docs/ROCM_AGENT_CONTEXT.md) documents the
 memory/attention fixes, prompt reuse, and separate coding acceptance results.
+The [end-to-end report](docs/OPENCODE_E2E_REPORT.md) compares actual repository
+tasks at 262K Q8 and 32K FP32 capacity, including incomplete delivery and review findings.
 The [technical write-up](https://zolotukhin.ai/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/)
 explains the failures, fixes, and reviewed feature result.
 

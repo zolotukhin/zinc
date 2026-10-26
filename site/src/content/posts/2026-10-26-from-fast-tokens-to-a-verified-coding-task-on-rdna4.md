@@ -203,18 +203,36 @@ The clean build passes 48 MTP/ordinary JSON/SSE responses, 24 cache checks and a
 
 The benchmark guard also caught a defect in its own heuristic: a valid Markdown table delimiter looked like repeated tokens. The regression test fails under the original detector. The corrected check exempts a delimiter only after a matching textual header; malformed separators, repeated lines and control-token checks still fail. Reclassifying the captured output leaves every timing sample intact.
 
-The [native-context guide](/zinc/docs/rocm-native-context/) and [portable evidence](/zinc/validation/rocm-native-context-2026-10-26.json) have the memory accounting, switches, hashes, individual measurements and validation results. This remains a single-slot ROCm Qwen feature. The repository coding acceptance described earlier still belongs to its original 32K FP32 run.
+The [native-context guide](/zinc/docs/rocm-native-context/) and [portable evidence](/zinc/validation/rocm-native-context-2026-10-26.json) have the memory accounting, switches, hashes, individual measurements and validation results. This remains a single-slot ROCm Qwen feature. The preview-feature acceptance described earlier belongs to its original 32K FP32 run.
+
+## Actual coding beyond 32K still needed review
+
+We then assigned three more real Zinc tasks in fresh worktrees: reject partially parsed benchmark integers, keep model-discovery IDs valid strings for invalid filesystem bytes, and discover the server capacity automatically during OpenCode setup. We ran the same tasks at native Q8 capacity and then with the 32K FP32 configuration. The [end-to-end report](/zinc/docs/opencode-e2e-report/) retains both configurations, exact prompts, frozen acceptance and separate completion review.
+
+The native runs passed their original functional checks in **6m05s, 4m00s and 14m10s**. The setup feature needed four automatic verification rounds. Its actual reported input reached **46,520 tokens**, beyond the earlier server capacity, with no API errors. That is a real coding history above 32K; it is still far short of a 262K coding-quality test.
+
+Under the same limits, the 32K configuration passed the first two functional tasks but failed automatic setup after **19m05s and four verification rounds**. It made 26 tool calls and no feature edits, reaching 31,519 reported input tokens without an API error. This is one ordered trial on a shared host, with capacity, cache format and attention precision changed together; it cannot establish a general quality or speed advantage.
+
+All three native patches omitted the requested regression tests. Two also omitted documentation. Our verifier had allowed the wrapper to stop as soon as the functional code passed, so the whole workflow accepted incomplete assignments. Existing project tests passing could not detect missing new tests.
+
+Review found another defect in the larger feature. Model discovery searched for either an exact ID or its `.gguf` suffix in the same `find` call. If a suffixed entry appeared first, it won over a later exact match. An unmatched multi-model list could also be accepted as an alias. The contract required exact matching first and allowed aliasing only for a singleton. The original test had checked an exact match and a singleton separately, missing their interaction.
+
+The 32K Zig run also added regression tests that did not compile: a Unicode scalar was placed in a byte array, and an allocator had the wrong type. Its project checks had still passed because those paths had not analyzed the module's embedded tests. Direct compilation failed both locally and on the node. The landing build now runs discovery as a dedicated CPU test target on every backend.
+
+We kept those original outcomes. Reviewer-authored regressions and fixes completed the landing patches, including malformed/duplicate IDs, credential-safe failures and a timeout that covers the response body. The resulting helper offers **`--context auto`** without saving runtime endpoints or keys. That makes setup easier; it does not turn three functional passes into three fully delivered model tasks.
+
+A separate fresh-build test exercised the revised setup itself: `--context auto` matched the live 262K server, preview bytes matched the written config, and all 23 API checks passed. OpenCode then fixed a protected Python NDJSON fixture, added tests and wrote usage docs in 70 seconds. Review caught Python's permissive handling of nonstandard JSON constants; the same session repaired it in another 115 seconds. Seven unit tests and six stricter external cases passed, including failure of the new tests against the original source. That is a bounded fixture with review feedback, separate from the six repository trials; numeric overflow and general schema validation were outside its checks.
 
 ## Try the same bounded workflow
 
-The [OpenCode guide](/zinc/docs/opencode/) covers server setup, isolated worktrees and task evaluation. The [standalone helper](/zinc/harnesses/setup-opencode.mjs) requires Bun 1.4.4 or later. With a running server at matching 32K capacity:
+The [OpenCode guide](/zinc/docs/opencode/) covers server setup, isolated worktrees and task evaluation. The [standalone helper](/zinc/harnesses/setup-opencode.mjs) requires Bun 1.4.4 or later. With a running server, setup can now discover its actual capacity:
 
 ```bash
 bun tools/setup_opencode.mjs --project ../my-project \
-  --model qwen38-27b-q4k-m --context 32768 --dry-run
+  --model qwen38-27b-q4k-m --context auto --dry-run
 
 bun tools/setup_opencode.mjs --project ../my-project \
-  --model qwen38-27b-q4k-m --context 32768
+  --model qwen38-27b-q4k-m --context auto
 
 bun tools/setup_opencode.mjs check --project ../my-project
 

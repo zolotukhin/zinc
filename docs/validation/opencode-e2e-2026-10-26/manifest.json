@@ -1,0 +1,60 @@
+{
+  "base_commit": "571b85182953c7af761cdd41e019252c5fee48c4",
+  "model": "Qwen3.8-27B-Q4_K_M",
+  "opencode": "1.19.4",
+  "conditions": [
+    {
+      "id": "q8-native",
+      "context": 262144,
+      "kv": "q8",
+      "f16_attention": true
+    },
+    {
+      "id": "f32-32k",
+      "context": 32768,
+      "kv": "f32",
+      "f16_attention": false
+    }
+  ],
+  "mtp": true,
+  "prompt_cache": true,
+  "output_tokens": 3072,
+  "agent_steps": 24,
+  "round_timeout_ms": 300000,
+  "task_timeout_ms": 1200000,
+  "attempts": 4,
+  "tasks": [
+    {
+      "id": "strict-numbers",
+      "name": "Reject partially parsed benchmark counts",
+      "language": "JavaScript",
+      "allowed": [
+        "tools/performance_suite.mjs",
+        "tools/performance_suite.test.ts",
+        "docs/BENCHMARKING.md"
+      ],
+      "prompt": "Work in this complete Zinc checkout. Implement the requested change, append regression tests or add a new focused test file, and update the relevant documentation. Preserve all existing tests and project instructions. Existing test files may only have tests appended. Do not inspect or modify the external acceptance harness, generated OpenCode configuration, or .zinc hook. Do not commit, install dependencies, start model servers, run GPU jobs, or delegate. Make focused edits; file reads are capped at 80 lines. Use CPU checks with ZINC_API_BASE_URL and ZINC_API_KEY unset. The external wrapper runs independent acceptance and full CPU project tests between rounds; finish the editing round once your patch is ready. Use only portable paths and public metadata in code and documentation.\n\nFix the numeric argument validation in tools/performance_suite.mjs. The integer flags using its shared integer parser currently accept 3junk, truncate 3.5, interpret 1e3 as 1, and round unsafe integers. Require the entire argument to be an unsigned decimal digit string representing a safe integer. Leading zeroes are valid; signs, surrounding whitespace, fractions, exponents, hex, junk suffixes, missing values, and unsafe integers must fail. Preserve the existing flag-specific zero rules: runs must be at least one, while warmup, timeout and device index can remain zero. Keep valid defaults, existing arguments and environment-based device validation working. Add regressions for valid, malformed, missing and unsafe values. Do not execute the benchmark suite or contact any node. Allowed production change: tools/performance_suite.mjs; documentation: docs/BENCHMARKING.md."
+    },
+    {
+      "id": "discovery-utf8",
+      "name": "Keep model discovery IDs type-safe for invalid filesystem bytes",
+      "language": "Zig",
+      "allowed": [
+        "src/server/model_discovery.zig",
+        "docs/API.md"
+      ],
+      "prompt": "Work in this complete Zinc checkout. Implement the requested change, append regression tests or add a new focused test file, and update the relevant documentation. Preserve all existing tests and project instructions. Existing test files may only have tests appended. Do not inspect or modify the external acceptance harness, generated OpenCode configuration, or .zinc hook. Do not commit, install dependencies, start model servers, run GPU jobs, or delegate. Make focused edits; file reads are capped at 80 lines. Use CPU checks with ZINC_API_BASE_URL and ZINC_API_KEY unset. The external wrapper runs independent acceptance and full CPU project tests between rounds; finish the editing round once your patch is ready. Use only portable paths and public metadata in code and documentation.\n\nFix src/server/model_discovery.zig for a model basename containing invalid UTF-8 bytes. Zig JSON currently serializes that ID as a numeric array, violating the OpenAI string-ID schema. serializeModels must return error.InvalidUtf8 for an invalid basename before allocating JSON. Validate only the basename: invalid bytes in parent directories must not reject a valid basename or leak parent metadata. Preserve every valid Unicode model ID, quoting/control-character escaping, exact existing JSON fields, allocator ownership and OutOfMemory behavior. Add regression tests for malformed UTF-8 sequences, valid Unicode basenames with non-UTF-8 parents, and allocation failure. Keep all existing embedded tests unchanged and append new tests. Do not change GGUF loading, Vulkan initialization, or inference. Allowed production change: src/server/model_discovery.zig; documentation: docs/API.md."
+    },
+    {
+      "id": "auto-context",
+      "name": "Discover the server context during OpenCode setup",
+      "language": "JavaScript",
+      "allowed": [
+        "tools/setup_opencode.mjs",
+        "tools/setup_opencode.test.ts",
+        "docs/OPENCODE.md"
+      ],
+      "prompt": "Work in this complete Zinc checkout. Implement the requested change, append regression tests or add a new focused test file, and update the relevant documentation. Preserve all existing tests and project instructions. Existing test files may only have tests appended. Do not inspect or modify the external acceptance harness, generated OpenCode configuration, or .zinc hook. Do not commit, install dependencies, start model servers, run GPU jobs, or delegate. Make focused edits; file reads are capped at 80 lines. Use CPU checks with ZINC_API_BASE_URL and ZINC_API_KEY unset. The external wrapper runs independent acceptance and full CPU project tests between rounds; finish the editing round once your patch is ready. Use only portable paths and public metadata in code and documentation.\n\nAdd setup-only --context auto to tools/setup_opencode.mjs so users can match the actual server capacity without guessing. Resolve capacity by one GET to the runtime /v1/models endpoint, using the existing runtime endpoint validation and ZINC_API_KEY authentication. Select the exact requested model ID when present; accept a single loaded model as an alias; reject an unmatched multi-model list as ambiguous. Require context_length to be a safe integer of at least 8192. Reject malformed discovery, missing/invalid capacity and HTTP failures before creating project/config/hook files. Bound lookup to at most ten seconds and keep credentials and endpoint values out of errors and generated configuration. The generated config must still use the portable loopback URL and environment key placeholder. Numeric --context remains offline and unchanged. Auto works for normal setup and --dry-run, respects --output/--steps, and --dry-run makes no writes. Reject auto for check/run as setup-only before project/task access. Preserve buildConfig as the synchronous numeric config builder and keep the existing portable hook working. Add tests, help text and documentation. Allowed production change: tools/setup_opencode.mjs; documentation: docs/OPENCODE.md."
+    }
+  ]
+}
