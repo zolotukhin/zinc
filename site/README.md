@@ -15,11 +15,11 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-| Command           | Purpose                              |
-| ----------------- | ------------------------------------ |
-| `bun run dev`     | Start the development server         |
-| `bun run build`   | Build all pages into `dist/`         |
-| `bun run preview` | Preview the production build locally |
+| Command                    | Purpose                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `bun run dev`              | Start the development server                                                  |
+| `bun run build`            | Build all pages into `dist/`                                                  |
+| `bun run preview`          | Preview the production build locally                                          |
 | `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts |
 
 After `bun run build`, run `bun run check:benchmarks`. Install the test browser
