@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 from release_lib import (
@@ -278,6 +279,7 @@ def aggregate(args):
     required_checks = {"package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup"}
     for path in sorted(Path(args.results).glob("*.json")):
         report = read_json(path)
+        require(report.get("schema_version") == 1, "unsupported GPU report schema")
         identifier = report.get("profile")
         require(identifier not in seen, "duplicate GPU report")
         seen.add(identifier)
@@ -288,6 +290,7 @@ def aggregate(args):
         require(report.get("target") == spec["target"] and report.get("family") == spec["family"], "wrong GPU family or backend")
         require(report.get("archive_sha256") == artifact["sha256"] and report.get("binary_sha256") == artifact["binary_sha256"], "GPU tested different artifact bytes")
         checks = report.get("checks", {})
+        require(report.get("options") == {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True}, "untested or missing runtime option policy")
         require(required_checks.issubset(checks) and all(value is True for value in checks.values()), "GPU checks failed or were skipped")
         require(not spec["target"].endswith("vulkan") or checks.get("kernel_reference") is True, "missing packaged Vulkan numerical reference checks")
         profile = next(p for p in policy()["gpu_profiles"] if p["id"] == identifier)
@@ -350,16 +353,33 @@ def finalize(args):
                   "```bash", "# Download and inspect install.sh from this release, then:", f"ZINC_VERSION=v{data['version']} bash install.sh", "# Linux ROCm: ZINC_BACKEND=rocm ZINC_VERSION=v" + data["version"] + " bash install.sh", "zinc --check", "zinc model list --all", "```", "",
                   "Installer defaults: Metal on ARM64 macOS 15+, Vulkan on glibc Linux x86_64 (2.35+); ROCm is explicit (glibc 2.39+, ROCm 7.2.4). Intel Macs, musl, Linux ARM64 and native Windows have no 0.1.0 archive.", "",
                   "The installer verifies and executes the new binary before atomic activation. To restore the previous install: `bash install.sh --rollback`. Models remain in their existing cache.", "",
+                  "For a first Metal/Vulkan run:", "", "```bash", "zinc model pull qwen3-0.6b-q8-0", 'zinc --model-id qwen3-0.6b-q8-0 --chat --prompt "Explain a ring buffer."', "```", "",
+                  "For ROCm, use `qwen35-9b-q4k-m` in both commands. Metal/Vulkan can also launch the browser UI with `zinc chat --model-id qwen3-0.6b-q8-0`.", "",
                   "## Validated hardware and models", "", "Each row ran the exact archive bytes against the pinned llama.cpp reference, including tokenization, generation, streaming/cancellation, and the listed context limit.", "",
                   "| Profile | Hardware | Models (context tokens) |", "| --- | --- | --- |"])
     for report in validation["profiles"]:
         models = ", ".join("`" + m["id"] + "` (" + str(m["context"]) + ")" for m in report["models"])
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
     notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Metal/Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU/unified memory. Apple chip variants still require their factory minimum macOS version.", "",
-                  "MTP, alternative KV formats and other architecture/backend combinations retain their documented experimental status unless separately validated. Default release checks use greedy decoding and f32 KV; they do not establish performance claims.", "",
+                  "Metal/Vulkan include the browser chat UI. ROCm exposes CLI/HTTP chat and completion routes; its standalone server has no built-in browser UI or hot model switching.", "",
+                  "Release checks use greedy decoding, one slot, f32 KV and each backend's default MTP setting. They do not establish performance claims or certify every MTP/context/concurrency configuration. Alternative KV formats and other architecture/backend combinations require separate validation.", "",
                   "Source-only experimental backends and development features are outside this binary support promise. See `release-policy.json` for model revisions, hashes, the pinned reference commit and mandatory profiles.", ""])
     (directory / "release-notes.md").write_text("\n".join(notes))
     print("Validated installer, policy and release notes frozen for attestation")
+
+
+def upstream_check(_args):
+    # Verify download identities without downloading any model weights or
+    # opening a GPU. Cache presence must not hide a broken upstream pin.
+    for model in policy()["models"]:
+        require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", model["repository"]), "invalid upstream repository")
+        url = "https://huggingface.co/api/models/" + model["repository"] + "/revision/" + model["revision"] + "?blobs=true"
+        with urllib.request.urlopen(url, timeout=45) as response:
+            data = json.load(response)
+        file = next((f for f in data.get("siblings", []) if f.get("rfilename") == model["file"]), None)
+        require(file and file.get("size") == model["size_bytes"] and file.get("lfs", {}).get("sha256") == model["sha256"], "upstream model pin is unavailable or differs: " + model["id"])
+        require(data.get("cardData", {}).get("license") == model["license"], "upstream model license metadata differs: " + model["id"])
+        print(model["id"] + ": immutable upstream file/hash/size/license verified", flush=True)
 
 
 def main():
@@ -407,6 +427,8 @@ def main():
     frozen_notes = sub.add_parser("finalize")
     frozen_notes.add_argument("--directory", required=True)
     frozen_notes.set_defaults(run=finalize)
+    upstream = sub.add_parser("upstream-check")
+    upstream.set_defaults(run=upstream_check)
     args = parser.parse_args()
     try:
         args.run(args)

@@ -68,6 +68,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Host tests, including release failure paths
         run: ./scripts/zig.sh build test -Dshaders=false -Doptimize=ReleaseFast --summary all
+      - name: Verify immutable model downloads without downloading weights
+        run: python3 tools/release.py upstream-check
 
   build:
     needs: [prepare, tests]

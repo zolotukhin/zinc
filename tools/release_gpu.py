@@ -30,7 +30,7 @@ PROMPTS = ["Write a long story about a lighthouse keeper.", "Explain how a refri
 
 
 def output(command, env=None, timeout=180):
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env)
+    result = subprocess.run(command, cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=timeout, env=env)
     require(result.returncode == 0, "validation command failed: " + Path(command[0]).name)
     return result.stdout + result.stderr
 
@@ -192,18 +192,22 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
         require(a and b and (a.startswith(b) or b.startswith(a)), "continuation reference parity failed")
 
 
-def api_checks(tree, model, context, device, work, env):
+def api_checks(tree, model, context, device, work, env, browser_chat):
     port = free_port()
     command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--port", str(port), "-c", str(context), "--parallel", "1"]
     with process(command, work / "server.log", work, env) as child:
         ready(child, port)
-        require(json_request(port, "/v1/models").get("data"), "model listing failed")
-        body = {"model": "zinc", "prompt": "The capital of France is", "max_tokens": 16, "temperature": 0, "stream": False}
+        available = json_request(port, "/v1/models").get("data")
+        model_id = active_model_id(available)
+        if browser_chat:
+            with request(port, "/") as response:
+                require("text/html" in response.headers.get("Content-Type", "") and "<html" in response.read().decode().lower(), "built-in chat page is missing")
+        body = {"model": model_id, "prompt": "The capital of France is", "max_tokens": 16, "temperature": 0, "stream": False}
         one = json_request(port, "/v1/completions", body)
         two = json_request(port, "/v1/completions", body)
         require(one.get("choices") and one["choices"][0].get("text") and one["choices"][0]["text"] == two["choices"][0]["text"], "raw completion is empty/non-deterministic")
         require(one.get("usage", {}).get("completion_tokens", 0) > 0, "completion usage is missing")
-        chat = {"model": "zinc", "messages": [{"role": "user", "content": "List three uses of copper."}], "max_tokens": 32, "temperature": 0, "stream": True}
+        chat = {"model": model_id, "messages": [{"role": "user", "content": "List three uses of copper."}], "max_tokens": 32, "temperature": 0, "stream": True, "enable_thinking": False}
         with request(port, "/v1/chat/completions", chat) as response:
             lines = response.read().decode().splitlines()
         payloads = [line[6:] for line in lines if line.startswith("data: ")]
@@ -226,6 +230,29 @@ def api_checks(tree, model, context, device, work, env):
         require(count >= context - 96, "failed to construct an exact context-boundary prompt")
         near = json_request(port, "/v1/completions", {**body, "prompt": near_prompt, "max_tokens": 8})
         require(near.get("choices") and near.get("usage", {}).get("prompt_tokens", 0) == count, "advertised context boundary was not exercised")
+        # Malformed and oversized requests must fail cleanly without poisoning
+        # the slot used by the next valid request.
+        malformed = urllib.request.Request(f"http://127.0.0.1:{port}/v1/completions", data=b'{"prompt":', headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(malformed, timeout=30):
+                raise ValueError("malformed JSON was accepted")
+        except urllib.error.HTTPError as error:
+            require(error.code == 400, "malformed JSON did not return a client error")
+        try:
+            json_request(port, "/v1/completions", {**body, "prompt": near_prompt * 2})
+            raise ValueError("oversized context was accepted")
+        except urllib.error.HTTPError as error:
+            require(error.code == 400, "oversized context did not return a client error")
+        require(json_request(port, "/v1/completions", body).get("choices"), "server did not recover from invalid requests")
+
+
+def active_model_id(available):
+    require(isinstance(available, list) and available, "model listing failed")
+    active = [model for model in available if model.get("active") is True]
+    if not active and len(available) == 1 and "active" not in available[0]:
+        active = available  # ROCm advertises only the loaded model.
+    require(len(active) == 1 and isinstance(active[0].get("id"), str) and active[0]["id"], "loaded model identity is ambiguous")
+    return active[0]["id"]
 
 
 def main():
@@ -237,6 +264,7 @@ def main():
     data = verify_candidate(args.directory)
     config_path = os.environ.get("ZINC_RELEASE_WORKER_CONFIG")
     require(config_path, "worker must set ZINC_RELEASE_WORKER_CONFIG to its private configuration file")
+    require(ROOT not in Path(config_path).expanduser().resolve().parents, "private worker configuration must be outside the checkout")
     config = read_json(config_path)
     profiles = [p for p in policy()["gpu_profiles"] if p["id"] == args.profile]
     require(len(profiles) == 1, "unknown GPU profile")
@@ -263,6 +291,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="zinc-packaged-gpu-") as directory:
             work = Path(directory)
             tree = extract_archive(Path(args.directory) / artifact["filename"], work / "unpack", data["version"], profile["target"], data["commit"])
+            print("Checking packaged identity, selected GPU and runtime", flush=True)
             probe_binary(tree, data["version"], profile["target"], data["commit"])
             env = {k: v for k, v in os.environ.items() if not k.startswith("ZINC_")}
             # Runtime assets must resolve from the installed archive itself.
@@ -273,6 +302,7 @@ def main():
                     output(["codesign", "--verify", "--strict", str(executable)])
                     output(["spctl", "--assess", "--type", "execute", str(executable)], timeout=120)
             if profile["target"].endswith("vulkan"):
+                print("Running 84 packaged shader/reference cases", flush=True)
                 kernel_reference(tree, reference, checkout, device, work, env)
             models = []
             for identifier in profile["models"]:
@@ -283,14 +313,18 @@ def main():
                 if profile["family"].startswith("apple"):
                     require(model == Path.home() / "Library/Caches/zinc/models/models" / identifier / "model.gguf", "Metal workers must use the managed model cache")
                 tokenizer_parity(tree, reference, model, work, env)
+                print(identifier + ": tokenizer matched; checking reference continuations", flush=True)
                 inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
-                api_checks(tree, model, expected["context"], device, work, env)
+                print(identifier + ": continuations matched; checking HTTP, cancellation and context", flush=True)
+                browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]
+                api_checks(tree, model, expected["context"], device, work, env, browser_chat)
                 models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True})
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": sha256(Path(args.directory) / artifact["filename"]), "binary_sha256": sha256(tree / "bin/zinc"),
                       "hardware": hardware, "models": models,
+                      "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": commit, "server_sha256": sha256(reference / "llama-server"), "tokenizer_sha256": sha256(reference / "llama-tokenize")},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup")}}
             if profile["target"].endswith("vulkan"):
@@ -314,4 +348,5 @@ if __name__ == "__main__":
         main()
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         # Worker paths and subprocess arguments remain private.
-        sys.exit("packaged GPU validation failed (" + type(error).__name__ + "); inspect the worker configuration and pinned policy")
+        detail = str(error) if type(error) is ValueError else type(error).__name__ + ": inspect the worker configuration and last reported stage"
+        sys.exit("packaged GPU validation failed: " + detail)

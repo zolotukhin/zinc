@@ -18,6 +18,11 @@ browser chat, and an OpenAI-compatible API in one native binary.
 
 ## Get running
 
+For published archives, runtime requirements and verified installation/rollback,
+see [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/) and
+[GitHub Releases](https://github.com/zolotukhin/zinc/releases). The 0.1.0
+binary pipeline is undergoing qualification. The commands below build from source.
+
 Install the [prerequisites for your GPU](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)
 first. The default build uses **Vulkan on Linux** and **Metal on macOS**.
 The build wrapper downloads and verifies **Zig 0.17.0** when needed; you do not

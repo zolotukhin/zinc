@@ -12,7 +12,13 @@
       "minimum_os": "15.0",
       "minimum_glibc": "none",
       "runtime": "macOS Metal and Foundation frameworks",
-      "signing_required": true
+      "signing_required": true,
+      "interfaces": {
+        "cli": true,
+        "http": true,
+        "streaming_chat": true,
+        "browser_chat": true
+      }
     },
     {
       "id": "linux-x86_64-vulkan",
@@ -25,7 +31,13 @@
       "minimum_os": "linux",
       "minimum_glibc": "2.35",
       "runtime": "Vulkan 1.3 loader and a supported GPU driver",
-      "signing_required": false
+      "signing_required": false,
+      "interfaces": {
+        "cli": true,
+        "http": true,
+        "streaming_chat": true,
+        "browser_chat": true
+      }
     },
     {
       "id": "linux-x86_64-rocm",
@@ -38,7 +50,13 @@
       "minimum_os": "linux",
       "minimum_glibc": "2.39",
       "runtime": "ROCm 7.2.4: amdhip64, hiprtc, hipblas, HIP and rocWMMA headers",
-      "signing_required": false
+      "signing_required": false,
+      "interfaces": {
+        "cli": true,
+        "http": true,
+        "streaming_chat": true,
+        "browser_chat": false
+      }
     }
   ],
   "gpu_profiles": [
@@ -143,7 +161,8 @@
       "file": "Qwen3-0.6B-Q8_0.gguf",
       "size_bytes": 639446688,
       "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
-      "context": 2048
+      "context": 2048,
+      "license": "apache-2.0"
     },
     {
       "id": "qwen38-27b-q4k-m",
@@ -152,7 +171,8 @@
       "file": "Qwen3.8-27B-Q4_K_M.gguf",
       "size_bytes": 17106775008,
       "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
-      "context": 4096
+      "context": 4096,
+      "license": "apache-2.0"
     },
     {
       "id": "qwen36-35b-a3b-q4k-xl",
@@ -161,7 +181,8 @@
       "file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
       "size_bytes": 22360456160,
       "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
-      "context": 4096
+      "context": 4096,
+      "license": "apache-2.0"
     },
     {
       "id": "qwen36-27b-q4k-m",
@@ -170,7 +191,8 @@
       "file": "Qwen3.6-27B-Q4_K_M.gguf",
       "size_bytes": 16817244384,
       "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
-      "context": 4096
+      "context": 4096,
+      "license": "apache-2.0"
     },
     {
       "id": "qwen35-9b-q4k-m",
@@ -179,7 +201,8 @@
       "file": "Qwen3.5-9B-Q4_K_M.gguf",
       "size_bytes": 5680522464,
       "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
-      "context": 4096
+      "context": 4096,
+      "license": "apache-2.0"
     },
     {
       "id": "gemma4-31b-q4k-m",
@@ -188,7 +211,8 @@
       "file": "gemma-4-31B-it-Q4_K_M.gguf",
       "size_bytes": 18323733440,
       "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
-      "context": 4096
+      "context": 4096,
+      "license": "apache-2.0"
     },
     {
       "id": "gemma4-26b-a4b-q4k-m",
@@ -197,7 +221,8 @@
       "file": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
       "size_bytes": 16868236288,
       "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
-      "context": 4096
+      "context": 4096,
+      "license": "apache-2.0"
     }
   ],
   "reference": {

@@ -51,6 +51,27 @@ def validate_environment(environment):
             "configure required reviewers on the release environment before publishing; an unprotected/missing environment cannot approve a release")
 
 
+def validate_catalog(catalog, release_version):
+    for model in policy()["models"]:
+        entry = re.search(r'\.id = "' + re.escape(model["id"]) + r'",([\s\S]*?)(?=\n    \},)', catalog)
+        require(entry is not None, "release model is missing from the shipped catalog")
+        text = entry.group(1)
+        require('/resolve/' + model["revision"] + '/' + model["file"] + '?download=true' in text
+                and '.sha256 = "' + model["sha256"] + '"' in text, "shipped model pin differs from release policy")
+        if model["id"] == "qwen3-0.6b-q8-0" and "-" not in release_version.split("+")[0]:
+            require(".status = .supported" in text and not re.search(r"\.tested_profiles\s*=\s*&\.\{\s*\}", text),
+                    "stable release requires the starter model to be qualified and promoted in the catalog; first run a nightly/RC, review the evidence, then build a new final-version candidate")
+
+
+def verify_remote_assets(directory, tag):
+    directory = Path(directory)
+    files = {p.name for p in directory.iterdir()}
+    with tempfile.TemporaryDirectory(prefix="zinc-upload-audit-") as temporary:
+        gh(["release", "download", tag, "--repo", REPOSITORY, "--dir", temporary])
+        require({p.name for p in Path(temporary).iterdir()} == files, "uploaded asset inventory mismatch")
+        require(all(sha256(Path(temporary) / name) == sha256(directory / name) for name in files), "uploaded bytes differ; release is not modified")
+
+
 def verify_bundle(directory, run_id, run):
     directory = Path(directory)
     workflow_sha = validate_run(run, run_id)
@@ -90,7 +111,12 @@ def publish(directory, data, run_id):
     ref = api("git/ref/tags/" + tag, optional=True)
     existing = api("releases/tags/" + tag, optional=True)
     if existing:
-        require(existing.get("draft") is True and marker in existing.get("body", ""), "refusing to mutate an existing/published release")
+        require(marker in existing.get("body", ""), "refusing to mutate an existing/published release")
+        require(ref and ref.get("object", {}).get("type") == "commit" and ref["object"]["sha"] == data["commit"], "existing tag/source mismatch")
+        if existing.get("draft") is False:
+            verify_remote_assets(directory, tag)
+            print("This candidate is already published; all existing bytes match")
+            return
     if ref:
         require(ref.get("object", {}).get("type") == "commit" and ref["object"]["sha"] == data["commit"] and existing,
                 "tag already exists without this exact candidate draft; inspect it manually")
@@ -107,10 +133,7 @@ def publish(directory, data, run_id):
     for name in files:
         if name not in present:
             gh(["release", "upload", tag, str(directory / name), "--repo", REPOSITORY])
-    with tempfile.TemporaryDirectory(prefix="zinc-upload-audit-") as temporary:
-        gh(["release", "download", tag, "--repo", REPOSITORY, "--dir", temporary])
-        require({p.name for p in Path(temporary).iterdir()} == set(files), "uploaded asset inventory mismatch")
-        require(all(sha256(Path(temporary) / name) == sha256(directory / name) for name in files), "uploaded bytes differ; draft remains unpublished")
+    verify_remote_assets(directory, tag)
     # gh uses PATCH here and keeps the existing asset bytes.
     gh(["release", "edit", tag, "--repo", REPOSITORY, "--draft=false"])
     print("Published https://github.com/" + REPOSITORY + "/releases/tag/" + tag)
@@ -146,6 +169,8 @@ def main():
     if not directory.exists():
         gh(["run", "download", args.run, "--repo", REPOSITORY, "--name", "release-candidate", "--dir", str(directory)])
     data = verify_bundle(directory, args.run, run)
+    catalog = subprocess.check_output(["git", "show", data["commit"] + ":src/model/catalog.zig"], cwd=ROOT, text=True)
+    validate_catalog(catalog, data["version"])
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
             stream.write("version=" + data["version"] + "\ncommit=" + data["commit"] + "\n")

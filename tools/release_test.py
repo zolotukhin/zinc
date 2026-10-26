@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import release
 import release_gpu
+import release_lib
 import release_publish
 from release_lib import (
     ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
@@ -273,6 +274,7 @@ class ReleaseTest(unittest.TestCase):
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": artifact["sha256"], "binary_sha256": artifact["binary_sha256"], "models": models,
                       "hardware": {"gpu": "CPU fixture, no GPU was executed", "os": "fixture", "driver": "fixture"},
+                      "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": policy()["reference"]["commit"], "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup", "kernel_reference")}}
             write_json(reports / (profile["id"] + ".json"), report)
@@ -373,6 +375,49 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(api.call_count, 2)
             gh.assert_not_called()
 
+    def test_published_candidate_rerun_is_read_only_when_all_bytes_match(self):
+        directory, _ = self.candidate()
+        data = read_json(directory / "release-manifest.json")
+        marker = f"<!-- zinc-candidate-run: 123; manifest: {sha256(directory / 'release-manifest.json')} -->"
+        existing = {"draft": False, "body": marker}
+        def command(args):
+            self.assertEqual(args[:2], ["release", "download"])
+            destination = Path(args[args.index("--dir") + 1])
+            for path in directory.iterdir():
+                shutil.copyfile(path, destination / path.name)
+        with patch.object(release_publish, "api", side_effect=[{"object": {"type": "commit", "sha": COMMIT}}, existing]) as api, patch.object(release_publish, "gh", side_effect=command) as gh, contextlib.redirect_stdout(io.StringIO()):
+            release_publish.publish(directory, data, "123")
+            self.assertEqual(api.call_count, 2)
+            self.assertEqual(gh.call_count, 1)
+
+    def test_stable_catalog_requires_reviewed_starter_qualification(self):
+        catalog = (ROOT / "src/model/catalog.zig").read_text()
+        # Exercise both qualification states even after the real starter is
+        # promoted; this contract must not lock the current experimental state.
+        match = re.search(r'(\.id = "qwen3-0.6b-q8-0",[\s\S]*?)(?=\n    \},)', catalog)
+        entry = re.sub(r'\.status = \.[a-z]+', '.status = .experimental', match.group(1))
+        unqualified = catalog[:match.start()] + entry + catalog[match.end():]
+        release_publish.validate_catalog(unqualified, "0.1.0-rc.1")
+        with self.assertRaisesRegex(ValueError, "starter model to be qualified"):
+            release_publish.validate_catalog(unqualified, "0.1.0")
+        qualified = unqualified.replace(".status = .experimental", ".status = .supported", 1).replace(".tested_profiles = &.{}", '.tested_profiles = &.{"apple-silicon"}', 1)
+        release_publish.validate_catalog(qualified, "0.1.0")
+
+    def test_archive_decompression_limit_applies_before_tar_metadata_parsing(self):
+        tree = self.tree()
+        archive = self.bundle(tree)
+        with patch.object(release_lib, "MAX_UNPACKED_BYTES", 512):
+            with self.assertRaisesRegex(ValueError, "expands beyond"):
+                extract_archive(archive, self.root / "bounded", "9.8.7", NATIVE)
+        self.assertEqual(list((self.root / "bounded").iterdir()), [])
+
+    def test_extra_executable_is_rejected_even_with_a_matching_inventory(self):
+        tree = self.tree()
+        (tree / "bin/unexpected").write_text("extra executable")
+        self.refresh(tree)
+        with self.assertRaisesRegex(ValueError, "unexpected packaged file"):
+            check_metadata(tree, "9.8.7", NATIVE)
+
     def test_publisher_recomputes_reports_and_verifies_every_attested_file(self):
         directory, reports = self.candidate()
         self.aggregate(directory, reports)
@@ -401,6 +446,13 @@ class ReleaseTest(unittest.TestCase):
                              (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4")]:
             with self.subTest(family=family), self.assertRaises(ValueError):
                 release_gpu.gpu_evidence(text, family)
+
+    def test_api_uses_the_loaded_model_instead_of_switching_to_an_unloaded_catalog_entry(self):
+        self.assertEqual(release_gpu.active_model_id([{"id": "unloaded", "active": False}, {"id": "loaded", "active": True}]), "loaded")
+        self.assertEqual(release_gpu.active_model_id([{"id": "rocm-loaded.gguf"}]), "rocm-loaded.gguf")
+        for data in [[], [{"id": "unloaded", "active": False}], [{"id": "one"}, {"id": "two"}]]:
+            with self.assertRaises(ValueError):
+                release_gpu.active_model_id(data)
 
     def test_gpu_process_is_reaped_on_test_failure(self):
         with self.assertRaisesRegex(RuntimeError, "fixture failure"):

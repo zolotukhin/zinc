@@ -97,6 +97,11 @@ fn configureVulkanModule(
             module.linkSystemLibrary("vulkan-1", .{});
         },
         else => {
+            // An explicit glibc floor disables Zig's native library search.
+            // Release containers provide their own loader library directory.
+            if (b.graph.environ_map.get("ZINC_VULKAN_LIBRARY_PATH")) |library_path| {
+                module.addLibraryPath(.{ .cwd_relative = library_path });
+            }
             module.linkSystemLibrary("vulkan", .{});
         },
     }

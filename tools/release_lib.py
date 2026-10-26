@@ -1,11 +1,14 @@
 """Shared release policy and archive validation. Development/CI only; stdlib only."""
 
 import hashlib
+import contextlib
+import gzip
 import json
 import os
 import re
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -165,7 +168,24 @@ def check_metadata(tree, release_version, identifier, commit=None):
     actual_assets = {f for f in files if f.startswith("share/zinc/shaders/")}
     require(set(required) == actual_assets, "runtime asset inventory mismatch")
     require(bool(required) or t["backend"] == "rocm", "empty runtime shader set")
+    expected_files = {"bin/zinc", "bin/zinc-tokenize", "VERSION.json", "INSTALL-METADATA", "README.md", "LICENSE", "share/zinc/asset-manifest.json", *required}
+    require(set(files) == expected_files, "unexpected packaged file")
     return meta
+
+
+@contextlib.contextmanager
+def bounded_tar(archive):
+    # Bound the entire decompressed stream before tarfile parses PAX/long-name
+    # metadata, not only the declared sizes of ordinary file members.
+    with gzip.open(archive, "rb") as source, tempfile.TemporaryFile() as raw:
+        total = 0
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            total += len(block)
+            require(total <= MAX_UNPACKED_BYTES, "release archive expands beyond its limit")
+            raw.write(block)
+        raw.seek(0)
+        with tarfile.open(fileobj=raw, mode="r:") as bundle:
+            yield bundle
 
 
 def extract_archive(archive, destination, release_version, identifier, commit=None):
@@ -175,7 +195,7 @@ def extract_archive(archive, destination, release_version, identifier, commit=No
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     require(not any(destination.iterdir()), "archive destination must be empty")
-    with tarfile.open(archive, "r:gz") as bundle:
+    with bounded_tar(archive) as bundle:
         members = []
         total_bytes = 0
         seen = set()
@@ -185,8 +205,8 @@ def extract_archive(archive, destination, release_version, identifier, commit=No
             require(len(members) <= MAX_MEMBERS, "invalid archive member count")
             require(total_bytes <= MAX_UNPACKED_BYTES, "release archive expands beyond its limit")
             safe_member(member.name, root)
-            require(member.name not in seen, "duplicate archive member")
-            seen.add(member.name)
+            require(member.name.rstrip("/") not in seen, "duplicate archive member")
+            seen.add(member.name.rstrip("/"))
             require(member.isdir() or member.isreg(), "archive links/devices are forbidden")
             require(not member.mode & 0o7000, "special archive permissions are forbidden")
         require(members, "empty release archive")

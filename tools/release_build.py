@@ -68,6 +68,7 @@ if [ "$ZINC_RELEASE_BACKEND" = rocm ]; then
   export LD_LIBRARY_PATH=/opt/rocm/lib
 else
   apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends libvulkan-dev
+  export ZINC_VULKAN_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
   # Keep the old loader/glibc ABI while compiling the extension declarations
   # needed by current shaders. These headers add no runtime dependency.
   curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 "$ZINC_VULKAN_HEADERS_URL" -o /tmp/vulkan-headers.tar.gz

@@ -15,7 +15,11 @@ from release_lib import extract_archive, read_json, require, sha256, version, so
 
 
 def run(command, timeout=120):
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # TimeoutExpired includes argv, which can contain keychain/API secrets.
+        raise ValueError("signing command timed out: " + Path(command[0]).name) from None
     require(result.returncode == 0, "signing command failed: " + Path(command[0]).name)
     return result.stdout
 
