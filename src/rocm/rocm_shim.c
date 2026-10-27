@@ -245,6 +245,7 @@ CudaBuf* cuda_alias_buffer(CudaBuf* base, size_t offset, size_t size) {
     }
     buf->dptr = (void*)((unsigned char*)base->dptr + offset);
     buf->size = size;
+    // calloc left owns and owns_host at zero: only the view wrapper is owned.
     return buf;
 }
 
@@ -284,6 +285,7 @@ void cuda_free_host(void* ptr) {
 
 void cuda_free_buffer(CudaBuf* buf) {
     if (!buf) return;
+    // Alias handles leave the production allocation alive when released.
     if (buf->owns && buf->dptr) hipFree(buf->dptr);
     if (buf->owns_host && buf->host) hipHostFree(buf->host);
     free(buf);

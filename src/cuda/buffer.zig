@@ -74,6 +74,8 @@ pub fn uploadMmap(ctx: ?*shim.CudaCtx, host_ptr: *const anyopaque, size: usize) 
 pub fn aliasBuffer(base: *const CudaBuffer, offset: usize, size: usize) !CudaBuffer {
     const handle = shim.cuda_alias_buffer(base.handle, offset, size);
     if (handle == null) return error.CudaBufferAllocFailed;
+    // CUDA and ROCm set the C handle's owns flag to zero. The Zig flag mirrors
+    // that ownership; releasing this handle never releases base's allocation.
     return .{ .handle = handle, .size = size, .owns_handle = false };
 }
 
@@ -81,6 +83,8 @@ pub fn aliasBuffer(base: *const CudaBuffer, offset: usize, size: usize) !CudaBuf
 /// owns it — aliases just free the wrapper). Safe with a null handle.
 pub fn freeBuffer(buf: *CudaBuffer) void {
     if (buf.handle) |h| {
+        // The backend checks CudaBuf.owns, then always destroys the wrapper.
+        // Non-owning views must still be passed here to avoid metadata leaks.
         shim.cuda_free_buffer(h);
         buf.handle = null;
     }

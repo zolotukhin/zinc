@@ -169,6 +169,16 @@ the actual dense projection/FFN dimensions, and rolls back partial slot and
 batch allocations. A larger 8K request exposed a second bug: failed batched
 prefill freed temporary KV views twice. Those views now have one cleanup path.
 
+Both accelerator shims mark alias handles as non-owning: `freeBuffer` releases
+their metadata while retaining the original device allocation. A direct R9700
+regression allocated and freed single-slot views three times; after every free,
+the original cache still produced the identical four-token decode. Run this
+check on a dedicated ROCm GPU worker with a Gemma GGUF:
+
+```bash
+./scripts/zig.sh build rocm-dbg -Dbackend=rocm -Doptimize=ReleaseFast -- kv-lifetime <model.gguf>
+```
+
 On the R9700, cold single-slot 4K startup fell from about 31.6 GiB to 24.7 GiB.
 The original binary still returned HTTP 500 in the controlled replay; the fixed
 binary generated `OK`. At 4K, ten Unicode, scratch-growth, overflow/recovery and

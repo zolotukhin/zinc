@@ -889,6 +889,21 @@ pub fn build(b: *std.Build) void {
         cuda_dbg_step.dependOn(&run_cuda_dbg.step);
     }
 
+    if (selected_backend == .rocm) {
+        const rocm_dbg_mod = createModule(b, .{
+            .root_source_file = b.path("src/dbg_cuda.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        rocm_dbg_mod.addOptions("build_options", build_options);
+        configureRocmModule(b, target, rocm_dbg_mod);
+        const rocm_dbg_exe = addExecutable(b, .{ .name = "rocm-dbg", .root_module = rocm_dbg_mod });
+        const run_rocm_dbg = b.addRunArtifact(rocm_dbg_exe);
+        run_rocm_dbg.addPassthruArgs();
+        b.step("rocm-dbg", "Build and run ROCm diagnostics on a dedicated GPU").dependOn(&run_rocm_dbg.step);
+    }
+
     // --- Documentation ---
     const docs_step = b.step("docs", "Generate Zig documentation");
     const docs_install = b.addInstallDirectory(.{

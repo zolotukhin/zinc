@@ -1010,7 +1010,7 @@
     "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0"
   },
   "gemma_memory_followup": {
-    "updated_utc": "2026-10-27T06:19:08.520218+00:00",
+    "updated_utc": "2026-10-27T06:41:52.222573+00:00",
     "required_policy_unchanged": true,
     "allocation_fix_commit": "393f7ea96f68697f7c2056cca3d4002ec0f5013f",
     "prefill_cleanup_fix_commit": "ae7fea1f11af7d24725ae56a8f208a81f29e8d0b",
@@ -1347,6 +1347,30 @@
       {"name": "overflow-and-recovery-2", "passed": true, "vram_used": 34150825984},
       {"name": "queued-or-concurrent-isolation", "passed": true}
     ],
-    "release_status": "Required ROCm Gemma 31B 4K single-slot allocation failure resolved; other model/hardware and signing gates remain"
+    "release_status": "Required ROCm Gemma 31B 4K single-slot allocation failure resolved; other model/hardware and signing gates remain",
+    "single_slot_lifetime_regression": {
+      "model": "gemma4-31b-q4k-m",
+      "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "context": 64,
+      "cycles": 3,
+      "tokens_per_decode": 4,
+      "exit_code": 0,
+      "passed": true,
+      "test_source_sha256": "f198661bdaa008cf57a3581b3e404387194c55f7be4a9831e050a3f10af8b3b8",
+      "build_source_sha256": "241270ede76c0cb69da2c2167da3ddba90e58141ad8b550a739afb025a8c0bba",
+      "cleanup": true
+    },
+    "lifetime_test_initial_setup": {
+      "model": "gemma4-31b-q4k-m",
+      "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "context": 64,
+      "cycles": 3,
+      "tokens_per_decode": 4,
+      "exit_code": 1,
+      "passed": false,
+      "test_source_sha256": "f198661bdaa008cf57a3581b3e404387194c55f7be4a9831e050a3f10af8b3b8",
+      "cleanup": true,
+      "setup_failure_note": "The first diagnostic target omitted its build_options module; no GPU execution occurred in that setup attempt"
+    }
   }
 }
