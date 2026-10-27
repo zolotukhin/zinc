@@ -4229,31 +4229,12 @@ pub const ForwardGemma = struct {
     /// is async too (down scale folded GPU-side, no host id readback); the per-slot
     /// MoE fallback keeps explicit commitAndWait around its readback. Falls back to
     /// sync if the ring fills.
-    /// A long MoE prompt expands to T * experts_used activation rows. That can
-    /// exceed the 65535-block Y limit even while T fits the advertised context.
-    /// Each row is independent: alias disjoint input/output ranges so the same
-    /// quantizer runs unchanged, with row zero relative to each range.
+    /// MoE expands T prompt tokens into T * experts_used rows. Fold the row
+    /// grid into Z above the Y limit, preserving the quantizer's original full-T
+    /// MMQ layout [K/128][T][144] and every consumer's addressing.
     fn quantizeRoutedRows(self: *ForwardGemma, cmd: *command.CudaCommand, input: *const CudaBuffer, output: *const CudaBuffer, K: u32, rows: u32) !void {
-        const max_rows: u32 = 65535;
-        if (rows <= max_rows) {
-            const push = QuantActPush{ .K = K, .T = rows };
-            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), rows, 1 }, .{ 256, 1, 1 }, &.{ input, output }, &push, @sizeOf(QuantActPush), 0);
-            return;
-        }
-        std.debug.assert(K % 32 == 0);
-        const input_stride = @as(usize, K) * @sizeOf(f32);
-        const output_stride = @as(usize, K / 32) * 34; // Q8_0: f16 scale + 32 i8
-        var start: u32 = 0;
-        while (start < rows) {
-            const count = @min(max_rows, rows - start);
-            var input_view = try buffer.aliasBuffer(input, @as(usize, start) * input_stride, @as(usize, count) * input_stride);
-            defer buffer.freeBuffer(&input_view);
-            var output_view = try buffer.aliasBuffer(output, @as(usize, start) * output_stride, @as(usize, count) * output_stride);
-            defer buffer.freeBuffer(&output_view);
-            const push = QuantActPush{ .K = K, .T = count };
-            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), count, 1 }, .{ 256, 1, 1 }, &.{ &input_view, &output_view }, &push, @sizeOf(QuantActPush), 0);
-            start += count;
-        }
+        const push = QuantActPush{ .K = K, .T = rows };
+        cmd.dispatch(&self.pipes.quantize_act_q8, quantizeActivationGrid(K, rows), .{ 256, 1, 1 }, &.{ input, output }, &push, @sizeOf(QuantActPush), 0);
     }
 
     fn submit(self: *ForwardGemma, cmd: command.CudaCommand) void {
@@ -4307,6 +4288,14 @@ pub const ForwardGemma = struct {
         self.n_pending = 0;
     }
 };
+
+/// Shared with the dedicated GPU packing regression. Keep the full row stride
+/// in QuantActPush; the kernel folds only its launch coordinates, not its data.
+pub fn quantizeActivationGrid(K: u32, rows: u32) [3]u32 {
+    std.debug.assert(K > 0 and rows > 0);
+    const planes = ceilDiv(rows, 65535);
+    return .{ ceilDiv(K, 256), ceilDiv(rows, planes), planes };
+}
 
 fn ceilDiv(a: u32, b: u32) u32 {
     return (a + b - 1) / b;

@@ -421,7 +421,9 @@ pub fn main(process_init: std.process.Init) !void {
     _ = args.next();
     const first = args.next() orelse "100";
 
-    if (std.mem.eql(u8, first, "kv-lifetime")) {
+    if (std.mem.eql(u8, first, "quantize-rows")) {
+        try quantizeRowsMode(allocator);
+    } else if (std.mem.eql(u8, first, "kv-lifetime")) {
         const model_path = args.next() orelse return error.ModelPathRequired;
         try kvLifetimeMode(allocator, model_path);
     } else if (std.mem.eql(u8, first, "gen")) {
@@ -494,6 +496,76 @@ pub fn main(process_init: std.process.Init) !void {
         const model_path = args.next() orelse DEFAULT_MODEL;
         try dumpMode(allocator, token, model_path);
     }
+}
+
+/// Bit-exact CPU oracle for the ROCm MMQ packer, including the Y-grid
+/// boundary, non-128-aligned K, padded groups and device-buffer guard bytes.
+fn quantizeRowsMode(allocator: std.mem.Allocator) !void {
+    if (!std.mem.eql(u8, @import("build_options").backend, "rocm")) return error.RequiresRocm;
+    var dev = try device.CudaDevice.initBest(allocator);
+    defer dev.deinit();
+    const src = try allocator.dupeSentinel(u8, @embedFile("shaders/cuda/kernels.cu"), 0);
+    defer allocator.free(src);
+    var pipe = try pipeline.createPipeline(dev.ctx, src.ptr, "quantize_act_q8_0");
+    defer pipeline.freePipeline(&pipe);
+    const cases = [_]struct { K: u32, rows: u32 }{
+        .{ .K = 256, .rows = 1 },     .{ .K = 704, .rows = 65535 },
+        .{ .K = 704, .rows = 65536 }, .{ .K = 704, .rows = 73856 },
+    };
+    for (cases) |case| {
+        const K: usize = case.K;
+        const rows: usize = case.rows;
+        const padded_groups = ((K + 255) / 256) * 8;
+        const guard: usize = 256;
+        const bytes = (padded_groups / 4) * rows * 144;
+        const input = try allocator.alloc(f32, rows * K);
+        defer allocator.free(input);
+        const expected = try allocator.alloc(u8, bytes + 2 * guard);
+        defer allocator.free(expected);
+        @memset(expected, 0xa5);
+        for (0..rows) |row| {
+            for (0..padded_groups) |group| {
+                const base = guard + ((group / 4) * rows + row) * 144;
+                var sum: f32 = 0;
+                for (0..32) |lane| {
+                    const k = group * 32 + lane;
+                    const value: i8 = if (k >= K) 0 else if (lane == 0) 127 else if (lane == 1) -127 else @intCast(@as(i32, @intCast((row * 31 + group * 17 + lane * 7) % 255)) - 127);
+                    if (k < K) input[row * K + k] = @floatFromInt(value);
+                    sum += @floatFromInt(value);
+                    expected[base + 16 + (group % 4) * 32 + lane] = @bitCast(value);
+                }
+                if (group * 32 < K) {
+                    const offset = base + (group % 4) * 4;
+                    std.mem.writeInt(u16, expected[offset..][0..2], @bitCast(@as(f16, 1)), .little);
+                    std.mem.writeInt(u16, expected[offset + 2 ..][0..2], @bitCast(@as(f16, @floatCast(sum))), .little);
+                }
+            }
+        }
+        var input_buf = try buffer.createBuffer(dev.ctx, input.len * @sizeOf(f32));
+        defer buffer.freeBuffer(&input_buf);
+        var storage = try buffer.createBuffer(dev.ctx, expected.len);
+        defer buffer.freeBuffer(&storage);
+        var output = try buffer.aliasBuffer(&storage, guard, bytes);
+        defer buffer.freeBuffer(&output);
+        const actual = try allocator.alloc(u8, expected.len);
+        defer allocator.free(actual);
+        @memset(actual, 0xa5);
+        buffer.upload(dev.ctx, &input_buf, std.mem.sliceAsBytes(input));
+        buffer.upload(dev.ctx, &storage, actual);
+        var cmd = try command.beginCommand(dev.ctx);
+        const push = extern struct { K: u32, T: u32 }{ .K = case.K, .T = case.rows };
+        cmd.dispatch(&pipe, forwardgemma.quantizeActivationGrid(case.K, case.rows), .{ 256, 1, 1 }, &.{ &input_buf, &output }, &push, @sizeOf(@TypeOf(push)), 0);
+        cmd.commitAndWait();
+        if (@import("cuda/c.zig").shim.cuda_execution_failed(dev.ctx) != 0) return error.GpuExecutionFailed;
+        buffer.download(dev.ctx, &storage, actual);
+        if (!std.mem.eql(u8, expected, actual)) {
+            const index = std.mem.indexOfDiff(u8, expected, actual).?;
+            std.debug.print("QUANTIZE_ROWS_GATE mismatch K={d} rows={d} byte={d}: expected={x} actual={x}\n", .{ K, rows, index, expected[index], actual[index] });
+            return error.QuantizedRowsMismatch;
+        }
+        std.debug.print("QUANTIZE_ROWS_GATE case PASS K={d} rows={d} bytes={d}\n", .{ K, rows, bytes });
+    }
+    std.debug.print("QUANTIZE_ROWS_GATE: PASS (4 cases, CPU reference and guards)\n", .{});
 }
 
 fn kvLifetimeDecode(fwd: *forwardgemma.ForwardGemma) ![4]u32 {
