@@ -16,6 +16,10 @@ Enabling slot batching alone still forces the block scan. The development
 controls reproduce the mismatch with either serial prefill or the block scan;
 batched prefill with the CLI's warp scan matches all three full continuations.
 
+`ZINC_BATCHED_PREFILL=0` and `ZINC_SSM_WARP=0` remain diagnostic opt-outs.
+Each reproduces this short-MoE mismatch in the controls; the passing results
+below cover default serving with those opt-outs unset.
+
 One shared predicate now selects both short slot batching and the SSM scan.
 It applies only to ROCm MoE with one slot, F32 KV and the B1 decoder enabled,
 for 2–31 prompt tokens. Long inputs retain their previous path. The shared
