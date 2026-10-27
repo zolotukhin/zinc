@@ -1,6 +1,6 @@
 # OpenCode coding harness
 
-Use OpenCode with a Qwen model served by ZINC. The
+Use OpenCode with a model served by ZINC. The
 [setup script](https://github.com/zolotukhin/zinc/blob/main/tools/setup_opencode.mjs)
 creates a project configuration, checks the API, and runs tasks headlessly.
 It requires **Bun 1.4.4 or newer**. This workflow is tested with
@@ -24,6 +24,12 @@ The model must fit your GPU. Qwen 3.5 9B is a smaller starting point; Qwen 3.8
 ROCm, follow the [backend setup](ROCM.md) and select your own device using
 `ROCR_VISIBLE_DEVICES`. An existing GGUF can be supplied with
 `-m /path/to/model.gguf` instead of a managed ID.
+
+Current development builds also support Gemma 4's native tool protocol. On the
+32 GB RDNA4 reference board, Gemma 26B at 16K passes the API checks and three
+core coding tasks. See the [source-specific results and limits](OPENCODE_RELEASE_VALIDATION.md#gemma-native-tool-follow-up-2026-10-27)
+before choosing a Gemma/backend combination. These development checks do not
+certify a published binary release.
 
 Use a server build with tool-call support. The setup check reports missing
 support before you start a coding task. ZINC generates tool calls; OpenCode
