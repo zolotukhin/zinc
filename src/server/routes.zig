@@ -3364,9 +3364,7 @@ fn handleChatCompletions(
         }
         {
             var chunk_buf: [1024]u8 = undefined;
-            const chunk = std.fmt.bufPrint(&chunk_buf,
-                \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{}},"finish_reason":"{s}"}}]}}
-            , .{ req_id, ts, model_name, @tagName(finish_reason) }) catch "";
+            const chunk = try formatStreamingFinishChunk(&chunk_buf, req_id, ts, model_name, finish_reason, prompt_tokens.len, generated);
             conn.writeSseEvent(chunk) catch return;
         }
 
@@ -4003,6 +4001,38 @@ test "chat JSON escaping preserves all control bytes and Unicode" {
     const parsed = try std.json.parseFromSlice([]const u8, a, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(input, parsed.value);
+}
+
+fn formatStreamingFinishChunk(
+    buf: []u8,
+    req_id: []const u8,
+    ts: i64,
+    model_name: []const u8,
+    finish_reason: FinishReason,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+) ![]const u8 {
+    return std.fmt.bufPrint(buf,
+        \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{}},"finish_reason":"{s}"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
+    , .{ req_id, ts, model_name, @tagName(finish_reason), prompt_tokens, completion_tokens, prompt_tokens + completion_tokens });
+}
+
+test "streaming finish reports usage for every terminal reason including an exhausted context" {
+    var buf: [1024]u8 = undefined;
+    for ([_]FinishReason{ .stop, .length, .tool_calls }) |reason| {
+        for ([_]usize{ 0, 1, 2048 }) |generated| {
+            const chunk = try formatStreamingFinishChunk(&buf, "chatcmpl-test", 123, "model", reason, 16000, generated);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, chunk, .{});
+            defer parsed.deinit();
+            const usage = parsed.value.object.get("usage").?.object;
+            try std.testing.expectEqual(@as(i64, 16000), usage.get("prompt_tokens").?.integer);
+            try std.testing.expectEqual(@as(i64, @intCast(generated)), usage.get("completion_tokens").?.integer);
+            try std.testing.expectEqual(@as(i64, @intCast(16000 + generated)), usage.get("total_tokens").?.integer);
+            const choice = parsed.value.object.get("choices").?.array.items[0].object;
+            try std.testing.expectEqualStrings(@tagName(reason), choice.get("finish_reason").?.string);
+            try std.testing.expectEqual(@as(usize, 0), choice.get("delta").?.object.count());
+        }
+    }
 }
 
 pub fn streamText(

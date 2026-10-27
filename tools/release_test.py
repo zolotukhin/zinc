@@ -455,9 +455,15 @@ class ReleaseTest(unittest.TestCase):
     def test_gpu_family_assertions_reject_software_and_wrong_devices(self):
         good = "Selected GPU: #0 AMD Radeon AI PRO R9700 (RADV GFX1201)\nGPU tuning: amd_rdna4 | 32768 MB VRAM\nVerdict: READY [OK]\n"
         self.assertIn("R9700", release_gpu.gpu_evidence(good, "rdna4"))
+        rocm = "  Device: AMD Radeon AI PRO R9700 [gfx1201] [OK]\n  Compute target: gfx1201 [OK]\nVerdict: READY [OK]\n"
+        self.assertEqual(release_gpu.gpu_evidence(rocm, "gfx1201"), "AMD Radeon AI PRO R9700")
+        self.assertEqual(release_gpu.gpu_evidence(rocm.replace(" [gfx1201]", ""), "gfx1201"), "AMD Radeon AI PRO R9700")
         self.assertEqual(release_gpu.gpu_evidence("GPU family: apple7 [OK]\nVerdict: READY [OK]", "apple7"), "apple7")
         for text, family in [(good, "rdna3"), (good.replace("R9700", "llvmpipe"), "rdna4"),
-                             (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4")]:
+                             (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4"),
+                             (rocm.replace("[gfx1201]", "[gfx1100]"), "gfx1201"),
+                             (rocm.replace("R9700", "llvmpipe"), "gfx1201"),
+                             (rocm.replace("R9700", "<private-host>"), "gfx1201")]:
             with self.subTest(family=family), self.assertRaises(ValueError):
                 release_gpu.gpu_evidence(text, family)
 

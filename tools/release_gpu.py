@@ -104,6 +104,8 @@ def gpu_evidence(text, family):
         match = re.search(r"^\s*Selected GPU:\s*#\d+\s+(.*?)(?:\s+\(auto\))?\s*$", clean, re.M)
     require(match is not None, "missing selected GPU identity")
     name = match.group(1)
+    if family == "gfx1201":
+        name = re.sub(r"\s+\[gfx1201\]$", "", name)
     require(re.fullmatch(r"[A-Za-z0-9 ()_.,+/-]{1,200}", name) and re.search(r"AMD|Radeon|Intel", name, re.I), "unrecognized public GPU name")
     return name
 

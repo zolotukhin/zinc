@@ -97,8 +97,9 @@ export async function validateApi({
     try {
       await fn();
       checks.push({ name, pass: true, ms: Math.round(performance.now() - started) });
-    } catch {
+    } catch (error) {
       checks.push({ name, pass: false, ms: Math.round(performance.now() - started) });
+      process.stderr.write(`${name}: ${String(error?.message ?? error).slice(0, 1000)}\n`);
     }
     process.stderr.write(`${checks.at(-1).pass ? 'PASS' : 'FAIL'} ${name}\n`);
   };
