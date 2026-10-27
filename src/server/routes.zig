@@ -2764,6 +2764,7 @@ fn handleChatCompletions(
     }
 
     var generation_guard = GenerationGuard.acquire(server_state);
+    // Every streaming early return and propagated error releases this slot.
     defer generation_guard.release();
     if (!try ensureRequestedModelActive(conn, manager, server_state, parsed.parsed.value.model)) return;
     const resources = manager.currentResources() orelse {
@@ -3278,7 +3279,7 @@ fn handleChatCompletions(
                         if (tools_active) {
                             const visible = completeUtf8Prefix(if (thinking_enabled) gen_text_buf[0..gen_text_len] else toolStreamText(gen_text_buf[0..gen_text_len]));
                             if (visible.len > sent_visible_len) {
-                                try streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true);
+                                streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
                                 sent_visible_len = visible.len;
                             }
                         } else if (is_atem) {
@@ -3322,7 +3323,7 @@ fn handleChatCompletions(
                         const visible = if (thinking_enabled) gen_text_buf[0..gen_text_len] else toolStreamText(gen_text_buf[0..gen_text_len]);
                         const safe_visible = lastCompleteUtf8End(visible);
                         if (safe_visible > sent_visible_len) {
-                            try streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true);
+                            streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
                             sent_visible_len = safe_visible;
                         }
                         sent_text_len = gen_text_len;
@@ -3345,7 +3346,7 @@ fn handleChatCompletions(
                         }
                         sent_text_len += safe_end_rel;
                     } else {
-                        const visible = try stripThinkingForDisabledStream(gen_text_buf[0..gen_text_len], &visible_buf);
+                        const visible = stripThinkingForDisabledStream(gen_text_buf[0..gen_text_len], &visible_buf) catch return;
                         const safe_visible = lastCompleteUtf8End(visible);
                         if (safe_visible > sent_visible_len) {
                             streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
@@ -3378,7 +3379,7 @@ fn handleChatCompletions(
                 if (tools_active) {
                     const visible = completeUtf8Prefix(if (thinking_enabled) gen_text_buf[0..gen_text_len] else toolStreamText(gen_text_buf[0..gen_text_len]));
                     if (visible.len > sent_visible_len and forced_tool_name == null) {
-                        try streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true);
+                        streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
                         sent_visible_len = visible.len;
                     }
                 } else if (is_atem) {
@@ -3431,7 +3432,7 @@ fn handleChatCompletions(
         }
         {
             var chunk_buf: [1024]u8 = undefined;
-            const chunk = try formatStreamingFinishChunk(&chunk_buf, req_id, ts, model_name, finish_reason, prompt_tokens.len, generated);
+            const chunk = formatStreamingFinishChunk(&chunk_buf, req_id, ts, model_name, finish_reason, prompt_tokens.len, generated) catch return;
             conn.writeSseEvent(chunk) catch return;
         }
 

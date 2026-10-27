@@ -2421,6 +2421,9 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         if (stream_response and tools_active and !write_failed and now_ns - last_tool_keepalive_ns >= std.time.ns_per_s) {
             conn.writeSseComment("keepalive") catch {
                 write_failed = true;
+                // The worker borrows chan/prompt_tokens until finished: cancel
+                // immediately, then keep draining rather than returning early.
+                ctx.engine.cancel(id);
             };
             last_tool_keepalive_ns = now_ns;
         }
