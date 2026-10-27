@@ -1010,7 +1010,7 @@
     "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0"
   },
   "gemma_memory_followup": {
-    "updated_utc": "2026-10-27T06:41:52.222573+00:00",
+    "updated_utc": "2026-10-27T06:47:05.298167+00:00",
     "required_policy_unchanged": true,
     "allocation_fix_commit": "393f7ea96f68697f7c2056cca3d4002ec0f5013f",
     "prefill_cleanup_fix_commit": "ae7fea1f11af7d24725ae56a8f208a81f29e8d0b",
@@ -1356,7 +1356,7 @@
       "tokens_per_decode": 4,
       "exit_code": 0,
       "passed": true,
-      "test_source_sha256": "f198661bdaa008cf57a3581b3e404387194c55f7be4a9831e050a3f10af8b3b8",
+      "test_source_sha256": "4852718ee0f51933479f91c3aecfd0954fa0efce6435ecddf05e80c6486abd43",
       "build_source_sha256": "241270ede76c0cb69da2c2167da3ddba90e58141ad8b550a739afb025a8c0bba",
       "cleanup": true
     },
