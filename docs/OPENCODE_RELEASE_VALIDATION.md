@@ -274,6 +274,10 @@ rate-limiter task makes no tool calls and passes 0/3 tests. It reaches the
 2,048-token output cap repeatedly without completing a call. This remains an
 unsuccessful coding result; the API pass does not qualify OpenCode use.
 
+Tool strings containing the literal Gemma quote delimiter (`<|"|>`) currently
+return HTTP 400. Source files containing that marker need separate transport
+work.
+
 These are development-source results on one RDNA4 board. They do not qualify
 Gemma on Metal, or certify final release archives.
 
