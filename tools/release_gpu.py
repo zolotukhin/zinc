@@ -190,9 +190,20 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
         require(text and wanted, "missing reference/CLI output")
         a, b = text.group(1).replace(" ", ""), wanted[0].replace(" ", "")
         require(a and b and (a.startswith(b) or b.startswith(a)), "continuation reference parity failed")
+    return samples
 
 
-def api_checks(tree, model, context, device, work, env, browser_chat):
+def reference_http_parity(port, body, samples):
+    # CLI logs show only the first line. Compare the complete HTTP continuation
+    # too, so an early stop or a shared first word cannot pass the reference gate.
+    for prompt, expected in samples:
+        actual = json_request(port, "/v1/completions", {**body, "prompt": prompt, "max_tokens": 16, "stream": False})
+        choices = actual.get("choices", [])
+        require(choices and choices[0].get("text") and choices[0]["text"] == expected.get("content"),
+                "full HTTP reference continuation differed")
+
+
+def api_checks(tree, model, context, device, work, env, browser_chat, reference_samples):
     port = free_port()
     command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--port", str(port), "-c", str(context), "--parallel", "1"]
     with process(command, work / "server.log", work, env) as child:
@@ -207,6 +218,7 @@ def api_checks(tree, model, context, device, work, env, browser_chat):
         two = json_request(port, "/v1/completions", body)
         require(one.get("choices") and one["choices"][0].get("text") and one["choices"][0]["text"] == two["choices"][0]["text"], "raw completion is empty/non-deterministic")
         require(one.get("usage", {}).get("completion_tokens", 0) > 0, "completion usage is missing")
+        reference_http_parity(port, body, reference_samples)
         chat = {"model": model_id, "messages": [{"role": "user", "content": "List three uses of copper."}], "max_tokens": 32, "temperature": 0, "stream": True, "enable_thinking": False}
         with request(port, "/v1/chat/completions", chat) as response:
             lines = response.read().decode().splitlines()
@@ -327,10 +339,10 @@ def main():
                     require(model == Path.home() / "Library/Caches/zinc/models/models" / identifier / "model.gguf", "Metal workers must use the managed model cache")
                 tokenizer_parity(tree, reference, model, work, env)
                 print(identifier + ": tokenizer matched; checking reference continuations", flush=True)
-                inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
+                samples = inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
                 print(identifier + ": continuations matched; checking HTTP, cancellation and context", flush=True)
                 browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]
-                api_checks(tree, model, expected["context"], device, work, env, browser_chat)
+                api_checks(tree, model, expected["context"], device, work, env, browser_chat, samples)
                 models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True})
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],

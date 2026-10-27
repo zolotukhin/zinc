@@ -468,6 +468,18 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release_gpu.active_model_id(data)
 
+    def test_http_reference_gate_rejects_early_stops_and_uses_the_exact_reference_prompt(self):
+        samples = [("<rendered reference prompt>", {"content": "The complete reference continuation.\nSecond line."})]
+        body = {"model": "loaded", "prompt": "unrelated", "temperature": 0}
+        with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "The complete reference"}]}) as request:
+            with self.assertRaisesRegex(ValueError, "full HTTP reference"):
+                release_gpu.reference_http_parity(1, body, samples)
+            self.assertEqual(request.call_args.args[2]["prompt"], samples[0][0])
+            self.assertEqual(request.call_args.args[2]["model"], "loaded")
+            self.assertFalse(request.call_args.args[2]["stream"])
+        with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": samples[0][1]["content"]}]}):
+            release_gpu.reference_http_parity(1, body, samples)
+
     def test_backend_device_indices_can_differ_but_the_physical_reservation_cannot(self):
         base = {"device": 1, "lock_directory": "<shared-reservation>", "models": {"one": "<model>"},
                 "profiles": {"rocm-rdna4": {"device": 0, "reference_bin": "<HIP-reference>"}}}
