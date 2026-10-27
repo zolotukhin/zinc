@@ -35,6 +35,7 @@ const tokenizer_mod = @import("model/tokenizer.zig");
 const graph_mod = @import("compute/graph.zig");
 const memory_plan = @import("gpu/memory_plan.zig");
 const kv_dtype = @import("compute/kv_dtype.zig");
+const prefill_policy = @import("compute/prefill_policy.zig");
 const process_lock_mod = @import("gpu/process_lock.zig");
 const server_runtime = @import("server/runtime.zig");
 // These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
@@ -155,6 +156,7 @@ comptime {
     _ = @import("build_info.zig");
     _ = @import("runtime_assets.zig");
     _ = @import("regression_tests.zig");
+    _ = prefill_policy;
     _ = @import("server/http.zig");
     _ = @import("server/runtime.zig");
     _ = @import("scheduler/request.zig");
@@ -1868,11 +1870,8 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
 }
 
-/// Effort 25: batched-GEMM prefill is the DEFAULT for the gemma forwards
-/// (ForwardGemma exposes `prefillBatched`; the call site gates it at comptime so
-/// the qwen forward — which has none — stays per-token regardless). Returns true
-/// unless ZINC_BATCHED_PREFILL is explicitly set to an off value (0/off/false/no),
-/// the opt-OUT back to the per-token prefill loop for debugging. Unset → on.
+/// Batched prefill is enabled unless explicitly disabled (0/off/false/no).
+/// Shape/model routing is handled separately by prefill_policy.
 fn batchedPrefillDefaultOn() bool {
     const v = host_io.getenv("ZINC_BATCHED_PREFILL") orelse return true;
     return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
@@ -1937,15 +1936,16 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
     var pos: u32 = 0;
     var next_tok: u32 = 0;
     var prefill_timer = try host_io.Timer.start();
-    // Effort 25: batched-GEMM prefill is now the DEFAULT for gemma — it runs the
-    // whole prompt through the batched path (gemma dense + MoE attention/FFN; the
-    // method handles MoE internally) and is output-identical to the per-token
-    // loop but ~4.6–4.7× faster. ZINC_BATCHED_PREFILL=0/off opts back out to the
-    // per-token loop. Gated at comptime so the qwen forward (no prefillBatched)
-    // stays per-token and still compiles.
+    // Keep short dense ROCm Qwen prompts on serial arithmetic; long inputs,
+    // MoE, and prepared MTP retain batching. See the shared policy's regression.
     var used_batched = false;
     if (comptime @hasDecl(@TypeOf(fwd.*), "prefillBatched")) {
-        if (batchedPrefillDefaultOn() and prompt_tokens.len > 1) {
+        if (prefill_policy.useBatched(prompt_tokens.len, .{
+            .rocm = gpu.is_rocm,
+            .hybrid_dense = model.config.architecture == .qwen35 and model.config.n_experts == 0,
+            .mtp_prepared = mtp_prepared,
+            .enabled = batchedPrefillDefaultOn(),
+        })) {
             // Default-on path: degrade gracefully to the per-token loop if the
             // batched path fails (e.g. a large-prompt scratch allocation on a
             // memory-tight box) instead of aborting the whole run. The happy

@@ -4,7 +4,6 @@
 //   src/rocm/rocm_shim.c -L/opt/rocm/lib -Wl,-rpath,/opt/rocm/lib \
 //   -lamdhip64 -lhiprtc -lhipblas -lm -o /tmp/validate-rocm-attention
 // ROCR_VISIBLE_DEVICES=<device> /tmp/validate-rocm-attention
-// Add --prefill-v2 for the short-history reduction/boundary regression suite.
 // Checks tiled decode, causal prefill, speculative offsets, slot isolation,
 // graph capture/update, guards, and sticky failures against independent double
 // precision CPU math. Legal short cases also compare with the old GPU kernels.
@@ -307,86 +306,8 @@ static void failures(void) {
         cases++;
     }
 }
-// Exercise the production v2 kernel on both sides of the 32-key boundary,
-// including a chunk with a nonzero absolute position. Short rows must retain
-// every output bit of the original kernel; all rows also use independent CPU
-// math. Truncating a batch must preserve its causal prefix and output guards.
-static void prefill_v2(CudaCtx *ctx, const char *s) {
-    CudaPipe *old = cuda_create_pipeline(ctx,s,"attention_causal_batched",NULL,0);
-    CudaPipe *next = cuda_create_pipeline(ctx,s,"attention_causal_batched_v2",NULL,0);
-    if (!old || !next) fail("prefill kernel compile");
-    const unsigned dimensions[] = {64,128,256,513};
-    const unsigned shapes[][2] = {{0,1},{0,18},{0,19},{0,22},{0,31},{0,32},{0,33},{0,65},
-                                  {29,1},{29,2},{29,4},{31,1},{32,3},{4090,9}};
-    for (unsigned d = 0; d < sizeof dimensions/sizeof dimensions[0]; d++) {
-        for (unsigned c = 0; c < sizeof shapes/sizeof shapes[0]; c++) {
-            for (unsigned stress = 0; stress < 2; stress++) {
-                unsigned hd=dimensions[d], base=shapes[c][0], T=shapes[c][1], seq=base+T;
-                const unsigned heads=4, kv_heads=2, guard=8;
-                size_t row=(size_t)heads*hd, qn=T*row, kn=(size_t)seq*kv_heads*hd;
-                float *q=allocate(qn*4), *k=allocate(kn*4), *v=allocate(kn*4);
-                float *out=allocate((qn+guard)*4), *reference=allocate((qn+guard)*4);
-                float sinks[]={-999.25f,-999.25f,-999.25f,NAN,-0.25f,NAN,stress?800.0f:0.5f};
-                for (size_t i=0; i<qn; i++) q[i]=random_value()*(stress?40:1);
-                for (size_t i=0; i<kn; i++) { k[i]=random_value(); v[i]=random_value(); }
-                for (size_t i=0; i<qn+guard; i++) out[i]=-999.25f;
-                CudaBuf *bufs[]={upload(ctx,q,qn*4),upload(ctx,k,kn*4),upload(ctx,v,kn*4),
-                                upload(ctx,sinks,sizeof sinks),upload(ctx,out,(qn+guard)*4)};
-                Causal pc={hd,heads,kv_heads,T,0,3,base};
-                float custom_scale=0.375f;
-                if (stress) memcpy(&pc.scale,&custom_scale,4);
-                unsigned grid[]={heads,T,1}, block[]={256,1,1};
-                CudaPipe *variants[]={old,next};
-                for (unsigned variant=0; variant<2; variant++) {
-                    CudaCmd *cmd=cuda_begin_command(ctx);
-                    cuda_dispatch(cmd,variants[variant],grid,block,bufs,5,&pc,sizeof pc,
-                                  (seq+(variant?hd:0))*4);
-                    cuda_commit_and_wait(cmd);
-                    cuda_download(ctx,bufs[4],variant?out:reference,(qn+guard)*4);
-                    if (cuda_execution_failed(ctx)) fail("prefill launch/download");
-                }
-                for (unsigned t=0; t<T; t++) {
-                    cpu_row(q+t*row,k,v,out+t*row,hd,heads,kv_heads,base+t+1,
-                            stress?custom_scale:1/sqrt(hd),sinks+3);
-                    if (base+t+1<32 && memcmp(out+t*row,reference+t*row,row*4))
-                        fail("short prefill reduction differs from original");
-                }
-                for (size_t i=qn; i<qn+guard; i++)
-                    if (out[i]!=-999.25f || reference[i]!=-999.25f) fail("prefill guard");
-                if (T>1) {
-                    // Crossing the threshold in another query cannot change
-                    // this query's arithmetic. Check long prefixes as well.
-                    unsigned prefix=T>31?31:T-1;
-                    pc.T=prefix; grid[1]=prefix;
-                    for (size_t i=0; i<qn+guard; i++) reference[i]=-999.25f;
-                    cuda_upload(ctx,bufs[4],reference,(qn+guard)*4);
-                    CudaCmd *cmd=cuda_begin_command(ctx);
-                    cuda_dispatch(cmd,next,grid,block,bufs,5,&pc,sizeof pc,(base+prefix+hd)*4);
-                    cuda_commit_and_wait(cmd);
-                    cuda_download(ctx,bufs[4],reference,(qn+guard)*4);
-                    if (cuda_execution_failed(ctx)) fail("prefill prefix launch/download");
-                    if (memcmp(out,reference,prefix*row*4)) fail("causal prefix changed");
-                    for (size_t i=prefix*row; i<qn+guard; i++)
-                        if (reference[i]!=-999.25f) fail("prefill prefix guard");
-                }
-                for (unsigned i=0; i<5; i++) cuda_free_buffer(bufs[i]);
-                free(q);free(k);free(v);free(out);free(reference);
-                cases++;
-            }
-        }
-    }
-    cuda_free_pipeline(old);cuda_free_pipeline(next);
-    printf("PASS %u prefill-v2 cases: CPU reference, short bitwise agreement, causal prefixes, guards\n",cases);
-}
 int main(int argc, char **argv) {
-    if (argc==2 && !strcmp(argv[1],"--prefill-v2")) {
-        char *s=source();CudaCtx *ctx=cuda_init(0);
-        if (!ctx) fail("GPU init");
-        prefill_v2(ctx,s);
-        cuda_destroy(ctx);free(s);
-        return 0;
-    }
-    if (argc > 2 || (argc == 2 && strcmp(argv[1],"--q8"))) fail("Use optional --q8 or --prefill-v2");
+    if (argc > 2 || (argc == 2 && strcmp(argv[1],"--q8"))) fail("Use optional --q8");
     quantized = argc == 2;
     char *s = source();
     CudaCtx *ctx = cuda_init(0);

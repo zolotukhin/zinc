@@ -5950,8 +5950,8 @@ fn prefillQ8ReuseOn() bool {
         std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no"));
 }
 
-/// Coalesced wave-per-key prefill attention, retaining the original dot order
-/// for causal histories shorter than 32 keys. ROCm default; CUDA opt-in.
+/// Coalesced wave-per-key prefill attention. Measured ROCm default; CUDA keeps
+/// the original reduction-order kernel unless explicitly enabled.
 fn prefillAttnV2On() bool {
     const v = host_io.getenv("ZINC_ATTN_V2") orelse return is_rocm;
     return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
