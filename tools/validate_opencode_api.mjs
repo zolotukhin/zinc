@@ -394,22 +394,25 @@ export async function validateApi({
     assert.ok(result.message.content.includes('OK'));
     assert.ok(performance.now() - started < 10000);
   });
-  await check('Long prompt above the former 8192-token SSM limit', async () => {
-    const result = await complete({
-      messages: [
-        {
-          role: 'user',
-          content:
-            'The following line is reference filler.\n' +
-            'word '.repeat(9200) +
-            '\nIgnore the reference filler and reply with OK.',
-        },
-      ],
-      max_tokens: 16,
+  const longFillerWords = Math.min(9200, context - 256);
+  if (longFillerWords > 8192) {
+    await check('Long prompt above the former 8192-token SSM limit', async () => {
+      const result = await complete({
+        messages: [
+          {
+            role: 'user',
+            content:
+              'The following line is reference filler.\n' +
+              'word '.repeat(longFillerWords) +
+              '\nIgnore the reference filler and reply with OK.',
+          },
+        ],
+        max_tokens: 16,
+      });
+      assert.ok(result.usage.prompt_tokens > 8192);
+      assert.ok(result.message.content.includes('OK'));
     });
-    assert.ok(result.usage.prompt_tokens > 8192);
-    assert.ok(result.message.content.includes('OK'));
-  });
+  }
   if (bufferedToolCancellation) {
     await check('Buffered tool-call cancellation releases the slot', () =>
       validateBufferedToolCancellation({ model, env }),
