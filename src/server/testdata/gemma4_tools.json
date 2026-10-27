@@ -42,6 +42,47 @@
       "name": "tools-none",
       "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Write source text.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"options\":{\"type\":\"object\",\"properties\":{\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"enabled\":{\"type\":\"boolean\"}},\"required\":[\"enabled\"]},\"code\":{\"type\":\"string\"}},\"required\":[\"path\",\"code\"]}}}],\"enable_thinking\":false,\"tool_choice\":\"none\"}",
       "expected": "<bos><|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+    },
+    {
+      "name": "legacy-first-user",
+      "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}}],\"enable_thinking\":false,\"tool_choice\":\"auto\"}",
+      "expected": "<bos><|turn>system\n<|tool>declaration:read{description:<|\"|>Read a source file.<|\"|>,parameters:{properties:{offset:{type:<|\"|>INTEGER<|\"|>},path:{description:<|\"|>File path<|\"|>,type:<|\"|>STRING<|\"|>}},required:[<|\"|>path<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+      "legacy": true
+    },
+    {
+      "name": "legacy-guided",
+      "request": "{\"messages\":[{\"role\":\"system\",\"content\":\"Source changes only.\"},{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}}],\"enable_thinking\":false,\"tool_choice\":\"auto\"}",
+      "expected": "<bos><|turn>system\nSource changes only.<|tool>declaration:read{description:<|\"|>Read a source file.<|\"|>,parameters:{properties:{offset:{type:<|\"|>INTEGER<|\"|>},path:{description:<|\"|>File path<|\"|>,type:<|\"|>STRING<|\"|>}},required:[<|\"|>path<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+      "legacy": true
+    },
+    {
+      "name": "legacy-one-result",
+      "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"one\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\": \\\"src/表.mjs\\\", \\\"offset\\\": 2}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"one\",\"content\":\"line 1\\nconst x = \\\"café\\\";\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}}],\"enable_thinking\":false,\"tool_choice\":\"auto\"}",
+      "expected": "<bos><|turn>system\n<|tool>declaration:read{description:<|\"|>Read a source file.<|\"|>,parameters:{properties:{offset:{type:<|\"|>INTEGER<|\"|>},path:{description:<|\"|>File path<|\"|>,type:<|\"|>STRING<|\"|>}},required:[<|\"|>path<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n<|tool_call>call:read{offset:2,path:<|\"|>src/表.mjs<|\"|>}<tool_call|><|tool_response>response:read{value:<|\"|>line 1\nconst x = \"café\";<|\"|>}<tool_response|><|channel>thought\n<channel|>",
+      "legacy": true
+    },
+    {
+      "name": "legacy-next-user",
+      "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"one\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\": \\\"src/表.mjs\\\", \\\"offset\\\": 2}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"one\",\"content\":\"line 1\\nconst x = \\\"café\\\";\"},{\"role\":\"assistant\",\"content\":\"Done.\"},{\"role\":\"user\",\"content\":\"Thanks\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}}],\"enable_thinking\":false,\"tool_choice\":\"auto\"}",
+      "expected": "<bos><|turn>system\n<|tool>declaration:read{description:<|\"|>Read a source file.<|\"|>,parameters:{properties:{offset:{type:<|\"|>INTEGER<|\"|>},path:{description:<|\"|>File path<|\"|>,type:<|\"|>STRING<|\"|>}},required:[<|\"|>path<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n<|tool_call>call:read{offset:2,path:<|\"|>src/表.mjs<|\"|>}<tool_call|><|tool_response>response:read{value:<|\"|>line 1\nconst x = \"café\";<|\"|>}<tool_response|><|turn>model\nDone.<turn|>\n<|turn>user\nThanks<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+      "legacy": true
+    },
+    {
+      "name": "legacy-thinking-enabled",
+      "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}}],\"enable_thinking\":true,\"tool_choice\":\"auto\"}",
+      "expected": "<bos><|turn>system\n<|think|><|tool>declaration:read{description:<|\"|>Read a source file.<|\"|>,parameters:{properties:{offset:{type:<|\"|>INTEGER<|\"|>},path:{description:<|\"|>File path<|\"|>,type:<|\"|>STRING<|\"|>}},required:[<|\"|>path<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n",
+      "legacy": true
+    },
+    {
+      "name": "legacy-tools-none",
+      "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read src/表.mjs.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a source file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}}}],\"enable_thinking\":false,\"tool_choice\":\"none\"}",
+      "expected": "<bos><|turn>user\nRead src/表.mjs.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+      "legacy": true
     }
-  ]
+  ],
+  "legacy_reference": {
+    "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+    "template_sha256": "2dfbfc7d538912f4ea11d29d85b4e25d7bc26386e53f57529f1d707c28b5828c",
+    "note": "Native embedded tool_responses; scalar schema avoids malformed nested declarations in this older GGUF template."
+  }
 }

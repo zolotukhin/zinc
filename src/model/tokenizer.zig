@@ -1709,6 +1709,7 @@ pub const Tokenizer = struct {
                     var start_idx: usize = 0;
                     const thinking_enabled = options.enable_thinking orelse false;
                     const native_tools = options.tool_format != null and options.tool_format.?.native_gemma;
+                    const legacy_tools = native_tools and options.tool_format.?.gemma_legacy_tool_template;
                     const has_tools = native_tools and options.tools.len > 0;
                     const has_leading_system = n > 0 and
                         (std.mem.eql(u8, roles[0], "system") or std.mem.eql(u8, roles[0], "developer"));
@@ -1716,7 +1717,7 @@ pub const Tokenizer = struct {
                         const system_turn = std.fmt.bufPrint(buf[pos..], "{s}system\n", .{turn_start}) catch return error.BufferTooSmall;
                         pos += system_turn.len;
                         if (thinking_enabled) {
-                            const think_token = std.fmt.bufPrint(buf[pos..], "<|think|>{s}", .{if (has_tools) @as([]const u8, "\n") else ""}) catch return error.BufferTooSmall;
+                            const think_token = std.fmt.bufPrint(buf[pos..], "<|think|>{s}", .{if (has_tools and !legacy_tools) @as([]const u8, "\n") else ""}) catch return error.BufferTooSmall;
                             pos += think_token.len;
                         }
                         if (has_leading_system) {
@@ -1755,7 +1756,7 @@ pub const Tokenizer = struct {
                             continue;
                         }
                         const rendered_role = if (is_model) "model" else roles[i];
-                        if (!is_model or !model_turn_open) {
+                        if (!is_model or !model_turn_open or (legacy_tools and last_was_tool_response)) {
                             const prefix = std.fmt.bufPrint(buf[pos..], "{s}{s}\n", .{ turn_start, rendered_role }) catch return error.BufferTooSmall;
                             pos += prefix.len;
                         }
@@ -1782,8 +1783,8 @@ pub const Tokenizer = struct {
                             const channel = std.fmt.bufPrint(buf[pos..], "<|channel>thought\n<channel|>", .{}) catch return error.BufferTooSmall;
                             pos += channel.len;
                         }
-                    } else if (options.add_generation_prompt and last_was_tool_response and thinking_enabled) {
-                        const channel = std.fmt.bufPrint(buf[pos..], "<|channel>thought\n", .{}) catch return error.BufferTooSmall;
+                    } else if (options.add_generation_prompt and last_was_tool_response and (legacy_tools != thinking_enabled)) {
+                        const channel = std.fmt.bufPrint(buf[pos..], "<|channel>thought\n{s}", .{if (legacy_tools) @as([]const u8, "<channel|>") else ""}) catch return error.BufferTooSmall;
                         pos += channel.len;
                     }
                 } else {

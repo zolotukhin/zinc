@@ -193,6 +193,7 @@ pub const ToolFormat = struct {
     vtable: *const VTable,
     native_xml: bool = false,
     native_gemma: bool = false,
+    gemma_legacy_tool_template: bool = false,
     supports_tools: bool = false,
 
     pub fn usesJsonPrefill(self: ToolFormat) bool {
@@ -341,7 +342,14 @@ pub fn forTemplate(template_kind: TemplateKind) ToolFormat {
 /// Newer Qwen checkpoints publish XML function/parameter tags in their own
 /// GGUF template. Keep the original JSON dialect for other ChatML checkpoints.
 pub fn forTokenizer(tokenizer: *const Tokenizer) ToolFormat {
-    if (tokenizer.detectTemplateKind() == .gemma and std.mem.indexOf(u8, tokenizer.chat_template orelse "", "<|tool_call>") != null) return gemmaToolFormat();
+    if (tokenizer.detectTemplateKind() == .gemma and std.mem.indexOf(u8, tokenizer.chat_template orelse "", "<|tool_call>") != null) {
+        var format = gemmaToolFormat();
+        // Earlier checkpoints use embedded tool_responses and append the
+        // empty thought scaffold after a result. Newer OpenAI-aware templates
+        // continue directly. Honor that checkpoint-level generation contract.
+        format.gemma_legacy_tool_template = std.mem.indexOf(u8, tokenizer.chat_template.?, "message['tool_responses']") != null;
+        return format;
+    }
     if (tokenizer.detectTemplateKind() == .chatml and std.mem.indexOf(u8, tokenizer.chat_template orelse "", "<function=") != null) {
         var format = chatmlToolFormat();
         format.vtable = &vtable_chatml_xml;

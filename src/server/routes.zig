@@ -6142,10 +6142,10 @@ test "native Gemma thought filtering preserves markers inside tool strings" {
 
 test "Gemma tool prompts match the pinned checkpoint Jinja template" {
     const a = std.testing.allocator;
-    const vectors = try std.json.parseFromSlice(struct { cases: []const struct { name: []const u8, request: []const u8, expected: []const u8 } }, a, @embedFile("testdata/gemma4_tools.json"), .{ .ignore_unknown_fields = true });
+    const vectors = try std.json.parseFromSlice(struct { cases: []const struct { name: []const u8, request: []const u8, expected: []const u8, legacy: bool = false } }, a, @embedFile("testdata/gemma4_tools.json"), .{ .ignore_unknown_fields = true });
     defer vectors.deinit();
-    const tok = makeTestTokenizer("<|turn> <|tool_call> enable_thinking <|think|>");
     for (vectors.value.cases) |case| {
+        const tok = makeTestTokenizer(if (case.legacy) "<|turn> <|tool_call> enable_thinking message['tool_responses']" else "<|turn> <|tool_call> enable_thinking <|think|>");
         var parsed = try parseChatRequest(a, case.request);
         defer parsed.deinit();
         try prepareChatForTokenizer(&parsed, &tok);
