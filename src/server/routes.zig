@@ -3168,6 +3168,7 @@ fn handleChatCompletions(
         var tool_call_index: u32 = 0;
         var generated: u32 = 0;
         const decode_start_ns = host_io.nanoTimestamp();
+        var last_tool_keepalive_ns = decode_start_ns;
 
         if (max_tokens > 0) {
             var prev_token = runtime.sample(engine, &state, sampling, random);
@@ -3175,6 +3176,11 @@ fn handleChatCompletions(
 
             while (generated < max_tokens and !isEog(tokenizer, prev_token) and !stopped) {
                 if (conn.isPeerClosed()) return;
+                const now_ns = host_io.nanoTimestamp();
+                if (tools_active and now_ns - last_tool_keepalive_ns >= std.time.ns_per_s) {
+                    conn.writeSseComment("keepalive") catch return;
+                    last_tool_keepalive_ns = now_ns;
+                }
 
                 // Accumulate this token's decoded text
                 var dec_buf: [256]u8 = undefined;

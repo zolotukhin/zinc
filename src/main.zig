@@ -2411,9 +2411,19 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var any_tool_call_emitted = false;
     var tool_call_index: u32 = 0;
     var sent_tool_text_len: usize = 0;
+    var last_tool_keepalive_ns = host_io.nanoTimestamp();
     while (true) {
         const ch = ctx.engine.nextChunk(&chan, &buf);
         generation_failed = generation_failed or ch.failed;
+        // A tool call may buffer thousands of tokens before its closing tag.
+        // Keep the stream live and detect a disconnected client while waiting.
+        const now_ns = host_io.nanoTimestamp();
+        if (stream_response and tools_active and !write_failed and now_ns - last_tool_keepalive_ns >= std.time.ns_per_s) {
+            conn.writeSseComment("keepalive") catch {
+                write_failed = true;
+            };
+            last_tool_keepalive_ns = now_ns;
+        }
         var i: usize = 0;
         while (i < ch.n) : (i += 1) {
             const tok = buf[i];

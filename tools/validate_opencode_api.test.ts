@@ -1,5 +1,72 @@
 import { expect, test } from 'bun:test';
-import { parseCompletion } from './validate_opencode_api.mjs';
+import { parseCompletion, validateBufferedToolCancellation } from './validate_opencode_api.mjs';
+
+test('buffered cancellation does not wait for the tool response body before proving recovery', async () => {
+  const requests: any[] = [];
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      requests.push(body);
+      if (body.stream) {
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(': buffering\n\n'));
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    },
+  });
+  try {
+    const result = await validateBufferedToolCancellation({
+      model: 'probe',
+      env: { ZINC_API_BASE_URL: `http://127.0.0.1:${server.port}/v1` },
+      timeoutMs: 1000,
+    });
+    expect(result.recovery_ms).toBeLessThan(1000);
+    expect(requests).toHaveLength(2);
+    expect(requests[0].tool_choice).toBe('required');
+    expect(requests[0].tools[0].function.name).toBe('buffered_probe');
+    expect(requests[1].stream).toBe(false);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test('buffered cancellation fails when the next request remains queued', async () => {
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      if (!body.stream) return new Promise<Response>(() => {});
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(': buffering\n\n'));
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    },
+  });
+  try {
+    await expect(
+      validateBufferedToolCancellation({
+        model: 'probe',
+        env: { ZINC_API_BASE_URL: `http://127.0.0.1:${server.port}/v1` },
+        timeoutMs: 100,
+      }),
+    ).rejects.toThrow();
+  } finally {
+    await server.stop(true);
+  }
+});
 
 test('assembles split tool arguments with Unicode and terminal usage', () => {
   const frames = [
