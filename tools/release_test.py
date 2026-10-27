@@ -474,6 +474,29 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release_gpu.active_model_id(data)
 
+    def test_release_unicode_gate_rejects_invalid_bytes_missing_usage_and_lost_text(self):
+        def nonstream(port, path, body):
+            text = "café 東京 🚀" if body["max_tokens"] == 32 else ""
+            return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+
+        def streaming(body, damage=None):
+            text = nonstream(0, "", body)["choices"][0]["message"]["content"]
+            event = {"choices": [{"delta": {"content": "wrong" if damage == "text" else text}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20}}
+            if damage == "usage":
+                del event["usage"]
+            payload = ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n" + ("" if damage == "done" else "data: [DONE]\n\n")).encode()
+            if damage == "utf8":
+                payload = b"data: \xff\n\ndata: [DONE]\n\n"
+            return contextlib.nullcontext(io.BytesIO(payload))
+
+        with patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body)) as request:
+            release_gpu.unicode_chat_checks(123, "loaded")
+            self.assertEqual(request.call_count, 4)
+        for damage in ("utf8", "usage", "done", "text"):
+            with self.subTest(damage=damage), patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body, damage)):
+                with self.assertRaises(ValueError):
+                    release_gpu.unicode_chat_checks(123, "loaded")
+
     def test_http_reference_gate_rejects_early_stops_and_uses_the_exact_reference_prompt(self):
         samples = [("<rendered reference prompt>", {"content": "The complete reference continuation.\nSecond line."})]
         body = {"model": "loaded", "prompt": "unrelated", "temperature": 0}
