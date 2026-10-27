@@ -5,7 +5,7 @@
   --color-bg-alt: #f6f8fa;
   --color-text: #1a1a2e;
   --color-text-muted: #57606a;
-  --color-accent: #d35400;
+  --color-accent: #b34700;
   --color-border: #d1d9e0;
   --color-tag-bg: #fef0e6;
   --color-tag-text: #b34700;
@@ -59,6 +59,13 @@ a {
 
 a:hover {
   text-decoration: underline;
+}
+
+p a,
+.doc-content a:not(.heading-anchor),
+.post-content a {
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
 }
 
 :focus-visible {
@@ -189,14 +196,11 @@ pre.shiki {
     color: #c9b8a8 !important;
   }
 
-  /* Remap all Shiki dark token colors to ZINC logo palette:
-     deep crimson, warm orange/amber, copper, muted gold */
+  /* Preserve the syntax theme's contrast without color filters. */
   .astro-code span,
   pre.shiki span,
   pre[style*='background-color'] span {
     color: var(--shiki-dark) !important;
-    /* Override specific vitesse-dark colors to warmer tones */
-    filter: sepia(0.15) saturate(1.2) hue-rotate(-10deg);
   }
 
   code {

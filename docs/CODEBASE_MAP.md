@@ -73,7 +73,7 @@ benchmarks/
 ├── bandwidth.zig                # DMMV bandwidth utilization benchmark
 ├── dispatch.zig                 # Vulkan dispatch overhead benchmark
 ├── dispatch_overhead.c          # Vulkan dispatch overhead C helper
-├── metal_inference.zig          # Metal inference benchmark
+├── metal_inference.zig          # Metal inference benchmark + CPU-only CLI contract tests
 └── metal_q8_shapes.zig          # Exact-shape Metal q8 benchmark suite
 
 loops/                           # Self-improving optimization loops
@@ -122,7 +122,7 @@ specs/                           # Historical feature design artifacts
 ├── 004-openai-api-server/
 └── 005-apple-silicon-inference/
 
-tools/                           # API benchmark, HTML tooling, graph/report helpers
+tools/                           # API benchmarks, metadata inspectors, graph/report and release helpers
 ├── benchmark_api.mjs
 ├── chat.html
 ├── inspect_qwen_meta.zig

@@ -2,6 +2,9 @@
 
 The release implementation builds three archives, certifies those exact archives on configured GPU workers, and promotes them after one protected publication approval. It does not publish on a tag push. The target, model, ABI and hardware policy is [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
+The first release is not published yet. Track the concrete remaining gates in
+[0.1.0 readiness](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md).
+
 ## Version policy
 
 Versions are `MAJOR.MINOR.PATCH`, tags are `vMAJOR.MINOR.PATCH`. Before 1.0, MINOR covers new features/models/backends, performance work and breaking changes; PATCH covers fixes/docs without client-visible contract changes. From 1.0, breaking changes require a MAJOR bump. Call out breaking CLI/API/cache changes in the release preparation PR.
@@ -26,7 +29,7 @@ The repository pins Zig and Bun. Linux builds export the frozen Git tree, exclud
 
 Metal builds for baseline ARM64 with a macOS 15.0 deployment target and the hosted worker's SDK. The hosted image/SDK can change: inspect and retain its build log; the archive does not claim bit-for-bit reproducibility across SDK updates. Mach-O deployment target/system dependencies and ELF architecture/glibc/DT_NEEDED/RPATH are audited. Native `--version` must succeed before packaging and installation.
 
-Archives contain `bin/zinc`, CPU-only `bin/zinc-tokenize`, matching runtime assets, `VERSION.json`, `INSTALL-METADATA`, `FILES.sha256`, README and license. The build emits a complete shader inventory; missing assets fail packaging. Owners/timestamps/order are normalized. Apple timestamped signatures are final content, frozen before hardware certification. Python 3 is a development/CI tool only; the installed binary and Bash installer add no Python/Node dependency.
+Archives contain `bin/zinc`, CPU-only `bin/zinc-tokenize`, matching runtime assets, `VERSION.json`, `INSTALL-METADATA`, `FILES.sha256`, binary usage instructions and license. The packaged README comes from `docs/releases/BINARY_README.md`, rather than the source-checkout setup guide. The build emits a complete shader inventory; missing assets fail packaging. Owners/timestamps/order are normalized. Apple timestamped signatures are final content, frozen before hardware certification. Python 3 is a development/CI tool only; the installed binary and Bash installer add no Python/Node dependency.
 
 ## Provision GPU workers
 

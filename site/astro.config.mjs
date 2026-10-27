@@ -96,8 +96,8 @@ export default defineConfig({
     shikiConfig: {
       defaultColor: 'light',
       themes: {
-        light: 'github-light',
-        dark: 'vitesse-dark',
+        light: 'github-light-high-contrast',
+        dark: 'github-dark-high-contrast',
       },
       langs: ['zig', 'glsl', 'json', 'bash', 'typescript', 'c'],
       langAlias: { metal: 'cpp' },

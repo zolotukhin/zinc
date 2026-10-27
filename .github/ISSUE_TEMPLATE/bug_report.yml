@@ -1,13 +1,13 @@
 name: Bug report
 description: Report a reproducible problem in build, runtime, API, or model execution.
-title: "[bug] "
+title: '[bug] '
 labels:
   - bug
 body:
   - type: markdown
     attributes:
       value: |
-        Please make this reproducible. ZINC issues are much easier to fix when the exact hardware, driver, model, and command are included.
+        Include the hardware, backend, driver, model, and command needed to reproduce the issue. Remove credentials, private endpoints, and personal paths from logs.
 
   - type: textarea
     id: summary
@@ -51,7 +51,7 @@ body:
     id: os
     attributes:
       label: Operating system
-      placeholder: Ubuntu 24.04, Windows 11, macOS 15.4
+      placeholder: Ubuntu 24.04, macOS 15, or Windows 11 with WSL2
     validations:
       required: true
 
@@ -59,23 +59,38 @@ body:
     id: gpu
     attributes:
       label: GPU
-      placeholder: RX 9070 XT, Radeon AI PRO R9700, Intel Arc A770
+      placeholder: Radeon AI PRO R9700, Apple M4 Max, Intel Arc B580, RTX 5090
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - Vulkan
+        - Metal
+        - ROCm / HIP
+        - CUDA (experimental)
+        - Other / not sure
     validations:
       required: true
 
   - type: input
-    id: vulkan
+    id: runtime
     attributes:
-      label: Vulkan driver / runtime
-      placeholder: Mesa 25.0.7, AMD Windows driver version, vulkaninfo summary
+      label: Driver / runtime version
+      description: Use the runtime for your backend; Metal users can give the macOS version.
+      placeholder: Mesa / RADV version, ROCm version, NVIDIA driver / CUDA version, or macOS version
     validations:
       required: true
 
   - type: input
-    id: zig
+    id: version
     attributes:
-      label: Zig version
-      placeholder: 0.17.0
+      label: ZINC version and build
+      description: Paste zinc --version output. Include the Zig version for a source build.
+      placeholder: Version, commit, target, backend, and optimization mode
     validations:
       required: true
 
@@ -101,9 +116,9 @@ body:
     attributes:
       label: Reproduces on latest main?
       options:
-        - "Yes"
-        - "No"
-        - "Not checked"
+        - 'Yes'
+        - 'No'
+        - 'Not checked'
     validations:
       required: true
 

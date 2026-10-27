@@ -12,7 +12,6 @@ import re
 import shutil
 import struct
 import subprocess
-import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -107,8 +106,8 @@ def package(args):
             dest = tree / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, dest)
-        for relative in ["README.md", "LICENSE"]:
-            shutil.copyfile(ROOT / relative, tree / relative)
+        shutil.copyfile(ROOT / "docs/releases/BINARY_README.md", tree / "README.md")
+        shutil.copyfile(ROOT / "LICENSE", tree / "LICENSE")
         signing = {"status": "unsigned"}
         if args.notary_receipt:
             require(spec["backend"] == "metal", "notarization is only valid for Metal")

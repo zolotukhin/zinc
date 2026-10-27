@@ -21,7 +21,8 @@ browser chat, and an OpenAI-compatible API in one native binary.
 For published archives, runtime requirements and verified installation/rollback,
 see [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases). The 0.1.0
-binary pipeline is undergoing qualification. The commands below build from source.
+binary pipeline is undergoing [qualification](docs/releases/0.1.0-plan.md).
+The commands below build from source.
 
 Install the [prerequisites for your GPU](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)
 first. The default build uses **Vulkan on Linux** and **Metal on macOS**.
@@ -116,12 +117,9 @@ and API keys come from environment variables at runtime.
 [Setup, worktrees, and task evaluation](https://zolotukhin.ai/zinc/docs/opencode/) ·
 [Download the standalone script](https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs)
 
-The [full-worktree trial](docs/OPENCODE_WORKTREE_REPORT.md) records the original
-coding failures. The [ROCm follow-up](docs/ROCM_AGENT_CONTEXT.md) documents the
-memory/attention fixes, prompt reuse, and separate coding acceptance results.
-The [end-to-end report](docs/OPENCODE_E2E_REPORT.md) compares actual repository
-tasks at 262K Q8 and 32K FP32 capacity, including incomplete delivery and review findings.
-The [technical write-up](https://zolotukhin.ai/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/)
+The [end-to-end report](docs/OPENCODE_E2E_REPORT.md) records real repository
+trials, review findings, and incomplete deliveries. The
+[technical write-up](https://zolotukhin.ai/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/)
 explains the failures, fixes, and reviewed feature result.
 
 Qwen 3.8 27B supports a **262,144-token** window. The 32K example above is the

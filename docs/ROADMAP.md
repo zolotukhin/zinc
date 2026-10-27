@@ -6,8 +6,9 @@ This is a lightweight public roadmap for contributors. It is not a guarantee of 
 
 Current priorities:
 
+- qualify and publish the first Metal, Vulkan, and ROCm binary release, including real hardware evidence and verified installation
 - make the core Linux AMD path more stable on real hardware
-- improve Windows and cross-platform build reliability
+- keep source builds and packages reliable across the documented Linux and macOS targets
 - harden the OpenAI-compatible server path
 - keep Qwen 3.8 27B correctness and performance coverage stable across RDNA4 and Metal
 - harden Intel Arc as an official Linux Vulkan target now that the full catalog matrix is published
@@ -30,7 +31,7 @@ Near-term work:
 - better profiling and graph/runtime inspection
 - more contributor-friendly benchmark workflows
 - broader model validation across supported GGUF architectures
-- expand the perf suite catalog beyond the current Qwen 3.6 and Gemma 4 targets
+- extend correctness and performance coverage as models and backend support change
 - stronger CI coverage across more environments
 - more complete API compatibility and client examples
 
@@ -49,7 +50,7 @@ Longer-horizon directions:
 - deeper TurboQuant validation and tuning
 - broader hardware coverage beyond the primary RDNA3/RDNA4 and Intel Arc targets
 - richer visual tooling around execution graphs and performance traces
-- packaging and distribution improvements for non-core developer users
+- broader binary distribution after the initial hardware matrix is qualified
 
 ## What helps most from the community
 

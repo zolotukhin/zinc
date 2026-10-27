@@ -28,12 +28,17 @@ function slugifyHeading(text: string): string {
   return normalized || 'section';
 }
 
-function rehypeDocHeadingAnchors() {
+function rehypeDocNavigation() {
   return (tree: any) => {
     const seen = new Map<string, number>();
 
     const walk = (node: any) => {
       if (!node || typeof node !== 'object') return;
+      // Wide Markdown tables scroll on small screens; keyboard users need a
+      // focus target to reach the columns without moving the whole page.
+      if (node.type === 'element' && node.tagName === 'table') {
+        node.properties = { ...(node.properties ?? {}), tabIndex: 0 };
+      }
       if (node.type === 'element' && typeof node.tagName === 'string' && /^h[1-6]$/.test(node.tagName)) {
         const headingText = extractHeadingText(node).trim();
         if (headingText.length > 0) {
@@ -143,8 +148,8 @@ export async function getStaticPaths() {
     },
     'api': {
       title: 'ZINC API Reference',
-      description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints for local LLM inference.',
-      keywords: 'ZINC API, OpenAI compatible, chat completions, SSE streaming, local LLM API, inference server, v1/chat/completions, embeddings API, health endpoint, self-hosted LLM, AMD GPU inference API',
+      description: 'OpenAI-compatible chat and text completions, streaming, model listing, and health endpoints for local LLM inference, with backend-specific coverage.',
+      keywords: 'ZINC API, OpenAI compatible, chat completions, SSE streaming, local LLM API, inference server, v1/chat/completions, health endpoint, self-hosted LLM, AMD GPU inference API',
     },
     'opencode': {
       title: 'Configure OpenCode with ZINC and Qwen',
@@ -170,8 +175,7 @@ const title = meta?.title ?? doc.title;
 const description = meta?.description ?? `${title} — ZINC documentation`;
 const keywords = meta?.keywords;
 
-// Strip the first H1 heading since DocLayout doesn't render one
-// and the markdown's own heading serves as the page title
+// The Markdown's own H1 serves as the page title.
 const content = doc.content;
 
 const contentHtml = String(
@@ -185,13 +189,13 @@ const contentHtml = String(
     .use(rehypeShiki, {
       defaultColor: 'light',
       themes: {
-        light: 'github-light',
-        dark: 'vitesse-dark',
+        light: 'github-light-high-contrast',
+        dark: 'github-dark-high-contrast',
       },
       langs: ['zig', 'glsl', 'json', 'bash', 'typescript', 'javascript', 'text', 'c', 'objc'],
       langAlias: { metal: 'cpp' },
     })
-    .use(rehypeDocHeadingAnchors)
+    .use(rehypeDocNavigation)
     .use(rehypeStringify)
     .process(content)
 );

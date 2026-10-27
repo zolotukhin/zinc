@@ -87,6 +87,11 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: '.bun-version'
+      - name: Install client tooling
+        run: bun install --frozen-lockfile
       - name: Compile Metal executables and tests without GPU execution
         run: |
           for mode in Debug ReleaseSafe ReleaseFast ReleaseSmall; do
@@ -94,6 +99,8 @@ jobs:
             ./scripts/zig.sh build test-build -Doptimize="$mode"
             ./scripts/zig.sh build check-tools -Doptimize="$mode"
           done
+      - name: Run CPU-only tests, including Metal benchmark CLI contracts
+        run: ./scripts/zig.sh build test --summary all
 
   nix-build:
     runs-on: ubuntu-latest
