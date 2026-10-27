@@ -474,8 +474,12 @@ class ReleaseTest(unittest.TestCase):
         good = "Selected GPU: #0 AMD Radeon AI PRO R9700 (RADV GFX1201)\nGPU tuning: amd_rdna4 | 32768 MB VRAM\nVerdict: READY [OK]\n"
         self.assertIn("R9700", release_gpu.gpu_evidence(good, "rdna4"))
         self.assertEqual(release_gpu.gpu_evidence("GPU family: apple7 [OK]\nVerdict: READY [OK]", "apple7"), "apple7")
+        rocm = "  Device: AMD Radeon AI PRO R9700 [gfx1201] [OK]\n  Compute target: gfx1201 [OK]\nVerdict: READY [OK]\n"
+        self.assertEqual(release_gpu.gpu_evidence(rocm, "gfx1201"), "AMD Radeon AI PRO R9700")
         for text, family in [(good, "rdna3"), (good.replace("R9700", "llvmpipe"), "rdna4"),
-                             (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4")]:
+                             (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4"),
+                             (rocm.replace("[gfx1201]", "[gfx1100]"), "gfx1201"),
+                             (rocm.replace("Compute target: gfx1201", "Compute target: gfx1100"), "gfx1201")]:
             with self.subTest(family=family), self.assertRaises(ValueError):
                 release_gpu.gpu_evidence(text, family)
 
@@ -497,6 +501,25 @@ class ReleaseTest(unittest.TestCase):
             self.assertFalse(request.call_args.args[2]["stream"])
         with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": samples[0][1]["content"]}]}):
             release_gpu.reference_http_parity(1, body, samples)
+
+    def test_cli_reference_gate_checks_all_backend_token_formats_and_complete_text(self):
+        expected = {"content": "First line.\n  Second line. ",
+                    "completion_probabilities": [{"id": token} for token in [791, 315, 198]]}
+        for label in ["Generated tokens (3): { 791, 315, 198 }",
+                      "Output tokens (3): { 791, 315, 198 }",
+                      "Output tokens (3): first20={ 791, 315, 198 }"]:
+            for output in ["Output (3 tokens): ", "Output text: "]:
+                text = "debug(zinc): " + label + "\ninfo(zinc): " + output + expected["content"] + "\n"
+                with self.subTest(label=label, output=output):
+                    release_gpu.cli_reference_parity(text, expected)
+                for bad in [text.replace("315, 198", "315, 199"),
+                            text.replace("(3):", "(4):"), text.replace("791, 315, 198", "791"),
+                            text.replace("  Second line. ", "Second line."),
+                            text.replace("\n  Second line. ", ""), text.replace(expected["content"], "First")]:
+                    with self.subTest(bad=bad), self.assertRaises(ValueError):
+                        release_gpu.cli_reference_parity(bad, expected)
+        with self.assertRaises(ValueError):
+            release_gpu.cli_reference_parity("topk: top=791\nOutput text: First line.\n", expected)
 
     def test_backend_device_indices_can_differ_but_the_physical_reservation_cannot(self):
         base = {"device": 1, "lock_directory": "<shared-reservation>", "models": {"one": "<model>"},

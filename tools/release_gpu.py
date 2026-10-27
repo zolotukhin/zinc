@@ -97,7 +97,7 @@ def gpu_evidence(text, family):
         return family
     if family == "gfx1201":
         require(re.search(r"Compute target\s*:\s*gfx1201\b", clean), "ROCm compute target mismatch")
-        match = re.search(r"^\s*Device:\s*(.*?)\s*\[OK\]", clean, re.M)
+        match = re.search(r"^[ \t]*Device:[ \t]*(.+?)[ \t]+\[gfx1201\][ \t]+\[OK\][ \t]*$", clean, re.M)
     else:
         tuning = {"rdna3": "amd_rdna3", "rdna4": "amd_rdna4", "strix-halo": "amd_rdna4_apu", "intel-xe2": "intel_arc_xe2"}[family]
         require(re.search(r"GPU tuning\s*:\s*" + tuning + r"\s*\|", clean), "Vulkan GPU family mismatch")
@@ -163,6 +163,26 @@ def tokenizer_parity(tree, reference, model, work, env):
         require(zinc == llama, f"tokenizer parity failed on corpus case {index}")
 
 
+def cli_reference_parity(text, expected):
+    # All three backends expose generated IDs in --debug output. Vulkan's
+    # ZINC_LOG_TOPK hook is backend-specific and cannot certify Metal or ROCm.
+    tokens = re.search(r"(?:Output|Generated) tokens \((\d+)\):\s*(?:first20=)?\{([\d,\s]*)\}", text)
+    require(tokens is not None, "CLI generated token IDs are missing")
+    actual = [int(value) for value in re.findall(r"\d+", tokens.group(2))]
+    count = int(tokens.group(1))
+    require(0 < count <= 20 and len(actual) == count, "CLI generated token IDs are incomplete")
+    probabilities = expected.get("completion_probabilities", [])
+    require(isinstance(probabilities, list) and probabilities and
+            all(isinstance(item, dict) and type(item.get("id")) is int and item["id"] >= 0 for item in probabilities),
+            "reference generated token IDs are missing")
+    require(actual == [item["id"] for item in probabilities], "CLI reference token IDs differed")
+    # Include whitespace and every line; a matching first word is insufficient.
+    output_text = re.search(r"^info\(zinc\): Output (?:text:|\(\d+ tokens\):) ", text, re.M)
+    content = expected.get("content")
+    require(output_text is not None and isinstance(content, str) and content and
+            text[output_text.end():].startswith(content + "\n"), "full CLI reference continuation differed")
+
+
 def inference_parity(tree, reference, model, context, device, llama_args, work, env):
     port = free_port()
     samples = []
@@ -175,21 +195,15 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
             expected = json_request(port, "/completion", {"prompt": rendered, "n_predict": 16, "temperature": 0,
                                                           "n_probs": 2, "cache_prompt": False})
             samples.append((rendered, expected))
+    write_json(work / "reference-samples.json", [{"prompt": prompt, "expected": expected} for prompt, expected in samples])
     # Reference is fully stopped before starting any ZINC GPU process.
     for index, (prompt, expected) in enumerate(samples):
         log = work / f"continuation-{index}.log"
-        command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--raw", "--prompt", prompt, "-n", "16", "-c", str(context)]
-        with process(command, log, work, {**env, "ZINC_LOG_TOPK": "1"}) as child:
+        command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--raw", "--debug", "--prompt", prompt, "-n", "16", "-c", str(context)]
+        with process(command, log, work, env) as child:
             require(child.wait(timeout=360) == 0, "packaged CLI inference failed")
         actual = log.read_text(errors="replace")
-        first = re.search(r"topk:.*?top=(\d+)", actual)
-        probabilities = expected.get("completion_probabilities", [])
-        require(first and probabilities and int(first.group(1)) == probabilities[0].get("id"), "first-token reference parity failed")
-        text = re.search(r"Output (?:text:|\(\d+ tokens\):) ([^\n]+)", actual)
-        wanted = expected.get("content", "").splitlines()
-        require(text and wanted, "missing reference/CLI output")
-        a, b = text.group(1).replace(" ", ""), wanted[0].replace(" ", "")
-        require(a and b and (a.startswith(b) or b.startswith(a)), "continuation reference parity failed")
+        cli_reference_parity(actual, expected)
     return samples
 
 
