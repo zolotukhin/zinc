@@ -96,7 +96,7 @@ const jsonLd = {
         {targets.map((target, index) => {
           const coverage = aggregate(rowsFor(target, 'core', 'off'));
           return (
-          <button type="button" role="tab" id={`tab-${target.id}`} aria-controls={`panel-${target.id}`}
+          <button type="button" role="tab" id={`tab-${target.id}`} aria-controls={target.id}
             aria-selected={index === 0 ? 'true' : 'false'} tabindex={index === 0 ? 0 : -1}
             class:list={['target-tab', { active: index === 0 }]} data-bench-target-tab={target.id}>
             <span class="tab-identity">{platformLabel(target)} <b class={`backend-badge ${target.id}`}>{backendLabel(target)}</b></span>
@@ -122,7 +122,7 @@ const jsonLd = {
       const historicalCli = /ZINC CLI/i.test(methodology.runner ?? '');
       const protocol = historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : /server/i.test(methodology.runner ?? '') ? 'Server protocol (CLI fallback allowed)' : 'Protocol not recorded';
       return (
-        <section id={`panel-${target.id}`} class="target-panel" role="tabpanel" aria-labelledby={`tab-${target.id}`}
+        <section id={target.id} class="target-panel" role="tabpanel" aria-labelledby={`tab-${target.id}`}
           tabindex="0" data-bench-target-panel={target.id} data-default-scenario={scenarioIds[0]}>
           <header class="panel-header">
             <div>

@@ -1,6 +1,9 @@
 # ZINC binary releases
 
-Published archives and their validation reports are listed on [GitHub Releases](https://github.com/zolotukhin/zinc/releases). The 0.1.0 pipeline is being qualified; a successful source build or PR packaging job is not a published release.
+The first binary release is undergoing hardware qualification. There is no
+published binary download yet; [build from source](/zinc/docs/getting-started/)
+to use ZINC today. Published archives and their validation reports will appear
+on [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
 
 ## Choose an archive
 
@@ -16,7 +19,14 @@ An OS/ABI floor describes the executable's compatibility. Read each release's `v
 
 ## Install a published version
 
-Download `install.sh` from the chosen release and inspect it before running it:
+Once the release is published, download `install.sh` from that release and
+inspect it before running it. For `v0.1.0`:
+
+```bash
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
+```
+
+Then install:
 
 ```bash
 ZINC_VERSION=v0.1.0 bash install.sh
@@ -32,7 +42,10 @@ The installer checks the archive and every file, verifies architecture/runtime c
 
 The default command is `~/.local/bin/zinc`, pointing to the active version under `~/.local/share/zinc`. Add `~/.local/bin` to PATH if needed. `ZINC_INSTALL_DIR` and `ZINC_BIN_DIR` override those locations. Reinstalling identical bytes is safe; different bytes cannot replace an existing version directory.
 
-Omit `ZINC_VERSION` to select the latest published stable release. Select an RC explicitly, for example `ZINC_VERSION=v0.1.0-rc.1`. An RC executable cannot be renamed into the final release.
+Omit `ZINC_VERSION` to select the latest published stable release. Before a
+stable release exists, this fails instead of installing a preview. Select a
+published RC explicitly, for example `ZINC_VERSION=v0.1.0-rc.1`. An RC executable
+cannot be renamed into the final release.
 
 ## Check the installation and choose a model
 

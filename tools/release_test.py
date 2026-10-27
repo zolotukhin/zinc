@@ -4,10 +4,8 @@ import contextlib
 import io
 import json
 import os
-import platform
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile

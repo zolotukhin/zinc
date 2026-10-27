@@ -266,7 +266,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Shader compilation: GLSL .comp → SPIR-V .spv ---
     // Only compiled when glslc is available (Linux build node).
-    // On macOS, shaders are skipped (build-only, no GPU inference).
+    // Metal builds install their MSL sources instead of compiling SPIR-V.
     const shader_dir = "src/shaders";
     const shader_sources = .{
         "dmmv_q4k",
@@ -668,9 +668,9 @@ pub fn build(b: *std.Build) void {
     const check_tools_step = b.step("check-tools", "Compile standalone tools without opening a model or GPU");
     const metadata_tools = .{
         .{ "zinc-inspect-qwen-meta", "tools/inspect_qwen_meta.zig" },
-        .{ "zinc-inspect-gemma-meta", "tools/inspect_gemma_meta_tmp.zig" },
-        .{ "zinc-inspect-tokenizer-meta", "tools/inspect_tokenizer_meta_tmp.zig" },
-        .{ "zinc-inspect-tensor-dims", "tools/inspect_tensor_dims_tmp.zig" },
+        .{ "zinc-inspect-gemma-meta", "tools/inspect_gemma_meta.zig" },
+        .{ "zinc-inspect-tokenizer-meta", "tools/inspect_tokenizer_meta.zig" },
+        .{ "zinc-inspect-tensor-dims", "tools/inspect_tensor_dims.zig" },
     };
     inline for (metadata_tools) |tool| {
         const tool_mod = createModule(b, .{
@@ -906,6 +906,7 @@ pub fn build(b: *std.Build) void {
     const hot_bench_step = b.step("hot-bench", "Run hot decode microbenchmarks");
     hot_bench_step.dependOn(&run_hot_bench.step);
 
+    var metal_bench_cli_tests: ?*std.Build.Step.Compile = null;
     if (is_macos) {
         const bench_mod = createModule(b, .{
             .root_source_file = b.path("benchmarks/metal_inference.zig"),
@@ -935,6 +936,11 @@ pub fn build(b: *std.Build) void {
             .root_module = bench_mod,
         });
         b.installArtifact(bench_exe);
+        metal_bench_cli_tests = addTest(b, .{
+            .name = "metal-bench-cli-tests",
+            .root_module = bench_mod,
+            .filters = &.{"Metal benchmark CLI"},
+        });
 
         const bench_run = b.addRunArtifact(bench_exe);
         bench_run.addPassthruArgs();
@@ -1099,18 +1105,9 @@ pub fn build(b: *std.Build) void {
     test_build_step.dependOn(&forward_zinc_rt_tests.step);
     test_build_step.dependOn(&host_io_tests.step);
     test_build_step.dependOn(&model_discovery_tests.step);
-    // In partial mode (`full_tests = false`) restrict `bun test` to the
-    // fast unit-test files. The slow `tests/test_qwen_smoke.test.ts`
-    // file launches multiple managed servers and loads four GGUFs
-    // (Qwen 3.5 9B, Qwen 3.6 35B, Qwen 3.8 27B, plus the API model),
-    // which together run several minutes on this Mac
-    // Studio — well past the harness's 120s `runCommand` timeout for
-    // `zig build test`, so even though the smoke tests themselves pass
-    // the parent spawn was being killed and `testExitCode` came back
-    // `-1`, causing the harness to revert otherwise-good changes.
-    // Full mode still runs every test file so the user's local
-    // `zig build test --full-tests` (or whatever flag wires
-    // `full_tests = true`) is unchanged.
+    if (metal_bench_cli_tests) |tests| test_build_step.dependOn(&tests.step);
+    // The default test target is CPU-only. Full mode includes model-loading
+    // and live API smoke tests and must run on a dedicated GPU worker.
     const bun_exe = resolveBunExe(b);
     const run_bun_tests = if (full_tests)
         b.addSystemCommand(&.{ bun_exe, "test" })
@@ -1150,6 +1147,7 @@ pub fn build(b: *std.Build) void {
     print_summary.step.dependOn(&run_host_io_tests.step);
     print_summary.step.dependOn(&run_model_discovery_tests.step);
     print_summary.step.dependOn(&run_bun_tests.step);
+    if (metal_bench_cli_tests) |tests| print_summary.step.dependOn(&b.addRunArtifact(tests).step);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&print_summary.step);

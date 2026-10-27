@@ -5,7 +5,7 @@ Instructions for AI coding agents working on this repository.
 ## Commands
 
 ```bash
-# Build (shaders compile on Linux only; macOS skips GPU inference)
+# Build Vulkan on Linux or Metal on macOS
 ./scripts/zig.sh build -Doptimize=ReleaseFast
 
 # Run inference

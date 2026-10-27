@@ -7,7 +7,7 @@
 # never restarted, the silent-failure bug); writes a heartbeat STATE file each
 # check so you can verify it is actually watching.
 #
-#   WORKTREE=/Users/stepan/Workspace/zinc-e27 DRIVER=run_perf_effort_4090.sh \
+#   WORKTREE=/path/to/dedicated-worktree DRIVER=run_perf_effort_4090.sh \
 #   EFFORT=loops/efforts/MULTI_HOUR_EFFORT_27_CUDA_4090_DECODE.md \
 #   nohup bash scripts/loop_watchdog.sh >/tmp/e27_watchdog.log 2>&1 &
 #

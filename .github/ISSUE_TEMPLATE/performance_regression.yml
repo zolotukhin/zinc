@@ -1,13 +1,13 @@
 name: Performance regression
 description: Report a measurable slowdown with a concrete baseline and environment.
-title: "[perf] "
+title: '[perf] '
 labels:
   - performance
 body:
   - type: markdown
     attributes:
       value: |
-        Performance reports need numbers. Please include the baseline, current result, and the exact hardware and command used.
+        Include the baseline, current result, backend, hardware, and exact command. Remove credentials, private endpoints, and personal paths from logs.
 
   - type: textarea
     id: summary
@@ -60,8 +60,8 @@ body:
   - type: input
     id: stack
     attributes:
-      label: Driver / Vulkan stack
-      placeholder: Mesa 25.0.7, RADV_PERFTEST=coop_matrix
+      label: Backend and driver / runtime stack
+      placeholder: Vulkan + Mesa / RADV, ROCm / HIP version, Metal + macOS, or CUDA + NVIDIA driver
     validations:
       required: true
 
@@ -78,7 +78,7 @@ body:
     attributes:
       label: Exact benchmark command
       render: shell
-      placeholder: ./zig-out/bin/zinc -m /root/models/... --prompt "The capital of France is"
+      placeholder: bun tools/performance_suite.mjs --target rdna --output /tmp/zinc-performance.json
     validations:
       required: true
 

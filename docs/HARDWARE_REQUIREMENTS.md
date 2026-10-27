@@ -60,7 +60,7 @@ Verify the runtime and build the ROCm backend explicitly:
 
 ```bash
 rocminfo
-ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
+ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
 ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
 ```
 
@@ -127,7 +127,7 @@ ZINC also has an experimental native CUDA backend for recent NVIDIA RTX cards. I
 - **Current development targets**: RTX 5090 (Blackwell) and RTX 4090 (Ada)
 
 ```bash
-CUDA_HOME=/usr/local/cuda zig build -Dbackend=cuda -Doptimize=ReleaseFast
+CUDA_HOME=/usr/local/cuda ./scripts/zig.sh build -Dbackend=cuda -Doptimize=ReleaseFast
 ./zig-out/bin/zinc --check
 ```
 
@@ -135,7 +135,9 @@ Native Windows builds are not supported. WSL2 is an experimental CUDA deployment
 
 ## Apple Silicon (macOS)
 
-ZINC has a native Metal backend with 31 MSL compute shaders, zero-copy model loading via `newBufferWithBytesNoCopy`, and the same OpenAI-compatible API as the AMD path.
+ZINC has a native Metal backend with MSL compute shaders and zero-copy model
+loading via `newBufferWithBytesNoCopy`. The [API guide](/zinc/docs/api/) describes
+its OpenAI-compatible endpoints and backend-specific limitations.
 
 | Chip family                  | Metal GPU family | Status                                      |
 | ---------------------------- | ---------------- | ------------------------------------------- |

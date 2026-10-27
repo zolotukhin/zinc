@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from release import aggregate, verify_candidate
-from release_lib import ROOT, archive_name, policy, read_json, require, sha256, source_sha, write_json
+from release_lib import ROOT, policy, read_json, require, sha256, source_sha, write_json
 
 REPOSITORY = "zolotukhin/zinc"
 WORKFLOW = ".github/workflows/release-candidate.yml"

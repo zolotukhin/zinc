@@ -16,7 +16,7 @@ These are usually the easiest ways to help:
 - documentation fixes and missing examples
 - test coverage for parser, scheduler, API, and graph code
 - bug reproduction cases with exact hardware and commands
-- Windows and non-RDNA Linux build fixes
+- build fixes for Metal, Vulkan, and ROCm, and reproducible reports on other GPUs
 - benchmark tooling and better diagnostics
 - small API or UX improvements that do not change core architecture
 
@@ -27,15 +27,16 @@ If you want a good first issue, look for `good first issue` or `help wanted` lab
 Core tools:
 
 - Zig 0.17.0, pinned in `.zig-version` and selected by `scripts/zig.sh`
-- Bun 1.x for the TypeScript tooling and tests
-- Vulkan headers/loader
-- `glslc` on Linux if you want shader compilation
+- Bun 1.4.4 or newer for tooling, tests, and `bun fmt`
+- Python 3 for the initial compiler download and release tooling
+- Backend dependencies from [Getting started](docs/GETTING_STARTED.md) or the [ROCm guide](docs/ROCM.md)
 
 Typical local workflow:
 
 ```bash
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
+bun install --frozen-lockfile
 ./scripts/zig.sh build
 ./scripts/zig.sh build test --summary all
 ```
@@ -69,7 +70,9 @@ Before opening a PR, run at minimum:
 ./scripts/zig.sh build test --summary all
 ```
 
-`./scripts/zig.sh build test --summary all` runs both the Zig and Bun test suites.
+The default test target runs CPU-only Zig and Bun tests. It skips model-loading
+and live API smoke tests. Format changed files with `bun run format`; CI checks
+them with `bun fmt`.
 
 Compile the standalone metadata inspectors, tokenizer tools, struct-layout
 tool and available Vulkan validators without opening models or GPU devices:
@@ -79,19 +82,21 @@ tool and available Vulkan validators without opening models or GPU devices:
 ./scripts/zig.sh build check-cuda
 ```
 
-If you want to require the integration smoke tests instead of letting them skip when their env is missing:
+Run integration tests on a dedicated GPU worker with the required models and
+server. Full mode fails if their environment is missing:
 
 ```bash
 ZINC_QWEN3_8B_MODEL=/path/to/Qwen3.5-9B-Q4_K_M.gguf \
 ZINC_QWEN36_35B_MODEL=/path/to/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+ZINC_QWEN38_27B_MODEL=/path/to/Qwen3.8-27B-Q4_K_M.gguf \
 ZINC_API_BASE_URL=http://localhost:8080/v1 \
 ./scripts/zig.sh build test --summary all -Dfull-tests=true
 ```
 
-If you want to run the Bun suite by itself:
+To run the CPU-only Bun suites by themselves:
 
 ```bash
-bun test
+bun test loops/ tools/ site/src/ tests/chat_ui_markdown.test.ts
 ```
 
 If you changed build logic, Vulkan setup, shaders, or platform support, include the exact build command and platform you validated.
@@ -104,11 +109,11 @@ Please include:
 
 - operating system and version
 - GPU model
-- Vulkan driver/runtime details
-- Zig version
+- backend and driver/runtime versions (Metal, Vulkan, ROCm, or CUDA)
+- `zinc --version` output and Zig version for source builds
 - exact command you ran
 - exact model file and quantization
-- full error output or log snippet
+- relevant error output, with credentials, private endpoints, and personal paths removed
 - whether the issue reproduces on the latest `main`
 
 For performance bugs, include both expected and actual tok/s.

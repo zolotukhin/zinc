@@ -22,7 +22,7 @@ const Config = struct {
     q8_tg: ?u32 = null,
     q8_dual_tg: ?u32 = null,
     private_decode: ?bool = null,
-    command_encoder_mode: ?u32 = null, // TODO: restore CommandEncoderMode after merge
+    command_encoder_mode: ?forward_metal.CommandEncoderMode = null,
     profile: bool = false,
     show_help: bool = false,
 };
@@ -76,6 +76,19 @@ fn parseU32(arg: []const u8) !u32 {
     return std.fmt.parseUnsigned(u32, arg, 10);
 }
 
+fn parseThreadgroup(arg: []const u8) !u32 {
+    const threads = try parseU32(arg);
+    if (threads == 0) return error.InvalidThreadgroup;
+    return threads;
+}
+
+fn validateThreadgroup(threads: ?u32, simd_width: u32, max_threads: u32) !void {
+    const value = threads orelse return;
+    if (value == 0 or simd_width == 0 or value > max_threads or value % simd_width != 0) {
+        return error.InvalidThreadgroup;
+    }
+}
+
 fn parseArgs(args: []const [:0]const u8) !Config {
     var config = Config{};
     var i: usize = 1;
@@ -112,11 +125,11 @@ fn parseArgs(args: []const [:0]const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--q8-tg")) {
             i += 1;
             if (i >= args.len) return error.MissingQ8Threadgroup;
-            config.q8_tg = try parseU32(args[i]);
+            config.q8_tg = try parseThreadgroup(args[i]);
         } else if (std.mem.eql(u8, arg, "--q8-dual-tg")) {
             i += 1;
             if (i >= args.len) return error.MissingQ8DualThreadgroup;
-            config.q8_dual_tg = try parseU32(args[i]);
+            config.q8_dual_tg = try parseThreadgroup(args[i]);
         } else if (std.mem.eql(u8, arg, "--private-decode")) {
             i += 1;
             if (i >= args.len) return error.MissingPrivateDecode;
@@ -131,9 +144,9 @@ fn parseArgs(args: []const [:0]const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--profile")) {
             config.profile = true;
         } else if (std.mem.eql(u8, arg, "--serial-encoder")) {
-            config.command_encoder_mode = 0;
+            config.command_encoder_mode = .serial;
         } else if (std.mem.eql(u8, arg, "--concurrent-encoder")) {
-            config.command_encoder_mode = 1;
+            config.command_encoder_mode = .concurrent;
         } else {
             return error.UnknownArgument;
         }
@@ -152,6 +165,16 @@ fn encoderModeLabel(mode: forward_metal.CommandEncoderMode) []const u8 {
 
 fn encoderModeOverrideLabel(mode: ?forward_metal.CommandEncoderMode) []const u8 {
     return if (mode) |value| encoderModeLabel(value) else "default";
+}
+
+fn engineOptions(config: Config) forward_metal.InitOptions {
+    return .{
+        .q8_tg_override = config.q8_tg,
+        .q8_dual_tg_override = config.q8_dual_tg,
+        .private_decode_buffers_override = config.private_decode,
+        .command_encoder_mode = config.command_encoder_mode,
+        .profile_enabled = config.profile,
+    };
 }
 
 fn preparePrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8, chat: bool, allocator: std.mem.Allocator) !PreparedPrompt {
@@ -401,14 +424,11 @@ pub fn main(process_init: std.process.Init) !void {
     const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
     defer allocator.free(prompt_tokens);
 
-    var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, .{
-        //.q8_tg_override = config.q8_tg, // TODO: restore after merge
-        //.q8_dual_tg_override = config.q8_dual_tg,
-        //.private_decode_buffers_override = config.private_decode,
-        //.command_encoder_mode = config.command_encoder_mode,
-        .profile_enabled = config.profile,
-    });
+    var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, engineOptions(config));
     defer engine.deinit();
+
+    try validateThreadgroup(config.q8_tg, engine.dmmv_q8_0_pipe.thread_execution_width, engine.dmmv_q8_0_pipe.max_threads_per_threadgroup);
+    try validateThreadgroup(config.q8_dual_tg, engine.dmmv_q8_0_dual_pipe.thread_execution_width, engine.dmmv_q8_0_dual_pipe.max_threads_per_threadgroup);
 
     try stdout.interface.print("Metal inference benchmark\n", .{});
     try stdout.interface.print("Model: {s}\n", .{config.model_path.?});
@@ -422,17 +442,19 @@ pub fn main(process_init: std.process.Init) !void {
         },
     );
     try stdout.interface.print(
-        "Prompt tokens: {d} | decode tokens: {d} | warmup: {d} | runs: {d} | chat={} | private_decode_override={any} | private_decode_effective={} | encoder_override={?d} | encoder_effective={?d} | profile={}\n\n",
+        "Prompt tokens: {d} | decode tokens: {d} | warmup: {d} | runs: {d} | chat={} | q8_tg={any} | q8_dual_tg={any} | private_decode_override={any} | private_decode_effective={} | encoder_override={s} | encoder_effective={s} | profile={}\n\n",
         .{
             prompt_tokens.len,
             config.max_tokens,
             config.warmup_runs,
             config.runs,
             config.chat,
+            engine.q8_tg_override,
+            engine.q8_dual_tg_override,
             config.private_decode,
-            false, // private_decode_buffers
-            @as(?u32, null), // command_encoder_mode override
-            @as(?u32, null), // command_encoder_mode
+            engine.private_decode_buffers,
+            encoderModeOverrideLabel(config.command_encoder_mode),
+            encoderModeLabel(engine.command_encoder_mode),
             config.profile,
         },
     );
@@ -518,4 +540,36 @@ pub fn main(process_init: std.process.Init) !void {
         try stdout.interface.print("Output preview: {s}\n", .{previewText(text, 160)});
     }
     try stdout.interface.flush();
+}
+
+test "Metal benchmark CLI passes tuning flags to engine initialization without a GPU" {
+    const args = [_][:0]const u8{
+        "zinc-bench-metal", "-m",   "unused.gguf",      "--q8-tg", "512",
+        "--q8-dual-tg",     "1024", "--private-decode", "yes",     "--serial-encoder",
+        "--profile",
+    };
+    const options = engineOptions(try parseArgs(&args));
+    try std.testing.expectEqual(@as(?u32, 512), options.q8_tg_override);
+    try std.testing.expectEqual(@as(?u32, 1024), options.q8_dual_tg_override);
+    try std.testing.expectEqual(@as(?bool, true), options.private_decode_buffers_override);
+    try std.testing.expectEqual(@as(?forward_metal.CommandEncoderMode, .serial), options.command_encoder_mode);
+    try std.testing.expect(options.profile_enabled);
+
+    const concurrent_args = [_][:0]const u8{
+        "zinc-bench-metal", "-m", "unused.gguf", "--private-decode", "0", "--concurrent-encoder",
+    };
+    const concurrent = engineOptions(try parseArgs(&concurrent_args));
+    try std.testing.expectEqual(@as(?bool, false), concurrent.private_decode_buffers_override);
+    try std.testing.expectEqual(@as(?forward_metal.CommandEncoderMode, .concurrent), concurrent.command_encoder_mode);
+}
+
+test "Metal benchmark CLI rejects zero, excessive and misaligned threadgroups" {
+    const args = [_][:0]const u8{ "zinc-bench-metal", "-m", "unused.gguf", "--q8-tg", "0" };
+    try std.testing.expectError(error.InvalidThreadgroup, parseArgs(&args));
+    try validateThreadgroup(512, 32, 512);
+    try validateThreadgroup(null, 0, 0);
+    try std.testing.expectError(error.InvalidThreadgroup, validateThreadgroup(0, 32, 1024));
+    try std.testing.expectError(error.InvalidThreadgroup, validateThreadgroup(1024, 32, 512));
+    try std.testing.expectError(error.InvalidThreadgroup, validateThreadgroup(33, 32, 1024));
+    try std.testing.expectError(error.InvalidThreadgroup, validateThreadgroup(32, 0, 1024));
 }

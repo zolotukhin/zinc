@@ -46,10 +46,12 @@ const docNavSections = [
     label: 'Start Here',
     items: [
       { slug: 'getting-started', label: 'Getting Started' },
+      { slug: 'binary-releases', label: 'Binary Installation' },
       { slug: 'hardware-requirements', label: 'Hardware Requirements' },
       { slug: 'rocm', label: 'AMD ROCm Setup' },
       { slug: 'running-zinc', label: 'Running ZINC' },
       { slug: 'api', label: 'Serving HTTP API' },
+      { slug: 'opencode', label: 'OpenCode Setup' },
       { slug: 'development', label: 'Development' },
     ],
   },
@@ -83,7 +85,7 @@ function isActive(slug: string): boolean {
       <input type="checkbox" id="doc-nav-toggle" class="doc-nav-checkbox sr-only" aria-label="Browse documentation" />
       <div class="doc-nav-bar">
         <h3><a href="/zinc/docs/">Docs</a></h3>
-        <label for="doc-nav-toggle" class="doc-nav-toggle-label" aria-label="Toggle docs navigation">
+        <label for="doc-nav-toggle" class="doc-nav-toggle-label">
           <span></span>
         </label>
       </div>

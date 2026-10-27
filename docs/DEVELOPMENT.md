@@ -55,13 +55,13 @@ bun install --frozen-lockfile
 ```
 
 ```bash
-# Full test suite (Zig unit tests + Bun TypeScript tests)
+# CPU-only Zig and Bun tests (default)
 ./scripts/zig.sh build test
 
-# Just the TypeScript tests
-bun test
+# Just the CPU-only Bun tests
+bun test loops/ tools/ site/src/ tests/chat_ui_markdown.test.ts
 
-# With integration smoke tests (requires a running server + model files)
+# On a dedicated GPU worker: include model and live API smoke tests
 ZINC_API_BASE_URL=http://localhost:8080/v1 ./scripts/zig.sh build test -Dfull-tests=true
 ```
 
@@ -114,76 +114,11 @@ Example debug run:
 ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" -n 64
 ```
 
-## Project Structure
+## Find the code
 
-```
-src/
-├── main.zig                     # CLI entry, arg parsing, server startup, chat subcommand
-├── compute/
-│   ├── forward.zig              # Vulkan inference engine — prefill + decode loop
-│   ├── forward_metal.zig        # Metal inference engine — prefill + decode loop
-│   ├── dmmv.zig                 # DMMV dispatch (quantized matmul-vec)
-│   ├── elementwise.zig          # Fused elementwise ops (RMS norm, SwiGLU, etc.)
-│   ├── attention.zig            # Flash attention dispatch
-│   ├── argmax.zig               # Argmax / sampling dispatch
-│   └── graph.zig                # Decode graph builder and exporter
-├── model/
-│   ├── tokenizer.zig            # BPE tokenizer, chat templates, thinking toggle
-│   ├── catalog.zig              # Managed model catalog with thinking_stable flag
-│   ├── gguf.zig                 # GGUF file parser and tensor metadata
-│   ├── loader.zig               # Model loader (Vulkan — mmap + DMA to VRAM)
-│   ├── loader_metal.zig         # Model loader (Metal — zero-copy mmap)
-│   ├── architecture.zig         # Architecture detection (Qwen, MoE, SSM, etc.)
-│   ├── config.zig               # Model configuration from GGUF metadata
-│   └── managed.zig              # Managed model download, install, activation
-├── server/
-│   ├── routes.zig               # OpenAI-compatible API, streaming, stop detection
-│   ├── chat.html                # Built-in chat UI (embedded at compile time)
-│   ├── http.zig                 # HTTP server and connection handling
-│   ├── http.zig                 # HTTP server base (request parsing, response writing)
-│   ├── routes.zig               # OpenAI-compatible request handlers and streaming
-│   ├── model_manager.zig        # Hot model switching and catalog view
-│   ├── model_manager_metal.zig  # Metal-specific model manager extensions
-│   ├── model_manager_runtime.zig # Runtime abstraction for model manager
-│   ├── runtime.zig              # Backend runtime dispatch (Vulkan vs Metal)
-│   ├── tool_format.zig          # OpenAI tool-calling output formatting
-│   └── chat.html                # Static chat UI served from /chat
-├── vulkan/
-│   ├── instance.zig             # Vulkan instance and device init
-│   ├── pipeline.zig             # Compute pipeline and shader loading
-│   ├── buffer.zig               # GPU buffer allocation and transfers
-│   ├── command.zig              # Command buffer recording and submission
-│   ├── gpu_detect.zig           # GPU vendor/capability detection
-│   └── vk.zig                   # Vulkan C API bindings
-├── metal/
-│   ├── device.zig               # Metal device init and capability query
-│   ├── pipeline.zig             # MSL compute pipeline compilation
-│   ├── buffer.zig               # Metal buffer management
-│   ├── command.zig              # Command buffer and encoder
-│   ├── c.zig                    # Metal C API bindings
-│   ├── shim.h                   # Objective-C shim header
-│   └── shim.m                   # Objective-C shim implementation
-├── gpu/
-│   └── interface.zig            # Backend abstraction (Vulkan vs Metal)
-├── scheduler/
-│   ├── scheduler.zig            # Request scheduling
-│   ├── kv_cache.zig             # KV cache management
-│   └── request.zig              # Request state
-├── diagnostics.zig              # --check system diagnostics (Vulkan)
-├── diagnostics_metal.zig        # --check system diagnostics (Metal)
-├── regression_tests.zig         # Regression test fixtures
-├── shaders/
-│   ├── *.comp                   # GLSL compute shaders (Vulkan/SPIR-V)
-│   └── metal/*.metal            # MSL compute shaders (Apple Silicon)
-site/                            # zolotukhin.ai Astro site
-docs/                            # Technical documentation (published to site)
-tools/                           # API benchmark, standalone utilities
-specs/                           # Feature specifications and plans
-benchmarks/                      # GPU microbenchmarks (bandwidth, dispatch, Metal)
-scripts/                         # Deployment scripts
-tests/                           # TypeScript test files
-loops/                           # Self-improving optimization loop
-```
+Use the [codebase map](/zinc/docs/codebase-map/) for source ownership, backend
+entry points, tests, standalone tools, and release automation. CLI `--help`
+and implementation source are authoritative for current flags.
 
 ## Graph Export
 
@@ -207,6 +142,10 @@ These flags are available via `--help-all`.
 ## Benchmarking
 
 ### CLI decode throughput
+
+Run model inference and benchmarks on a dedicated GPU worker. Check existing
+GPU users first and stop only processes owned by your task. The project
+workstation is not an unattended inference worker.
 
 ```bash
 # Single-stream decode (the primary metric)
@@ -239,12 +178,16 @@ batching should raise aggregate throughput materially without linear p95 growth.
 
 ```bash
 # Generate the benchmark artifact that powers /zinc/benchmarks.
-# Legacy "both" runs RDNA + Metal; use "all" to include Intel Arc and CUDA nodes.
-bun tools/performance_suite.mjs --target both --rdna-sync --rdna-build --rdna-start-llama --output /tmp/zinc-performance.json
+# RDNA runs over SSH; the local process only drives the remote worker.
+bun tools/performance_suite.mjs --target rdna --rdna-sync --rdna-build --rdna-start-llama --output /tmp/zinc-performance.json
 bun tools/performance_suite.mjs --target intel --output /tmp/zinc-intel-performance.json
 ```
 
 The generated target entries include the exact ZINC git version/commit for the machine that produced each target and the llama.cpp binary version/commit used for the baseline on that target. The public performance page renders the same provenance so benchmark rows are tied to a concrete source tree and baseline build.
+
+The Metal target runs on the machine that invokes the suite. Use a dedicated
+Mac with explicit permission for that GPU run. `both` includes Metal; `all`
+also includes the Intel and CUDA targets.
 
 Use the RDNA suite's server-vs-server path for headline comparisons. One-shot CLI runs are diagnostics; do not compare them against a warmed baseline server when deciding whether a target is beaten.
 
