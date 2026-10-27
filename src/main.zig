@@ -2124,7 +2124,7 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
     if (host_io.getenv("ZINC_SCHED_EOS")) |v| {
         eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
     }
-    const eot = if (!debug_ids and tokenizer.detectTemplateKind() == .atem) tokenizer.eot_id else null;
+    const eot = if (debug_ids) null else if (tool_format_mod.forTokenizer(&tokenizer).native_gemma) tokenizer.token_to_id.get("<|tool_response>") else if (tokenizer.detectTemplateKind() == .atem) tokenizer.eot_id else null;
 
     const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
     const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
@@ -2322,10 +2322,10 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 return;
             }
             tools_active = chat.tools.len > 0 and chat.tool_choice != .none and
-                ctx.tokenizer.detectTemplateKind() == .chatml;
+                tool_format_mod.forTokenizer(ctx.tokenizer).supports_tools;
             if (tools_active and enable_thinking == null) enable_thinking = false;
             const skip_thinking = routes_mod.shouldSkipThinkingTemplateForRequest(chat.tools.len, chat.tool_choice, enable_thinking);
-            if (!tool_format_mod.forTokenizer(ctx.tokenizer).native_xml) {
+            if (tool_format_mod.forTokenizer(ctx.tokenizer).usesJsonPrefill()) {
                 if (routes_mod.forcedSingleToolName(chat.tools, chat.tool_choice)) |name| {
                     forced_tool_name = try allocator.dupe(u8, name);
                     if (routes_mod.forcedSingleToolFirstArgumentName(chat.tools, chat.tool_choice)) |arg| {
@@ -2406,7 +2406,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var sent_structured_len: usize = 0;
     var write_failed = false;
     var generation_failed = false;
-    var detector = tool_format_mod.StreamingDetector{ .allocator = allocator, .tools = tool_definitions };
+    var detector = tool_format_mod.StreamingDetector{ .allocator = allocator, .tools = tool_definitions, .native_gemma = tool_format_mod.forTokenizer(ctx.tokenizer).native_gemma };
     defer detector.deinit();
     var any_tool_call_emitted = false;
     var tool_call_index: u32 = 0;
@@ -2462,7 +2462,8 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 };
                 // Token byte pieces can split a UTF-8 code point. Hold that
                 // suffix until the next token before serializing an SSE event.
-                const pending = routes_mod.completeUtf8Prefix(output.items[sent_tool_text_len..]);
+                const visible_tool_text = if (detector.native_gemma) tool_format_mod.gemma.visibleText(output.items) else output.items;
+                const pending = routes_mod.completeUtf8Prefix(visible_tool_text[@min(sent_tool_text_len, visible_tool_text.len)..]);
                 if (forced_tool_name == null and pending.len > 0 and std.unicode.utf8ValidateSlice(pending)) {
                     routes_mod.streamTextViaDetector(conn, pending, "chatcmpl-zinc", 0, "zinc", &detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch {
                         write_failed = true;
@@ -2554,7 +2555,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     const response_output = routes_mod.completeUtf8Prefix(if (structured_chat)
         routes_mod.normalizeStructuredAssistantOutput(ctx.tokenizer, output.items, thinking_enabled, structured_buf.?) catch ""
     else
-        output.items);
+        (if (tool_format_mod.forTokenizer(ctx.tokenizer).native_gemma and is_chat) tool_format_mod.gemma.visibleText(output.items) else output.items));
     if (!std.unicode.utf8ValidateSlice(response_output)) {
         try conn.sendError(500, "server_error", "model returned invalid UTF-8");
         return;

@@ -881,6 +881,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        cuda_dbg_mod.addOptions("build_options", build_options);
         configureCudaModule(b, target, cuda_dbg_mod);
         const cuda_dbg_exe = addExecutable(b, .{ .name = "cuda-dbg", .root_module = cuda_dbg_mod });
         const run_cuda_dbg = b.addRunArtifact(cuda_dbg_exe);

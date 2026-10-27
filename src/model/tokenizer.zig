@@ -1708,42 +1708,84 @@ pub const Tokenizer = struct {
                 if (is_gemma4) {
                     var start_idx: usize = 0;
                     const thinking_enabled = options.enable_thinking orelse false;
+                    const native_tools = options.tool_format != null and options.tool_format.?.native_gemma;
+                    const legacy_tools = native_tools and options.tool_format.?.gemma_legacy_tool_template;
+                    const has_tools = native_tools and options.tools.len > 0;
                     const has_leading_system = n > 0 and
                         (std.mem.eql(u8, roles[0], "system") or std.mem.eql(u8, roles[0], "developer"));
-                    if (thinking_enabled or has_leading_system) {
+                    if (thinking_enabled or has_leading_system or has_tools) {
                         const system_turn = std.fmt.bufPrint(buf[pos..], "{s}system\n", .{turn_start}) catch return error.BufferTooSmall;
                         pos += system_turn.len;
                         if (thinking_enabled) {
-                            const think_token = std.fmt.bufPrint(buf[pos..], "<|think|>", .{}) catch return error.BufferTooSmall;
+                            const think_token = std.fmt.bufPrint(buf[pos..], "<|think|>{s}", .{if (has_tools and !legacy_tools) @as([]const u8, "\n") else ""}) catch return error.BufferTooSmall;
                             pos += think_token.len;
                         }
                         if (has_leading_system) {
-                            const system_text = std.fmt.bufPrint(buf[pos..], "{s}", .{std.mem.trim(u8, contents[0], " \t\r\n")}) catch return error.BufferTooSmall;
-                            pos += system_text.len;
+                            try appendTrimmed(buf, &pos, contents[0]);
                             start_idx = 1;
+                        }
+                        if (has_tools) {
+                            const a = options.tool_render_allocator orelse return error.MissingToolRenderAllocator;
+                            var definitions: std.ArrayList(u8) = .empty;
+                            defer definitions.deinit(a);
+                            try options.tool_format.?.renderToolDefinitions(options.tools, &definitions, a);
+                            if (options.require_tool_call) try definitions.appendSlice(a, "\nUse one of the declared functions in your response.\n");
+                            if (pos + definitions.items.len > buf.len) return error.BufferTooSmall;
+                            @memcpy(buf[pos..][0..definitions.items.len], definitions.items);
+                            pos += definitions.items.len;
                         }
                         const system_end = std.fmt.bufPrint(buf[pos..], "{s}\n", .{turn_end}) catch return error.BufferTooSmall;
                         pos += system_end.len;
                     }
+                    var model_turn_open = false;
+                    var last_was_tool_response = false;
                     for (start_idx..n) |i| {
-                        const rendered_role = if (std.mem.eql(u8, roles[i], "assistant")) "model" else roles[i];
-                        const prefix = std.fmt.bufPrint(buf[pos..], "{s}{s}\n", .{ turn_start, rendered_role }) catch return error.BufferTooSmall;
-                        pos += prefix.len;
-                        if (std.mem.eql(u8, rendered_role, "model")) {
-                            try appendGemma4ThinkingStripped(buf, &pos, contents[i]);
-                        } else {
+                        const is_tool = native_tools and std.mem.eql(u8, roles[i], "tool");
+                        const is_model = std.mem.eql(u8, roles[i], "assistant");
+                        if (is_tool) {
+                            if (!model_turn_open) return error.InvalidToolHistory;
+                            // prepareChatForTokenizer resolved the call ID and
+                            // rendered this native response inside its model turn.
                             try appendTrimmed(buf, &pos, contents[i]);
+                            last_was_tool_response = true;
+                            if (i + 1 < n and !std.mem.eql(u8, roles[i + 1], "tool") and !std.mem.eql(u8, roles[i + 1], "assistant")) {
+                                const end = std.fmt.bufPrint(buf[pos..], "{s}\n", .{turn_end}) catch return error.BufferTooSmall;
+                                pos += end.len;
+                                model_turn_open = false;
+                            }
+                            continue;
                         }
-                        const suffix = std.fmt.bufPrint(buf[pos..], "{s}\n", .{turn_end}) catch return error.BufferTooSmall;
-                        pos += suffix.len;
+                        const rendered_role = if (is_model) "model" else roles[i];
+                        if (!is_model or !model_turn_open or (legacy_tools and last_was_tool_response)) {
+                            const prefix = std.fmt.bufPrint(buf[pos..], "{s}{s}\n", .{ turn_start, rendered_role }) catch return error.BufferTooSmall;
+                            pos += prefix.len;
+                        }
+                        const has_calls = native_tools and is_model and std.mem.indexOf(u8, contents[i], "<|tool_call>") != null;
+                        if (is_model and !has_calls) try appendGemma4ThinkingStripped(buf, &pos, contents[i]) else try appendTrimmed(buf, &pos, contents[i]);
+                        last_was_tool_response = false;
+                        const continues = native_tools and is_model and (has_calls or (i + 1 < n and std.mem.eql(u8, roles[i + 1], "assistant")));
+                        if (continues) {
+                            model_turn_open = true;
+                            if (has_calls and (i + 1 == n or !std.mem.eql(u8, roles[i + 1], "tool"))) {
+                                const response_start = std.fmt.bufPrint(buf[pos..], "<|tool_response>", .{}) catch return error.BufferTooSmall;
+                                pos += response_start.len;
+                            }
+                        } else {
+                            const suffix = std.fmt.bufPrint(buf[pos..], "{s}\n", .{turn_end}) catch return error.BufferTooSmall;
+                            pos += suffix.len;
+                            model_turn_open = false;
+                        }
                     }
-                    if (options.add_generation_prompt) {
+                    if (options.add_generation_prompt and !model_turn_open) {
                         const suffix = std.fmt.bufPrint(buf[pos..], "{s}model\n", .{turn_start}) catch return error.BufferTooSmall;
                         pos += suffix.len;
                         if (!options.skip_thinking_template and !thinking_enabled) {
                             const channel = std.fmt.bufPrint(buf[pos..], "<|channel>thought\n<channel|>", .{}) catch return error.BufferTooSmall;
                             pos += channel.len;
                         }
+                    } else if (options.add_generation_prompt and last_was_tool_response and (legacy_tools != thinking_enabled)) {
+                        const channel = std.fmt.bufPrint(buf[pos..], "<|channel>thought\n{s}", .{if (legacy_tools) @as([]const u8, "<channel|>") else ""}) catch return error.BufferTooSmall;
+                        pos += channel.len;
                     }
                 } else {
                     for (0..n) |i| {

@@ -3755,7 +3755,7 @@ pub const ForwardGemma = struct {
         // On ROCm the exact route-reuse Q5_1 down kernel is substantially faster
         // for short prompts than padding every expert to a WMMA tile. Gate/up keep
         // the grouped WMMA path unless explicitly requested with "gate" or "1".
-        const exact_gate = is_rocm and exact_mode != null and !exact_disabled and
+        const exact_gate = is_rocm and P <= 65535 and exact_mode != null and !exact_disabled and
             !std.ascii.eqlIgnoreCase(exact_mode.?, "down");
         const direct_q51 = is_rocm and route_tile == 16 and envFlag("ZINC_MOE_Q51_DIRECT", is_rocm);
         const exact_down = is_rocm and !direct_q51 and !exact_disabled and
@@ -3771,8 +3771,7 @@ pub const ForwardGemma = struct {
             cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), T, 1 }, .{ 256, 1, 1 }, &.{ &b.moe_norm_e, &b.act_q8 }, &qp_gate, @sizeOf(QuantActPush), 0);
             const pgu = ExpertsQ8Push{ .M = ef, .K = d.n_embd, .T = T, .slice = gu_full, .up_base = gu_half, .n_used = n_used, .routing_stride = rt_stride, .dst_tok_stride = n_used * ef, .fuse_activation = 1 };
             cmd.dispatch(&self.pipes.dmmv_q4k_experts_grouped_q8_dual, .{ ceilDiv(ef, 16), P, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.act_q8, &b.geglu_e, &b.geglu_e, &b.router_table, &b.expert_order }, &pgu, @sizeOf(ExpertsQ8Push), 0);
-            const qp_down = QuantActPush{ .K = ef, .T = P };
-            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(ef, 256), P, 1 }, .{ 256, 1, 1 }, &.{ &b.geglu_e, &b.act_q8 }, &qp_down, @sizeOf(QuantActPush), 0);
+            try self.quantizeRoutedRows(&cmd, &b.geglu_e, &b.act_q8, ef, P);
             if (exact_down) {
                 const pd = ExpertsQ8Push{ .M = d.n_embd, .K = ef, .T = P, .slice = down_slice, .up_base = 0, .n_used = n_used, .routing_stride = rt_stride, .dst_tok_stride = n_used * d.n_embd, .fuse_activation = 0 };
                 cmd.dispatch(&self.pipes.dmmv_q5_1_experts_grouped_q8, .{ ceilDiv(d.n_embd, 32), P, 1 }, .{ 256, 1, 1 }, &.{ &wde.gpu_buffer, &b.act_q8, &b.down_e, &b.router_table, &b.expert_order }, &pd, @sizeOf(ExpertsQ8Push), 0);
@@ -3839,8 +3838,7 @@ pub const ForwardGemma = struct {
         const sg = SwigluPush{ .N = T * n_used * ef };
         cmd.dispatch(&self.pipes.geglu, .{ ceilDiv(T * n_used * ef, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.gate_e, &b.up_e, &b.geglu_e }, &sg, @sizeOf(SwigluPush), 0);
         if (comptime is_rocm) {
-            const qp_down = QuantActPush{ .K = ef, .T = P };
-            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(ef, 256), P, 1 }, .{ 256, 1, 1 }, &.{ &b.geglu_e, &b.act_q8 }, &qp_down, @sizeOf(QuantActPush), 0);
+            try self.quantizeRoutedRows(&cmd, &b.geglu_e, &b.act_q8, ef, P);
             if (exact_down) {
                 const down_tile: u32 = if (envFlag("ZINC_MOE_T8", false)) 8 else if (envFlag("ZINC_MOE_T16", true)) 16 else 4;
                 const max_pos_down = P + down_tile * d.n_experts;
@@ -4231,6 +4229,14 @@ pub const ForwardGemma = struct {
     /// is async too (down scale folded GPU-side, no host id readback); the per-slot
     /// MoE fallback keeps explicit commitAndWait around its readback. Falls back to
     /// sync if the ring fills.
+    /// MoE expands T prompt tokens into T * experts_used rows. Fold the row
+    /// grid into Z above the Y limit, preserving the quantizer's original full-T
+    /// MMQ layout [K/128][T][144] and every consumer's addressing.
+    fn quantizeRoutedRows(self: *ForwardGemma, cmd: *command.CudaCommand, input: *const CudaBuffer, output: *const CudaBuffer, K: u32, rows: u32) !void {
+        const push = QuantActPush{ .K = K, .T = rows };
+        cmd.dispatch(&self.pipes.quantize_act_q8, quantizeActivationGrid(K, rows), .{ 256, 1, 1 }, &.{ input, output }, &push, @sizeOf(QuantActPush), 0);
+    }
+
     fn submit(self: *ForwardGemma, cmd: command.CudaCommand) void {
         var c = cmd;
         if (self.capturing) {
@@ -4282,6 +4288,14 @@ pub const ForwardGemma = struct {
         self.n_pending = 0;
     }
 };
+
+/// Shared with the dedicated GPU packing regression. Keep the full row stride
+/// in QuantActPush; the kernel folds only its launch coordinates, not its data.
+pub fn quantizeActivationGrid(K: u32, rows: u32) [3]u32 {
+    std.debug.assert(K > 0 and rows > 0);
+    const planes = ceilDiv(rows, 65535);
+    return .{ ceilDiv(K, 256), ceilDiv(rows, planes), planes };
+}
 
 fn ceilDiv(a: u32, b: u32) u32 {
     return (a + b - 1) / b;

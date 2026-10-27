@@ -6623,7 +6623,8 @@ extern "C" __global__ void gemm_q5k_tc_lowsmem(const unsigned char* a, const flo
 struct QuantActPush { unsigned K, T; };
 extern "C" __global__ void quantize_act_q8_0(const float* __restrict__ act,
     unsigned char* __restrict__ out, QuantActPush pc) {
-    unsigned tok = blockIdx.y;
+    unsigned tok = blockIdx.y + blockIdx.z * gridDim.y;
+    if (tok >= pc.T) return; // final folded grid plane can contain spare rows
     unsigned chunk_base = blockIdx.x * 256u;
     unsigned tid = threadIdx.x;
     unsigned k_idx = chunk_base + tid;

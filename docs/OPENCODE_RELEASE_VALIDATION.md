@@ -8,12 +8,13 @@ three core coding fixtures, with Qwen 3.5 9B on Vulkan requiring a server fix
 and a separate retry. This establishes useful coding capability on this board,
 with the limits below. It does not qualify every model for the first release.
 
-**Gemma is not OpenCode-qualified.** Gemma 26B failed tool use on both backends.
+**The original Gemma trials could not use tools.** Gemma 26B failed tool use on both backends.
 Gemma 31B could not meet the helper's 8K context minimum on Vulkan. Its initial
 ROCm allocation failure was fixed in the memory follow-up below; chat now works,
 but its actual OpenCode attempt still made no tool calls and failed the fixture.
-The experimental Qwen3 0.6B starter also failed the coding fixture and several
-API checks.
+The native-tool follow-up below now passes all API checks and three core coding
+fixtures for Gemma 26B on ROCm. The experimental Qwen3 0.6B starter also failed
+the coding fixture and several API checks.
 
 The [portable result JSON](/zinc/validation/opencode-release-2026-10-26.json)
 retains model pins, binary and harness hashes, every completed fixture outcome,
@@ -207,17 +208,92 @@ rate-limiter attempt without a timeout or API error. It made zero tool calls
 and failed all three independent tests. Gemma 31B therefore remains outside
 the OpenCode support claim despite the working inference path.
 
+## Gemma native-tool follow-up (2026-10-27)
+
+The original failures exposed missing server support: Gemma selected the no-op
+formatter, and ROCm enabled tool handling only for ChatML. The follow-up adds
+Gemma 4's native declarations, calls and results, using the
+[documented protocol](https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4).
+Nested strings, numbers, booleans, arrays and objects retain their types and
+source bytes in JSON and streaming responses. Unknown functions, duplicate
+argument keys and incomplete calls remain non-executable text.
+
+OpenAI tool-result IDs resolve back to their function names. Results replay
+inside the model turn that made the call. Earlier checkpoints, including the
+pinned 26B model, require an empty thought scaffold after a result; newer
+OpenAI-aware templates continue directly. Fourteen golden prompt cases come
+from sandboxed rendering of the two pinned GGUF templates. The older template
+has malformed nested-schema punctuation; declarations use the corrected native
+schema grammar rather than reproducing that defect.
+
+A 9,232-token MoE prompt also expanded to 73,856 activation rows and exceeded a
+kernel's launch dimension. The corrected quantizer folds its launch across Y
+and Z while preserving the full ROCm MMQ buffer layout. A first row-slicing
+attempt used the wrong layout and produced invalid continuations; those failed
+runs remain separate in the evidence.
+
+The updated ROCm executable also matches all **48/48 reference choices** across
+three complete 16-token continuations under the pinned serial/F32 llama.cpp
+settings, with no near-tie exceptions. This checks the full model after the
+shared quantizer change. The repaired 9,232-token prompt also matches the
+reference after explicit tokenization removes an accidental duplicate BOS in an
+earlier diagnostic request.
+
+The dedicated GPU packing regression compares every output byte against a CPU
+reference, including scales, sums, quantized values, padded groups and buffer
+guards. It passes four cases: 1, 65,535, 65,536 and 73,856 rows. Run it on an
+otherwise idle ROCm worker:
+
+```bash
+./scripts/zig.sh build rocm-dbg -Dbackend=rocm -Doptimize=ReleaseFast -- quantize-rows
+```
+
+The corrected development build is `166f5516bb6aa944d9fa1ba83aa1b80ce82ef73c`,
+executable SHA-256 `5ca83de7b2937bd17ddc771ed691cf442c2cf1d7a25625697c7d2062a964db63`.
+Gemma 26B passes **23/23 API checks at 16K**, including the previously failing
+long prompt, Unicode, typed tools, history, queue isolation and cancellation.
+All **three core OpenCode fixtures pass**: rate limiter (3/3 independent tests,
+7 tool calls), cart (3/3, 9 calls), and Python CLI (4/4, 7 calls). Each fixture
+used a fresh server, 4,096 output tokens, 16 steps and a 300-second limit.
+Protected files stayed unchanged; no tool repairs or supervisor edits were used.
+The earlier cart failure and intermediate invalid continuations are retained.
+
+Final input checks on `a9c13da0` pass on both backends: invalid histories and
+schemas return 400, later requests recover, and Unicode keys round-trip. ROCm
+also passes 24/24 API checks including buffered-tool cancellation.
+
+Gemma 31B passes **22/22 API checks at 8K**, including actual native tool calls.
+Its rate-limiter task made one tool call but hit the 300-second limit without
+fixing the source (0/3 tests). The first 5,037-token prompt took about 199 seconds
+to prefill after a temporary-allocation failure selected the serial fallback.
+Tool transport works; this 32 GB configuration does not establish practical
+OpenCode readiness for 31B. Its required 4K release configuration is unchanged.
+
+Gemma 26B also passes **22/22 API checks on Vulkan at 8K**, but its actual
+rate-limiter task makes no tool calls and passes 0/3 tests. It reaches the
+2,048-token output cap repeatedly without completing a call. This remains an
+unsuccessful coding result; the API pass does not qualify OpenCode use.
+
+Tool strings containing the literal Gemma quote delimiter (`<|"|>`) currently
+return HTTP 400. Source files containing that marker need separate transport
+work.
+
+These are development-source results on one RDNA4 board. They do not qualify
+Gemma on Metal, or certify final release archives.
+
 ## What still blocks 0.1.0
 
-The original required ROCm Gemma 31B allocation blocker is fixed. Both Gemma
-models still need a separate tool-calling fix before advertising OpenCode support.
+The original required ROCm Gemma 31B allocation blocker is fixed. Gemma 26B
+now completes the core OpenCode sweep on ROCm; other Gemma/backend combinations
+need their own coding qualification.
 The tiny starter remains experimental; stable publication already rejects an
 unqualified starter.
 
 These runs cover one RDNA4 board. The required Apple families, other Linux GPU
 families, signed/notarized Mac delivery and protected release infrastructure
-still need qualification. At this audit, the repository had no registered
-self-hosted runners or configured environments. Rebuild and qualify the final
+still need qualification. The follow-up audit still found no registered self-hosted runners. The
+`release` and `release-signing` environments now exist; GPU workers and Apple
+signing credentials remain pending. Rebuild and qualify the final
 candidate's exact packaged bytes after these fixes; do not promote the older
 archives using development-build results.
 

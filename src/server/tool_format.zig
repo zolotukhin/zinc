@@ -1,12 +1,13 @@
 //! Pluggable tool-calling format dispatch for chat completions.
 //! @section Tool Calling
-//! `chatmlToolFormat()` handles Qwen3-family models. `NoopToolFormat` is the
-//! silent fallback for any other template kind.
+//! Qwen ChatML and Gemma 4 use their checkpoint-native tool dialects.
+//! `NoopToolFormat` is the fallback for templates without tool support.
 const std = @import("std");
 const TemplateKind = @import("../model/tokenizer.zig").Tokenizer.TemplateKind;
 const Tokenizer = @import("../model/tokenizer.zig").Tokenizer;
 
 const log = std.log.scoped(.tool_format);
+pub const gemma = @import("gemma_tools.zig");
 
 var global_tool_call_id = std.atomic.Value(u64).init(0);
 
@@ -46,7 +47,7 @@ pub const ToolCall = struct {
 /// response builder when deciding between a `content` reply and a `tool_calls`
 /// reply.
 pub const ParsedAssistantOutput = struct {
-    /// Anything outside `<tool_call>...</tool_call>` blocks.
+    /// Anything outside the format's native tool-call envelopes.
     text_content: []const u8,
     /// Empty slice if no tool calls were detected.
     tool_calls: []const ToolCall,
@@ -70,6 +71,7 @@ pub const FeedResult = enum {
 /// might be the start of a `<tool_call>` tag and flushes them either as
 /// content deltas or as parsed tool calls. One detector per streaming request.
 pub const StreamingDetector = struct {
+    native_gemma: bool = false,
     /// Request schemas distinguish XML string values from numbers/objects.
     tools: []const ToolDefinition = &.{},
     /// Bytes pending emission as content delta.
@@ -105,18 +107,20 @@ pub const StreamingDetector = struct {
     /// @returns A `FeedResult` indicating whether content is ready to emit, a
     ///     tool call is ready to consume, or the bytes are still being held.
     pub fn feed(self: *StreamingDetector, chunk: []const u8) !FeedResult {
+        const open = if (self.native_gemma) gemma.call_open else tool_call_open;
+        const close = if (self.native_gemma) gemma.call_close else tool_call_close;
         try self.hold_buf.appendSlice(self.allocator, chunk);
         while (true) {
-            if (std.mem.indexOf(u8, self.hold_buf.items, tool_call_open)) |open_at| {
+            if (std.mem.indexOf(u8, self.hold_buf.items, open)) |open_at| {
                 if (open_at > 0) {
                     try self.content_pending.appendSlice(self.allocator, self.hold_buf.items[0..open_at]);
                     std.mem.copyForwards(u8, self.hold_buf.items, self.hold_buf.items[open_at..]);
                     self.hold_buf.shrinkRetainingCapacity(self.hold_buf.items.len - open_at);
                 }
-                const close_at = findCallClose(self.hold_buf.items, tool_call_open.len) orelse break;
-                const inner = std.mem.trim(u8, self.hold_buf.items[tool_call_open.len..close_at], " \t\r\n");
-                const after_close = close_at + tool_call_close.len;
-                if (try parseCallInner(inner, self.tools, self.allocator)) |call| {
+                const close_at = (if (self.native_gemma) gemma.findClose(self.hold_buf.items, open.len) else findCallClose(self.hold_buf.items, open.len)) orelse break;
+                const inner = std.mem.trim(u8, self.hold_buf.items[open.len..close_at], " \t\r\n");
+                const after_close = close_at + close.len;
+                if (try parseDialectCall(inner, self.tools, self.allocator, self.native_gemma)) |call| {
                     errdefer {
                         self.allocator.free(call.id);
                         self.allocator.free(call.name);
@@ -131,8 +135,8 @@ pub const StreamingDetector = struct {
                 continue;
             }
             // Retain only a suffix that can grow into the opening delimiter.
-            var held = @min(self.hold_buf.items.len, tool_call_open.len - 1);
-            while (held > 0 and !std.mem.endsWith(u8, self.hold_buf.items, tool_call_open[0..held])) : (held -= 1) {}
+            var held = @min(self.hold_buf.items.len, open.len - 1);
+            while (held > 0 and !std.mem.endsWith(u8, self.hold_buf.items, open[0..held])) : (held -= 1) {}
             const emit = self.hold_buf.items.len - held;
             try self.content_pending.appendSlice(self.allocator, self.hold_buf.items[0..emit]);
             std.mem.copyForwards(u8, self.hold_buf.items, self.hold_buf.items[emit..]);
@@ -188,6 +192,13 @@ pub const ToolFormat = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
     native_xml: bool = false,
+    native_gemma: bool = false,
+    gemma_legacy_tool_template: bool = false,
+    supports_tools: bool = false,
+
+    pub fn usesJsonPrefill(self: ToolFormat) bool {
+        return self.supports_tools and !self.native_xml and !self.native_gemma;
+    }
 
     /// Function-pointer table that concrete format implementations fill in.
     pub const VTable = struct {
@@ -270,11 +281,11 @@ pub const ToolFormat = struct {
 };
 
 // ============================================================
-// NoopToolFormat — silent fallback for non-ChatML templates.
+// NoopToolFormat — fallback for templates without a tool dialect.
 // ============================================================
 
 /// Silent fallback `ToolFormat` for templates that don't have a tool-call
-/// dialect wired in (everything except ChatML today). Definition rendering is
+/// dialect wired in. Definition rendering is
 /// a no-op, parsing returns the model output verbatim with no tool calls, and
 /// the streaming detector treats everything as content.
 pub const NoopToolFormat = struct {
@@ -331,6 +342,14 @@ pub fn forTemplate(template_kind: TemplateKind) ToolFormat {
 /// Newer Qwen checkpoints publish XML function/parameter tags in their own
 /// GGUF template. Keep the original JSON dialect for other ChatML checkpoints.
 pub fn forTokenizer(tokenizer: *const Tokenizer) ToolFormat {
+    if (tokenizer.detectTemplateKind() == .gemma and std.mem.indexOf(u8, tokenizer.chat_template orelse "", "<|tool_call>") != null) {
+        var format = gemmaToolFormat();
+        // Earlier checkpoints use embedded tool_responses and append the
+        // empty thought scaffold after a result. Newer OpenAI-aware templates
+        // continue directly. Honor that checkpoint-level generation contract.
+        format.gemma_legacy_tool_template = std.mem.indexOf(u8, tokenizer.chat_template.?, "message['tool_responses']") != null;
+        return format;
+    }
     if (tokenizer.detectTemplateKind() == .chatml and std.mem.indexOf(u8, tokenizer.chat_template orelse "", "<function=") != null) {
         var format = chatmlToolFormat();
         format.vtable = &vtable_chatml_xml;
@@ -697,7 +716,53 @@ pub fn chatmlToolFormat() ToolFormat {
     return .{
         .ptr = @ptrCast(&chatml_instance),
         .vtable = &vtable_chatml,
+        .supports_tools = true,
     };
+}
+
+fn parseDialectCall(inner: []const u8, tools: []const ToolDefinition, allocator: std.mem.Allocator, native_gemma: bool) !?ToolCall {
+    if (!native_gemma) return parseCallInner(inner, tools, allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const call = (try gemma.parse(inner, arena.allocator())) orelse return null;
+    // Never promote an unadvertised function into an executable SDK tool call.
+    for (tools) |tool| if (std.mem.eql(u8, tool.name, call.name)) return parsedCall(allocator, call.name, call.arguments);
+    return null;
+}
+
+fn gemma_render_defs(_: *anyopaque, tools: []const ToolDefinition, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    for (tools) |tool| try gemma.appendDefinition(buf, allocator, tool.name, tool.description, tool.parameters_json);
+}
+
+fn gemma_render_result(_: *anyopaque, name: []const u8, content: []const u8, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    return gemma.appendResult(buf, allocator, name, content);
+}
+
+fn gemma_parse_calls(_: *anyopaque, text: []const u8, tools: []const ToolDefinition, allocator: std.mem.Allocator) !ParsedAssistantOutput {
+    var detector = StreamingDetector{ .allocator = allocator, .native_gemma = true, .tools = tools };
+    defer detector.deinit();
+    _ = try detector.feed(gemma.visibleText(text));
+    const content = try allocator.dupe(u8, detector.finalize());
+    errdefer allocator.free(content);
+    const calls = try detector.pending_calls.toOwnedSlice(allocator);
+    return .{ .text_content = content, .tool_calls = calls };
+}
+
+fn gemma_new_detector(_: *anyopaque, allocator: std.mem.Allocator) !*StreamingDetector {
+    const d = try allocator.create(StreamingDetector);
+    d.* = .{ .allocator = allocator, .native_gemma = true };
+    return d;
+}
+
+const vtable_gemma = ToolFormat.VTable{
+    .renderToolDefinitions = gemma_render_defs,
+    .renderToolResultMessage = gemma_render_result,
+    .parseAssistantToolCalls = gemma_parse_calls,
+    .newStreamingDetector = gemma_new_detector,
+};
+
+pub fn gemmaToolFormat() ToolFormat {
+    return .{ .ptr = @ptrCast(&chatml_instance), .vtable = &vtable_gemma, .native_gemma = true, .supports_tools = true };
 }
 
 // ============================================================
@@ -1082,4 +1147,71 @@ test "native Qwen XML decodes Python boolean and null scalars only for typed fie
         try std.testing.expect(args.value.object.get("nullable").? == .null);
         try std.testing.expectEqualStrings(spelling, args.value.object.get("oldString").?.string);
     }
+}
+
+test "Gemma streaming detects byte-split multiple calls and preserves raw argument markers" {
+    const a = std.testing.allocator;
+    const tools = [_]ToolDefinition{.{ .name = "write", .description = "", .parameters_json = "{}" }};
+    const detector = try gemmaToolFormat().newStreamingDetector(a);
+    detector.tools = &tools;
+    defer {
+        detector.deinit();
+        a.destroy(detector);
+    }
+    const input = "Prose. <|tool_call>call:write{code:<|\"|>東京\n<think><channel|><tool_call|><|\"|>}<tool_call|><|tool_call>call:write{code:<|\"|>second<|\"|>}<tool_call|> Done.";
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(a);
+    var calls: std.ArrayList(ToolCall) = .empty;
+    defer {
+        for (calls.items) |call| {
+            a.free(call.id);
+            a.free(call.name);
+            a.free(call.arguments_json);
+        }
+        calls.deinit(a);
+    }
+    for (input, 0..) |_, i| {
+        _ = try detector.feed(input[i..][0..1]);
+        try content.appendSlice(a, detector.takeContentDelta());
+        while (detector.takePendingToolCall()) |call| try calls.append(a, call);
+    }
+    try content.appendSlice(a, detector.finalize());
+    try std.testing.expectEqualStrings("Prose.  Done.", content.items);
+    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+    try std.testing.expect(!std.mem.eql(u8, calls.items[0].id, calls.items[1].id));
+    const args = try std.json.parseFromSlice(std.json.Value, a, calls.items[0].arguments_json, .{});
+    defer args.deinit();
+    try std.testing.expectEqualStrings("東京\n<think><channel|><tool_call|>", args.value.object.get("code").?.string);
+}
+
+test "Gemma unknown and incomplete calls remain text" {
+    const a = std.testing.allocator;
+    const tools = [_]ToolDefinition{.{ .name = "read", .description = "", .parameters_json = "{}" }};
+    const input = "<|tool_call>call:unknown{}<tool_call|><|tool_call>call:read{path:<|\"|>unfinished";
+    const result = try gemmaToolFormat().parseAssistantToolCallsWithTools(input, &tools, a);
+    defer {
+        a.free(result.text_content);
+        a.free(result.tool_calls);
+    }
+    try std.testing.expectEqual(@as(usize, 0), result.tool_calls.len);
+    try std.testing.expectEqualStrings(input, result.text_content);
+}
+
+fn checkGemmaToolParseAllocation(allocator: std.mem.Allocator) !void {
+    const tools = [_]ToolDefinition{.{ .name = "write", .description = "", .parameters_json = "{}" }};
+    const result = try gemmaToolFormat().parseAssistantToolCallsWithTools("Before <|tool_call>call:write{path:<|\"|>表.mjs<|\"|>,options:{enabled:true,lines:[1,2]}}<tool_call|> after", &tools, allocator);
+    defer {
+        for (result.tool_calls) |call| {
+            allocator.free(call.id);
+            allocator.free(call.name);
+            allocator.free(call.arguments_json);
+        }
+        allocator.free(result.tool_calls);
+        allocator.free(result.text_content);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+}
+
+test "Gemma tool parsing cleans up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkGemmaToolParseAllocation, .{});
 }
