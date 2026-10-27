@@ -47,7 +47,7 @@ pub const ToolCall = struct {
 /// response builder when deciding between a `content` reply and a `tool_calls`
 /// reply.
 pub const ParsedAssistantOutput = struct {
-    /// Anything outside `<tool_call>...</tool_call>` blocks.
+    /// Anything outside the format's native tool-call envelopes.
     text_content: []const u8,
     /// Empty slice if no tool calls were detected.
     tool_calls: []const ToolCall,
@@ -281,11 +281,11 @@ pub const ToolFormat = struct {
 };
 
 // ============================================================
-// NoopToolFormat — silent fallback for non-ChatML templates.
+// NoopToolFormat — fallback for templates without a tool dialect.
 // ============================================================
 
 /// Silent fallback `ToolFormat` for templates that don't have a tool-call
-/// dialect wired in (everything except ChatML today). Definition rendering is
+/// dialect wired in. Definition rendering is
 /// a no-op, parsing returns the model output verbatim with no tool calls, and
 /// the streaming detector treats everything as content.
 pub const NoopToolFormat = struct {
@@ -1195,4 +1195,23 @@ test "Gemma unknown and incomplete calls remain text" {
     }
     try std.testing.expectEqual(@as(usize, 0), result.tool_calls.len);
     try std.testing.expectEqualStrings(input, result.text_content);
+}
+
+fn checkGemmaToolParseAllocation(allocator: std.mem.Allocator) !void {
+    const tools = [_]ToolDefinition{.{ .name = "write", .description = "", .parameters_json = "{}" }};
+    const result = try gemmaToolFormat().parseAssistantToolCallsWithTools("Before <|tool_call>call:write{path:<|\"|>表.mjs<|\"|>,options:{enabled:true,lines:[1,2]}}<tool_call|> after", &tools, allocator);
+    defer {
+        for (result.tool_calls) |call| {
+            allocator.free(call.id);
+            allocator.free(call.name);
+            allocator.free(call.arguments_json);
+        }
+        allocator.free(result.tool_calls);
+        allocator.free(result.text_content);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+}
+
+test "Gemma tool parsing cleans up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkGemmaToolParseAllocation, .{});
 }

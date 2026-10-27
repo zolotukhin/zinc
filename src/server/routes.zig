@@ -2851,7 +2851,14 @@ fn handleChatCompletions(
     }
     defer runtime.setLogitsReadbackEnabled(engine, previous_logits_readback);
 
-    try prepareChatForTokenizer(&parsed, tokenizer);
+    prepareChatForTokenizer(&parsed, tokenizer) catch |err| {
+        if (err == error.OutOfMemory) {
+            try conn.sendError(500, "internal_error", "Tool history allocation failed");
+            return;
+        }
+        try conn.sendError(400, "invalid_request_error", "Invalid tool-call history");
+        return;
+    };
 
     const prompt = allocChatPrompt(allocator, tokenizer, parsed.roles, parsed.contents, parsed.enable_thinking, skip_thinking_template, parsed.tools, parsed.tool_choice) catch |err| {
         if (err == error.OutOfMemory) {
@@ -2860,6 +2867,10 @@ fn handleChatCompletions(
         }
         if (err == error.BufferTooSmall) {
             try conn.sendError(400, "invalid_request_error", "Prompt too long");
+            return;
+        }
+        if (err == error.InvalidToolArguments) {
+            try conn.sendError(400, "invalid_request_error", "Invalid tool schema or arguments");
             return;
         }
         try conn.sendError(500, "internal_error", "Prompt formatting failed");

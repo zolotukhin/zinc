@@ -14,6 +14,9 @@
 //!       Dedicated GPU regression: allocate/free single-slot KV views, then
 //!       verify the original cache still produces the same four-token decode.
 //!
+//!   ./scripts/zig.sh build rocm-dbg -Dbackend=rocm -- quantize-rows
+//!       Bitwise CPU packing reference across the Y-grid limit, with guards.
+//!
 //! Read-only w.r.t. the engine — uses only public ForwardCuda methods.
 //! @section CUDA Runtime
 const std = @import("std");

@@ -130,6 +130,10 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
+fn validKey(key: []const u8) bool {
+    return key.len > 0 and std.unicode.utf8ValidateSlice(key) and std.mem.indexOfAny(u8, key, ":,{}[] \t\r\n<>") == null;
+}
+
 fn appendString(buf: *std.ArrayList(u8), a: std.mem.Allocator, value: []const u8) !void {
     // The native grammar has no escape for its own raw-string delimiter.
     if (std.mem.indexOf(u8, value, string_delimiter) != null) return error.InvalidToolArguments;
@@ -159,7 +163,7 @@ pub fn appendValue(buf: *std.ArrayList(u8), a: std.mem.Allocator, value: std.jso
             for (keys, 0..) |key, i| {
                 if (i > 0) try buf.append(a, ',');
                 // Native call/result keys are bare, including nested objects.
-                if (key.len == 0 or std.mem.indexOfAny(u8, key, ":,{}[] \t\r\n<>") != null) return error.InvalidToolArguments;
+                if (!validKey(key)) return error.InvalidToolArguments;
                 try buf.print(a, "{s}:", .{key});
                 try appendValue(buf, a, object.get(key).?, depth - 1);
             }
@@ -185,6 +189,8 @@ fn appendType(buf: *std.ArrayList(u8), a: std.mem.Allocator, kind: std.json.Valu
     if (kind == .array) {
         try buf.append(a, '[');
         for (kind.array.items, 0..) |item, i| {
+            // JSON Schema type unions contain names, never nested arrays.
+            if (item != .string) return error.InvalidToolArguments;
             if (i > 0) try buf.append(a, ',');
             try appendType(buf, a, item);
         }
@@ -217,7 +223,7 @@ fn appendSchema(buf: *std.ArrayList(u8), a: std.mem.Allocator, schema: std.json.
             defer a.free(keys);
             for (keys, 0..) |key, i| {
                 if (i > 0) try buf.append(a, ',');
-                if (!validName(key)) return error.InvalidToolArguments;
+                if (!validKey(key)) return error.InvalidToolArguments;
                 try buf.print(a, "{s}:", .{key});
                 try appendSchema(buf, a, item.object.get(key).?, depth - 1, false);
             }
@@ -295,4 +301,14 @@ test "Gemma definitions match the native schema scaffold" {
     defer buf.deinit(a);
     try appendDefinition(&buf, a, "read", "Read a file", "{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"}}}");
     try std.testing.expectEqualStrings("<|tool>declaration:read{description:<|\"|>Read a file<|\"|>,parameters:{properties:{path:{description:<|\"|>File path<|\"|>,type:<|\"|>STRING<|\"|>}},required:[<|\"|>path<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|>", buf.items);
+}
+
+test "Gemma schemas preserve Unicode property names and reject nested type unions" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try appendDefinition(&buf, a, "read", "", "{\"type\":\"object\",\"properties\":{\"名前\":{\"type\":\"string\"}}}");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "名前:{type:<|\"|>STRING<|\"|>}") != null);
+    buf.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidToolArguments, appendDefinition(&buf, a, "read", "", "{\"type\":[[\"string\"]]}"));
 }
