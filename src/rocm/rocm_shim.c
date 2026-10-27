@@ -198,6 +198,11 @@ CudaBuf* cuda_create_buffer(CudaCtx* ctx, size_t size) {
         return NULL;
     }
     if (!hip_ok(hipMalloc(&buf->dptr, size ? size : 1), "hipMalloc")) {
+        size_t free_bytes = 0, total_bytes = 0;
+        if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+            fprintf(stderr, "[rocm_shim] allocation failed: requested=%zu bytes, free=%zu bytes, total=%zu bytes\n",
+                    size, free_bytes, total_bytes);
+        }
         free(buf);
         return NULL;
     }

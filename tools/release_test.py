@@ -475,13 +475,11 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("R9700", release_gpu.gpu_evidence(good, "rdna4"))
         rocm = "  Device: AMD Radeon AI PRO R9700 [gfx1201] [OK]\n  Compute target: gfx1201 [OK]\nVerdict: READY [OK]\n"
         self.assertEqual(release_gpu.gpu_evidence(rocm, "gfx1201"), "AMD Radeon AI PRO R9700")
-        self.assertEqual(release_gpu.gpu_evidence(rocm.replace(" [gfx1201]", ""), "gfx1201"), "AMD Radeon AI PRO R9700")
         self.assertEqual(release_gpu.gpu_evidence("GPU family: apple7 [OK]\nVerdict: READY [OK]", "apple7"), "apple7")
-        rocm = "  Device: AMD Radeon AI PRO R9700 [gfx1201] [OK]\n  Compute target: gfx1201 [OK]\nVerdict: READY [OK]\n"
-        self.assertEqual(release_gpu.gpu_evidence(rocm, "gfx1201"), "AMD Radeon AI PRO R9700")
         for text, family in [(good, "rdna3"), (good.replace("R9700", "llvmpipe"), "rdna4"),
                              (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4"),
                              (rocm.replace("[gfx1201]", "[gfx1100]"), "gfx1201"),
+                             (rocm.replace(" [gfx1201]", ""), "gfx1201"),
                              (rocm.replace("R9700", "llvmpipe"), "gfx1201"),
                              (rocm.replace("R9700", "<private-host>"), "gfx1201"),
                              (rocm.replace("Compute target: gfx1201", "Compute target: gfx1100"), "gfx1201")]:
