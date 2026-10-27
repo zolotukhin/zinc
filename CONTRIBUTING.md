@@ -70,9 +70,11 @@ Before opening a PR, run at minimum:
 ./scripts/zig.sh build test --summary all
 ```
 
-The default test target runs CPU-only Zig and Bun tests. It skips model-loading
-and live API smoke tests. Format changed files with `bun run format`; CI checks
-them with `bun fmt`.
+The default test target runs CPU-only Zig and Bun tests. It explicitly skips
+Metal hardware cases, model-loading tests, and live API smoke tests. On a
+dedicated Metal worker, `./scripts/zig.sh build test -Dgpu-tests=true` adds GPU
+unit tests. Full mode also requires the model/API integration environment.
+Format changed files with `bun run format`; CI checks them with `bun fmt`.
 
 Compile the standalone metadata inspectors, tokenizer tools, struct-layout
 tool and available Vulkan validators without opening models or GPU devices:

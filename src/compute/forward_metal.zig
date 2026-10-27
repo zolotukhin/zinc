@@ -31382,6 +31382,7 @@ test "resolveLayerAttentionParams handles gemma global KV-sharing layers" {
 }
 
 test "rope_native dispatch uses precomputed inverse frequencies" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -31439,6 +31440,7 @@ test "rope_native dispatch uses precomputed inverse frequencies" {
 }
 
 test "residual_rms_norm dispatch normalizes post-residual hidden state" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -31494,6 +31496,7 @@ test "residual_rms_norm dispatch normalizes post-residual hidden state" {
 }
 
 test "residual_rms_norm_out keeps input immutable while writing hidden and norm" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -31569,6 +31572,7 @@ test "residual_rms_norm_out keeps input immutable while writing hidden and norm"
 }
 
 test "gemma_moe_post_norm_residual fuses post MoE tail" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -31669,6 +31673,7 @@ test "gemma_moe_post_norm_residual fuses post MoE tail" {
 }
 
 test "gemma_moe_weighted_post_norm_residual folds scaled expert reduce" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -31808,6 +31813,7 @@ test "gemma_moe_weighted_post_norm_residual folds scaled expert reduce" {
 }
 
 test "gemma_moe_weighted_post_norm_residual_batched folds scaled routes per token" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -31971,6 +31977,7 @@ test "gemma_moe_weighted_post_norm_residual_batched folds scaled routes per toke
 }
 
 test "ssm_delta_net shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32079,6 +32086,7 @@ test "ssm_delta_net shader matches CPU reference" {
 }
 
 test "ssm_delta_net_offset shader matches CPU reference with row offsets" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32191,6 +32199,7 @@ test "ssm_delta_net_offset shader matches CPU reference with row offsets" {
 }
 
 test "ssm_delta_net_prefill shader matches CPU reference across token chunk" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32336,6 +32345,7 @@ test "ssm_delta_net_prefill shader matches CPU reference across token chunk" {
 }
 
 test "ssm_delta_net_prefill exact Qwen shape matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32470,6 +32480,7 @@ test "ssm_delta_net_prefill exact Qwen shape matches CPU reference" {
 }
 
 test "ssm_delta_net_prefill_warp exact Qwen 27B shape matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32657,6 +32668,7 @@ test "qwen ssm delta gated norm threadgroup helper uses tg128 exact model shape"
 }
 
 test "ssm_conv1d shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32737,6 +32749,7 @@ test "ssm_conv1d shader matches CPU reference" {
 }
 
 test "qwen27b ssm_conv1d d4 shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32813,6 +32826,7 @@ test "qwen27b ssm_conv1d d4 shader matches CPU reference" {
 }
 
 test "ssm_conv1d_prefill shader matches repeated CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32903,6 +32917,7 @@ test "ssm_conv1d_prefill shader matches repeated CPU reference" {
 }
 
 test "qwen ssm_conv1d_prefill d4 shader matches repeated CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -32986,6 +33001,7 @@ test "qwen ssm_conv1d_prefill d4 shader matches repeated CPU reference" {
 }
 
 test "ssm_gated_norm shader matches CPU reference with shared norm weights" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33055,6 +33071,7 @@ test "ssm_gated_norm shader matches CPU reference with shared norm weights" {
 }
 
 test "ssm_gated_norm shader matches CPU reference with per-head norm weights" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33124,6 +33141,7 @@ test "ssm_gated_norm shader matches CPU reference with per-head norm weights" {
 }
 
 test "ssm_delta_net shader matches CPU reference at realistic head width" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33240,6 +33258,7 @@ test "ssm_delta_net shader matches CPU reference at realistic head width" {
 }
 
 test "ssm_delta_net shader matches CPU reference at model-like dimensions" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33354,6 +33373,7 @@ test "ssm_delta_net shader matches CPU reference at model-like dimensions" {
 }
 
 test "ssm_delta_net_gated_norm shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33547,6 +33567,7 @@ test "dequantRow q5_1 reads second-half high bits from qh bit 16" {
 }
 
 test "dmmv_q5k shader matches GGML contiguous-half CPU reference ordering" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33610,6 +33631,7 @@ test "dmmv_q5k shader matches GGML contiguous-half CPU reference ordering" {
 }
 
 test "dmmv_q5k shader matches CPU reference across rows and blocks" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33687,6 +33709,7 @@ test "dmmv_q5k shader matches CPU reference across rows and blocks" {
 }
 
 test "dmmv_q5k shader matches CPU reference with nonzero a_offset across many rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33776,6 +33799,7 @@ test "dmmv_q5k shader matches CPU reference with nonzero a_offset across many ro
 }
 
 test "dmmv_q6k shader matches CPU reference with nonzero a_offset across many rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33858,6 +33882,7 @@ test "dmmv_q6k shader matches CPU reference with nonzero a_offset across many ro
 }
 
 test "dmmv_q4k_moe_k2048 shader matches CPU reference across selected experts" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -33959,6 +33984,7 @@ test "dmmv_q4k_moe_k2048 shader matches CPU reference across selected experts" {
 }
 
 test "dmmv_q4k_moe_gate_up shader matches CPU reference across selected experts" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34073,6 +34099,7 @@ test "dmmv_q4k_moe_gate_up shader matches CPU reference across selected experts"
 }
 
 test "dmmv_q4k_moe_gate_up_dual_k2048 matches cached dual path" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34192,6 +34219,7 @@ test "dmmv_q4k_moe_gate_up_dual_k2048 matches cached dual path" {
 }
 
 test "dmmv_q5_1_moe shader matches CPU reference across selected experts" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34296,6 +34324,7 @@ test "dmmv_q5_1_moe shader matches CPU reference across selected experts" {
 }
 
 test "dmmv_q4k_moe_cols shader matches per-route CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34412,6 +34441,7 @@ test "dmmv_q4k_moe_cols shader matches per-route CPU reference" {
 }
 
 test "dmmv_q5k_moe shader matches CPU reference across selected experts" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34514,6 +34544,7 @@ test "dmmv_q5k_moe shader matches CPU reference across selected experts" {
 }
 
 test "dmmv_q5k_moe_k512 shader matches CPU reference across paired rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34617,6 +34648,7 @@ test "dmmv_q5k_moe_k512 shader matches CPU reference across paired rows" {
 }
 
 test "dmmv_q5k_moe_k512_quad shader matches CPU reference across four rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34720,6 +34752,7 @@ test "dmmv_q5k_moe_k512_quad shader matches CPU reference across four rows" {
 }
 
 test "dmmv_q5k_moe_k512_tri shader matches CPU reference across three rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34823,6 +34856,7 @@ test "dmmv_q5k_moe_k512_tri shader matches CPU reference across three rows" {
 }
 
 test "dmmv_q6k_moe shader matches CPU reference across selected experts" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -34918,6 +34952,7 @@ test "dmmv_q6k_moe shader matches CPU reference across selected experts" {
 }
 
 test "dmmv_q5_1_moe_cols shader matches per-route CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35037,6 +35072,7 @@ test "dmmv_q5_1_moe_cols shader matches per-route CPU reference" {
 }
 
 test "dmmv_q5k_moe_cols shader matches per-route CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35153,6 +35189,7 @@ test "dmmv_q5k_moe_cols shader matches per-route CPU reference" {
 }
 
 test "dmmv_q6k_moe_cols shader matches per-route CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35345,6 +35382,7 @@ test "cpu Q8_0 parallel argmax matches serial row pass" {
 }
 
 test "dmmv_q8_0 shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35409,6 +35447,7 @@ test "dmmv_q8_0 shader matches CPU reference" {
 }
 
 test "dmmv_q8_0 shader matches CPU reference across rows and blocks" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35479,6 +35518,7 @@ test "dmmv_q8_0 shader matches CPU reference across rows and blocks" {
 }
 
 test "dmmv_q8_0 shader matches CPU reference across many workgroups" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35560,6 +35600,7 @@ test "dmmv_q8_0 shader matches CPU reference across many workgroups" {
 }
 
 test "gemm_q8_0 shader matches CPU reference for batched tokens" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35642,6 +35683,7 @@ test "gemm_q8_0 shader matches CPU reference for batched tokens" {
 }
 
 test "gemm_f32_small shader matches CPU reference for batched tokens" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35702,6 +35744,7 @@ test "gemm_f32_small shader matches CPU reference for batched tokens" {
 }
 
 test "dmmv_f32_dual_small shader matches batched alpha beta CPU references" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35780,6 +35823,7 @@ test "dmmv_f32_dual_small shader matches batched alpha beta CPU references" {
 }
 
 test "gemm_q5k shader matches CPU reference for batched tokens" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35871,6 +35915,7 @@ test "gemm_q5k shader matches CPU reference for batched tokens" {
 }
 
 test "gemm_q6k n48 shader matches default shader for 36 token partial tile" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -35963,6 +36008,7 @@ test "gemm_q6k n48 shader matches default shader for 36 token partial tile" {
 }
 
 test "gemm_q4k n48 shader matches default shader for 36 token partial tile" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37146,6 +37192,7 @@ test "defaultKvCacheQ8Enabled disables Gemma ISWA q8 KV cache" {
 }
 
 test "dmmv_q8_0_dual shader matches CPU reference across both outputs" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37251,6 +37298,7 @@ test "dmmv_q8_0_dual shader matches CPU reference across both outputs" {
 }
 
 test "dmmv_q8_0_pair shader matches CPU reference for equal-shape outputs" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37342,6 +37390,7 @@ test "dmmv_q8_0_pair shader matches CPU reference for equal-shape outputs" {
 }
 
 test "dmmv_q8_0_pair_swiglu shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37428,6 +37477,7 @@ test "dmmv_q8_0_pair_swiglu shader matches CPU reference" {
 }
 
 test "dmmv_q4k_k2048 shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37491,6 +37541,7 @@ test "dmmv_q4k_k2048 shader matches CPU reference" {
 }
 
 test "batched MoE Metal shaders compile" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37940,6 +37991,7 @@ test "batched MoE Metal shaders compile" {
 }
 
 test "deinterleave shader splits block-interleaved Q and gate" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -37982,6 +38034,7 @@ test "deinterleave shader splits block-interleaved Q and gate" {
 }
 
 test "rms_norm shader normalizes each token slice with shared weights" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38040,6 +38093,7 @@ test "rms_norm shader normalizes each token slice with shared weights" {
 }
 
 test "copy_rms_norm_offset shader copies selected row and normalizes it" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38094,6 +38148,7 @@ test "copy_rms_norm_offset shader copies selected row and normalizes it" {
 }
 
 test "softmax_topk shader selects top experts and normalized weights" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38129,6 +38184,7 @@ test "softmax_topk shader selects top experts and normalized weights" {
 }
 
 test "softmax_topk_batched shader routes each token independently" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38188,6 +38244,7 @@ test "softmax_topk_batched shader routes each token independently" {
 }
 
 test "moe_route_pack shader groups batched routing by expert" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38251,6 +38308,7 @@ test "moe_route_pack shader groups batched routing by expert" {
 }
 
 test "moe_route_pack_blocks shader packs from flattened routes" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38367,6 +38425,7 @@ test "moe_route_pack_blocks shader packs from flattened routes" {
 }
 
 test "moe_route_ids shader flattens batched routing in route order" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38407,6 +38466,7 @@ test "moe_route_ids shader flattens batched routing in route order" {
 }
 
 test "moe_route_gather shader expands token inputs into route slots" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38465,6 +38525,7 @@ test "moe_route_gather shader expands token inputs into route slots" {
 }
 
 test "moe_route_scatter shader accumulates packed batched routes by token" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38564,6 +38625,7 @@ test "moe_route_scatter shader accumulates packed batched routes by token" {
 }
 
 test "moe_route_scatter_shared_residual fuses route shared and residual" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38661,6 +38723,7 @@ test "moe_route_scatter_shared_residual fuses route shared and residual" {
 }
 
 test "moe_route_scatter_shared_residual_gate_f32 computes shared gate dot" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38779,6 +38842,7 @@ test "moe_route_scatter_shared_residual_gate_f32 computes shared gate dot" {
 }
 
 test "moe_route_scatter_scaled folds per-expert scale into routing weight" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38885,6 +38949,7 @@ test "moe_route_scatter_scaled folds per-expert scale into routing weight" {
 }
 
 test "moe_route_scatter_direct_scaled accumulates route-order outputs" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -38973,6 +39038,7 @@ test "moe_route_scatter_direct_scaled accumulates route-order outputs" {
 }
 
 test "moe_route_scatter debug marks invalid packed ids" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39022,6 +39088,7 @@ test "moe_route_scatter debug marks invalid packed ids" {
 }
 
 test "BatchedPrefillScratch allocates Gemma MoE route scratch" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     var device = try metal_device.MetalDevice.init(std.testing.allocator, 0);
     defer device.deinit();
 
@@ -39072,6 +39139,7 @@ test "BatchedPrefillScratch allocates Gemma MoE route scratch" {
 }
 
 test "acquireBatchedPrefillScratch reuses, re-zeroes, grows, and evicts oversized scratch" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     var device = try metal_device.MetalDevice.init(std.testing.allocator, 0);
     defer device.deinit();
 
@@ -39169,6 +39237,7 @@ test "acquireBatchedPrefillScratch reuses, re-zeroes, grows, and evicts oversize
 }
 
 test "BatchedPrefillScratch sizes active-block shared output scratch by token" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     var device = try metal_device.MetalDevice.init(std.testing.allocator, 0);
     defer device.deinit();
 
@@ -39251,6 +39320,7 @@ test "gemma moe prefill path name exposes mixed validation replay" {
 }
 
 test "kv_cache_write shader writes K and V slices at token offset" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39296,6 +39366,7 @@ test "kv_cache_write shader writes K and V slices at token offset" {
 }
 
 test "flash_attn shader handles contiguous Metal KV cache fast path" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39384,6 +39455,7 @@ test "flash_attn shader handles contiguous Metal KV cache fast path" {
 }
 
 test "flash_attn shader respects sliding window mask" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39461,6 +39533,7 @@ test "flash_attn shader respects sliding window mask" {
 }
 
 test "moe_weighted_acc shader adds weighted experts into destination" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39511,6 +39584,7 @@ test "moe_weighted_acc shader adds weighted experts into destination" {
 }
 
 test "moe_weighted_acc_shared_gate_f32 computes gate dot and reduce" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39592,6 +39666,7 @@ test "moe_weighted_acc_shared_gate_f32 computes gate dot and reduce" {
 }
 
 test "moe_weighted_acc_shared_gate_f32_qwen2048 computes one-tile gate dot and reduce" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39673,6 +39748,7 @@ test "moe_weighted_acc_shared_gate_f32_qwen2048 computes one-tile gate dot and r
 }
 
 test "moe_weighted_acc_shared_gate_scalar_qwen2048 consumes precomputed scalar" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39752,6 +39828,7 @@ test "moe_weighted_acc_shared_gate_scalar_qwen2048 consumes precomputed scalar" 
 }
 
 test "moe_weighted_acc_shared_gate_f32_qwen2048_norm computes reduce and next norm" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39853,6 +39930,7 @@ test "moe_weighted_acc_shared_gate_f32_qwen2048_norm computes reduce and next no
 }
 
 test "moe_weighted_acc_shared_gate_f32_qwen2048_seed_norm seeds hidden from separate row" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -39964,6 +40042,7 @@ test "moe_weighted_acc_shared_gate_f32_qwen2048_seed_norm seeds hidden from sepa
 }
 
 test "moe_weighted_acc_shared_gate_scalar_qwen2048_seed_norm consumes precomputed gate" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40072,6 +40151,7 @@ test "moe_weighted_acc_shared_gate_scalar_qwen2048_seed_norm consumes precompute
 }
 
 test "router_f32_topk_bias shader matches CPU top-k softmax reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40171,6 +40251,7 @@ test "router_f32_topk_bias shader matches CPU top-k softmax reference" {
 }
 
 test "router_f32_topk_batched shader routes each prompt token" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40272,6 +40353,7 @@ test "router_f32_topk_batched shader routes each prompt token" {
 }
 
 test "rms_norm_router_f32_topk_batched shader normalizes Gemma router input" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40427,6 +40509,7 @@ test "rms_norm_router_f32_topk_batched shader normalizes Gemma router input" {
 }
 
 test "router_f32_topk_batched_shared_gate shader also writes shared gate scalar" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40544,6 +40627,7 @@ test "router_f32_topk_batched_shared_gate shader also writes shared gate scalar"
 }
 
 test "residual_rms_norm_router_f32_topk shader matches residual norm and CPU top-k" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40680,6 +40764,7 @@ test "residual_rms_norm_router_f32_topk shader matches residual norm and CPU top
 }
 
 test "router_q8_0_topk shader matches CPU top-k softmax reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40762,6 +40847,7 @@ test "router_q8_0_topk shader matches CPU top-k softmax reference" {
 }
 
 test "dmmv_q5_0 shader matches CPU reference with qh bits and nonzero offset" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     // Regression test for the Q5_0 unaligned-uint32 qh read bug.
     // The Q5_0 block stores qh at byte offset 2 within a 22-byte block.
     // With nonzero a_offset, the qh address can be non-4-byte-aligned,
@@ -40849,6 +40935,7 @@ test "dmmv_q5_0 shader matches CPU reference with qh bits and nonzero offset" {
 }
 
 test "dmmv_q5_0 shader matches CPU reference across many rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     // Stress test: 64 rows × 3 blocks per row (K=96), with padding
     // that creates various alignment patterns for the qh uint32 read.
     const ctx = shim.mtl_init();
@@ -40932,6 +41019,7 @@ test "dmmv_q5_0 shader matches CPU reference across many rows" {
 }
 
 test "dmmv_mxfp4 shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -40999,6 +41087,7 @@ test "dmmv_mxfp4 shader matches CPU reference" {
 }
 
 test "dmmv_mxfp4_moe_sg shader matches CPU reference across selected experts" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41095,6 +41184,7 @@ test "dmmv_mxfp4_moe_sg shader matches CPU reference across selected experts" {
 }
 
 test "repacked Q8_0 shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41184,6 +41274,7 @@ test "repacked Q8_0 shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_k2048 shader matches CPU reference (nr=2)" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41258,6 +41349,7 @@ test "dmmv_q8_0_k2048 shader matches CPU reference (nr=2)" {
 }
 
 test "dmmv_q8_0_k4096 shader matches CPU reference (nr=2)" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41330,6 +41422,7 @@ test "dmmv_q8_0_k4096 shader matches CPU reference (nr=2)" {
 }
 
 test "dmmv_q8_0_lmhead shader matches Gemma 12B K2816 shape" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41402,6 +41495,7 @@ test "dmmv_q8_0_lmhead shader matches Gemma 12B K2816 shape" {
 }
 
 test "dmmv_q8_0 nr=2 odd M produces correct last row" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41484,6 +41578,7 @@ test "dmmv_q8_0 nr=2 odd M produces correct last row" {
 }
 
 test "repacked Q8_0 shader matches CPU reference with multiple groups per row" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41566,6 +41661,7 @@ test "repacked Q8_0 shader matches CPU reference with multiple groups per row" {
 }
 
 test "repacked Q8_0 quad shader matches CPU reference with tail rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41699,6 +41795,7 @@ test "repacked Q8_0 quad shader matches CPU reference with tail rows" {
 }
 
 test "repacked Q8_0 K4096 quad shader matches CPU reference with tail rows" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41856,6 +41953,7 @@ test "repackQ8_0Blocks round-trip preserves data" {
 }
 
 test "dmmv_q8_0_k2048_fused_norm shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -41944,6 +42042,7 @@ test "dmmv_q8_0_k2048_fused_norm shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_dual_fused_norm shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -42061,6 +42160,7 @@ test "dmmv_q8_0_dual_fused_norm shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_native scalar shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -42130,6 +42230,7 @@ test "dmmv_q8_0_native scalar shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_k512_quad shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -42203,6 +42304,7 @@ test "dmmv_q8_0_k512_quad shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_k2048_quad shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -42276,6 +42378,7 @@ test "dmmv_q8_0_k2048_quad shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_k4096_quad shader matches CPU reference" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -42349,6 +42452,7 @@ test "dmmv_q8_0_k4096_quad shader matches CPU reference" {
 }
 
 test "dmmv_q8_0_k2048 large M across many workgroups (nr=2)" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);

@@ -74,6 +74,7 @@ test "MetalPipeline struct size" {
 }
 
 test "createPipeline compiles simple MSL kernel" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -99,6 +100,7 @@ test "createPipeline compiles simple MSL kernel" {
 }
 
 test "createPipeline fails on invalid MSL" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -111,6 +113,7 @@ test "createPipeline fails on invalid MSL" {
 }
 
 test "createPipeline fails on wrong function name" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);

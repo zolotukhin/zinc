@@ -156,6 +156,9 @@ fn configureRocmModule(
     module.addIncludePath(b.path("src/cuda"));
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "include" }) });
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "lib" }) });
+    // ROCm installs outside the system loader's default directories. Preserve
+    // its runtime location so an extracted package needs no shell setup.
+    module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "lib" }) });
     module.linkSystemLibrary("amdhip64", .{});
     module.linkSystemLibrary("hiprtc", .{});
     module.linkSystemLibrary("hipblas", .{});
@@ -201,6 +204,8 @@ pub fn build(b: *std.Build) void {
         b.graph.environ_map.get("GITHUB_SHA") orelse
         "unknown";
     const full_tests = b.option(bool, "full-tests", "Require integration smoke tests and fail when their environment is missing") orelse false;
+    const requested_gpu_tests = b.option(bool, "gpu-tests", "Enable hardware unit tests on a dedicated GPU worker") orelse false;
+    const gpu_tests = full_tests or requested_gpu_tests;
     const install_hot_bench = b.option(bool, "install-hot-bench", "Install the zinc-hot-bench binary as part of the default install step") orelse false;
 
     const is_linux = target.result.os.tag == .linux;
@@ -1051,7 +1056,7 @@ pub fn build(b: *std.Build) void {
     } else if (is_macos) {
         test_mod.addCSourceFile(.{
             .file = b.path("src/metal/shim.m"),
-            .flags = &.{"-fobjc-arc"},
+            .flags = if (gpu_tests) &.{"-fobjc-arc"} else &.{ "-fobjc-arc", "-DZINC_CPU_ONLY_TESTS=1" },
         });
         test_mod.addIncludePath(b.path("src/metal"));
         addMetalBindings(b, target, test_mod);
@@ -1069,6 +1074,7 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    run_unit_tests.setEnvironmentVariable("ZINC_RUN_GPU_TESTS", if (gpu_tests) "1" else "0");
 
     const zinc_rt_unit_tests = addTest(b, .{
         .name = "zinc-rt-ir-smoke",

@@ -104,6 +104,26 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual({x["backend"] for x in data["targets"]}, {"metal", "vulkan", "rocm"})
         self.assertEqual(len(data["gpu_profiles"]), 9)
 
+    def test_rocm_archive_resolves_the_standard_runtime_without_shell_setup(self):
+        binary = self.root / "fixture-elf"
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[18:20] = (62).to_bytes(2, "little")
+        binary.write_bytes(header)
+        needed = "\n".join(f"(NEEDED) Shared library: [{name}]" for name in
+                           ["libc.so.6", "libamdhip64.so.7", "libhiprtc.so.7", "libhipblas.so.3"])
+        for paths, valid in [(None, False), ("/opt/rocm/lib", True),
+                             ("$ORIGIN:/opt/rocm/lib", True), ("/tmp/toolkit/lib", False)]:
+            dynamic = needed + (f"\n(RUNPATH) Library runpath: [{paths}]" if paths else "")
+            def inspect(command):
+                return "GLIBC_2.39" if "--version-info" in command else dynamic
+            with self.subTest(paths=paths), patch.object(release, "command_output", side_effect=inspect):
+                if valid:
+                    self.assertEqual(release.inspect_binary(binary, target("linux-x86_64-rocm"))["runtime_paths"], [paths])
+                else:
+                    with self.assertRaises(ValueError):
+                        release.inspect_binary(binary, target("linux-x86_64-rocm"))
+
     def test_missing_gpu_configuration_fails_instead_of_skipping(self):
         with patch.dict(os.environ, {"RELEASE_VARIABLES": "{}"}):
             with self.assertRaisesRegex(ValueError, "configuration missing"):
@@ -457,11 +477,14 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(release_gpu.gpu_evidence(rocm, "gfx1201"), "AMD Radeon AI PRO R9700")
         self.assertEqual(release_gpu.gpu_evidence(rocm.replace(" [gfx1201]", ""), "gfx1201"), "AMD Radeon AI PRO R9700")
         self.assertEqual(release_gpu.gpu_evidence("GPU family: apple7 [OK]\nVerdict: READY [OK]", "apple7"), "apple7")
+        rocm = "  Device: AMD Radeon AI PRO R9700 [gfx1201] [OK]\n  Compute target: gfx1201 [OK]\nVerdict: READY [OK]\n"
+        self.assertEqual(release_gpu.gpu_evidence(rocm, "gfx1201"), "AMD Radeon AI PRO R9700")
         for text, family in [(good, "rdna3"), (good.replace("R9700", "llvmpipe"), "rdna4"),
                              (good + "requested #1 out of range", "rdna4"), (good + "[FAIL]", "rdna4"),
                              (rocm.replace("[gfx1201]", "[gfx1100]"), "gfx1201"),
                              (rocm.replace("R9700", "llvmpipe"), "gfx1201"),
-                             (rocm.replace("R9700", "<private-host>"), "gfx1201")]:
+                             (rocm.replace("R9700", "<private-host>"), "gfx1201"),
+                             (rocm.replace("Compute target: gfx1201", "Compute target: gfx1100"), "gfx1201")]:
             with self.subTest(family=family), self.assertRaises(ValueError):
                 release_gpu.gpu_evidence(text, family)
 
@@ -506,6 +529,25 @@ class ReleaseTest(unittest.TestCase):
             self.assertFalse(request.call_args.args[2]["stream"])
         with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": samples[0][1]["content"]}]}):
             release_gpu.reference_http_parity(1, body, samples)
+
+    def test_cli_reference_gate_checks_all_backend_token_formats_and_complete_text(self):
+        expected = {"content": "First line.\n  Second line. ",
+                    "completion_probabilities": [{"id": token} for token in [791, 315, 198]]}
+        for label in ["Generated tokens (3): { 791, 315, 198 }",
+                      "Output tokens (3): { 791, 315, 198 }",
+                      "Output tokens (3): first20={ 791, 315, 198 }"]:
+            for output in ["Output (3 tokens): ", "Output text: "]:
+                text = "debug(zinc): " + label + "\ninfo(zinc): " + output + expected["content"] + "\n"
+                with self.subTest(label=label, output=output):
+                    release_gpu.cli_reference_parity(text, expected)
+                for bad in [text.replace("315, 198", "315, 199"),
+                            text.replace("(3):", "(4):"), text.replace("791, 315, 198", "791"),
+                            text.replace("  Second line. ", "Second line."),
+                            text.replace("\n  Second line. ", ""), text.replace(expected["content"], "First")]:
+                    with self.subTest(bad=bad), self.assertRaises(ValueError):
+                        release_gpu.cli_reference_parity(bad, expected)
+        with self.assertRaises(ValueError):
+            release_gpu.cli_reference_parity("topk: top=791\nOutput text: First line.\n", expected)
 
     def test_backend_device_indices_can_differ_but_the_physical_reservation_cannot(self):
         base = {"device": 1, "lock_directory": "<shared-reservation>", "models": {"one": "<model>"},

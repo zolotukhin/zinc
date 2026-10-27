@@ -84,6 +84,8 @@ cd /tmp/source
 export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache
 ./scripts/zig.sh build -Dtarget="$ZINC_RELEASE_TARGET" -Dcpu=baseline -Dbackend="$ZINC_RELEASE_BACKEND" -Dshaders=false -Doptimize=ReleaseFast -Dversion="$ZINC_RELEASE_VERSION" -Dcommit="$ZINC_RELEASE_COMMIT" --prefix /out
 ./scripts/zig.sh build tokenize-tool -Dtarget="$ZINC_RELEASE_TARGET" -Dcpu=baseline -Dbackend="$ZINC_RELEASE_BACKEND" -Dshaders=false -Doptimize=ReleaseFast --prefix /out
+# A build-shell library path must not hide a broken standalone archive.
+unset LD_LIBRARY_PATH
 python3 tools/release.py package --version "$ZINC_RELEASE_VERSION" --target "linux-x86_64-$ZINC_RELEASE_BACKEND" --commit "$ZINC_RELEASE_COMMIT" --prefix /out --dist /out/archives
 python3 tools/release.py install-smoke --version "$ZINC_RELEASE_VERSION" --target "linux-x86_64-$ZINC_RELEASE_BACKEND" --directory /out/archives
 chown -R "$ZINC_OUTPUT_UID:$ZINC_OUTPUT_GID" /out

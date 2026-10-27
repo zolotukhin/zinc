@@ -58,6 +58,11 @@ struct MetalRSet {
 // --- Device lifecycle ---
 
 MetalCtx* mtl_init(void) {
+#ifdef ZINC_CPU_ONLY_TESTS
+    // Default unit tests must never initialize even a virtual Metal device.
+    // A missing hardware-test guard then fails without touching the GPU.
+    return NULL;
+#else
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) {
         fprintf(stderr, "Error: Metal device not available. Apple Silicon required.\n");
@@ -76,6 +81,7 @@ MetalCtx* mtl_init(void) {
     ctx->device = device;
     ctx->queue = queue;
     return ctx;
+#endif
 }
 
 void mtl_destroy(MetalCtx* ctx) {

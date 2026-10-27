@@ -39,8 +39,10 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
 ./zig-out/bin/zinc --version
 ```
 
-If the ROCm libraries are not registered with the system dynamic linker, add
-`/opt/rocm/lib` to `LD_LIBRARY_PATH` for the build and run commands.
+The executable records the toolkit's `lib` directory as a runtime search path.
+The standard `/opt/rocm` installation needs no `LD_LIBRARY_PATH` setup. If you
+move a custom toolkit after building, rebuild against its new location or add
+that toolkit's `lib` directory to `LD_LIBRARY_PATH`.
 
 Run a GGUF directly:
 

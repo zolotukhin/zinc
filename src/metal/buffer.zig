@@ -94,6 +94,7 @@ test "MetalBuffer struct size" {
 }
 
 test "createBuffer allocates shared memory with CPU pointer" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -118,6 +119,7 @@ test "createBuffer allocates shared memory with CPU pointer" {
 }
 
 test "createBuffer with various sizes" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -135,6 +137,7 @@ test "createBuffer with various sizes" {
 }
 
 test "createPrivateBuffer allocates GPU-only memory without CPU pointer" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -150,6 +153,7 @@ test "createPrivateBuffer allocates GPU-only memory without CPU pointer" {
 }
 
 test "createBuffer with zero size returns error" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -159,6 +163,7 @@ test "createBuffer with zero size returns error" {
 }
 
 test "wrapMmap wraps page-aligned memory" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -203,6 +208,7 @@ test "freeBuffer with null handle is safe" {
 }
 
 test "contents and mapped return same pointer" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const device_shim = @import("c.zig").shim;
     const ctx = device_shim.mtl_init();
     try std.testing.expect(ctx != null);

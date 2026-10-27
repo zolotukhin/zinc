@@ -120,7 +120,13 @@ pub const MetalDevice = struct {
     }
 };
 
+test "CPU test shim cannot create a Metal device" {
+    if (@import("../gpu/test_policy.zig").enabled()) return error.SkipZigTest;
+    try std.testing.expectError(error.MetalInitFailed, MetalDevice.init(std.testing.allocator, 0));
+}
+
 test "MetalDevice init and deinit" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     var device = try MetalDevice.init(std.testing.allocator, 0);
     defer device.deinit();
 
@@ -132,6 +138,7 @@ test "MetalDevice init and deinit" {
 }
 
 test "MetalDevice reports nonzero memory" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     var device = try MetalDevice.init(std.testing.allocator, 0);
     defer device.deinit();
 
@@ -151,6 +158,7 @@ test "MetalDevice reports nonzero memory" {
 }
 
 test "MetalDevice double deinit is safe" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     var device = try MetalDevice.init(std.testing.allocator, 0);
     device.deinit();
     // Second deinit should be a no-op (ctx is null)
