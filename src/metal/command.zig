@@ -339,6 +339,7 @@ const buffer_mod = @import("buffer.zig");
 const pipeline_mod = @import("pipeline.zig");
 
 test "beginCommand and commitAndWait" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -350,6 +351,7 @@ test "beginCommand and commitAndWait" {
 }
 
 test "full GPU dispatch: write indices via compute shader" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -389,6 +391,7 @@ test "full GPU dispatch: write indices via compute shader" {
 }
 
 test "GPU dispatch with push constants" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -430,6 +433,7 @@ test "GPU dispatch with push constants" {
 }
 
 test "barrier separates dispatches" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -480,6 +484,7 @@ test "barrier separates dispatches" {
 }
 
 test "concurrent encoder with barrier preserves buffer write-read chains" {
+    try @import("../gpu/test_policy.zig").requireGpuTests();
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);

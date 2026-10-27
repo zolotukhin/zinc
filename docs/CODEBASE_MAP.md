@@ -58,7 +58,8 @@ src/
 ├── gpu/
 │   ├── interface.zig            # Backend abstraction (Vulkan vs Metal)
 │   ├── memory_plan.zig          # Cross-backend memory planning
-│   └── process_lock.zig         # Cross-process GPU reservation lock
+│   ├── process_lock.zig         # Cross-process GPU reservation lock
+│   └── test_policy.zig          # Explicit opt-in for hardware unit tests
 ├── scheduler/
 │   ├── request.zig              # Request/response scheduler types
 │   ├── scheduler.zig            # Request scheduling

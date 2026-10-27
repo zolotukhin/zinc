@@ -61,9 +61,19 @@ bun install --frozen-lockfile
 # Just the CPU-only Bun tests
 bun test loops/ tools/ site/src/ tests/chat_ui_markdown.test.ts
 
+# On a dedicated Metal worker: include hardware unit tests without model smoke tests
+./scripts/zig.sh build test -Dgpu-tests=true
+
 # On a dedicated GPU worker: include model and live API smoke tests
 ZINC_API_BASE_URL=http://localhost:8080/v1 ./scripts/zig.sh build test -Dfull-tests=true
 ```
+
+The default Metal suite reports hardware cases as skipped before they create
+a device, allocate GPU buffers, or dispatch a kernel. Its test-only shim also
+refuses device creation, so an unguarded test cannot silently use the GPU.
+`-Dgpu-tests=true` enables those cases on a dedicated worker; `-Dfull-tests=true`
+enables them together with the model/API smoke tests. Hosted macOS virtual GPUs
+do not qualify as supported Apple Silicon hardware.
 
 The test suite covers:
 

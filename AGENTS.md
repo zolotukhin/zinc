@@ -12,7 +12,7 @@ Instructions for AI coding agents working on this repository.
 ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3] [--debug]
 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "Hello" [--chat]
 
-# Run unit tests
+# Run CPU-only unit tests; hardware cases require explicit -Dgpu-tests=true
 ./scripts/zig.sh build test
 
 # Compile shaders manually (requires glslc / shaderc)
