@@ -1044,6 +1044,10 @@ pub const ForwardCuda = struct {
     ssm_state_slots: ?[]CudaBuffer = null,
     n_slots: u32 = 0,
     slot_ctx: u32 = 0,
+    // Chosen per single-slot request, independently of cached batch allocation.
+    // Otherwise a 4K prefill silently enables packed-Q8/fused decode on the
+    // next short request, changing its continuation after the slot is reset.
+    slot_decode_q8_allowed: bool = true,
     // E28 degradation fix: persistent device scratch for the per-step batched
     // decode positions[]/slots[] uploads — allocated ONCE alongside the slot
     // state (sized to n_slots ≥ B), reused every `decodeBatch` step so the
@@ -1772,6 +1776,7 @@ pub const ForwardCuda = struct {
         }
         self.n_slots = 0;
         self.slot_ctx = 0;
+        self.slot_decode_q8_allowed = true;
     }
 
     /// Byte offset of slot `slot`'s K/V for position `pos` in attn layer `L`'s slot
@@ -1799,6 +1804,7 @@ pub const ForwardCuda = struct {
     /// No-op if slot state is unallocated. Call on ADMIT, before per-token prefill.
     pub fn resetSlot(self: *ForwardCuda, slot: u32) !void {
         try self.checkExecution();
+        self.slot_decode_q8_allowed = prefill_policy.useSlotDecodeQ8(false, self.slotPrefillOptions());
         const cc = self.ssm_conv_slots orelse return;
         const ss = self.ssm_state_slots orelse return;
         const d = self.d;
@@ -1993,6 +1999,7 @@ pub const ForwardCuda = struct {
 
     pub fn prefillBatched(self: *ForwardCuda, tokens: []const u32) !u32 {
         if (tokens.len == 0 or tokens.len > self.max_ctx) return error.InvalidPromptLength;
+        self.slot_decode_q8_allowed = true;
         errdefer if (self.prompt_cache) |*cache| {
             cache.valid = false;
         };
@@ -2787,14 +2794,18 @@ pub const ForwardCuda = struct {
         };
     }
 
-    pub fn useCliMoeSlotPrefill(self: *const ForwardCuda, tokens: usize) bool {
-        return prefill_policy.useCliMoeSlotPrefill(tokens, .{
+    fn slotPrefillOptions(self: *const ForwardCuda) prefill_policy.SlotOptions {
+        return .{
             .rocm = is_rocm,
             .moe = self.d.n_experts > 0,
             .slots = self.n_slots,
             .kv_f32 = self.kv_format == .f32,
             .b1_matvec = b1MatvecOn(),
-        });
+        };
+    }
+
+    pub fn useCliMoeSlotPrefill(self: *const ForwardCuda, tokens: usize) bool {
+        return prefill_policy.useCliMoeSlotPrefill(tokens, self.slotPrefillOptions());
     }
 
     /// Batched prefill that writes KV cache + SSM state into the given slot's
@@ -5040,7 +5051,7 @@ pub const ForwardCuda = struct {
         const d = self.d;
         const lm = DmmvPush{ .M = rows, .K = d.n_embd };
         const lm_idx = dmmvIdx(lm_type);
-        if (self.use_decode_q8_lm and lm_type == .q6_k and self.batch != null and (d.n_embd & 255) == 0) {
+        if (self.use_decode_q8_lm and lm_type == .q6_k and self.hasDecodeQ8Scratch() and (d.n_embd & 255) == 0) {
             if (!q8_ready) {
                 const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
@@ -5255,11 +5266,11 @@ pub const ForwardCuda = struct {
         var cmd = try command.beginCommand(ctx);
         const ffn_q8 = self.use_fused_decode_ffn and self.use_decode_q8_ffn and
             wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and
-            self.batch != null and (d.n_embd & 255) == 0;
+            self.hasDecodeQ8Scratch() and (d.n_embd & 255) == 0;
         const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf, d.n_embd, ffn_q8);
         if (self.use_fused_decode_ffn and wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and (d.n_embd & 255) == 0) {
             const gu = DmmvPush{ .M = d.n_ff, .K = d.n_embd, .acc_mode = boolU32(self.use_decode_pair_reduce) };
-            if (self.use_decode_q8_ffn and self.batch != null) {
+            if (self.use_decode_q8_ffn and self.hasDecodeQ8Scratch()) {
                 if (!norm_q8_ready) {
                     const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
                     cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.ffn_norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
@@ -5280,7 +5291,7 @@ pub const ForwardCuda = struct {
             const sg = SwigluPush{ .N = d.n_ff };
             cmd.dispatch(&self.pipes.swiglu, .{ ceilDiv(d.n_ff, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.gate_buf, &self.up_buf, &self.swiglu_buf }, &sg, @sizeOf(SwigluPush), 0);
         }
-        if (self.use_decode_q8_q6 and wdown.info.type_ == .q6_k and self.batch != null and (d.n_ff & 255) == 0) {
+        if (self.use_decode_q8_q6 and wdown.info.type_ == .q6_k and self.hasDecodeQ8Scratch() and (d.n_ff & 255) == 0) {
             const qp = QuantActPush{ .K = d.n_ff, .T = 1 };
             cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_ff, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.swiglu_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             const down = DmmvPush{ .M = d.n_embd, .K = d.n_ff, .acc_mode = 1 };
@@ -5564,6 +5575,10 @@ pub const ForwardCuda = struct {
 
     // ---- helpers ------------------------------------------------------------
 
+    fn hasDecodeQ8Scratch(self: *const ForwardCuda) bool {
+        return self.batch != null and self.slot_decode_q8_allowed;
+    }
+
     /// Decode-only normalization helper. When the next projection consumes the
     /// ROCm packed-Q8 activation, produce the normalized f32 row and that packed
     /// view together. Returns true when `batch.act_q8` is ready for immediate
@@ -5577,7 +5592,7 @@ pub const ForwardCuda = struct {
         N: u32,
         want_q8: bool,
     ) bool {
-        const fuse = self.use_rocm_rms_q8 and want_q8 and self.batch != null and (N & 255) == 0;
+        const fuse = self.use_rocm_rms_q8 and want_q8 and self.hasDecodeQ8Scratch() and (N & 255) == 0;
         if (fuse) {
             const rms_q8 = RmsQ8Push{ .N = N, .eps = self.d.rms_eps, .T = 1 };
             cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ x, w, y, &self.batch.?.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
@@ -5617,7 +5632,7 @@ pub const ForwardCuda = struct {
     /// same-input projection pairs pack once instead of each dispatcher launching
     /// its own identical quantizer.
     fn decodePreparedQ8Eligible(self: *ForwardCuda, type_: gguf.GGMLType, M: u32, K: u32) bool {
-        if (self.d.n_experts != 0 or self.batch == null or (K & 255) != 0) return false;
+        if (self.d.n_experts != 0 or !self.hasDecodeQ8Scratch() or (K & 255) != 0) return false;
         return switch (type_) {
             .q4_k => self.use_decode_q8_q4,
             .q5_k => self.use_decode_q8_q5 and (M >= 4096 or self.kv_format == .q8),
@@ -5674,19 +5689,19 @@ pub const ForwardCuda = struct {
     fn dmmvDispatch(self: *ForwardCuda, cmd: *command.CudaCommand, w: *const LoadedTensor, x: *const CudaBuffer, y: *const CudaBuffer, M: u32, K: u32, acc_mode: u32, a_offset: u32) void {
         const push = DmmvPush{ .M = M, .K = K, .acc_mode = acc_mode, .a_offset = a_offset };
         const idx = dmmvIdx(w.info.type_);
-        if (self.use_decode_q8_q4 and self.d.n_experts == 0 and idx == 0 and self.batch != null and (K & 255) == 0) {
+        if (self.use_decode_q8_q4 and self.d.n_experts == 0 and idx == 0 and self.hasDecodeQ8Scratch() and (K & 255) == 0) {
             const qp = QuantActPush{ .K = K, .T = 1 };
             cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ x, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             cmd.dispatch(&self.pipes.dmmv_q4k_q8_fast, .{ M, 1, 1 }, .{ self.q8DecodeBlock(w.info.type_), 1, 1 }, &.{ &w.gpu_buffer, &self.batch.?.act_q8, y }, &push, @sizeOf(DmmvPush), 0);
             return;
         }
-        if (self.use_decode_q8_q6_proj and self.d.n_experts == 0 and idx == 2 and (M >= 4096 or self.kv_format == .q8) and self.batch != null and (K & 255) == 0) {
+        if (self.use_decode_q8_q6_proj and self.d.n_experts == 0 and idx == 2 and (M >= 4096 or self.kv_format == .q8) and self.hasDecodeQ8Scratch() and (K & 255) == 0) {
             const qp = QuantActPush{ .K = K, .T = 1 };
             cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ x, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             cmd.dispatch(&self.pipes.dmmv_q6k_q8_fast, .{ M, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &w.gpu_buffer, &self.batch.?.act_q8, y }, &push, @sizeOf(DmmvPush), 0);
             return;
         }
-        if (self.use_decode_q8_q5 and self.d.n_experts == 0 and idx == 1 and (M >= 4096 or self.kv_format == .q8) and self.batch != null and (K & 255) == 0) {
+        if (self.use_decode_q8_q5 and self.d.n_experts == 0 and idx == 1 and (M >= 4096 or self.kv_format == .q8) and self.hasDecodeQ8Scratch() and (K & 255) == 0) {
             const qp = QuantActPush{ .K = K, .T = 1 };
             cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ x, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             cmd.dispatch(&self.pipes.dmmv_q5k_q8_fast, .{ M, 1, 1 }, .{ self.q8DecodeBlock(w.info.type_), 1, 1 }, &.{ &w.gpu_buffer, &self.batch.?.act_q8, y }, &push, @sizeOf(DmmvPush), 0);
@@ -5790,7 +5805,7 @@ pub const ForwardCuda = struct {
         q8_ready: bool,
     ) void {
         const push = DmmvPairPush{ .M0 = M0, .M1 = M1, .K = K, .pair_reduce = boolU32(self.use_q4_pair_reduce) };
-        if (self.use_decode_q8_q4_pair and (M0 >= 4096 or self.kv_format == .q8) and self.batch != null and (K & 255) == 0) {
+        if (self.use_decode_q8_q4_pair and (M0 >= 4096 or self.kv_format == .q8) and self.hasDecodeQ8Scratch() and (K & 255) == 0) {
             if (!q8_ready) {
                 const qp = QuantActPush{ .K = K, .T = 1 };
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ x, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
