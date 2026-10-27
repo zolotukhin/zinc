@@ -3225,12 +3225,12 @@ fn handleChatCompletions(
                 if (findStreamingStopStart(gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled)) |stop_idx| {
                     gen_text_len = stop_idx;
                     const pending_text = gen_text_buf[sent_text_len..gen_text_len];
-                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
+                    const cleaned_pending = trimTrailingChatArtifacts(completeUtf8Prefix(pending_text));
                     gen_text_len = sent_text_len + cleaned_pending.len;
                     if (forced_tool_name == null) {
                         if (is_atem) {
                             const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
-                            const cleaned_structured = trimTrailingChatArtifacts(structured);
+                            const cleaned_structured = trimTrailingChatArtifacts(completeUtf8Prefix(structured));
                             if (cleaned_structured.len > sent_visible_len) {
                                 streamTextViaDetector(conn, cleaned_structured[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                                 sent_visible_len = cleaned_structured.len;
@@ -3316,20 +3316,20 @@ fn handleChatCompletions(
             if (!stopped) {
                 if (is_atem) {
                     const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
-                    const cleaned_structured = trimTrailingChatArtifacts(structured);
+                    const cleaned_structured = trimTrailingChatArtifacts(completeUtf8Prefix(structured));
                     if (cleaned_structured.len > sent_visible_len and forced_tool_name == null) {
                         streamTextViaDetector(conn, cleaned_structured[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                         sent_visible_len = cleaned_structured.len;
                     }
                 } else if (thinking_enabled) {
                     const pending_text = gen_text_buf[sent_text_len..gen_text_len];
-                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
+                    const cleaned_pending = trimTrailingChatArtifacts(completeUtf8Prefix(pending_text));
                     if (cleaned_pending.len > 0 and forced_tool_name == null) {
                         streamTextViaDetector(conn, cleaned_pending, req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                     }
                 } else {
                     const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
-                    const cleaned_visible = trimTrailingChatArtifacts(visible);
+                    const cleaned_visible = trimTrailingChatArtifacts(completeUtf8Prefix(visible));
                     if (cleaned_visible.len > sent_visible_len and forced_tool_name == null) {
                         streamTextViaDetector(conn, cleaned_visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                     }
@@ -3429,7 +3429,8 @@ fn handleChatCompletions(
 
         // Escape the full text for JSON
         var structured_buf: [16384]u8 = undefined;
-        const structured_text = normalizeStructuredAssistantOutput(tokenizer, text_buf.items, thinking_enabled, &structured_buf) catch text_buf.items;
+        const complete_text = completeUtf8Prefix(text_buf.items);
+        const structured_text = normalizeStructuredAssistantOutput(tokenizer, complete_text, thinking_enabled, &structured_buf) catch complete_text;
         var strip_buf: [16384]u8 = undefined;
         const base_text = if (thinking_enabled)
             structured_text
@@ -3601,7 +3602,7 @@ fn handleCompletions(
 
     const finish_reason = completionFinishReason(parsed.max_tokens, max_tokens, output_tokens.len);
 
-    const escaped_text = try jsonEscapeAlloc(allocator, text_buf.items);
+    const escaped_text = try jsonEscapeAlloc(allocator, completeUtf8Prefix(text_buf.items));
     defer allocator.free(escaped_text);
 
     var wb: std.ArrayList(u8) = .empty;
@@ -4076,6 +4077,14 @@ test "response token budgets retain only complete Unicode characters" {
         var expected = end;
         while (!std.unicode.utf8ValidateSlice(text[0..expected])) : (expected -= 1) {}
         try std.testing.expectEqualStrings(text[0..expected], completeUtf8Prefix(text[0..end]));
+        const a = std.testing.allocator;
+        const escaped = try jsonEscapeAlloc(a, completeUtf8Prefix(text[0..end]));
+        defer a.free(escaped);
+        const json = try std.fmt.allocPrint(a, "\"{s}\"", .{escaped});
+        defer a.free(json);
+        const parsed = try std.json.parseFromSlice([]const u8, a, json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(text[0..expected], parsed.value);
     }
 }
 
