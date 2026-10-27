@@ -966,6 +966,8 @@ fn handlePullModel(
 
 // ── /v1/chat/completions ─────────────────────────────────────
 
+const max_stream_text_bytes = 32768;
+
 const chat_stop_strs = [_][]const u8{
     "<|im_end|>",
     "<|im_start|>",
@@ -3143,11 +3145,11 @@ fn handleChatCompletions(
             }
         }.check;
         const stop_strs = try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
-        var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
+        var gen_text_buf: [max_stream_text_bytes]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
         var sent_visible_len: usize = if (is_atem and thinking_enabled and forced_tool_name == null) thinking_prefix.len else 0;
-        var visible_buf: [4096]u8 = undefined;
+        var visible_buf: [max_stream_text_bytes]u8 = undefined;
         var structured_stream_buf: [32768]u8 = undefined;
         var stopped = false;
         var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
@@ -3311,7 +3313,7 @@ fn handleChatCompletions(
                         }
                         sent_text_len += safe_end_rel;
                     } else {
-                        const visible = stripThinkingForDisabledStream(gen_text_buf[0..gen_text_len], &visible_buf) catch "";
+                        const visible = try stripThinkingForDisabledStream(gen_text_buf[0..gen_text_len], &visible_buf);
                         const safe_visible = lastCompleteUtf8End(visible);
                         if (safe_visible > sent_visible_len) {
                             streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
@@ -5690,6 +5692,45 @@ test "disabled-thinking streams preserve a native tool call after hidden reasoni
     try std.testing.expectEqual(@as(usize, 1), calls);
     try std.testing.expectEqualStrings("", detector.finalize());
     try std.testing.expectEqualStrings(try stripThinkingForDisabledResponse(input, &buf), emitted.items);
+}
+
+test "disabled-thinking streams preserve a write argument larger than four KiB" {
+    const a = std.testing.allocator;
+    const code = host_io.repeatText("export const value = 'café 東京 🚀';\n", 200);
+    const input = "<think>Plan the edit.</think>\n<tool_call>\n<function=write>\n<parameter=content>\n" ++ code ++ "\n</parameter>\n</function>\n</tool_call>";
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "write",
+        .description = "Write source",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}}}",
+    }};
+    for ([_]usize{ 1, 127, 4096 }) |chunk_size| {
+        var detector = tool_format.StreamingDetector{ .allocator = a, .tools = &tools };
+        defer detector.deinit();
+        var visible_buf: [max_stream_text_bytes]u8 = undefined;
+        var sent: usize = 0;
+        var end: usize = 0;
+        var calls: usize = 0;
+        while (end < input.len) {
+            end = @min(input.len, end + chunk_size);
+            const visible = completeUtf8Prefix(try stripThinkingForDisabledStream(input[0..end], &visible_buf));
+            try std.testing.expect(visible.len >= sent);
+            _ = try detector.feed(visible[sent..]);
+            sent = visible.len;
+            try std.testing.expectEqualStrings("", detector.takeContentDelta());
+            while (detector.takePendingToolCall()) |call| {
+                defer a.free(call.id);
+                defer a.free(call.name);
+                defer a.free(call.arguments_json);
+                calls += 1;
+                try std.testing.expectEqualStrings("write", call.name);
+                const parsed = try std.json.parseFromSlice(std.json.Value, a, call.arguments_json, .{});
+                defer parsed.deinit();
+                try std.testing.expectEqualStrings(&code, parsed.value.object.get("content").?.string);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), calls);
+        try std.testing.expectEqualStrings("", detector.finalize());
+    }
 }
 
 test "stripThinkingForDisabledResponse promotes think-only answer when no final answer arrived" {
