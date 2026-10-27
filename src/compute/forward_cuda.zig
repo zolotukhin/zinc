@@ -34,6 +34,7 @@ const dmmv_fast_block: u32 = 64;
 const KERNELS_CU = @embedFile("../shaders/cuda/kernels.cu");
 const launch_sizes = @import("launch_sizes.zig");
 const kv_storage = @import("kv_storage.zig");
+const prefill_policy = @import("prefill_policy.zig");
 
 // ---- kernel push-constant structs (must byte-match kernels.cu) --------------
 const RmsPush = extern struct { N: u32, eps: f32 };
@@ -2786,6 +2787,16 @@ pub const ForwardCuda = struct {
         };
     }
 
+    pub fn useCliMoeSlotPrefill(self: *const ForwardCuda, tokens: usize) bool {
+        return prefill_policy.useCliMoeSlotPrefill(tokens, .{
+            .rocm = is_rocm,
+            .moe = self.d.n_experts > 0,
+            .slots = self.n_slots,
+            .kv_f32 = self.kv_format == .f32,
+            .b1_matvec = b1MatvecOn(),
+        });
+    }
+
     /// Batched prefill that writes KV cache + SSM state into the given slot's
     /// per-sequence region (instead of the single-seq scratch). Used by the
     /// serve engine so server-mode prefill gets the 5× batched-GEMM speedup
@@ -2849,12 +2860,13 @@ pub const ForwardCuda = struct {
             return e;
         }
 
-        // F32 slot batches require the block reduction used by batched decode.
-        // Q8 is single-slot and always uses decodeSlotStep, so retain the same
-        // prefill reduction as its MTP path. Otherwise changing only MTP mode
-        // changes the recurrent state before the first generated token.
+        // Short single-slot MoE must retain the CLI's warp scan as well as its
+        // batching choice. The B=1 decoder uses the serial chain; forcing the
+        // block scan here changed its continuation despite identical weights.
+        // Other F32 slot batches keep the batched-decode reduction. Q8 retains
+        // the prefill reduction shared with its MTP path.
         const saved_force_block_ssm = self.force_block_ssm;
-        self.force_block_ssm = self.kv_format == .f32;
+        self.force_block_ssm = self.kv_format == .f32 and !self.useCliMoeSlotPrefill(tokens.len);
         defer self.force_block_ssm = saved_force_block_ssm;
         const tok = self.prefillBatched(tokens) catch |err| {
             self.restorePrefillAliases(saved_kv_k, saved_kv_v, saved_ssm, saved_conv, d.n_layers);

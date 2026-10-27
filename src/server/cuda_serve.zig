@@ -30,6 +30,7 @@ const host_io = @import("host_io");
 const scheduler = @import("../scheduler/scheduler.zig");
 const forwardgemma = @import("../compute/forward_cuda_gemma.zig");
 const forwardcuda = @import("../compute/forward_cuda.zig");
+const prefill_policy = @import("../compute/prefill_policy.zig");
 const shim = @import("../cuda/c.zig").shim;
 
 const log = std.log.scoped(.cuda_serve);
@@ -545,13 +546,15 @@ pub const ServeEngine = struct {
                     self.failSlot(slot_id);
                     continue;
                 };
-                // Batched prefill: use prefillBatchedSlot (5× faster than per-token
-                // decodeBatch) for qwen. Falls back to per-token for gemma.
-                // Batched prefill: use prefillBatchedSlot (2-5× faster for longer
-                // prompts) for qwen. Falls back to per-token for gemma or short prompts.
-                // Threshold: batched GEMM overhead dominates below ~32 tokens.
+                // Short single-slot MoE uses the same batched prefill and SSM
+                // reduction as CLI. Other short prompts keep per-token prefill;
+                // long prompts retain the existing batched path.
                 // A/B toggle: ZINC_BATCHED_PREFILL=0 disables (uses per-token fallback).
-                const use_batched = np >= 32 and
+                const cli_moe_short = switch (fwd) {
+                    .qwen => |q| q.useCliMoeSlotPrefill(np),
+                    .gemma => false,
+                };
+                const use_batched = (np >= prefill_policy.batch_threshold or cli_moe_short) and
                     (host_io.getenv("ZINC_BATCHED_PREFILL") == null or
                         !std.mem.eql(u8, host_io.getenv("ZINC_BATCHED_PREFILL").?, "0"));
                 const batched_tok = if (use_batched)
