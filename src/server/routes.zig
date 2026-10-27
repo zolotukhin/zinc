@@ -2489,6 +2489,27 @@ fn compactHistoryAnswer(answer: []const u8) []const u8 {
 }
 
 pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8 {
+    return stripThinkingForDisabledOutput(text, buf, true);
+}
+
+fn stripThinkingForDisabledStream(text: []const u8, buf: []u8) ![]const u8 {
+    // A reasoning block cannot become visible and later disappear: callers
+    // have already sent its byte count to the client. Also hold partial tags
+    // until the next token identifies them as reasoning or ordinary text.
+    var end = text.len;
+    for ([_][]const u8{ thinking_open_tag, thinking_close_tag }) |tag| {
+        var held = @min(text.len, tag.len - 1);
+        while (held > 0) : (held -= 1) {
+            if (std.mem.endsWith(u8, text, tag[0..held])) {
+                end = @min(end, text.len - held);
+                break;
+            }
+        }
+    }
+    return stripThinkingForDisabledOutput(text[0..end], buf, false);
+}
+
+fn stripThinkingForDisabledOutput(text: []const u8, buf: []u8, final: bool) ![]const u8 {
     var cursor: usize = 0;
     var out_len: usize = 0;
 
@@ -2527,7 +2548,7 @@ pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8
                 while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
                 continue;
             }
-            if (out_len == 0) {
+            if (final and out_len == 0) {
                 const fallback = sanitizeAnswerTail(text[after_open..]);
                 if (fallback.len > buf.len) return error.BufferTooSmall;
                 @memcpy(buf[0..fallback.len], fallback);
@@ -2541,7 +2562,7 @@ pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8
     }
 
     const stripped = std.mem.trim(u8, buf[0..out_len], " \t\r\n");
-    if (stripped.len > 0) return stripped;
+    if (stripped.len > 0 or !final) return stripped;
 
     const trimmed = std.mem.trimStart(u8, text, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, thinking_open_tag)) return stripped;
@@ -3224,7 +3245,7 @@ fn handleChatCompletions(
                 // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
                 if (findStreamingStopStart(gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled)) |stop_idx| {
                     gen_text_len = stop_idx;
-                    const pending_text = gen_text_buf[sent_text_len..gen_text_len];
+                    const pending_text = gen_text_buf[@min(sent_text_len, gen_text_len)..gen_text_len];
                     const cleaned_pending = trimTrailingChatArtifacts(completeUtf8Prefix(pending_text));
                     gen_text_len = sent_text_len + cleaned_pending.len;
                     if (forced_tool_name == null) {
@@ -3284,7 +3305,7 @@ fn handleChatCompletions(
                         }
                         sent_text_len += safe_end_rel;
                     } else {
-                        const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
+                        const visible = stripThinkingForDisabledStream(gen_text_buf[0..gen_text_len], &visible_buf) catch "";
                         const safe_visible = lastCompleteUtf8End(visible);
                         if (safe_visible > sent_visible_len) {
                             streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
@@ -5626,6 +5647,43 @@ test "stripThinkingForDisabledResponse removes complete think block and keeps an
     var buf: [256]u8 = undefined;
     const stripped = try stripThinkingForDisabledResponse("<think>\n17 * 24 = 408\n</think>\n\n408", &buf);
     try std.testing.expectEqualStrings("408", stripped);
+}
+
+test "disabled-thinking streams preserve a native tool call after hidden reasoning at every byte boundary" {
+    const a = std.testing.allocator;
+    const input = "<think>\nLet me read the source before editing.\n</think>\n\n<tool_call>\n<function=read>\n<parameter=filePath>\n/project/src/rate_limiter.mjs\n</parameter>\n</function>\n</tool_call>";
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "read",
+        .description = "Read source",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"}}}",
+    }};
+    var detector = tool_format.StreamingDetector{ .allocator = a, .tools = &tools };
+    defer detector.deinit();
+    var emitted: std.ArrayList(u8) = .empty;
+    defer emitted.deinit(a);
+    var buf: [1024]u8 = undefined;
+    var calls: usize = 0;
+    for (0..input.len + 1) |end| {
+        const visible = try stripThinkingForDisabledStream(input[0..end], &buf);
+        try std.testing.expect(std.mem.startsWith(u8, visible, emitted.items));
+        const delta = visible[emitted.items.len..];
+        _ = try detector.feed(delta);
+        try std.testing.expectEqualStrings("", detector.takeContentDelta());
+        while (detector.takePendingToolCall()) |call| {
+            defer a.free(call.id);
+            defer a.free(call.name);
+            defer a.free(call.arguments_json);
+            calls += 1;
+            try std.testing.expectEqualStrings("read", call.name);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, call.arguments_json, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings("/project/src/rate_limiter.mjs", parsed.value.object.get("filePath").?.string);
+        }
+        try emitted.appendSlice(a, delta);
+    }
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqualStrings("", detector.finalize());
+    try std.testing.expectEqualStrings(try stripThinkingForDisabledResponse(input, &buf), emitted.items);
 }
 
 test "stripThinkingForDisabledResponse promotes think-only answer when no final answer arrived" {
