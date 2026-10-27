@@ -63,7 +63,10 @@ def inspect_binary(binary, spec):
     require(all(any(lib.startswith(prefix) for lib in libraries) for prefix in required), "missing backend runtime dependency")
     rpaths = re.findall(r"\((?:RPATH|RUNPATH)\).*?\[([^\]]+)\]", dynamic)
     require(all(part.startswith(("$ORIGIN", "/opt/rocm")) for value in rpaths for part in value.split(":")), "build-host ELF runtime path")
-    return {"libraries": sorted(libraries), "required_glibc": maximum}
+    if spec["backend"] == "rocm":
+        require("/opt/rocm/lib" in [part for value in rpaths for part in value.split(":")],
+                "ROCm archive must resolve the standard runtime without LD_LIBRARY_PATH")
+    return {"libraries": sorted(libraries), "required_glibc": maximum, "runtime_paths": rpaths}
 
 
 def package(args):

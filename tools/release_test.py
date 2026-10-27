@@ -104,6 +104,26 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual({x["backend"] for x in data["targets"]}, {"metal", "vulkan", "rocm"})
         self.assertEqual(len(data["gpu_profiles"]), 9)
 
+    def test_rocm_archive_resolves_the_standard_runtime_without_shell_setup(self):
+        binary = self.root / "fixture-elf"
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[18:20] = (62).to_bytes(2, "little")
+        binary.write_bytes(header)
+        needed = "\n".join(f"(NEEDED) Shared library: [{name}]" for name in
+                           ["libc.so.6", "libamdhip64.so.7", "libhiprtc.so.7", "libhipblas.so.3"])
+        for paths, valid in [(None, False), ("/opt/rocm/lib", True),
+                             ("$ORIGIN:/opt/rocm/lib", True), ("/tmp/toolkit/lib", False)]:
+            dynamic = needed + (f"\n(RUNPATH) Library runpath: [{paths}]" if paths else "")
+            def inspect(command):
+                return "GLIBC_2.39" if "--version-info" in command else dynamic
+            with self.subTest(paths=paths), patch.object(release, "command_output", side_effect=inspect):
+                if valid:
+                    self.assertEqual(release.inspect_binary(binary, target("linux-x86_64-rocm"))["runtime_paths"], [paths])
+                else:
+                    with self.assertRaises(ValueError):
+                        release.inspect_binary(binary, target("linux-x86_64-rocm"))
+
     def test_missing_gpu_configuration_fails_instead_of_skipping(self):
         with patch.dict(os.environ, {"RELEASE_VARIABLES": "{}"}):
             with self.assertRaisesRegex(ValueError, "configuration missing"):

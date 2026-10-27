@@ -156,6 +156,9 @@ fn configureRocmModule(
     module.addIncludePath(b.path("src/cuda"));
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "include" }) });
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "lib" }) });
+    // ROCm installs outside the system loader's default directories. Preserve
+    // its runtime location so an extracted package needs no shell setup.
+    module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "lib" }) });
     module.linkSystemLibrary("amdhip64", .{});
     module.linkSystemLibrary("hiprtc", .{});
     module.linkSystemLibrary("hipblas", .{});
