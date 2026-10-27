@@ -1066,6 +1066,30 @@ fn isIntelGpuVendor(vendor: GpuVendor) bool {
     return vendor == .intel_arc_xe2 or vendor == .intel_arc;
 }
 
+fn intelA3bPrefillEnabled(vendor: GpuVendor, setting: ?[]const u8) bool {
+    if (!isIntelGpuVendor(vendor)) return false;
+    // Packaged qualification found corrupted continuations in the Intel
+    // layer-major A3B path. Keep it explicit while that path is investigated.
+    const value = setting orelse return false;
+    return std.mem.eql(u8, value, "1") or std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "on") or std.ascii.eqlIgnoreCase(value, "yes");
+}
+
+test "Intel A3B prefill requires an explicit recognized opt-in" {
+    for ([_]GpuVendor{ .intel_arc, .intel_arc_xe2 }) |vendor| {
+        try std.testing.expect(!intelA3bPrefillEnabled(vendor, null));
+        for ([_][]const u8{ "", "0", "off", "false", "no", "typo" }) |setting| {
+            try std.testing.expect(!intelA3bPrefillEnabled(vendor, setting));
+        }
+        for ([_][]const u8{ "1", "true", "ON", "Yes" }) |setting| {
+            try std.testing.expect(intelA3bPrefillEnabled(vendor, setting));
+        }
+    }
+    for ([_]GpuVendor{ .amd_rdna3, .amd_rdna4, .amd_rdna4_apu }) |vendor| {
+        try std.testing.expect(!intelA3bPrefillEnabled(vendor, "1"));
+    }
+}
+
 fn intelBatchedPrefillChunkLimit(vendor: GpuVendor, default_limit: u32) u32 {
     if (!isIntelGpuVendor(vendor)) return 0;
     const raw = host_io.getenv("ZINC_INTEL_BATCHED_PREFILL_CHUNK") orelse return default_limit;
@@ -19164,9 +19188,7 @@ pub const InferenceEngine = struct {
     }
 
     fn intelA3bProductionEnabled(self: *const InferenceEngine) bool {
-        if (!isIntelGpuVendor(self.gpu_config.vendor)) return false;
-        const raw = host_io.getenv("ZINC_INTEL_A3B_PRODUCTION") orelse return true;
-        return raw.len > 0 and !std.mem.eql(u8, raw, "0");
+        return intelA3bPrefillEnabled(self.gpu_config.vendor, host_io.getenv("ZINC_INTEL_A3B_PRODUCTION"));
     }
 
     fn qwen36DensePrefillSsmPreprojEnabled(self: *const InferenceEngine) bool {
@@ -28988,8 +29010,8 @@ pub const InferenceEngine = struct {
     /// the `canUseBatchedPrefillRdna`-gated batched body or `prefillBatch` (per-token
     /// serial path). Set `ZINC_BATCHED_PREFILL=0` to force the serial fallback or
     /// `=validate` to run both paths and diff the last-token logits. Intel Arc
-    /// Gemma uses the chunked batched path by default; Qwen 3.6 A3B uses the
-    /// specialized layer-major path by default; other Intel models still
+    /// Gemma uses the chunked batched path by default; Intel Qwen 3.6 A3B's
+    /// layer-major path requires ZINC_INTEL_A3B_PRODUCTION=1; other Intel models
     /// require `ZINC_INTEL_BATCHED_PREFILL=1` to opt in.
     /// @param state Decode state for the current request.
     /// @param prompt_tokens Tokenized prompt sequence to prefill.

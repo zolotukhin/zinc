@@ -2847,34 +2847,39 @@ pub const ForwardGemma = struct {
     // ---- Effort 28 increment 1: slot-based KV (batched / continuous decode) --
 
     /// Allocate slot-based KV for `n_slots` concurrent sequences of up to
-    /// `slot_ctx` positions each. ADDITIVE: a fresh per-layer allocation that
-    /// never aliases or touches the production single-sequence kv_k/kv_v. The
-    /// batched-decode path (sub-steps 1b/1c) writes/reads it via
-    /// `slotKvOffsetBytes`; the production decodeStep is unchanged. Idempotent —
-    /// frees any prior slot KV first. Sub-step 1a only allocates + smoke-tests it.
+    /// `slot_ctx` positions each. A single slot reuses the existing cache through
+    /// lightweight views; multiple slots retain independent allocations.
+    /// Idempotent, including cleanup after a partial allocation failure.
     pub fn allocSlotKv(self: *ForwardGemma, n_slots: u32, slot_ctx: u32) !void {
+        if (n_slots == 0 or slot_ctx == 0) return error.InvalidSlotCapacity;
         self.freeSlotKv();
+        errdefer self.freeSlotKv();
         const ctx = self.ctx;
         const f4 = @sizeOf(f32);
-        const kk = try self.allocator.alloc(CudaBuffer, self.d.n_layers);
-        const vv = try self.allocator.alloc(CudaBuffer, self.d.n_layers);
+        inline for (.{ &self.kv_k_slots, &self.kv_v_slots }) |field| {
+            field.* = try self.allocator.alloc(CudaBuffer, self.d.n_layers);
+            @memset(field.*.?, std.mem.zeroes(CudaBuffer));
+        }
+        const kk = self.kv_k_slots.?;
+        const vv = self.kv_v_slots.?;
+        const reuse_single = n_slots == 1 and slot_ctx <= self.max_ctx;
         for (0..self.d.n_layers) |li| {
             const bytes = @as(usize, n_slots) * slot_ctx * self.geom[li].kv_dim * f4;
-            kk[li] = try buffer.createBuffer(ctx, bytes);
-            vv[li] = try buffer.createBuffer(ctx, bytes);
+            kk[li] = if (reuse_single) try buffer.aliasBuffer(&self.kv_k[li], 0, bytes) else try buffer.createBuffer(ctx, bytes);
+            vv[li] = if (reuse_single) try buffer.aliasBuffer(&self.kv_v[li], 0, bytes) else try buffer.createBuffer(ctx, bytes);
         }
-        self.kv_k_slots = kk;
-        self.kv_v_slots = vv;
         if (is_rocm and self.d.is_muse and self.use_muse_attn_blas) {
-            const kk16 = try self.allocator.alloc(CudaBuffer, self.d.n_layers);
-            const vv16 = try self.allocator.alloc(CudaBuffer, self.d.n_layers);
+            inline for (.{ &self.kv_k_f16_slots, &self.kv_v_f16_slots }) |field| {
+                field.* = try self.allocator.alloc(CudaBuffer, self.d.n_layers);
+                @memset(field.*.?, std.mem.zeroes(CudaBuffer));
+            }
+            const kk16 = self.kv_k_f16_slots.?;
+            const vv16 = self.kv_v_f16_slots.?;
             for (0..self.d.n_layers) |li| {
                 const bytes = @as(usize, n_slots) * slot_ctx * self.geom[li].kv_dim * @sizeOf(u16);
                 kk16[li] = try buffer.createBuffer(ctx, bytes);
                 vv16[li] = try buffer.createBuffer(ctx, bytes);
             }
-            self.kv_k_f16_slots = kk16;
-            self.kv_v_f16_slots = vv16;
         }
         self.n_slots = n_slots;
         self.slot_ctx = slot_ctx;

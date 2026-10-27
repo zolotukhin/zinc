@@ -301,13 +301,16 @@ class ReleaseTest(unittest.TestCase):
         (directory / "SHA256SUMS.txt").write_text("".join(a["sha256"] + "  " + a["filename"] + "\n" for a in artifacts))
         for profile in policy()["gpu_profiles"]:
             artifact = next(a for a in artifacts if a["target"] == profile["target"])
-            models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True) for m in policy()["models"] if m["id"] in profile["models"]]
+            models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True,
+                           reference_agreement=release_lib.reference_agreement([{"tokens": 16, "near_ties": []} for _ in range(3)]))
+                      for m in policy()["models"] if m["id"] in profile["models"]]
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": artifact["sha256"], "binary_sha256": artifact["binary_sha256"], "models": models,
                       "hardware": {"gpu": "CPU fixture, no GPU was executed", "os": "fixture", "driver": "fixture"},
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
-                      "reference": {"commit": policy()["reference"]["commit"], "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
+                      "reference": {"commit": policy()["reference"]["commit"], "generation": policy()["reference"]["generation"],
+                                    "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup", "kernel_reference")}}
             write_json(reports / (profile["id"] + ".json"), report)
         return directory, reports
@@ -360,6 +363,9 @@ class ReleaseTest(unittest.TestCase):
                    lambda d: d.update(binary_sha256="0" * 64), lambda d: d.update(family="rdna3"),
                    lambda d: d["models"][0].update(sha256="0" * 64), lambda d: d["models"][0].update(context=1),
                    lambda d: d["models"].pop(), lambda d: d["reference"].update(commit="2" * 40),
+                   lambda d: d["models"][0].pop("reference_agreement"),
+                   lambda d: d["models"][0]["reference_agreement"].update(exact_tokens=1),
+                   lambda d: d["reference"].pop("generation"), lambda d: d["reference"]["generation"].update(micro_batch=2),
                    lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver")]
         for index, change in enumerate(changes):
             data = json.loads(saved)
@@ -501,6 +507,15 @@ class ReleaseTest(unittest.TestCase):
             self.assertFalse(request.call_args.args[2]["stream"])
         with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": samples[0][1]["content"]}]}):
             release_gpu.reference_http_parity(1, body, samples)
+        samples[0][1].update(validated_content="A qualified alternate.", comparison={"near_ties": [{"rank": 2}]})
+        for content in [samples[0][1]["content"], "A qualified alternate."]:
+            with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": content}]}):
+                release_gpu.reference_http_parity(1, body, samples)
+        with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "A qualified"}]}), self.assertRaises(ValueError):
+            release_gpu.reference_http_parity(1, body, samples)
+        samples[0][1].pop("comparison")
+        with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "A qualified alternate."}]}), self.assertRaises(ValueError):
+            release_gpu.reference_http_parity(1, body, samples)
 
     def test_cli_reference_gate_checks_all_backend_token_formats_and_complete_text(self):
         expected = {"content": "First line.\n  Second line. ",
@@ -520,6 +535,87 @@ class ReleaseTest(unittest.TestCase):
                         release_gpu.cli_reference_parity(bad, expected)
         with self.assertRaises(ValueError):
             release_gpu.cli_reference_parity("topk: top=791\nOutput text: First line.\n", expected)
+
+    def test_reference_precision_is_fixed_after_worker_flags_and_cli_keeps_gpu_argmax(self):
+        commands, environments = [], []
+        @contextlib.contextmanager
+        def fake_process(command, log, _cwd, env):
+            commands.append(command)
+            environments.append(env)
+            if Path(command[0]).name == "zinc":
+                Path(log).write_text("debug(zinc): Generated tokens (1): { 760 }\ninfo(zinc): Output (1 tokens): The\n")
+            yield SimpleNamespace(wait=lambda **_kwargs: 0)
+        expected = {"content": "The", "completion_probabilities": [{"id": 760}]}
+        worker_flags = ["--ubatch-size", "512", "--cache-type-k", "f16", "--flash-attn", "on"]
+        with patch.object(release_gpu, "PROMPTS", ["fixture"]), patch.object(release_gpu, "process", fake_process), \
+             patch.object(release_gpu, "ready"), patch.object(release_gpu, "json_request", side_effect=[{"prompt": "rendered"}, expected]):
+            samples = release_gpu.inference_parity(self.root / "package", self.root / "reference", self.root / "model",
+                                                  4096, 0, worker_flags, self.root, {})
+        self.assertEqual(samples, [("rendered", expected)])
+        for flag, value in [("--ubatch-size", "1"), ("--batch-size", "512"), ("--parallel", "1"),
+                            ("--cache-type-k", "f32"), ("--cache-type-v", "f32"), ("--flash-attn", "off")]:
+            self.assertEqual([commands[0][i + 1] for i, item in enumerate(commands[0][:-1]) if item == flag][-1], value)
+        self.assertIn("--debug", commands[1])
+        self.assertNotIn("ZINC_LOG_TOPK", environments[1])
+        self.assertNotIn("ZINC_FORCE_CPU_ARGMAX", environments[1])
+
+    def test_reference_agreement_records_a_bounded_tie_without_counting_it_exact(self):
+        cases = [{"tokens": 16, "near_ties": []} for _ in range(3)]
+        tie = {"position": 11, "chosen_id": 36337, "reference_id": 3618, "rank": 2, "logprob_gap": 0.032}
+        cases[1]["near_ties"].append(tie)
+        report = release_lib.reference_agreement(cases)
+        self.assertEqual((report["exact_tokens"], report["total_tokens"], report["near_tie_tokens"]), (47, 48, 1))
+        release_lib.verify_reference_agreement(report)
+        for change in [lambda data: data[1]["near_ties"][0].update(rank=3),
+                       lambda data: data[1]["near_ties"][0].update(logprob_gap=0.051),
+                       lambda data: data[1]["near_ties"][0].update(logprob_gap=float("nan")),
+                       lambda data: data[1]["near_ties"][0].update(position=16),
+                       lambda data: data[1]["near_ties"][0].update(chosen_id=3618),
+                       lambda data: data[0]["near_ties"].append(dict(tie)),
+                       lambda data: data[1]["near_ties"].append(dict(tie)),
+                       lambda data: data.pop()]:
+            data = json.loads(json.dumps(cases));change(data)
+            with self.assertRaises(ValueError):
+                release_lib.reference_agreement(data)
+        report["exact_tokens"] = 48
+        with self.assertRaisesRegex(ValueError, "totals"):
+            release_lib.verify_reference_agreement(report)
+
+    def test_reference_near_tie_rejects_unrelated_choices_and_large_probability_gaps(self):
+        expected = {"completion_probabilities": [{"id": token} for token in range(100, 116)]}
+        expected["completion_probabilities"][11]["top_logprobs"] = [{"id": 111, "logprob": -1.0}, {"id": 999, "logprob": -1.032}]
+        actual = list(range(100, 116));actual[11] = 999
+        tie = release_gpu.reference_near_tie(actual, expected)
+        self.assertEqual((tie["position"], tie["rank"]), (11, 2))
+        self.assertAlmostEqual(tie["logprob_gap"], 0.032)
+        for selected, low in [(998, -1.032), (999, -1.051), (999, float("nan")), (999, -0.9)]:
+            data = json.loads(json.dumps(expected));data["completion_probabilities"][11]["top_logprobs"][1]["logprob"] = low
+            tokens = actual.copy();tokens[11] = selected
+            with self.assertRaises(ValueError):
+                release_gpu.reference_near_tie(tokens, data)
+        with self.assertRaises(ValueError):
+            release_gpu.reference_near_tie(actual[:-1], expected)
+
+    def test_near_tie_branch_requires_matching_prompt_all_suffix_tokens_and_complete_detokenization(self):
+        actual = list(range(100, 116));actual[11] = 999
+        tie = {"position": 11, "chosen_id": 999, "reference_id": 111, "rank": 2, "logprob_gap": 0.032}
+        content = "A complete alternate continuation.\n Second line. "
+        log = "info(zinc): Output text: " + content + "\n"
+        expected = {"content": "Original reference remains visible"}
+        replies = [{"tokens": [1, 2]}, {"completion_probabilities": [{"id": token} for token in actual[12:]]}, {"content": content}]
+        with patch.object(release_gpu, "output", return_value="[1, 2]\n"), \
+             patch.object(release_gpu, "json_request", side_effect=replies) as request:
+            release_gpu.qualify_reference_branch(1, self.root, self.root / "model", "rendered", expected, actual, log, tie, self.root, {})
+        self.assertEqual(request.call_args_list[1].args[2]["prompt"], [1, 2] + actual[:12])
+        self.assertEqual(request.call_args_list[1].args[2]["n_predict"], 4)
+        self.assertEqual(expected["content"], "Original reference remains visible")
+        self.assertEqual(expected["validated_content"], content)
+        for native, wrong in [("[9]\n", replies), ("[1, 2]\n", [replies[0], {"completion_probabilities": [{"id": 7}]}]),
+                              ("[1, 2]\n", [*replies[:2], {"content": content.rstrip()}])]:
+            data = {"content": "original"}
+            with patch.object(release_gpu, "output", return_value=native), patch.object(release_gpu, "json_request", side_effect=wrong), self.assertRaises(ValueError):
+                release_gpu.qualify_reference_branch(1, self.root, self.root / "model", "rendered", data, actual, log, tie, self.root, {})
+            self.assertNotIn("validated_content", data)
 
     def test_backend_device_indices_can_differ_but_the_physical_reservation_cannot(self):
         base = {"device": 1, "lock_directory": "<shared-reservation>", "models": {"one": "<model>"},
