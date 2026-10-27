@@ -58,10 +58,11 @@ export async function validateBufferedToolCancellation({
     'content-type': 'application/json',
     authorization: `Bearer ${env.ZINC_API_KEY || 'local'}`,
   };
+  const controller = new AbortController();
   const response = await fetch(url, {
     method: 'POST',
     headers,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
     body: JSON.stringify({
       model,
       messages: [
@@ -92,7 +93,8 @@ export async function validateBufferedToolCancellation({
     }),
   });
   assert.equal(response.status, 200);
-  await response.body.cancel();
+  controller.abort();
+  await response.body.cancel().catch(() => {});
   const started = performance.now();
   const recovered = await fetch(url, {
     method: 'POST',
