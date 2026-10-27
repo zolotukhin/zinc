@@ -321,6 +321,23 @@ from earlier revisions.
 
 The four-model Qwen sweep also found a MoE HTTP continuation difference that
 reproduces in the unchanged #35 package. All four CLI rows match 48/48 reference
-choices, but that MoE HTTP row remains a release blocker. These results do not
-promote the experimental dense 27B catalog entry or qualify the final hardware
-matrix.
+choices, but that preview did not qualify the MoE HTTP row. The subsequent
+single-slot follow-up below resolves it. These results do not promote the
+experimental dense 27B catalog entry or qualify the final hardware matrix.
+
+## ROCm single-slot consistency follow-up (2026-10-27)
+
+The [single-slot consistency fix](ROCM_SINGLE_SLOT_CORRECTNESS.md) clears the
+MoE CLI/HTTP difference and the dense-model request-reuse drift exposed by
+stronger recovery checks. One new extracted ROCm preview passes all six required
+ROCm model rows at 4K, with 288/288 exact CLI choices and 54 complete HTTP
+reference replays across initial, cancellation and context/error-recovery phases.
+Reference backend identities remain explicit for every row.
+
+On that same final package, Qwen 3.6 35B-A3B passes **24/24 OpenCode API checks
+and 3/3 core coding fixtures at 16K**, with all ten independent tests passing,
+real tool calls, fresh servers and no protected-file changes. The
+[portable evidence](/zinc/validation/rocm-single-slot-2026-10-27.json) preserves
+the failed intermediate sweep and earlier executable identities. This does not
+change the Gemma 31B OpenCode memory limitation, promote catalog models, or
+qualify the final hardware matrix.
