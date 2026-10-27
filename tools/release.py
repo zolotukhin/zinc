@@ -19,7 +19,7 @@ from pathlib import Path
 
 from release_lib import (
     ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
-    probe_binary, read_json, require, sha256, source_sha, target, version, write_json,
+    probe_binary, read_json, require, sha256, source_sha, target, verify_reference_agreement, version, write_json,
 )
 
 
@@ -302,9 +302,11 @@ def aggregate(args):
             expected = next(m for m in policy()["models"] if m["id"] == model["id"])
             require(model.get("sha256") == expected["sha256"] and model.get("context") == expected["context"] and model.get("passed") is True,
                     "model digest/context differs from policy")
+            verify_reference_agreement(model.get("reference_agreement"))
         reference = report.get("reference", {})
         require(reference.get("commit") == policy()["reference"]["commit"] and all(re.fullmatch(r"[0-9a-f]{64}", reference.get(key, "")) for key in ("server_sha256", "tokenizer_sha256")),
                 "missing pinned reference evidence")
+        require(reference.get("generation") == policy()["reference"]["generation"], "reference generation settings differ from policy")
         require(all(report.get("hardware", {}).get(key) for key in ("gpu", "os", "driver")), "missing public hardware/driver evidence")
         reports.append(report)
     require(seen == {p["id"] for p in data["required_profiles"]}, "required GPU reports are missing")
@@ -365,7 +367,7 @@ def finalize(args):
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
     notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Metal/Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU/unified memory. Apple chip variants still require their factory minimum macOS version.", "",
                   "Metal/Vulkan include the browser chat UI. ROCm exposes CLI/HTTP chat and completion routes; its standalone server has no built-in browser UI or hot model switching.", "",
-                  "Release checks use greedy decoding, one slot, f32 KV and each backend's default MTP setting. They do not establish performance claims or certify every MTP/context/concurrency configuration. Alternative KV formats and other architecture/backend combinations require separate validation.", "",
+                  "Release checks use greedy decoding, one slot, f32 KV and each backend's default MTP setting. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
                   "Source-only experimental backends and development features are outside this binary support promise. See `release-policy.json` for model revisions, hashes, the pinned reference commit and mandatory profiles.", ""])
     (directory / "release-notes.md").write_text("\n".join(notes))
     print("Validated installer, policy and release notes frozen for attestation")

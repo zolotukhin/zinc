@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from release import verify_candidate
-from release_lib import ROOT, extract_archive, install_signal_handlers, policy, probe_binary, read_json, require, sha256, write_json
+from release_lib import ROOT, extract_archive, install_signal_handlers, policy, probe_binary, read_json, reference_agreement, require, sha256, write_json
 
 CORPUS = [
     "The quick brown fox jumps over the lazy dog.", "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
@@ -163,7 +163,7 @@ def tokenizer_parity(tree, reference, model, work, env):
         require(zinc == llama, f"tokenizer parity failed on corpus case {index}")
 
 
-def cli_reference_parity(text, expected):
+def cli_generated_ids(text):
     # All three backends expose generated IDs in --debug output. Vulkan's
     # ZINC_LOG_TOPK hook is backend-specific and cannot certify Metal or ROCm.
     tokens = re.search(r"(?:Output|Generated) tokens \((\d+)\):\s*(?:first20=)?\{([\d,\s]*)\}", text)
@@ -171,49 +171,129 @@ def cli_reference_parity(text, expected):
     actual = [int(value) for value in re.findall(r"\d+", tokens.group(2))]
     count = int(tokens.group(1))
     require(0 < count <= 20 and len(actual) == count, "CLI generated token IDs are incomplete")
+    return actual
+
+
+def reference_generated_ids(expected):
     probabilities = expected.get("completion_probabilities", [])
     require(isinstance(probabilities, list) and probabilities and
             all(isinstance(item, dict) and type(item.get("id")) is int and item["id"] >= 0 for item in probabilities),
             "reference generated token IDs are missing")
-    require(actual == [item["id"] for item in probabilities], "CLI reference token IDs differed")
+    return [item["id"] for item in probabilities]
+
+
+def cli_text_parity(text, content):
     # Include whitespace and every line; a matching first word is insufficient.
     output_text = re.search(r"^info\(zinc\): Output (?:text:|\(\d+ tokens\):) ", text, re.M)
-    content = expected.get("content")
     require(output_text is not None and isinstance(content, str) and content and
             text[output_text.end():].startswith(content + "\n"), "full CLI reference continuation differed")
+
+
+def cli_reference_parity(text, expected):
+    require(cli_generated_ids(text) == reference_generated_ids(expected), "CLI reference token IDs differed")
+    cli_text_parity(text, expected.get("content"))
+
+
+def reference_near_tie(actual, expected):
+    wanted = reference_generated_ids(expected)
+    require(len(actual) == len(wanted), "CLI reference token count differed")
+    position = next((i for i, (a, b) in enumerate(zip(actual, wanted)) if a != b), None)
+    require(position is not None, "missing reference choice difference")
+    top = expected["completion_probabilities"][position].get("top_logprobs", [])
+    require(isinstance(top, list) and len(top) >= 2 and all(isinstance(item, dict) for item in top[:2]) and
+            all(type(item.get("id")) is int for item in top[:2]) and
+            top[0].get("id") == wanted[position] and top[1].get("id") == actual[position] and
+            all(type(item.get("logprob")) in (int, float) for item in top[:2]), "reference choice is not a near-tied second choice")
+    gap = top[0]["logprob"] - top[1]["logprob"]
+    tie = {"position": position, "chosen_id": actual[position], "reference_id": wanted[position], "rank": 2, "logprob_gap": gap}
+    # Validate the individual case before starting another reference process.
+    limits = policy()["reference"]["agreement"]
+    require(limits["max_near_ties_per_case"] >= 1 and 0 <= gap <= limits["max_logprob_gap"], "reference choice exceeds near-tie policy")
+    return tie
+
+
+def qualify_reference_branch(port, tree, model, prompt, expected, actual, text, tie, work, env):
+    ids = json_request(port, "/tokenize", {"content": prompt, "add_special": True, "parse_special": True}).get("tokens")
+    require(isinstance(ids, list) and ids and all(type(value) is int and value >= 0 for value in ids), "missing reference prompt tokens")
+    prompt_file = work / "reference-branch-prompt.txt"
+    prompt_file.write_text(prompt)
+    native = token_ids(output([str(tree / "bin/zinc-tokenize"), str(model), str(prompt_file)], env))
+    require(native == ids, "rendered prompt tokenization differed from reference")
+    # Teacher-force the close choice, then demand the entire remaining suffix.
+    # An unrelated later error cannot be excused by the earlier near tie.
+    start = tie["position"] + 1
+    if start < len(actual):
+        tail = json_request(port, "/completion", {"prompt": ids + actual[:start], "n_predict": len(actual) - start,
+                                                  "temperature": 0, "n_probs": 2, "cache_prompt": False})
+        require(reference_generated_ids(tail) == actual[start:], "reference continuation after near tie differed")
+    content = json_request(port, "/detokenize", {"tokens": actual}).get("content")
+    cli_text_parity(text, content)
+    expected["validated_content"] = content
 
 
 def inference_parity(tree, reference, model, context, device, llama_args, work, env):
     port = free_port()
     samples = []
-    command = [str(reference / "llama-server"), "-m", str(model), *llama_args, "--host", "127.0.0.1", "--port", str(port), "-c", str(context)]
-    with process(command, work / "reference.log", work, env) as child:
+    generation = policy()["reference"]["generation"]
+    # A batched quantized reference can choose different greedy tokens from its
+    # own serial path. Freeze the oracle's arithmetic and report these settings.
+    def reference_command(port):
+        return [str(reference / "llama-server"), "-m", str(model), *llama_args,
+               "--batch-size", str(generation["batch_size"]), "--ubatch-size", str(generation["micro_batch"]),
+               "--parallel", str(generation["parallel"]), "--cache-type-k", generation["kv_cache"],
+               "--cache-type-v", generation["kv_cache"], "--flash-attn", "on" if generation["flash_attention"] else "off",
+               "--host", "127.0.0.1", "--port", str(port), "-c", str(context)]
+    limit = policy()["reference"]["agreement"]["tokens_per_case"]
+    with process(reference_command(port), work / "reference.log", work, env) as child:
         ready(child, port)
         for prompt in PROMPTS:
             rendered = json_request(port, "/apply-template", {"messages": [{"role": "user", "content": prompt}],
                                                               "chat_template_kwargs": {"enable_thinking": False}})["prompt"]
-            expected = json_request(port, "/completion", {"prompt": rendered, "n_predict": 16, "temperature": 0,
+            expected = json_request(port, "/completion", {"prompt": rendered, "n_predict": limit, "temperature": 0,
                                                           "n_probs": 2, "cache_prompt": False})
             samples.append((rendered, expected))
     write_json(work / "reference-samples.json", [{"prompt": prompt, "expected": expected} for prompt, expected in samples])
     # Reference is fully stopped before starting any ZINC GPU process.
+    pending = []
     for index, (prompt, expected) in enumerate(samples):
         log = work / f"continuation-{index}.log"
-        command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--raw", "--debug", "--prompt", prompt, "-n", "16", "-c", str(context)]
+        command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--raw", "--debug", "--prompt", prompt, "-n", str(limit), "-c", str(context)]
         with process(command, log, work, env) as child:
             require(child.wait(timeout=360) == 0, "packaged CLI inference failed")
-        actual = log.read_text(errors="replace")
-        cli_reference_parity(actual, expected)
+        text = log.read_text(errors="replace")
+        actual = cli_generated_ids(text)
+        ties = []
+        if actual == reference_generated_ids(expected):
+            cli_reference_parity(text, expected)
+        else:
+            tie = reference_near_tie(actual, expected)
+            ties.append(tie)
+            pending.append((prompt, expected, actual, text, tie))
+        expected["comparison"] = {"tokens": len(actual), "near_ties": ties}
+    reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(PROMPTS))
+    if pending:
+        port = free_port()
+        with process(reference_command(port), work / "reference-near-ties.log", work, env) as child:
+            ready(child, port)
+            for prompt, expected, actual, text, tie in pending:
+                qualify_reference_branch(port, tree, model, prompt, expected, actual, text, tie, work, env)
+    write_json(work / "reference-samples.json", [{"prompt": prompt, "expected": expected} for prompt, expected in samples])
     return samples
 
 
-def reference_http_parity(port, body, samples):
-    # CLI logs show only the first line. Compare the complete HTTP continuation
-    # too, so an early stop or a shared first word cannot pass the reference gate.
-    for prompt, expected in samples:
-        actual = json_request(port, "/v1/completions", {**body, "prompt": prompt, "max_tokens": 16, "stream": False})
+def reference_http_parity(port, body, samples, work=None):
+    # Check the HTTP path independently, including every line and whitespace.
+    for index, (prompt, expected) in enumerate(samples):
+        actual = json_request(port, "/v1/completions", {**body, "prompt": prompt,
+                                                      "max_tokens": policy()["reference"]["agreement"]["tokens_per_case"], "stream": False})
+        if work is not None:
+            write_json(work / f"http-reference-{index}.json", actual)
         choices = actual.get("choices", [])
-        require(choices and choices[0].get("text") and choices[0]["text"] == expected.get("content"),
+        require("validated_content" not in expected or expected.get("comparison", {}).get("near_ties"), "unqualified alternate reference content")
+        accepted = [expected.get("content")]
+        if "validated_content" in expected:
+            accepted.append(expected["validated_content"])
+        require(choices and choices[0].get("text") and choices[0]["text"] in accepted,
                 "full HTTP reference continuation differed")
 
 
@@ -255,7 +335,7 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
         two = json_request(port, "/v1/completions", body)
         require(one.get("choices") and one["choices"][0].get("text") and one["choices"][0]["text"] == two["choices"][0]["text"], "raw completion is empty/non-deterministic")
         require(one.get("usage", {}).get("completion_tokens", 0) > 0, "completion usage is missing")
-        reference_http_parity(port, body, reference_samples)
+        reference_http_parity(port, body, reference_samples, work)
         chat = {"model": model_id, "messages": [{"role": "user", "content": "List three uses of copper."}], "max_tokens": 32, "temperature": 0, "stream": True, "enable_thinking": False}
         with request(port, "/v1/chat/completions", chat) as response:
             lines = response.read().decode().splitlines()
@@ -378,17 +458,21 @@ def main():
                 tokenizer_parity(tree, reference, model, work, env)
                 print(identifier + ": tokenizer matched; checking reference continuations", flush=True)
                 samples = inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
-                print(identifier + ": continuations matched; checking HTTP, cancellation and context", flush=True)
+                agreement = reference_agreement([sample["comparison"] for _, sample in samples])
+                print(identifier + f": reference choices {agreement['exact_tokens']}/{agreement['total_tokens']} exact, "
+                      f"{agreement['near_tie_tokens']} qualified near ties; checking HTTP, cancellation and context", flush=True)
                 browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]
                 api_checks(tree, model, expected["context"], device, work, env, browser_chat, samples)
-                models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True})
+                models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True,
+                               "reference_agreement": agreement})
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": sha256(Path(args.directory) / artifact["filename"]), "binary_sha256": sha256(tree / "bin/zinc"),
                       "hardware": hardware, "models": models,
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
-                      "reference": {"commit": commit, "server_sha256": sha256(reference / "llama-server"), "tokenizer_sha256": sha256(reference / "llama-tokenize")},
+                      "reference": {"commit": commit, "generation": policy()["reference"]["generation"],
+                                    "server_sha256": sha256(reference / "llama-server"), "tokenizer_sha256": sha256(reference / "llama-tokenize")},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup")}}
             if profile["target"].endswith("vulkan"):
                 report["checks"]["kernel_reference"] = True

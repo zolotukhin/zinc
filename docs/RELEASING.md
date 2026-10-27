@@ -69,6 +69,23 @@ For a worker serving multiple profiles, an optional `profiles` object maps profi
 
 Build the exact llama.cpp commit in the policy. The harness checks clean Git source, executable version and hashes. Workers need Python 3, Git and the supported backend runtime. Vulkan workers also need `cc`, Vulkan headers, `vulkaninfo`, and matching shared `libggml-base` beside the reference tools for the 84-case numerical shader check.
 
+The policy also freezes reference generation: one slot, a 512-token logical
+batch, one-token microbatches, F32 K/V, and flash attention disabled. The harness
+applies these settings after worker arguments and records them in the report;
+aggregation rejects missing or different settings. Quantized batched and serial
+paths can choose different greedy tokens within the reference engine itself.
+Explicit settings make continuation comparisons reproducible. Throughput
+measurements use the performance suite and its matched scenario settings.
+
+Reference agreement must be at least 97.5% exact across each model's cases.
+One differing choice per case can qualify only when it is the reference's
+second choice within 0.05 log probability. The harness checks the complete
+rendered prompt's tokenization, teacher-forces that choice, requires the entire
+remaining suffix to match, and verifies the complete detokenized CLI text. HTTP
+responses must match the original reference or that qualified continuation.
+Reports retain the original reference and record every accepted choice, gap,
+and exact-token count. Aggregation checks these measurements against policy.
+
 Vulkan/ROCm jobs share workflow concurrency and the same configured host reservation. Its parent must exist. The harness refuses an occupied reservation or visible ZINC/llama GPU process; it never stops unrelated workloads. Servers belong to owned process groups and are stopped/reaped on errors, timeouts and normal cancellation before the command returns. A hard worker crash can leave a reservation directory: inspect processes before clearing it manually.
 
 Only sanitized JSON is uploaded: source/archive/binary/model digests, public GPU/OS/driver data and results. Private paths, endpoints, process arguments, serials and UUIDs are excluded. Temporary worker logs are removed. Checks cover packaged asset discovery, diagnostics, tokenizer corpus, reference continuations, HTTP health/models/raw/chat SSE, cancellation/recovery and context boundaries. Missing, duplicate, failed or stale reports cannot certify a candidate.

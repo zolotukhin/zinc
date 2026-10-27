@@ -227,7 +227,21 @@
   ],
   "reference": {
     "repository": "ggml-org/llama.cpp",
-    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4"
+    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "generation": {
+      "batch_size": 512,
+      "micro_batch": 1,
+      "parallel": 1,
+      "kv_cache": "f32",
+      "flash_attention": false
+    },
+    "agreement": {
+      "cases": 3,
+      "tokens_per_case": 16,
+      "min_exact_fraction": 0.975,
+      "max_logprob_gap": 0.05,
+      "max_near_ties_per_case": 1
+    }
   },
   "toolchain": {
     "zig": "0.17.0",

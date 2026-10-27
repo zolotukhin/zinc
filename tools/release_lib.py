@@ -4,6 +4,7 @@ import hashlib
 import contextlib
 import gzip
 import json
+import math
 import os
 import re
 import signal
@@ -90,10 +91,56 @@ def policy(path=None):
     require(all(p.get("models") and set(p["models"]).issubset(model_ids) and len(set(p["models"])) == len(p["models"]) for p in profiles),
             "GPU profile is missing its required model matrix")
     source_sha(data["reference"]["commit"])
+    generation = data["reference"].get("generation", {})
+    require(set(generation) == {"batch_size", "micro_batch", "parallel", "kv_cache", "flash_attention"} and
+            type(generation["batch_size"]) is int and type(generation["micro_batch"]) is int and
+            1 <= generation["micro_batch"] <= generation["batch_size"] <= 4096 and
+            type(generation["parallel"]) is int and generation["parallel"] == 1 and
+            generation["kv_cache"] == "f32" and type(generation["flash_attention"]) is bool,
+            "invalid reference generation policy")
+    agreement = data["reference"].get("agreement", {})
+    require(set(agreement) == {"cases", "tokens_per_case", "min_exact_fraction", "max_logprob_gap", "max_near_ties_per_case"} and
+            type(agreement["cases"]) is int and agreement["cases"] > 0 and
+            type(agreement["tokens_per_case"]) is int and 1 <= agreement["tokens_per_case"] <= 20 and
+            type(agreement["min_exact_fraction"]) in (int, float) and 0.95 <= agreement["min_exact_fraction"] <= 1 and
+            type(agreement["max_logprob_gap"]) in (int, float) and 0 <= agreement["max_logprob_gap"] <= 0.05 and
+            type(agreement["max_near_ties_per_case"]) is int and 0 <= agreement["max_near_ties_per_case"] <= 1,
+            "invalid reference agreement policy")
     require(data["toolchain"]["zig"] == (ROOT / ".zig-version").read_text().strip(), "release compiler differs from repository pin")
     source_sha(data["toolchain"]["vulkan_headers"]["commit"])
     require(DIGEST.fullmatch(data["toolchain"]["vulkan_headers"]["sha256"]), "Vulkan headers must be checksum-pinned")
     return data
+
+
+def reference_agreement(cases, expected_cases=None):
+    """Validate and summarize measured choices; an accepted tie is never exact."""
+    limits = policy()["reference"]["agreement"]
+    require(isinstance(cases, list) and len(cases) == (limits["cases"] if expected_cases is None else expected_cases),
+            "missing reference agreement cases")
+    total, exact = 0, 0
+    for case in cases:
+        require(isinstance(case, dict) and set(case) == {"tokens", "near_ties"} and
+                type(case["tokens"]) is int and 0 < case["tokens"] <= limits["tokens_per_case"] and
+                isinstance(case["near_ties"], list) and len(case["near_ties"]) <= limits["max_near_ties_per_case"],
+                "invalid reference agreement case")
+        for tie in case["near_ties"]:
+            require(isinstance(tie, dict) and set(tie) == {"position", "chosen_id", "reference_id", "rank", "logprob_gap"} and
+                    all(type(tie[key]) is int for key in ("position", "chosen_id", "reference_id", "rank")) and
+                    0 <= tie["position"] < case["tokens"] and tie["chosen_id"] >= 0 and tie["reference_id"] >= 0 and
+                    tie["chosen_id"] != tie["reference_id"] and tie["rank"] == 2 and
+                    type(tie["logprob_gap"]) in (int, float) and math.isfinite(tie["logprob_gap"]) and
+                    0 <= tie["logprob_gap"] <= limits["max_logprob_gap"], "reference choice exceeds near-tie policy")
+        total += case["tokens"]
+        exact += case["tokens"] - len(case["near_ties"])
+    require(total > 0 and exact / total >= limits["min_exact_fraction"], "reference exact-choice agreement is too low")
+    return {"cases": cases, "total_tokens": total, "exact_tokens": exact, "near_tie_tokens": total - exact}
+
+
+def verify_reference_agreement(data):
+    require(isinstance(data, dict) and set(data) == {"cases", "total_tokens", "exact_tokens", "near_tie_tokens"} and
+            all(type(data[key]) is int for key in ("total_tokens", "exact_tokens", "near_tie_tokens")),
+            "missing reference agreement measurements")
+    require(data == reference_agreement(data["cases"]), "reference agreement totals differ from measured cases")
 
 
 def target(identifier, data=None):

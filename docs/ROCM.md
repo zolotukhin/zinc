@@ -92,6 +92,12 @@ Gemma 4 26B-A4B currently serves through its single-sequence MoE path, so ZINC
 uses one request slot for that model even if a larger `--parallel` value is
 given. The other validated models keep the requested slot count.
 
+Start with `--parallel 1` on a memory-limited GPU. Single-slot Qwen and Gemma
+servers reuse the existing KV cache; multiple slots require separate caches.
+Gemma 31B Q4_K_M passed the packaged 4K/F32 checks on the 32GB R9700 after
+removing a duplicate single-slot cache. Larger contexts and additional slots
+still need their own memory budget and validation.
+
 The ROCm-tuned prefill and decode fusions are default-on. These switches remain
 available as correctness/performance A/B opt-outs:
 
