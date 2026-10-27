@@ -4,28 +4,30 @@ ZINC runs on consumer GPUs through Vulkan, ROCm/HIP, Metal, and an experimental 
 
 ## Supported platforms
 
-| Platform | GPU | Backend | Status |
-|----------|-----|---------|--------|
-| **Linux** | AMD RDNA4 discrete (Navi 48 / Navi 44) | Vulkan 1.3 | Supported and tuned |
-| **Linux** | AMD RDNA4 discrete (`gfx1201`) | ROCm/HIP | Supported; R9700 is the validated reference |
-| **Linux** | AMD RDNA4 APU (Strix Halo / gfx1151) | Vulkan 1.3 | Supported with APU-specific bandwidth tuning |
-| **Linux** | AMD RDNA3 | Vulkan 1.3 | Supported, less tuned |
-| **Linux** | Intel Arc Xe2 / Battlemage | Vulkan 1.3+ | Supported, validated benchmark target |
-| **macOS** | Apple Silicon M1 through M5 | Metal | Supported, native MSL shaders |
-| **Linux / WSL2** | NVIDIA RTX 40/50 series | CUDA | Experimental |
+| Platform         | GPU                                     | Backend     | Status                                       |
+| ---------------- | --------------------------------------- | ----------- | -------------------------------------------- |
+| **Linux**        | AMD RDNA4 discrete (Navi 48 / Navi 44)  | Vulkan 1.3  | Supported and tuned                          |
+| **Linux**        | AMD RDNA4 discrete (`gfx1201`)          | ROCm/HIP    | Supported; R9700 is the validated reference  |
+| **Linux**        | AMD RDNA 3.5 APU (Strix Halo / gfx1151) | Vulkan 1.3  | Supported with APU-specific bandwidth tuning |
+| **Linux**        | AMD RDNA3                               | Vulkan 1.3  | Supported, less tuned                        |
+| **Linux**        | Intel Arc Xe2 / Battlemage              | Vulkan 1.3+ | Supported, validated benchmark target        |
+| **macOS**        | Apple Silicon M1 through M5             | Metal       | Supported, native MSL shaders                |
+| **Linux / WSL2** | NVIDIA RTX 40/50 series                 | CUDA        | Experimental                                 |
 
 On AMD Radeon, Vulkan and ROCm are separate first-class builds. Vulkan is the broad RDNA3/RDNA4 path; ROCm uses HIP and dedicated AMD kernels, with the current public validation centered on `gfx1201`. Benchmark results are kept separate because the runtimes and driver stacks are different.
+
+The [binary release guide](https://zolotukhin.ai/zinc/docs/binary-releases/) lists archive-specific OS/ABI floors. Release certification is narrower than source compatibility: use each release's validation report for the exact tested GPU, driver, backend and model combinations.
 
 ## AMD GPUs (Linux)
 
 ZINC supports AMD consumer and workstation GPUs through Vulkan and, on validated RDNA4 stacks, ROCm/HIP.
 
-| Family | Examples | Notes |
-| --- | --- | --- |
-| RDNA4 discrete (Navi 48 / gfx1201) | RX 9070, RX 9070 XT, RX 9070 GRE, Radeon AI PRO R9700 | Primary tuning target, hand-tuned shaders |
-| RDNA4 discrete (Navi 44 / gfx1200) | RX 9060, RX 9060 XT | Same RDNA4 ISA as Navi 48, smaller die, narrower bus |
-| RDNA4 APU (gfx1151) | Strix Halo: Radeon 8060S, Radeon 8050S | Unified-memory iGPU; ZINC selects an APU bandwidth profile (~256 GB/s) distinct from the discrete 576–640 GB/s default |
-| RDNA3 | RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600 | Supported, less tuned than RDNA4 |
+| Family                             | Examples                                                 | Notes                                                                                                                  |
+| ---------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| RDNA4 discrete (Navi 48 / gfx1201) | RX 9070, RX 9070 XT, RX 9070 GRE, Radeon AI PRO R9700    | Primary tuning target, hand-tuned shaders                                                                              |
+| RDNA4 discrete (Navi 44 / gfx1200) | RX 9060, RX 9060 XT                                      | Same RDNA4 ISA as Navi 48, smaller die, narrower bus                                                                   |
+| RDNA 3.5 APU (gfx1151)             | Strix Halo: Radeon 8060S, Radeon 8050S                   | Unified-memory iGPU; ZINC selects an APU bandwidth profile (~256 GB/s) distinct from the discrete 576–640 GB/s default |
+| RDNA3                              | RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600 | Supported, less tuned than RDNA4                                                                                       |
 
 Any AMD GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work through the Vulkan build. ROCm support is narrower and should be checked against the installed ROCm release and GPU target.
 
@@ -34,7 +36,7 @@ Any AMD GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work thro
 - **OS**: Linux
 - **API**: Vulkan 1.3
 - **Driver**: RADV (Mesa) or AMDVLK
-- **Shader compiler**: glslc (shaderc 2023.8, included in build)
+- **Source-build shader compiler**: modern LunarG shaderc with `GL_EXT_integer_dot_product`; prebuilt Vulkan archives do not need `glslc`
 - **Recommended**: `export RADV_PERFTEST=coop_matrix` on RDNA4
 
 Verify your Vulkan stack:
@@ -66,9 +68,9 @@ If `rocminfo` cannot see the GPU, or HIP reports `hipErrorNoBinaryForGpu`, first
 
 ### AMD VRAM guide
 
-| VRAM | What fits |
-| --- | --- |
-| 16 GB | 2B to 8B class models comfortably |
+| VRAM  | What fits                                                        |
+| ----- | ---------------------------------------------------------------- |
+| 16 GB | 2B to 8B class models comfortably                                |
 | 32 GB | 27B dense models and 35B MoE models like Qwen3.6-35B-A3B Q4_K_XL |
 
 Exact fit depends on architecture, quantization, and context length. `--check -m <model>` prints a practical fit estimate.
@@ -77,10 +79,10 @@ Exact fit depends on architecture, quantization, and context length. `--check -m
 
 Intel Arc support is an official Linux Vulkan path. The current validated target is the Arc B-series / Battlemage line:
 
-| Family | Examples | Notes |
-| --- | --- | --- |
-| Arc B-series desktop | Arc B580, Arc B570 | Best fit for 7B/8B models; B580 is the stronger consumer target |
-| Arc Pro B-series | Arc Pro B70, B65, B60, B50 | Larger VRAM options for local AI; B70/B65 are the 32 GB targets |
+| Family               | Examples                   | Notes                                                           |
+| -------------------- | -------------------------- | --------------------------------------------------------------- |
+| Arc B-series desktop | Arc B580, Arc B570         | Best fit for 7B/8B models; B580 is the stronger consumer target |
+| Arc Pro B-series     | Arc Pro B70, B65, B60, B50 | Larger VRAM options for local AI; B70/B65 are the 32 GB targets |
 
 ### Intel requirements
 
@@ -99,12 +101,12 @@ If that command does not show your Intel Arc GPU, ZINC will not use it.
 
 ### Intel VRAM guide
 
-| VRAM | B-series cards | What fits |
-| --- | --- | --- |
-| 10-12 GB | B570, B580 | 7B/8B class models |
-| 16 GB | B50 | 8B with more context; some 12B experiments |
-| 24 GB | B60 | 20B class and tight larger-model experiments |
-| 32 GB | B65, B70 | 27B dense and 35B MoE targets |
+| VRAM     | B-series cards | What fits                                    |
+| -------- | -------------- | -------------------------------------------- |
+| 10-12 GB | B570, B580     | 7B/8B class models                           |
+| 16 GB    | B50            | 8B with more context; some 12B experiments   |
+| 24 GB    | B60            | 20B class and tight larger-model experiments |
+| 32 GB    | B65, B70       | 27B dense and 35B MoE targets                |
 
 See [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for the full B-series card table, device IDs, memory bandwidth, Xe2 opcode notes, and ZINC tuning guidance.
 
@@ -112,8 +114,8 @@ The public benchmark matrix currently validates four managed catalog models on a
 
 ## Other Vulkan GPUs
 
-| Family | Status |
-| --- | --- |
+| Family            | Status                           |
+| ----------------- | -------------------------------- |
 | NVIDIA via Vulkan | Vulkan works, not primary target |
 
 ## NVIDIA RTX GPUs (experimental CUDA)
@@ -135,13 +137,13 @@ Native Windows builds are not supported. WSL2 is an experimental CUDA deployment
 
 ZINC has a native Metal backend with 31 MSL compute shaders, zero-copy model loading via `newBufferWithBytesNoCopy`, and the same OpenAI-compatible API as the AMD path.
 
-| Chip family | Metal GPU family | Status |
-| --- | --- | --- |
-| M1, M1 Pro, M1 Max, M1 Ultra | Apple7 | Supported |
-| M2, M2 Pro, M2 Max, M2 Ultra | Apple8 | Supported |
-| M3, M3 Pro, M3 Max, M3 Ultra | Apple9 | Supported |
-| M4, M4 Pro, M4 Max | Apple9 | Supported |
-| M5, M5 Pro, M5 Max | Apple10 | Supported (TensorOps investigation planned) |
+| Chip family                  | Metal GPU family | Status                                      |
+| ---------------------------- | ---------------- | ------------------------------------------- |
+| M1, M1 Pro, M1 Max, M1 Ultra | Apple7           | Supported                                   |
+| M2, M2 Pro, M2 Max, M2 Ultra | Apple8           | Supported                                   |
+| M3, M3 Pro, M3 Max, M3 Ultra | Apple9           | Supported                                   |
+| M4, M4 Pro, M4 Max           | Apple9           | Supported                                   |
+| M5, M5 Pro, M5 Max           | Apple10          | Supported (TensorOps investigation planned) |
 
 ### Apple Silicon requirements
 
@@ -153,13 +155,13 @@ ZINC has a native Metal backend with 31 MSL compute shaders, zero-copy model loa
 
 Apple Silicon uses unified memory shared between CPU and GPU. There is no separate "VRAM" budget.
 
-| Unified memory | What fits |
-| --- | --- |
-| 8 GB | Too tight for most models |
-| 16 GB | 2B models comfortably |
-| 24 GB | 2B with headroom, 35B might be tight |
-| 32+ GB | 27B dense and 35B MoE models like Qwen3.6-35B-A3B Q4_K_XL |
-| 64+ GB (Pro/Max/Ultra) | Large models with generous context |
+| Unified memory         | What fits                                                 |
+| ---------------------- | --------------------------------------------------------- |
+| 8 GB                   | Too tight for most models                                 |
+| 16 GB                  | 2B models comfortably                                     |
+| 24 GB                  | 2B with headroom, 35B might be tight                      |
+| 32+ GB                 | 27B dense and 35B MoE models like Qwen3.6-35B-A3B Q4_K_XL |
+| 64+ GB (Pro/Max/Ultra) | Large models with generous context                        |
 
 ZINC uses zero-copy model loading on Metal, so a 1.2 GB model file does not require an additional 1.2 GB of GPU memory. The model weights stay in place and the GPU reads from the mmap'd pages directly.
 
@@ -201,11 +203,11 @@ The catalog automatically selects the right GPU profile (`amd-rdna4-32gb`, `inte
 
 ## System requirements (both platforms)
 
-| Resource | Minimum | Recommended |
-| --- | --- | --- |
-| **CPU** | Any modern 64-bit (x86_64 or arm64) | Multi-core for serving |
-| **System RAM** | 16 GB | 32 GB+ for larger models |
-| **Storage** | SSD | NVMe SSD for fast model loading |
+| Resource       | Minimum                             | Recommended                     |
+| -------------- | ----------------------------------- | ------------------------------- |
+| **CPU**        | Any modern 64-bit (x86_64 or arm64) | Multi-core for serving          |
+| **System RAM** | 16 GB                               | 32 GB+ for larger models        |
+| **Storage**    | SSD                                 | NVMe SSD for fast model loading |
 
 ## Quick sanity check
 

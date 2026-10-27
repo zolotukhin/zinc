@@ -1,7 +1,7 @@
 //! Curated catalog of ZINC-supported managed GGUF models.
 //! @section Managed Models
-//! The catalog is intentionally small and only includes models that ZINC has
-//! explicitly validated for the listed GPU profiles.
+//! Supported entries list validated GPU profiles. Experimental entries may be
+//! included for release qualification without claiming hardware coverage.
 const std = @import("std");
 const gpu_detect = @import("../vulkan/gpu_detect.zig");
 
@@ -62,6 +62,27 @@ pub const apple_silicon_profile = "apple-silicon";
 /// The complete list of ZINC-validated managed models available for download.
 pub const entries = [_]CatalogEntry{
     .{
+        .id = "qwen3-0.6b-q8-0",
+        .display_name = "Qwen3 0.6B Q8_0 (release qualification)",
+        .release_date = "2025-04-29",
+        .family = "qwen3",
+        .format = "gguf",
+        .quantization = "Q8_0",
+        .file_name = "Qwen3-0.6B-Q8_0.gguf",
+        .homepage_url = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF",
+        .download_url = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf?download=true",
+        .sha256 = "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        .size_bytes = 639_446_688,
+        .required_vram_bytes = 2 * 1024 * 1024 * 1024,
+        .default_context_length = 2048,
+        .recommended_for_chat = false,
+        .thinking_stable = false,
+        // Keep experimental until the packaged Metal/Vulkan family jobs pass.
+        // ROCm's hybrid forward path does not implement plain Qwen3.
+        .status = .experimental,
+        .tested_profiles = &.{},
+    },
+    .{
         .id = "qwen38-27b-q4k-m",
         .display_name = "Qwen3.8 27B Dense Q4_K_M",
         .release_date = "2026-08-14",
@@ -70,7 +91,7 @@ pub const entries = [_]CatalogEntry{
         .quantization = "Q4_K_M",
         .file_name = "Qwen3.8-27B-Q4_K_M.gguf",
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF",
-        .download_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf?download=true",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4121cb19390a7984a0e6dc0f46bea9177b846f15/Qwen3.8-27B-Q4_K_M.gguf?download=true",
         .sha256 = "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
         .size_bytes = 17_106_775_008,
         // Qwen3.8-27B retains Qwen3.6-27B's qwen35 text architecture and
@@ -95,8 +116,8 @@ pub const entries = [_]CatalogEntry{
         .quantization = "UD-Q4_K_XL",
         .file_name = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF",
-        .download_url = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf?download=true",
-        .sha256 = "",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/a483e9e6cbd595906af30beda3187c2663a1118c/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf?download=true",
+        .sha256 = "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
         .size_bytes = 22_360_456_160,
         .required_vram_bytes = 23_106_019_926,
         // 35B-A3B: same architecture as Qwen3.5; ≈ 18 GiB of offloadable experts.
@@ -124,8 +145,8 @@ pub const entries = [_]CatalogEntry{
         .quantization = "Q4_K_M",
         .file_name = "Qwen3.6-27B-Q4_K_M.gguf",
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF",
-        .download_url = "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf?download=true",
-        .sha256 = "",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/82d411acf4a06cfb8d9b073a5211bf410bfc29bf/Qwen3.6-27B-Q4_K_M.gguf?download=true",
+        .sha256 = "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
         .size_bytes = 16_817_244_384,
         .required_vram_bytes = 20 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
@@ -148,7 +169,7 @@ pub const entries = [_]CatalogEntry{
         .quantization = "Q4_K_M",
         .file_name = "Qwen3.5-9B-Q4_K_M.gguf",
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF",
-        .download_url = "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_K_M.gguf?download=true",
         .sha256 = "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
         .size_bytes = 5_680_522_464,
         .required_vram_bytes = 7 * 1024 * 1024 * 1024,
@@ -173,9 +194,9 @@ pub const entries = [_]CatalogEntry{
         .quantization = "Q4_K_M",
         .file_name = "gemma-4-31B-it-Q4_K_M.gguf",
         .homepage_url = "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF",
-        .download_url = "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF/resolve/main/gemma-4-31B-it-Q4_K_M.gguf?download=true",
-        .sha256 = "",
-        .size_bytes = 19_650_000_000,
+        .download_url = "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF/resolve/c1ac76e99d5513b141e8adde7288b85c3f9c32ec/gemma-4-31B-it-Q4_K_M.gguf?download=true",
+        .sha256 = "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        .size_bytes = 18_323_733_440,
         .required_vram_bytes = 21 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
         .recommended_for_chat = true,
@@ -197,8 +218,8 @@ pub const entries = [_]CatalogEntry{
         .quantization = "Q4_K_M",
         .file_name = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
         .homepage_url = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF",
-        .download_url = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf?download=true",
-        .sha256 = "",
+        .download_url = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/1e1a26411a88d189e28a068a62e31a44ea0e3dae/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf?download=true",
+        .sha256 = "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
         .size_bytes = 16_868_236_288,
         .required_vram_bytes = 16 * 1024 * 1024 * 1024,
         // Gemma4 26B-A4B MoE (~4B active, ~22B inactive experts) at Q4_K_M ≈ 11 GiB.

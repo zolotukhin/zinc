@@ -39,7 +39,7 @@ jobs:
       fail-fast: false
       matrix:
         optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v5
@@ -50,23 +50,11 @@ jobs:
           version: 0.17.0
           use-cache: false
 
-      - name: Install Vulkan SDK (LunarG — modern shaderc/glslc with GL_EXT_integer_dot_product)
-        # Ubuntu's stock `glslc` (shaderc 2023.x and earlier on ubuntu-latest) does not
-        # recognise GL_EXT_integer_dot_product / dotPacked4x8AccSatEXT, which several
-        # DP4a shaders in src/shaders/ now require. Install LunarG's official Vulkan SDK
-        # instead — it ships a current shaderc and also provides headers + tools.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
-          UB_CODENAME=$(lsb_release -cs)
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-${UB_CODENAME}.list \
-            https://packages.lunarg.com/vulkan/lunarg-vulkan-${UB_CODENAME}.list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk libvulkan-dev vulkan-tools
-          echo "--- glslc version (must be >= 2024 for dp4a) ---"
-          glslc --version
+      - name: Install the release shader compiler and Vulkan headers
+        # Share the tested compiler with release packaging. Stock shaderc lacks
+        # GL_EXT_integer_dot_product; the full SDK adds unused GUI packages and
+        # makes the four CPU jobs depend on much larger downloads.
+        run: bash scripts/setup_release_shaderc.sh
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
