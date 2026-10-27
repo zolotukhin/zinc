@@ -1384,6 +1384,34 @@ pub const Tokenizer = struct {
     /// @returns UTF-8 bytes for the token, or an empty slice if the ID is out of range.
     pub fn decodeToken(self: *const Tokenizer, token_id: u32, buf: []u8) []const u8 {
         if (token_id >= self.vocab.len) return "";
+        if (self.scores != null or self.pretokenizer == .gemma4_bpe) {
+            // Match encodeChunk's raw-UTF-8 vocabulary. GPT-2's byte remapping
+            // corrupts Latin-1 characters and drops four-byte code points here.
+            const piece = self.vocab[token_id];
+            if (piece.len == 6 and std.mem.startsWith(u8, piece, "<0x") and piece[5] == '>') {
+                if (buf.len == 0) return "";
+                if (std.fmt.parseInt(u8, piece[3..5], 16)) |byte| {
+                    buf[0] = byte;
+                    return buf[0..1];
+                } else |_| {}
+            }
+            var pos: usize = 0;
+            var out: usize = 0;
+            while (pos < piece.len and out < buf.len) {
+                if (std.mem.startsWith(u8, piece[pos..], "▁")) {
+                    buf[out] = ' ';
+                    out += 1;
+                    pos += "▁".len;
+                } else {
+                    const length = utf8SequenceLength(piece[pos]);
+                    if (length > piece.len - pos or length > buf.len - out) break;
+                    @memcpy(buf[out..][0..length], piece[pos..][0..length]);
+                    pos += length;
+                    out += length;
+                }
+            }
+            return buf[0..out];
+        }
         const gpt2_text = self.vocab[token_id];
         var out: usize = 0;
         var i: usize = 0;
@@ -2259,6 +2287,38 @@ test "decodeToken converts GPT-2 remapped newline back to byte 0x0A" {
     var buf: [8]u8 = undefined;
     const decoded = tok.decodeToken(0, &buf);
     try std.testing.expectEqualStrings("\n", decoded);
+}
+
+test "raw UTF-8 vocabularies preserve Latin-1 CJK emoji and whitespace markers" {
+    const vocab = [_][]const u8{ "▁café▁東京▁🚀", "<0xC3>", "<0xa9>", "<0x0A>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 99,
+        .prepend_bos = false,
+        .pretokenizer = .gemma4_bpe,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+    var buf: [64]u8 = undefined;
+    const expected = " café 東京 🚀";
+    try std.testing.expectEqualStrings(expected, tok.decodeToken(0, &buf));
+    for (0..expected.len + 1) |capacity| {
+        const decoded = tok.decodeToken(0, buf[0..capacity]);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(decoded));
+        try std.testing.expect(std.mem.startsWith(u8, expected, decoded));
+    }
+    var combined: [3]u8 = undefined;
+    for (1..4) |id| combined[id - 1] = tok.decodeToken(@intCast(id), &buf)[0];
+    try std.testing.expectEqualStrings("é\n", &combined);
+    try std.testing.expectEqualStrings("", tok.decodeToken(1, buf[0..0]));
+    // SentencePiece's scored vocabulary uses the same raw bytes.
+    tok.pretokenizer = .legacy;
+    tok.scores = &.{ 0, 0, 0, 0 };
+    try std.testing.expectEqualStrings(expected, tok.decodeToken(0, &buf));
 }
 
 test "encodePrompt supports distinct tokenizer and output allocators" {
