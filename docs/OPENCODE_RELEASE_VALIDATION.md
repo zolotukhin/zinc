@@ -9,9 +9,11 @@ and a separate retry. This establishes useful coding capability on this board,
 with the limits below. It does not qualify every model for the first release.
 
 **Gemma is not OpenCode-qualified.** Gemma 26B failed tool use on both backends.
-Gemma 31B could not meet the helper's 8K context minimum on Vulkan, and failed
-generation even at the release-default 4K context on ROCm. The experimental
-Qwen3 0.6B starter also failed the coding fixture and several API checks.
+Gemma 31B could not meet the helper's 8K context minimum on Vulkan. Its initial
+ROCm allocation failure was fixed in the memory follow-up below; chat now works,
+but its actual OpenCode attempt still made no tool calls and failed the fixture.
+The experimental Qwen3 0.6B starter also failed the coding fixture and several
+API checks.
 
 The [portable result JSON](/zinc/validation/opencode-release-2026-10-26.json)
 retains model pins, binary and harness hashes, every completed fixture outcome,
@@ -139,8 +141,8 @@ Gemma vocabulary**. All non-unused Qwen pieces matched; pre-existing unused
 padding labels differ from llama.cpp's empty output and were left unchanged.
 This decoder comparison does not substitute for numerical GPU kernel parity.
 
-At the release-default 4K context, strict ASCII/Unicode JSON/SSE probes at output
-budgets 1, 2, 3 and 64 produced:
+Before the memory fix, strict ASCII/Unicode JSON/SSE probes at the release-default
+4K context and output budgets 1, 2, 3 and 64 produced:
 
 | Backend | Gemma 26B | Gemma 31B                                       |
 | ------- | --------: | ----------------------------------------------- |
@@ -152,13 +154,55 @@ endpoint is therefore insufficient qualification. Release GPU jobs now require
 Unicode chat parity, complete JSON/SSE termination and usage, and full Unicode
 echo at a sufficient budget; unit negative controls cover broken transport.
 
+## Gemma ROCm memory fix
+
+The Gemma 31B allocation failure is resolved for the policy's **4K, single-slot**
+configuration. The same required model remains in the release policy.
+
+Single-slot serving previously duplicated the engine's KV cache, consuming
+another **6.875 GiB**. Its dense-weight scratch also multiplied independent
+dimension maxima, reserving 672 MiB for a matrix that needs only 220.5 MiB.
+The observed first request had 372 MiB free and failed that 672 MiB allocation.
+
+The fix reuses single-sequence KV through non-owning views, sizes scratch to
+the actual dense projection/FFN dimensions, and rolls back partial slot and
+batch allocations. A larger 8K request exposed a second bug: failed batched
+prefill freed temporary KV views twice. Those views now have one cleanup path.
+
+On the R9700, cold single-slot 4K startup fell from about 31.6 GiB to 24.7 GiB.
+The original binary still returned HTTP 500 in the controlled replay; the fixed
+binary generated `OK`. At 4K, ten Unicode, scratch-growth, overflow/recovery and
+isolation checks passed. A two-slot 1K check passed 7/7, and Gemma 26B passed
+the same ten 4K checks.
+
+The first memory fix still crashed during an 8K allocation failure; that failed
+run remains in the evidence. After correcting cleanup, the 8K run passed 10/10,
+including three temporary-buffer allocation failures that safely fell back to
+token-wise prefill. This configuration has little spare memory and can prefill
+more slowly. It does not expand the required 4K release context.
+
+The actual ROCm archive from
+[packaging run 40458670841](https://github.com/zolotukhin/zinc/actions/runs/40458670841)
+passed extraction/identity checks and GPU diagnostics without a library-path
+override, all twelve tokenizer corpus cases, three complete 16-token CLI
+continuations against pinned llama.cpp, and the packaged HTTP gate. That gate
+compares full reference continuations and checks Unicode streaming, cancellation,
+near-capacity input, malformed/oversized requests and subsequent recovery.
+Its source tree matches fix commit `ae7fea1f11af7d24725ae56a8f208a81f29e8d0b`;
+the JSON binds the preview archive, executable and reference digests. This
+qualifies one packaged model row on this board, not the complete release matrix.
+
+With the server now running at 8K, actual OpenCode 1.19.4 completed a
+rate-limiter attempt without a timeout or API error. It made zero tool calls
+and failed all three independent tests. Gemma 31B therefore remains outside
+the OpenCode support claim despite the working inference path.
+
 ## What still blocks 0.1.0
 
-The current `rocm-rdna4` policy requires Gemma 31B. Its 4K generation failure on
-the 32 GB reference board must be fixed or the supported model/device policy
-explicitly narrowed before publication. Gemma 26B needs a separate tool-calling
-fix before advertising OpenCode support. The tiny starter remains experimental;
-stable publication already rejects an unqualified starter.
+The original required ROCm Gemma 31B allocation blocker is fixed. Both Gemma
+models still need a separate tool-calling fix before advertising OpenCode support.
+The tiny starter remains experimental; stable publication already rejects an
+unqualified starter.
 
 These runs cover one RDNA4 board. The required Apple families, other Linux GPU
 families, signed/notarized Mac delivery and protected release infrastructure
