@@ -29,6 +29,7 @@ const pipeline = @import("cuda/pipeline.zig");
 const buffer = @import("cuda/buffer.zig");
 const command = @import("cuda/command.zig");
 const scheduler = @import("scheduler/scheduler.zig");
+const prefill_policy = @import("compute/prefill_policy.zig");
 
 /// Drives either the qwen35/qwen36 (`ForwardCuda`) or gemma4 (`ForwardGemma`)
 /// decode engine, selected from the model architecture. Both expose the same
@@ -127,8 +128,7 @@ const Engine = union(enum) {
 const DEFAULT_MODEL = "models/Qwen3.5-9B-Q4_K_M.gguf";
 
 /// Effort 25: batched-GEMM prefill is the DEFAULT for gemma (matches main.zig).
-/// True unless ZINC_BATCHED_PREFILL is explicitly off (0/off/false/no). qwen has
-/// no prefillBatched (Engine returns error.Unsupported) so it falls back anyway.
+/// True unless ZINC_BATCHED_PREFILL is explicitly off (0/off/false/no).
 fn batchedPrefillDefaultOn() bool {
     const v = host_io.getenv("ZINC_BATCHED_PREFILL") orelse return true;
     return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
@@ -631,12 +631,13 @@ fn genMode(allocator: std.mem.Allocator, ids_arg: []const u8, ngen: u32, model_p
     // need no logits, so ZINC_PREFILL_SKIP=1 runs them via prefillStep (skips
     // the LM head, bit-identical generation) to A/B the head-skip prefill win.
     const pf_skip = host_io.getenv("ZINC_PREFILL_SKIP") != null;
-    // Effort 25: batched-GEMM prefill is the DEFAULT for gemma (qwen falls back
-    // via error.Unsupported). ZINC_BATCHED_PREFILL=0/off opts out to per-token.
-    // scripts/prefill_catalog.sh forces the opt-out on its baseline arm so the
-    // batched-vs-per-token A/B (GEN_IDS must be byte-identical — the gate) still
-    // measures the real delta after the default flip.
-    const pf_batched = batchedPrefillDefaultOn();
+    // Match production CLI routing. This harness does ordinary greedy decode
+    // without MTP preparation, so it needs no batched hidden rows for priming.
+    const pf_batched = prefill_policy.useBatched(prompt.len, .{
+        .rocm = std.mem.eql(u8, @import("build_options").backend, "rocm"),
+        .hybrid_dense = model.config.architecture == .qwen35 and model.config.n_experts == 0,
+        .enabled = batchedPrefillDefaultOn(),
+    });
     var pos: u32 = 0;
     var tok: u32 = 0;
     var pf_timer = try host_io.Timer.start();

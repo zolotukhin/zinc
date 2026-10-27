@@ -307,3 +307,20 @@ one model/backend at the intended context, run the API checks, then invoke
 `opencode_eval.mjs` for one fixture at a time with the documented budgets.
 Restart the server between fixtures, especially after failures or timeouts.
 Keep the portable metadata; raw traces contain local paths and session data.
+
+## Dense Qwen prefill follow-up (2026-10-27)
+
+The [short-prompt prefill fix](ROCM_QWEN27_PREFILL.md) clears dense Qwen 3.6 27B's
+packaged 4K continuation/API blocker while keeping long prompts batched. On the
+same new ROCm preview executable, a separate 16K OpenCode run passed **24/24 API
+checks and 3/3 core fixtures**, with all ten independent tests passing, real tool
+calls, fresh servers and no protected-file changes. The
+[portable follow-up evidence](/zinc/validation/qwen27-prefill-2026-10-27.json)
+records the exact archive and executable hashes and keeps this run separate
+from earlier revisions.
+
+The four-model Qwen sweep also found a MoE HTTP continuation difference that
+reproduces in the unchanged #35 package. All four CLI rows match 48/48 reference
+choices, but that MoE HTTP row remains a release blocker. These results do not
+promote the experimental dense 27B catalog entry or qualify the final hardware
+matrix.

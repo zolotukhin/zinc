@@ -1,0 +1,1339 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-27",
+  "exported_utc": "2026-10-27T18:33:42.366844+00:00",
+  "scope": "Dense ROCm Qwen short CLI prefill fix; four-model packaged developer sweep and 16K OpenCode check on one R9700. Not final release certification.",
+  "fix_commit": "dc89acaee3a8b5bbbabfc2a75da311f5ab93e8b0",
+  "dense_prefill_fix_passed": true,
+  "full_qwen_api_matrix_passed": false,
+  "method": [
+    "The original default and serial controls use the same extracted PR #35 preview executable and pinned GGUFs.",
+    "All four Qwen model rows use the worker canonical HIP reference at the policy commit, batch 512, micro-batch 1, single-slot F32 KV and flash attention disabled.",
+    "The separate Vulkan-oracle ablations retain their own reference identity; they are not combined with the primary sweep.",
+    "The production fix changes host routing; numerical GPU kernel source is identical to main.",
+    "CPU policy regressions cover short and 31/32/33-token boundaries, 4K batching, prepared MTP, explicit opt-out and unaffected models/backends. The old always-batch policy fails the new test.",
+    "CLI/debug routing and actual model generation are both checked. The debug executable is a separate development build.",
+    "OpenCode 1.19.4 runs directly against the extracted package with bounded tools, a fresh server per fixture and independent frozen acceptance tests. No synthetic responses, supervisor edits or tool repairs.",
+    "Every GPU/model run is remote. Owned process groups and task-owned clients are stopped after each command."
+  ],
+  "baseline": {
+    "source_commit": "fe5d43846b758914492c3d3941a2a41609d50728",
+    "equivalent_merged_commit": "3b9c2f7fe3e91ee0f938a9d253e2d61748d2fc21",
+    "archive_sha256": "125036af02f5d0bd77dcf994718b6957d79cbeacdd19b202e83b3ba9e045e514",
+    "binary_sha256": "ed5764e63b4b3b633faad9b365b4edb1f228a43a00c2b4be2d05e6e1f31e6e94",
+    "primary_hip": {
+      "reference_backend": "hip",
+      "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+      "models": [
+        {
+          "id": "qwen36-27b-q4k-m",
+          "default": [
+            {
+              "case": 0,
+              "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+              "tokens": 16,
+              "exact_tokens": 15,
+              "first_difference": 15,
+              "actual": 11,
+              "expected": 4424,
+              "logprob_gap": 0.08444410562515259
+            },
+            {
+              "case": 2,
+              "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ],
+          "serial_control": [
+            {
+              "case": 0,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 2,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ]
+        },
+        {
+          "id": "qwen35-9b-q4k-m",
+          "default": [
+            {
+              "case": 0,
+              "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 2,
+              "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ],
+          "serial_control": [
+            {
+              "case": 0,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 2,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ]
+        },
+        {
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "default": [
+            {
+              "case": 0,
+              "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 2,
+              "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ],
+          "serial_control": [
+            {
+              "case": 0,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "tokens": 16,
+              "exact_tokens": 15,
+              "first_difference": 11,
+              "actual": 3618,
+              "expected": 36337,
+              "logprob_gap": 0.11875724792480469
+            },
+            {
+              "case": 2,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ]
+        },
+        {
+          "id": "qwen38-27b-q4k-m",
+          "default": [
+            {
+              "case": 0,
+              "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 2,
+              "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ],
+          "serial_control": [
+            {
+              "case": 0,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 1,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            },
+            {
+              "case": 2,
+              "tokens": 16,
+              "exact_tokens": 16,
+              "first_difference": null
+            }
+          ]
+        }
+      ]
+    },
+    "secondary_vulkan_ablations": {
+      "model": "qwen36-27b-q4k-m",
+      "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+      "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+      "reference_generation": {
+        "batch_size": 512,
+        "micro_batch": 1,
+        "parallel": 1,
+        "kv_cache": "f32",
+        "flash_attention": false
+      },
+      "context": 4096,
+      "cases": [
+        {
+          "index": 0,
+          "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+          "prompt_tokens": 22,
+          "expected_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            15756,
+            11894,
+            26,
+            424,
+            76454,
+            13,
+            1049,
+            1100
+          ]
+        },
+        {
+          "index": 1,
+          "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+          "prompt_tokens": 19,
+          "expected_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            36337,
+            310,
+            279,
+            4732,
+            4424
+          ]
+        },
+        {
+          "index": 2,
+          "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+          "prompt_tokens": 18,
+          "expected_ids": [
+            8160,
+            513,
+            2250,
+            4047,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ]
+        }
+      ],
+      "variants": [
+        {
+          "label": "default",
+          "environment": {},
+          "cases": [
+            {
+              "index": 0,
+              "actual_ids": [
+                760,
+                9662,
+                383,
+                5068,
+                6451,
+                4963,
+                1467,
+                524,
+                15756,
+                11894,
+                26,
+                424,
+                76454,
+                13,
+                1049,
+                1100
+              ],
+              "exact_tokens": 16,
+              "total_tokens": 16,
+              "first_difference": null,
+              "wall_seconds": 1.966
+            },
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                11
+              ],
+              "exact_tokens": 15,
+              "total_tokens": 16,
+              "first_difference": 15,
+              "wall_seconds": 1.716,
+              "reference_rank": 2,
+              "logprob_gap": 0.2171306014060974
+            },
+            {
+              "index": 2,
+              "actual_ids": [
+                8160,
+                513,
+                2250,
+                4047,
+                5533,
+                314,
+                22561,
+                25,
+                271,
+                16,
+                13,
+                220,
+                2972,
+                28371,
+                11764,
+                46258
+              ],
+              "exact_tokens": 16,
+              "total_tokens": 16,
+              "first_difference": null,
+              "wall_seconds": 1.766
+            }
+          ]
+        },
+        {
+          "label": "serial",
+          "environment": {
+            "ZINC_BATCHED_PREFILL": "0"
+          },
+          "cases": [
+            {
+              "index": 0,
+              "actual_ids": [
+                760,
+                9662,
+                383,
+                5068,
+                6451,
+                4963,
+                1467,
+                524,
+                15756,
+                11894,
+                26,
+                424,
+                76454,
+                13,
+                1049,
+                1100
+              ],
+              "exact_tokens": 16,
+              "total_tokens": 16,
+              "first_difference": null,
+              "wall_seconds": 1.866
+            },
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                4424
+              ],
+              "exact_tokens": 16,
+              "total_tokens": 16,
+              "first_difference": null,
+              "wall_seconds": 1.866
+            },
+            {
+              "index": 2,
+              "actual_ids": [
+                8160,
+                513,
+                2250,
+                4047,
+                5533,
+                314,
+                22561,
+                25,
+                271,
+                16,
+                13,
+                220,
+                2972,
+                28371,
+                11764,
+                46258
+              ],
+              "exact_tokens": 16,
+              "total_tokens": 16,
+              "first_difference": null,
+              "wall_seconds": 1.766
+            }
+          ]
+        },
+        {
+          "label": "no-prefill-q8",
+          "environment": {
+            "ZINC_PREFILL_Q8": "0"
+          },
+          "cases": [
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                11
+              ],
+              "exact_tokens": 15,
+              "total_tokens": 16,
+              "first_difference": 15,
+              "wall_seconds": 1.816,
+              "reference_rank": 2,
+              "logprob_gap": 0.2171306014060974
+            }
+          ]
+        },
+        {
+          "label": "no-attn-v2",
+          "environment": {
+            "ZINC_ATTN_V2": "0"
+          },
+          "cases": [
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                4424
+              ],
+              "exact_tokens": 16,
+              "total_tokens": 16,
+              "first_difference": null,
+              "wall_seconds": 1.766
+            }
+          ]
+        },
+        {
+          "label": "block-ssm",
+          "environment": {
+            "ZINC_SSM_WARP": "0"
+          },
+          "cases": [
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                11
+              ],
+              "exact_tokens": 15,
+              "total_tokens": 16,
+              "first_difference": 15,
+              "wall_seconds": 1.766,
+              "reference_rank": 2,
+              "logprob_gap": 0.2171306014060974
+            }
+          ]
+        },
+        {
+          "label": "no-f32-blas",
+          "environment": {
+            "ZINC_F32_BLAS": "0"
+          },
+          "cases": [
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                11
+              ],
+              "exact_tokens": 15,
+              "total_tokens": 16,
+              "first_difference": 15,
+              "wall_seconds": 1.867,
+              "reference_rank": 2,
+              "logprob_gap": 0.2171306014060974
+            }
+          ]
+        },
+        {
+          "label": "no-rms-q8",
+          "environment": {
+            "ZINC_ROCM_RMS_Q8": "0"
+          },
+          "cases": [
+            {
+              "index": 1,
+              "actual_ids": [
+                32,
+                43447,
+                4138,
+                539,
+                6992,
+                8364,
+                494,
+                279,
+                4613,
+                314,
+                279,
+                36337,
+                310,
+                279,
+                4732,
+                11
+              ],
+              "exact_tokens": 15,
+              "total_tokens": 16,
+              "first_difference": 15,
+              "wall_seconds": 1.766,
+              "reference_rank": 2,
+              "logprob_gap": 0.2171306014060974
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "host_policy_regression": {
+    "source": "src/compute/prefill_policy.zig",
+    "sha256": "59a0a143aea679de54bc161804bd3cc4f900f4cc1f50f06c2faa580e1bbacb5c",
+    "test_count": 3,
+    "passed": true,
+    "old_policy_negative_control": "failed the short dense ROCm release prompt test as expected",
+    "commands": [
+      "./scripts/zig.sh build test",
+      "./scripts/zig.sh build check-cuda -Dtarget=x86_64-linux-gnu -Dshaders=false -Doptimize=ReleaseFast"
+    ]
+  },
+  "debug_regression": {
+    "source_commit": "dc89acaee3a8b5bbbabfc2a75da311f5ab93e8b0",
+    "scope": "Development rocm-dbg gen regression for the shared CLI/debug short-prompt policy",
+    "cases": [
+      {
+        "model": "qwen36-27b-q4k-m",
+        "prompt_tokens": 19,
+        "expected_ids": [
+          32,
+          43447,
+          4138,
+          539,
+          6992,
+          8364,
+          494,
+          279,
+          4613,
+          314,
+          279,
+          36337,
+          310,
+          279,
+          4732,
+          4424
+        ],
+        "actual_ids": [
+          32,
+          43447,
+          4138,
+          539,
+          6992,
+          8364,
+          494,
+          279,
+          4613,
+          314,
+          279,
+          36337,
+          310,
+          279,
+          4732,
+          4424
+        ],
+        "passed": true
+      },
+      {
+        "model": "qwen35-9b-q4k-m",
+        "prompt_tokens": 19,
+        "expected_ids": [
+          32,
+          43447,
+          4138,
+          539,
+          48270,
+          8364,
+          494,
+          279,
+          4613,
+          314,
+          279,
+          53494,
+          318,
+          2777,
+          488,
+          1318
+        ],
+        "actual_ids": [
+          32,
+          43447,
+          4138,
+          539,
+          48270,
+          8364,
+          494,
+          279,
+          4613,
+          314,
+          279,
+          53494,
+          318,
+          2777,
+          488,
+          1318
+        ],
+        "passed": true
+      }
+    ],
+    "cleanup": true,
+    "passed": true
+  },
+  "packaged": {
+    "schema_version": 1,
+    "scope": "Packaged ROCm Qwen developer regression checks on one RDNA4 board; not an aggregate release qualification report",
+    "tested_at_utc": "2026-10-27T18:22:08.892908+00:00",
+    "source_commit": "abd765201d7712d05cf168306d98d46c32dd9fe9",
+    "head_commit": "dc89acaee3a8b5bbbabfc2a75da311f5ab93e8b0",
+    "archive": "zinc-v0.1.0-dev.40558175678-linux-x86_64-rocm.tar.gz",
+    "archive_sha256": "06200181324703268cbde546b39d62a819a0e2ed6a23a0b3fd77856da956a26a",
+    "binary_sha256": "39b53bcf72e11fd4f47c24ccfb688afe9d319a79b3bcd8a9eaf01fbfa08c662d",
+    "packaging_run": 40558175678,
+    "hardware": {
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic",
+      "driver": "ROCm 7.2.4"
+    },
+    "reference": {
+      "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+      "backend": "hip",
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f",
+      "generation": {
+        "batch_size": 512,
+        "micro_batch": 1,
+        "parallel": 1,
+        "kv_cache": "f32",
+        "flash_attention": false
+      },
+      "agreement_policy": {
+        "cases": 3,
+        "tokens_per_case": 16,
+        "min_exact_fraction": 0.975,
+        "max_logprob_gap": 0.05,
+        "max_near_ties_per_case": 1
+      }
+    },
+    "options": {
+      "parallel": 1,
+      "context": 4096,
+      "kv_cache": "f32",
+      "mtp": "backend-default",
+      "greedy": true,
+      "runtime_overrides": {}
+    },
+    "kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "harness_sha256": {
+      "tools/release_gpu.py": "5554bd5fcbaf75c5675f424f34cdd31634d9208473273bd2e4a3e17024dd9d5b",
+      "tools/release_lib.py": "8de9a5e2be25007d282c2967902222c2310708af1b375214de8fc5d0af0ed7fa",
+      "src/compute/prefill_policy.zig": "59a0a143aea679de54bc161804bd3cc4f900f4cc1f50f06c2faa580e1bbacb5c"
+    },
+    "models": [
+      {
+        "id": "qwen36-27b-q4k-m",
+        "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "context": 4096,
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 12.978
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "wall_seconds": 22.673
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 6333.3 ms (636.63 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen35-9b-q4k-m",
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "context": 4096,
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 5.523
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "wall_seconds": 9.173
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 2348.4 ms (1716.93 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "context": 4096,
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 7.691
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "passed": false,
+        "failure": "full HTTP reference continuation differed"
+      },
+      {
+        "id": "qwen38-27b-q4k-m",
+        "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "context": 4096,
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 11.281
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "wall_seconds": 22.127
+          },
+          {
+            "name": "mtp-disabled-exact-reference",
+            "passed": true,
+            "tokens": 48
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 9278.1 ms (434.57 tok/s)"
+        ],
+        "passed": true
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": false
+  },
+  "opencode": {
+    "scope": "Actual OpenCode core regression on one packaged ROCm executable; separate 16K developer scope, not release certification",
+    "archive_sha256": "06200181324703268cbde546b39d62a819a0e2ed6a23a0b3fd77856da956a26a",
+    "binary_sha256": "39b53bcf72e11fd4f47c24ccfb688afe9d319a79b3bcd8a9eaf01fbfa08c662d",
+    "source_commit": "abd765201d7712d05cf168306d98d46c32dd9fe9",
+    "head_commit": "dc89acaee3a8b5bbbabfc2a75da311f5ab93e8b0",
+    "model": "qwen36-27b-q4k-m",
+    "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+    "context": 16384,
+    "parallel": 1,
+    "options": {
+      "max_tokens": 4096,
+      "steps": 16,
+      "timeout_ms": 300000,
+      "temperature": 0,
+      "top_p": 1,
+      "thinking": false,
+      "fresh_server_per_fixture": true
+    },
+    "opencode_version": "1.19.4",
+    "opencode_sha256": "538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7",
+    "harness_sha256": {
+      "tools/opencode_eval.mjs": "cc6b515145a5f20a19edf348a1cca557840139f142c90c8c92f9e50eb52fb89e",
+      "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+      "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "tools/validate_opencode_api.mjs": "e04f885ded44e5c30efbd54db147286d99d7df7982bf7c68d1204ba7f067c46e"
+    },
+    "fixtures": [
+      {
+        "id": "rate-limiter-single",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 3
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 6,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 145.184
+      },
+      {
+        "id": "cart-multi-file",
+        "passed": true,
+        "baseline": {
+          "pass": 1,
+          "fail": 2
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 7,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 89.118
+      },
+      {
+        "id": "python-log-cli",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 4
+        },
+        "final": {
+          "pass": 4,
+          "fail": 0
+        },
+        "tool_calls": 4,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 88.47
+      }
+    ],
+    "api": {
+      "model": "Qwen3.6-27B-Q4_K_M.gguf",
+      "context": 16384,
+      "passed": 24,
+      "total": 24,
+      "checks": [
+        {
+          "name": "JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 1030
+        },
+        {
+          "name": "JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 1089
+        },
+        {
+          "name": "JSON/SSE parity at 7 output tokens",
+          "pass": true,
+          "ms": 1153
+        },
+        {
+          "name": "Unicode JSON/SSE parity",
+          "pass": true,
+          "ms": 1914
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 1280
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 1346
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 3 output tokens",
+          "pass": true,
+          "ms": 1411
+        },
+        {
+          "name": "JSON tool arguments and unique ID",
+          "pass": true,
+          "ms": 1423
+        },
+        {
+          "name": "SSE tool arguments and unique ID",
+          "pass": true,
+          "ms": 1254
+        },
+        {
+          "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 2748
+        },
+        {
+          "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 2734
+        },
+        {
+          "name": "Truncated tool calls remain text without an executable call",
+          "pass": true,
+          "ms": 598
+        },
+        {
+          "name": "Null assistant content and tool-result history",
+          "pass": true,
+          "ms": 364
+        },
+        {
+          "name": "tool_choice none",
+          "pass": true,
+          "ms": 143
+        },
+        {
+          "name": "Text content arrays",
+          "pass": true,
+          "ms": 560
+        },
+        {
+          "name": "Malformed JSON returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Invalid message content returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Empty messages returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Negative token budget returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Context overflow returns HTTP 400",
+          "pass": true,
+          "ms": 5
+        },
+        {
+          "name": "Queued requests keep conversations separate",
+          "pass": true,
+          "ms": 1802
+        },
+        {
+          "name": "Streaming cancellation releases the slot",
+          "pass": true,
+          "ms": 704
+        },
+        {
+          "name": "Long prompt above the former 8192-token SSM limit",
+          "pass": true,
+          "ms": 29983
+        },
+        {
+          "name": "Buffered tool-call cancellation releases the slot",
+          "pass": true,
+          "ms": 1620
+        }
+      ],
+      "complete": true
+    },
+    "remaining_processes": {
+      "zinc": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": true
+  },
+  "remaining_moe_http_blocker": {
+    "scope": "Unchanged baseline MoE HTTP continuation check against canonical HIP; separate from dense prefill fix",
+    "source_commit": "fe5d43846b758914492c3d3941a2a41609d50728",
+    "binary_sha256": "ed5764e63b4b3b633faad9b365b4edb1f228a43a00c2b4be2d05e6e1f31e6e94",
+    "model": "qwen36-35b-a3b-q4k-xl",
+    "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+    "reference_backend": "hip",
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "cases": [
+      {
+        "case": 0,
+        "matches_reference": true,
+        "matches_candidate": true,
+        "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+        "expected_content": "The salt did not just sit on the skin; it worked its way into the",
+        "actual_content": "The salt did not just sit on the skin; it worked its way into the"
+      },
+      {
+        "case": 1,
+        "matches_reference": false,
+        "matches_candidate": true,
+        "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+        "expected_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+        "actual_content": "A refrigerator works by moving heat from the inside of the box to the outside environment"
+      },
+      {
+        "case": 2,
+        "matches_reference": true,
+        "matches_candidate": null,
+        "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+        "expected_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+        "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring"
+      }
+    ],
+    "preexisting_difference_confirmed": true,
+    "cleanup": true
+  },
+  "remaining_limits": [
+    "The MoE model matches all CLI choices but fails full HTTP continuation parity. The same difference reproduces in the unchanged baseline; that required release row remains blocked.",
+    "These unsigned previews are development packages, not final-version candidates. The full Metal/Vulkan/ROCm hardware matrix, signing and protected promotion remain pending.",
+    "The 16K OpenCode task scope is separate from the required 4K release model checks. Three small core fixtures do not establish complete large-repository delivery.",
+    "No model catalog promotion, NVIDIA hardware validation or local workstation GPU inference was performed."
+  ],
+  "cleanup": true
+}

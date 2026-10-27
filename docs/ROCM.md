@@ -21,6 +21,7 @@ The current reference configuration is:
 - Radeon AI PRO R9700 (`gfx1201`, wave32)
 - Zig `0.17.0`, pinned by `.zig-version` and selected by `scripts/zig.sh`
 - Qwen 3.5 9B, Qwen 3.6 35B-A3B, and Qwen 3.8 27B
+- Qwen 3.6 dense 27B at 4K in the [packaged prefill follow-up](ROCM_QWEN27_PREFILL.md)
 - Gemma 4 26B-A4B MoE and Gemma 4 31B
 
 Kernel `7.2.2` is the validated reference, not a build-time requirement. The
@@ -97,6 +98,12 @@ servers reuse the existing KV cache; multiple slots require separate caches.
 Gemma 31B Q4_K_M passed the packaged 4K/F32 checks on the 32GB R9700 after
 removing a duplicate single-slot cache. Larger contexts and additional slots
 still need their own memory budget and validation.
+
+Short dense hybrid Qwen CLI prompts use per-token prefill below 32 tokens;
+long prompts remain batched. Prepared MTP retains the batched hidden rows needed
+for priming. The debug harness shares this routing policy. See the
+[short-prompt agreement checks](ROCM_QWEN27_PREFILL.md) for the regression tests
+and packaged evidence.
 
 The ROCm-tuned prefill and decode fusions are default-on. These switches remain
 available as correctness/performance A/B opt-outs:
