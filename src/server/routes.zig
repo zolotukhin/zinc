@@ -6139,3 +6139,21 @@ test "native Gemma thought filtering preserves markers inside tool strings" {
     }
     try std.testing.expectEqualStrings(text["<|channel>thought\nPrivate plan<channel|>".len..], toolStreamText(text));
 }
+
+test "Gemma tool prompts match the pinned checkpoint Jinja template" {
+    const a = std.testing.allocator;
+    const vectors = try std.json.parseFromSlice(struct { cases: []const struct { name: []const u8, request: []const u8, expected: []const u8 } }, a, @embedFile("testdata/gemma4_tools.json"), .{ .ignore_unknown_fields = true });
+    defer vectors.deinit();
+    const tok = makeTestTokenizer("<|turn> <|tool_call> enable_thinking <|think|>");
+    for (vectors.value.cases) |case| {
+        var parsed = try parseChatRequest(a, case.request);
+        defer parsed.deinit();
+        try prepareChatForTokenizer(&parsed, &tok);
+        const prompt = try allocChatPrompt(a, &tok, parsed.roles, parsed.contents, parsed.enable_thinking, true, parsed.tools, parsed.tool_choice);
+        defer a.free(prompt);
+        std.testing.expectEqualStrings(case.expected, prompt) catch |err| {
+            std.debug.print("Gemma template case: {s}\n", .{case.name});
+            return err;
+        };
+    }
+}
