@@ -1500,15 +1500,16 @@ pub const ForwardGemma = struct {
         const saved_k = self.kv_k;
         const saved_v = self.kv_v;
         const alias_k = try self.allocator.alloc(CudaBuffer, n_layers);
-        errdefer self.allocator.free(alias_k);
-        const alias_v = try self.allocator.alloc(CudaBuffer, n_layers);
-        errdefer self.allocator.free(alias_v);
-
         var made_k: usize = 0;
-        var made_v: usize = 0;
-        errdefer {
+        defer {
             for (alias_k[0..made_k]) |*b| buffer.freeBuffer(b);
+            self.allocator.free(alias_k);
+        }
+        const alias_v = try self.allocator.alloc(CudaBuffer, n_layers);
+        var made_v: usize = 0;
+        defer {
             for (alias_v[0..made_v]) |*b| buffer.freeBuffer(b);
+            self.allocator.free(alias_v);
         }
         for (0..n_layers) |li| {
             const bytes = tokens.len * @as(usize, self.geom[li].kv_dim) * f4;
@@ -1523,13 +1524,9 @@ pub const ForwardGemma = struct {
         self.kv_v = alias_v;
         defer {
             // `prefillBatched` drains its async command ring before returning.
-            // Restore the owning caches before releasing the lightweight views.
+            // LIFO: restore before the earlier defers release each view once.
             self.kv_k = saved_k;
             self.kv_v = saved_v;
-            for (alias_k) |*b| buffer.freeBuffer(b);
-            for (alias_v) |*b| buffer.freeBuffer(b);
-            self.allocator.free(alias_k);
-            self.allocator.free(alias_v);
         }
 
         const tok = try self.prefillBatched(tokens);
