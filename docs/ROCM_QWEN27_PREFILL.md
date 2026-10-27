@@ -1,5 +1,9 @@
 # ROCm Qwen short-prompt prefill agreement
 
+The subsequent [single-slot consistency follow-up](ROCM_SINGLE_SLOT_CORRECTNESS.md)
+fixes the MoE HTTP mismatch and a request-reuse issue found by stronger checks.
+The original report below retains its failed MoE row and exact package identity.
+
 Dense hybrid Qwen CLI and debug runs on ROCm now use per-token prefill below
 32 tokens unless MTP is prepared. Longer prompts retain batched prefill. This fixes a release reference mismatch
 without changing attention or SSM kernels, disabling batching globally, or
@@ -81,8 +85,9 @@ This is separate developer evidence from the required 4K release row.
 The MoE HTTP failure is **pre-existing**, reproduced with the unchanged #35
 package and the same GGUF, prompt and reference. Its refrigerator continuation
 says “box” where the HIP reference and CLI say “fridge.” The aggregate Qwen API
-matrix remains failed in the JSON. That required model row must be fixed and
-rechecked before release; a correct CLI does not qualify its HTTP path.
+matrix remains failed in the JSON. That preview did not qualify the HTTP row.
+The subsequent [single-slot follow-up](ROCM_SINGLE_SLOT_CORRECTNESS.md) fixes and rechecks it;
+a correct CLI alone does not qualify HTTP.
 
 ## Reference scope
 
