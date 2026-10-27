@@ -1390,11 +1390,11 @@ fn estimateChatPromptBytes(roles: []const []const u8, contents: []const []const 
 fn buildChatPrompt(allocator: std.mem.Allocator, tokenizer: *const tokenizer_mod.Tokenizer, roles: []const []const u8, contents: []const []const u8, enable_thinking: ?bool, skip_thinking_template: bool, tools: []const tool_format.ToolDefinition, tool_choice: ToolChoice, buf: []u8) ![]const u8 {
     const tf = tool_format.forTokenizer(tokenizer);
     const tools_for_template = if (tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else tools;
-    const forced_tool_name = if (tf.native_xml) null else forcedSingleToolName(tools_for_template, tool_choice);
-    const forced_tool_first_arg_name = if (tf.native_xml) null else forcedSingleToolFirstArgumentName(tools_for_template, tool_choice);
+    const forced_tool_name = if (!tf.usesJsonPrefill()) null else forcedSingleToolName(tools_for_template, tool_choice);
+    const forced_tool_first_arg_name = if (!tf.usesJsonPrefill()) null else forcedSingleToolFirstArgumentName(tools_for_template, tool_choice);
     return tokenizer.applyChatTemplateWithOptions(roles, contents, .{
         .enable_thinking = enable_thinking,
-        .skip_thinking_template = skip_thinking_template,
+        .skip_thinking_template = skip_thinking_template and !tf.native_gemma,
         .tools = tools_for_template,
         .require_tool_call = tool_choice == .required,
         .forced_tool_call_name = forced_tool_name,
@@ -1455,7 +1455,7 @@ fn buildChatTranscriptPrompt(
     return tokenizer.applyChatTemplateWithOptions(roles, contents, .{
         .add_generation_prompt = false,
         .enable_thinking = enable_thinking,
-        .skip_thinking_template = skip_thinking_template,
+        .skip_thinking_template = skip_thinking_template and !tf.native_gemma,
         .tools = tools_for_template,
         .require_tool_call = tool_choice == .required,
         .tool_format = tf,
@@ -1932,10 +1932,52 @@ fn dropInjectedDefaultSystemForGemma(parsed: *ParsedChatRequest, is_gemma: bool)
     parsed.injected_default_system = false;
 }
 
+/// Gemma tool results stay in the model turn that issued their calls. Resolve
+/// SDK IDs from structured history rather than guessing a function name from
+/// prose or treating a tool result as a separate user message.
+fn prepareGemmaToolHistory(parsed: *ParsedChatRequest) !void {
+    const a = parsed.arena.allocator();
+    const messages = parsed.parsed.value.messages;
+    const roles = try a.alloc([]const u8, messages.len);
+    const contents = try a.alloc([]const u8, messages.len);
+    var count: usize = 0;
+    for (messages, 0..) |message, index| {
+        if (message.role.len == 0) continue;
+        var rendered: std.ArrayList(u8) = .empty;
+        if (std.mem.eql(u8, message.role, "assistant") and message.tool_calls.len > 0) {
+            for (message.tool_calls) |call| try tool_format.gemma.appendCall(&rendered, a, call.function.name, call.function.arguments);
+            try rendered.appendSlice(a, sanitizeAssistantHistoryContent(message.content.text));
+        } else if (std.mem.eql(u8, message.role, "tool")) {
+            var name: ?[]const u8 = null;
+            var previous = index;
+            while (previous > 0) {
+                previous -= 1;
+                if (std.mem.eql(u8, messages[previous].role, "tool")) continue;
+                if (!std.mem.eql(u8, messages[previous].role, "assistant")) break;
+                for (messages[previous].tool_calls) |call| {
+                    if (message.tool_call_id.len > 0 and std.mem.eql(u8, call.id, message.tool_call_id)) name = call.function.name;
+                }
+                break;
+            }
+            try tool_format.gemma.appendResult(&rendered, a, name orelse return error.UnknownToolCallId, message.content.text);
+        } else {
+            if (message.content.text.len == 0) continue;
+            try rendered.appendSlice(a, if (std.mem.eql(u8, message.role, "assistant")) sanitizeAssistantHistoryContent(message.content.text) else message.content.text);
+        }
+        roles[count] = message.role;
+        contents[count] = try rendered.toOwnedSlice(a);
+        count += 1;
+    }
+    parsed.roles = roles[0..count];
+    parsed.contents = contents[0..count];
+    parsed.injected_default_system = false;
+}
+
 /// SDK history is OpenAI JSON; render its assistant calls in the model's native
 /// XML dialect before tokenization so tools and follow-up results round-trip.
 pub fn prepareChatForTokenizer(parsed: *ParsedChatRequest, tokenizer: *const tokenizer_mod.Tokenizer) !void {
     const format = tool_format.forTokenizer(tokenizer);
+    if (format.native_gemma) return prepareGemmaToolHistory(parsed);
     if (!format.native_xml) return;
     const a = parsed.arena.allocator();
     const contents = try a.dupe([]const u8, parsed.contents);
@@ -2450,6 +2492,7 @@ fn historyAssistantContentWithTools(
     tool_history_buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) ![]const u8 {
+    if (tools_active and tool_fmt.native_gemma) return tool_format.gemma.visibleText(text);
     if (!tools_active or !std.mem.eql(u8, tokenizer.detectTemplateKindName(), "chatml")) {
         return historyAssistantContent(tokenizer, text, transport_buf);
     }
@@ -2501,7 +2544,7 @@ pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8
 }
 
 fn toolStreamText(text: []const u8) []const u8 {
-    var visible = std.mem.trimStart(u8, text, " \t\r\n");
+    var visible = tool_format.gemma.visibleText(text);
     while (std.mem.startsWith(u8, visible, thinking_open_tag) or std.mem.startsWith(u8, thinking_open_tag, visible)) {
         if (visible.len < thinking_open_tag.len) return "";
         const close = std.mem.indexOf(u8, visible, thinking_close_tag) orelse return "";
@@ -2902,8 +2945,8 @@ fn handleChatCompletions(
     const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
     const is_atem = tokenizer.detectTemplateKind() == .atem;
     const tools_for_choice = if (parsed.tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else parsed.tools;
-    const tools_active = tools_for_choice.len > 0;
-    const forced_tool_name = if (tool_format.forTokenizer(tokenizer).native_xml) null else forcedSingleToolName(tools_for_choice, parsed.tool_choice);
+    const tools_active = tools_for_choice.len > 0 and tool_format.forTokenizer(tokenizer).supports_tools;
+    const forced_tool_name = if (!tool_format.forTokenizer(tokenizer).usesJsonPrefill()) null else forcedSingleToolName(tools_for_choice, parsed.tool_choice);
     const forced_tool_first_arg_name = if (forced_tool_name == null) null else forcedSingleToolFirstArgumentName(tools_for_choice, parsed.tool_choice);
     const seed_bits: u128 = @bitCast(seed_ns);
     var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
@@ -3254,7 +3297,7 @@ fn handleChatCompletions(
                 {
                     const gemma_close = "<channel|>";
                     const think_close = "</think>\n";
-                    if (gen_text_len >= gemma_close.len) {
+                    if (gen_text_len >= gemma_close.len and std.mem.startsWith(u8, gen_text_buf[0..gen_text_len], thinking_open_tag) and std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], thinking_close_tag) == null) {
                         if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], gemma_close)) |idx| {
                             @memcpy(gen_text_buf[idx..][0..think_close.len], think_close);
                             if (gen_text_len > idx + gemma_close.len) {
@@ -6053,4 +6096,46 @@ fn checkNativeChatPromptAllocation(allocator: std.mem.Allocator) !void {
 
 test "native tool prompt allocations can be freed and clean up every failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkNativeChatPromptAllocation, .{});
+}
+
+test "Gemma native tool history resolves SDK ids and continues one model turn" {
+    const a = std.testing.allocator;
+    var parsed = try parseChatRequest(a,
+        \\{"messages":[{"role":"system","content":"Source changes only."},{"role":"user","content":"Read the file."},{"role":"assistant","content":null,"tool_calls":[{"id":"example","type":"function","function":{"name":"read","arguments":"{\"filePath\":\"src/表.mjs\",\"offset\":2}"}}]},{"role":"tool","tool_call_id":"example","content":"file contents"}],"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"offset":{"type":"integer"}}}}}],"tool_choice":"required"}
+    );
+    defer parsed.deinit();
+    var tok = makeTestTokenizer("<|turn> <|tool_call> <|think|>");
+    try std.testing.expect(tool_format.forTokenizer(&tok).native_gemma);
+    try prepareChatForTokenizer(&parsed, &tok);
+    const prompt = try allocChatPrompt(a, &tok, parsed.roles, parsed.contents, false, true, parsed.tools, parsed.tool_choice);
+    defer a.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "<|tool>declaration:read{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "<|turn>model\n<|tool_call>call:read{filePath:<|\"|>src/表.mjs<|\"|>,offset:2}<tool_call|><|tool_response>response:read{value:<|\"|>file contents<|\"|>}<tool_response|>") != null);
+    try std.testing.expect(std.mem.endsWith(u8, prompt, "<tool_response|>"));
+    const first = try allocChatPrompt(a, &tok, parsed.roles[0..2], parsed.contents[0..2], false, true, parsed.tools, .auto);
+    defer a.free(first);
+    try std.testing.expect(std.mem.endsWith(u8, first, "<|turn>model\n<|channel>thought\n<channel|>"));
+    const none = try allocChatPrompt(a, &tok, parsed.roles[0..2], parsed.contents[0..2], false, true, parsed.tools, .none);
+    defer a.free(none);
+    try std.testing.expect(std.mem.indexOf(u8, none, "declaration:") == null);
+    tok.chat_template = "<start_of_turn>";
+    try std.testing.expect(!tool_format.forTokenizer(&tok).supports_tools);
+}
+
+test "Gemma native history rejects a mismatched tool result id" {
+    var parsed = try parseChatRequest(std.testing.allocator,
+        \\{"messages":[{"role":"user","content":"Hello"},{"role":"tool","tool_call_id":"missing","content":"result"}]}
+    );
+    defer parsed.deinit();
+    const tok = makeTestTokenizer("<|turn> <|tool_call>");
+    try std.testing.expectError(error.UnknownToolCallId, prepareChatForTokenizer(&parsed, &tok));
+}
+
+test "native Gemma thought filtering preserves markers inside tool strings" {
+    const text = "<|channel>thought\nPrivate plan<channel|><|tool_call>call:write{code:<|\"|><think><channel|><|\"|>}<tool_call|>";
+    for (0..text.len) |end| {
+        const visible = toolStreamText(text[0..end]);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "Private plan") == null);
+    }
+    try std.testing.expectEqualStrings(text["<|channel>thought\nPrivate plan<channel|>".len..], toolStreamText(text));
 }
