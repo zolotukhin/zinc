@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { FIXTURES, fixtureById, readOnlyPathsForFixture } from './opencode_eval_fixtures.mjs';
-import { buildConfig, runtimeConfig, writeConfig } from './setup_opencode.mjs';
+import { buildConfig, CONTEXT_PLUGIN_PATH, runtimeConfig, writeConfig } from './setup_opencode.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
@@ -277,6 +277,7 @@ export async function unexpectedProjectFiles(projectDir, fixture) {
     'baseline-test.log',
     'final-test.log',
     'result.json',
+    CONTEXT_PLUGIN_PATH,
   ]);
   const violations = [];
   async function walk(dir, relative = '') {
@@ -310,7 +311,6 @@ export function buildOpenCodeArgs(provider, fixture, projectDir, opts, baselineO
     '--model',
     opts.model,
     '--auto',
-    '--pure',
     '--agent',
     'zinc',
     '--format',
@@ -676,6 +676,9 @@ export async function runFixture(provider, fixture, opts, providerDir) {
   await writeConfig(projectDir, config);
   beforeReadOnly['opencode.zinc.json'] = await sha256File(
     path.join(projectDir, 'opencode.zinc.json'),
+  );
+  beforeReadOnly[CONTEXT_PLUGIN_PATH] = await sha256File(
+    path.join(projectDir, CONTEXT_PLUGIN_PATH),
   );
   const live = runtimeConfig(config, {
     ZINC_API_BASE_URL: opts.manageProxy

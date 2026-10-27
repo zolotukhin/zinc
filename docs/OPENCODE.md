@@ -311,9 +311,16 @@ synthetic behavior separately.
 The API checks cover JSON/SSE parity, small token budgets, Unicode, tool
 arguments, tool-result history, invalid requests, context overflow, queued
 requests, streaming cancellation, and a prompt above the former 8K SSM limit.
-Run them on a server with at least the default 16K context. Their report
+The long-prompt check runs only when the configured context can hold a prompt
+above 8K; use the default 16K context to include it. Pass `--context` to match
+the running server. Add `--buffered-tool-cancel` to test cancellation while a
+long tool argument is still buffered, followed by a recovery request. Their report
 contains check names, outcomes, and durations; it omits endpoints, local paths,
 and response transcripts.
+
+The [first-release model validation](OPENCODE_RELEASE_VALIDATION.md) records
+actual OpenCode runs on all seven managed models on RDNA4, including failures,
+source-specific retries and the Gemma/tool-calling limits.
 
 ZINC selects Qwen's JSON or XML function-call dialect from the loaded model's
 template. Native XML calls retain multiline source strings, use the tool schema

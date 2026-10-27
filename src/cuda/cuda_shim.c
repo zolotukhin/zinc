@@ -202,6 +202,7 @@ CudaBuf* cuda_alias_buffer(CudaBuf* base, size_t offset, size_t size) {
     CudaBuf* b = (CudaBuf*)calloc(1, sizeof *b);
     if (!b) { set_err("cuda_alias_buffer", "oom"); return NULL; }
     b->dptr = base->dptr + offset; b->size = size; b->owns = 0;
+    // A view owns metadata only; cuda_free_buffer cannot free base->dptr.
     return b;
 }
 uint64_t cuda_buffer_device_ptr(CudaBuf* b) { return (uint64_t)b->dptr; }
@@ -235,6 +236,7 @@ void* cuda_alloc_host(size_t size) {
 void cuda_free_host(void* p) { if (p) cuMemFreeHost(p); }
 void cuda_free_buffer(CudaBuf* b) {
     if (!b) return;
+    // Alias handles have owns=0 and owns_host=0, so only their wrapper is freed.
     if (b->owns && b->dptr) cuMemFree(b->dptr);
     if (b->owns_host && b->host) cuMemFreeHost(b->host);
     free(b);

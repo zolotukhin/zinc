@@ -47,10 +47,80 @@ export function parseCompletion(text, stream) {
   };
 }
 
+export async function validateBufferedToolCancellation({
+  model,
+  env = process.env,
+  timeoutMs = 10000,
+}) {
+  const config = runtimeConfig(buildConfig({ model }), env);
+  const url = `${config.provider.zinc.options.baseURL}/chat/completions`;
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${env.ZINC_API_KEY || 'local'}`,
+  };
+  const controller = new AbortController();
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: 'user',
+          content:
+            'Call buffered_probe with text containing copper repeated 5000 times. Do not abbreviate.',
+        },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'buffered_probe',
+            parameters: {
+              type: 'object',
+              properties: { text: { type: 'string', minLength: 20000 } },
+              required: ['text'],
+            },
+          },
+        },
+      ],
+      tool_choice: 'required',
+      temperature: 0,
+      enable_thinking: false,
+      max_tokens: 4096,
+      stream: true,
+    }),
+  });
+  assert.equal(response.status, 200);
+  controller.abort();
+  await response.body.cancel().catch(() => {});
+  const started = performance.now();
+  const recovered = await fetch(url, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+      temperature: 0,
+      enable_thinking: false,
+      max_tokens: 8,
+      stream: false,
+    }),
+  });
+  assert.equal(recovered.status, 200);
+  const json = await recovered.json();
+  assert.ok(!json.error && json.choices?.length > 0);
+  assert.ok(performance.now() - started < timeoutMs);
+  return { recovery_ms: Math.round(performance.now() - started) };
+}
+
 export async function validateApi({
   model = 'qwen38-27b-q4k-m',
   context = 16384,
   env = process.env,
+  bufferedToolCancellation = false,
 } = {}) {
   const config = runtimeConfig(buildConfig({ model, context }), env);
   const baseURL = config.provider.zinc.options.baseURL;
@@ -78,7 +148,8 @@ export async function validateApi({
       max_tokens: 64,
       ...body,
     });
-    assert.equal(response.status, 200);
+    if (response.status !== 200)
+      assert.fail(`HTTP ${response.status}: ${(await response.text()).slice(0, 1000)}`);
     const raw = new Uint8Array(await response.arrayBuffer());
     const text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
     const result = parseCompletion(text, !!body.stream);
@@ -97,8 +168,9 @@ export async function validateApi({
     try {
       await fn();
       checks.push({ name, pass: true, ms: Math.round(performance.now() - started) });
-    } catch {
+    } catch (error) {
       checks.push({ name, pass: false, ms: Math.round(performance.now() - started) });
+      process.stderr.write(`${name}: ${String(error?.message ?? error).slice(0, 1000)}\n`);
     }
     process.stderr.write(`${checks.at(-1).pass ? 'PASS' : 'FAIL'} ${name}\n`);
   };
@@ -322,22 +394,30 @@ export async function validateApi({
     assert.ok(result.message.content.includes('OK'));
     assert.ok(performance.now() - started < 10000);
   });
-  await check('Long prompt above the former 8192-token SSM limit', async () => {
-    const result = await complete({
-      messages: [
-        {
-          role: 'user',
-          content:
-            'The following line is reference filler.\n' +
-            'word '.repeat(9200) +
-            '\nIgnore the reference filler and reply with OK.',
-        },
-      ],
-      max_tokens: 16,
+  const longFillerWords = Math.min(9200, context - 256);
+  if (longFillerWords > 8192) {
+    await check('Long prompt above the former 8192-token SSM limit', async () => {
+      const result = await complete({
+        messages: [
+          {
+            role: 'user',
+            content:
+              'The following line is reference filler.\n' +
+              'word '.repeat(longFillerWords) +
+              '\nIgnore the reference filler and reply with OK.',
+          },
+        ],
+        max_tokens: 16,
+      });
+      assert.ok(result.usage.prompt_tokens > 8192);
+      assert.ok(result.message.content.includes('OK'));
     });
-    assert.ok(result.usage.prompt_tokens > 8192);
-    assert.ok(result.message.content.includes('OK'));
-  });
+  }
+  if (bufferedToolCancellation) {
+    await check('Buffered tool-call cancellation releases the slot', () =>
+      validateBufferedToolCancellation({ model, env }),
+    );
+  }
   return {
     model,
     context,
@@ -352,15 +432,20 @@ if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes('--help')) {
     console.log(
-      'Usage: bun tools/validate_opencode_api.mjs [--model ID] [--context N] [--output FILE]\nUses ZINC_API_BASE_URL and ZINC_API_KEY at runtime. Run only where GPU requests are authorized.',
+      'Usage: bun tools/validate_opencode_api.mjs [--model ID] [--context N] [--output FILE] [--buffered-tool-cancel]\nUses ZINC_API_BASE_URL and ZINC_API_KEY at runtime. Run only where GPU requests are authorized.',
     );
   } else {
     try {
       const options = {};
-      for (let i = 0; i < args.length; i += 2) {
+      for (let i = 0; i < args.length; i += 1) {
+        if (args[i] === '--buffered-tool-cancel') {
+          options.bufferedToolCancellation = true;
+          continue;
+        }
         if (!['--model', '--context', '--output'].includes(args[i]) || !args[i + 1])
           throw new Error('arguments');
         options[args[i].slice(2)] = args[i] === '--context' ? Number(args[i + 1]) : args[i + 1];
+        i += 1;
       }
       const result = await validateApi(options);
       const text = JSON.stringify(result, null, 2) + '\n';

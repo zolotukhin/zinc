@@ -9,6 +9,23 @@ const config_mod = @import("../model/config.zig");
 
 const ModelConfig = config_mod.ModelConfig;
 
+/// Largest fp16 dense projection/FFN matrix: each dimension pair includes hidden_dim.
+/// Multiplying independent maxima invents a query_dim × ffn_dim matrix.
+pub fn densePrefillWeightScratchBytes(hidden_dim: u32, query_dim: u32, ffn_dim: u32) usize {
+    return @as(usize, hidden_dim) * @max(hidden_dim, @max(query_dim, ffn_dim)) * @sizeOf(u16);
+}
+
+test "Gemma 31B dense weight scratch fits the observed allocation budget" {
+    const bytes = densePrefillWeightScratchBytes(5376, 16384, 21504);
+    try std.testing.expectEqual(@as(usize, 231211008), bytes);
+    try std.testing.expect(bytes < 390070272); // free bytes at the failed 4K request
+    // Cover gate/up, down, Q/K/V, O, and square dense projections.
+    for ([_][2]u32{ .{ 21504, 5376 }, .{ 5376, 21504 }, .{ 16384, 5376 }, .{ 5376, 16384 }, .{ 5376, 5376 } }) |shape| {
+        try std.testing.expect(bytes >= @as(usize, shape[0]) * shape[1] * @sizeOf(u16));
+    }
+    try std.testing.expectEqual(@as(usize, 8589934592), densePrefillWeightScratchBytes(65536, 65536, 32768));
+}
+
 /// Backend-agnostic breakdown of runtime memory as:
 /// - fixed bytes that do not scale with context length
 /// - bytes that scale linearly per token

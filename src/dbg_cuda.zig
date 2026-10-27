@@ -1,4 +1,4 @@
-//! CUDA forward-pass debug harness for the qwen35 hybrid-SSM model. Two modes:
+//! Accelerator forward-pass debug harness for Qwen and Gemma models.
 //!
 //!   ./scripts/zig.sh build cuda-dbg -- <token> [model.gguf]
 //!       Per-layer residual-norm dump at pos 0 (used to pinpoint the attention
@@ -9,6 +9,10 @@
 //!       the ids (exercising pos>0 RoPE + multi-entry attention + SSM state
 //!       carry), then greedily emits ngen tokens. Diff GEN_IDS vs `/tmp/gen`
 //!       (the reference implementation greedy) to validate the full decode path beyond pos 0.
+//!
+//!   ./scripts/zig.sh build rocm-dbg -Dbackend=rocm -- kv-lifetime <model.gguf>
+//!       Dedicated GPU regression: allocate/free single-slot KV views, then
+//!       verify the original cache still produces the same four-token decode.
 //!
 //! Read-only w.r.t. the engine — uses only public ForwardCuda methods.
 //! @section CUDA Runtime
@@ -417,7 +421,10 @@ pub fn main(process_init: std.process.Init) !void {
     _ = args.next();
     const first = args.next() orelse "100";
 
-    if (std.mem.eql(u8, first, "gen")) {
+    if (std.mem.eql(u8, first, "kv-lifetime")) {
+        const model_path = args.next() orelse return error.ModelPathRequired;
+        try kvLifetimeMode(allocator, model_path);
+    } else if (std.mem.eql(u8, first, "gen")) {
         const ids_arg = args.next() orelse "760,6511,314,9338,369";
         const ngen: u32 = std.fmt.parseInt(u32, args.next() orelse "16", 10) catch 16;
         const model_path = args.next() orelse DEFAULT_MODEL;
@@ -487,6 +494,37 @@ pub fn main(process_init: std.process.Init) !void {
         const model_path = args.next() orelse DEFAULT_MODEL;
         try dumpMode(allocator, token, model_path);
     }
+}
+
+fn kvLifetimeDecode(fwd: *forwardgemma.ForwardGemma) ![4]u32 {
+    var ids: [4]u32 = undefined;
+    var token: u32 = 0;
+    for (&ids, 0..) |*id, pos| {
+        token = try fwd.decodeStep(token, @intCast(pos), true);
+        id.* = token;
+    }
+    if (@import("cuda/c.zig").shim.cuda_execution_failed(fwd.ctx) != 0) return error.CudaExecutionFailed;
+    return ids;
+}
+
+fn kvLifetimeMode(allocator: std.mem.Allocator, model_path: []const u8) !void {
+    var dev = try device.CudaDevice.initBest(allocator);
+    defer dev.deinit();
+    var model = try loader.Model.load(allocator, dev.ctx, model_path);
+    defer model.deinit();
+    var fwd = try forwardgemma.ForwardGemma.init(allocator, &model, 64);
+    defer fwd.deinit();
+    const expected = try kvLifetimeDecode(&fwd);
+    for (0..3) |_| {
+        try fwd.allocSlotKv(1, 64);
+        for (fwd.kv_k, fwd.kv_v, fwd.kv_k_slots.?, fwd.kv_v_slots.?) |key, value, slot_key, slot_value| {
+            if (slot_key.owns_handle or slot_value.owns_handle or key.devicePtr() != slot_key.devicePtr() or value.devicePtr() != slot_value.devicePtr()) return error.SlotKvNotBorrowed;
+        }
+        fwd.freeSlotKv();
+        const actual = try kvLifetimeDecode(&fwd);
+        if (!std.mem.eql(u32, &expected, &actual)) return error.SlotKvLifetimeMismatch;
+    }
+    std.debug.print("KV_LIFETIME_GATE: PASS (3 alloc/free/decode cycles, 4 tokens each)\n", .{});
 }
 
 /// Autoregressive greedy generation from a comma-separated prompt token list.

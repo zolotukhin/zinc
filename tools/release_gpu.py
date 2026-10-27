@@ -297,6 +297,29 @@ def reference_http_parity(port, body, samples, work=None):
                 "full HTTP reference continuation differed")
 
 
+def unicode_chat_checks(port, model_id):
+    """Require real UTF-8 and matching JSON/SSE, including split code points."""
+    for budget in (1, 2, 3, 32):
+        body = {"model": model_id, "messages": [{"role": "user", "content": "Reply exactly with café 東京 🚀."}],
+                "max_tokens": budget, "temperature": 0, "enable_thinking": False}
+        result = json_request(port, "/v1/chat/completions", {**body, "stream": False})
+        content = result["choices"][0]["message"].get("content") or ""
+        content.encode("utf-8", errors="strict")
+        with request(port, "/v1/chat/completions", {**body, "stream": True}) as response:
+            payloads = [line[6:] for line in response.read().decode("utf-8", errors="strict").splitlines() if line.startswith("data: ")]
+        require(payloads and payloads[-1] == "[DONE]", "Unicode stream did not terminate")
+        events = [json.loads(payload) for payload in payloads[:-1]]
+        require(not any(event.get("error") for event in events), "Unicode stream returned an error")
+        choices = [choice for event in events for choice in event.get("choices", [])]
+        streamed = "".join(choice.get("delta", {}).get("content") or "" for choice in choices)
+        finishes = [choice["finish_reason"] for choice in choices if choice.get("finish_reason")]
+        require(streamed == content and "\ufffd" not in content, "Unicode JSON/SSE text differed or was corrupted")
+        require(finishes == [result["choices"][0]["finish_reason"]], "Unicode JSON/SSE finish differed")
+        require(any(event.get("usage", {}).get("prompt_tokens", 0) > 0 for event in events), "Unicode stream usage is missing")
+        if budget == 32:
+            require(all(word in content for word in ("café", "東京", "🚀")), "Unicode echo was incomplete")
+
+
 def api_checks(tree, model, context, device, work, env, browser_chat, reference_samples):
     port = free_port()
     command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--port", str(port), "-c", str(context), "--parallel", "1"]
@@ -318,6 +341,7 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
             lines = response.read().decode().splitlines()
         payloads = [line[6:] for line in lines if line.startswith("data: ")]
         require(payloads and payloads[-1] == "[DONE]" and any(json.loads(p).get("choices") for p in payloads[:-1]), "chat SSE contract failed")
+        unicode_chat_checks(port, model_id)
         # Disconnect an active stream; then prove the single-slot server recovers.
         with request(port, "/v1/completions", {**body, "stream": True, "max_tokens": 256}) as response:
             require(response.readline(), "stream did not start")

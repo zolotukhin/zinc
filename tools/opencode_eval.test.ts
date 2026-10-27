@@ -20,6 +20,7 @@ import {
   unexpectedProjectFiles,
 } from './opencode_eval.mjs';
 import { FIXTURES, fixtureById } from './opencode_eval_fixtures.mjs';
+import { buildConfig, CONTEXT_PLUGIN_PATH, writeConfig } from './setup_opencode.mjs';
 
 async function tempDir(prefix = 'zinc-opencode-eval-test-') {
   return await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -73,6 +74,22 @@ describe('opencode eval args', () => {
 });
 
 describe('fixture projects', () => {
+  test('permits the installed context hook and detects changes to it', async () => {
+    const fixture = fixtureById('rate-limiter-single')!;
+    const dir = await tempDir();
+    await writeFixtureProject(fixture, dir);
+    await writeConfig(dir, buildConfig({ model: 'test-model' }));
+    expect(await unexpectedProjectFiles(dir, fixture)).toEqual([]);
+    const before = {
+      [CONTEXT_PLUGIN_PATH]: Bun.CryptoHasher.hash(
+        'sha256',
+        await readFile(path.join(dir, CONTEXT_PLUGIN_PATH)),
+        'hex',
+      ),
+    };
+    await writeFile(path.join(dir, CONTEXT_PLUGIN_PATH), 'changed');
+    expect(await readOnlyViolations(dir, before)).toEqual([CONTEXT_PLUGIN_PATH]);
+  });
   test('detects added test-runner configuration outside source', async () => {
     const fixture = fixtureById('rate-limiter-single')!;
     const dir = await tempDir();
@@ -114,6 +131,7 @@ describe('fixture projects', () => {
     expect(args).toContain('--dir');
     expect(args[args.indexOf('--dir') + 1]).toBe(dir);
     expect(args).toContain('zinc-rate-limiter-single');
+    expect(args).not.toContain('--pure');
   });
 
   test('all seeded fixtures start with failing tests', async () => {

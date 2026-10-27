@@ -198,6 +198,11 @@ CudaBuf* cuda_create_buffer(CudaCtx* ctx, size_t size) {
         return NULL;
     }
     if (!hip_ok(hipMalloc(&buf->dptr, size ? size : 1), "hipMalloc")) {
+        size_t free_bytes = 0, total_bytes = 0;
+        if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+            fprintf(stderr, "[rocm_shim] allocation failed: requested=%zu bytes, free=%zu bytes, total=%zu bytes\n",
+                    size, free_bytes, total_bytes);
+        }
         free(buf);
         return NULL;
     }
@@ -240,6 +245,7 @@ CudaBuf* cuda_alias_buffer(CudaBuf* base, size_t offset, size_t size) {
     }
     buf->dptr = (void*)((unsigned char*)base->dptr + offset);
     buf->size = size;
+    // calloc left owns and owns_host at zero: only the view wrapper is owned.
     return buf;
 }
 
@@ -279,6 +285,7 @@ void cuda_free_host(void* ptr) {
 
 void cuda_free_buffer(CudaBuf* buf) {
     if (!buf) return;
+    // Alias handles leave the production allocation alive when released.
     if (buf->owns && buf->dptr) hipFree(buf->dptr);
     if (buf->owns_host && buf->host) hipHostFree(buf->host);
     free(buf);

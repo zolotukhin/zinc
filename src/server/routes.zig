@@ -966,6 +966,8 @@ fn handlePullModel(
 
 // ── /v1/chat/completions ─────────────────────────────────────
 
+const max_stream_text_bytes = 32768;
+
 const chat_stop_strs = [_][]const u8{
     "<|im_end|>",
     "<|im_start|>",
@@ -2164,6 +2166,12 @@ fn findStreamingStopStart(text: []const u8, stop_strs: []const []const u8, think
     return first;
 }
 
+fn findChatGenerationStopStart(text: []const u8, stop_strs: []const []const u8, thinking_enabled: bool, tools_active: bool) ?usize {
+    // Source code and repeated tool envelopes are not prose loops. Preserve
+    // their bytes while still honoring explicit chat/client stop sequences.
+    return if (tools_active) findFirstStop(text, stop_strs) else findStreamingStopStart(text, stop_strs, thinking_enabled);
+}
+
 fn extractHarmonyMessage(text: []const u8, prefix: []const u8) []const u8 {
     const start = std.mem.indexOf(u8, text, prefix) orelse return "";
     const body = text[start + prefix.len ..];
@@ -2489,6 +2497,38 @@ fn compactHistoryAnswer(answer: []const u8) []const u8 {
 }
 
 pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8 {
+    return stripThinkingForDisabledOutput(text, buf, true);
+}
+
+fn toolStreamText(text: []const u8) []const u8 {
+    var visible = std.mem.trimStart(u8, text, " \t\r\n");
+    while (std.mem.startsWith(u8, visible, thinking_open_tag) or std.mem.startsWith(u8, thinking_open_tag, visible)) {
+        if (visible.len < thinking_open_tag.len) return "";
+        const close = std.mem.indexOf(u8, visible, thinking_close_tag) orelse return "";
+        visible = std.mem.trimStart(u8, visible[close + thinking_close_tag.len ..], " \t\r\n");
+    }
+    // Once the answer starts, <think> can be literal source inside an argument.
+    return visible;
+}
+
+fn stripThinkingForDisabledStream(text: []const u8, buf: []u8) ![]const u8 {
+    // A reasoning block cannot become visible and later disappear: callers
+    // have already sent its byte count to the client. Also hold partial tags
+    // until the next token identifies them as reasoning or ordinary text.
+    var end = text.len;
+    for ([_][]const u8{ thinking_open_tag, thinking_close_tag }) |tag| {
+        var held = @min(text.len, tag.len - 1);
+        while (held > 0) : (held -= 1) {
+            if (std.mem.endsWith(u8, text, tag[0..held])) {
+                end = @min(end, text.len - held);
+                break;
+            }
+        }
+    }
+    return stripThinkingForDisabledOutput(text[0..end], buf, false);
+}
+
+fn stripThinkingForDisabledOutput(text: []const u8, buf: []u8, final: bool) ![]const u8 {
     var cursor: usize = 0;
     var out_len: usize = 0;
 
@@ -2527,7 +2567,7 @@ pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8
                 while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
                 continue;
             }
-            if (out_len == 0) {
+            if (final and out_len == 0) {
                 const fallback = sanitizeAnswerTail(text[after_open..]);
                 if (fallback.len > buf.len) return error.BufferTooSmall;
                 @memcpy(buf[0..fallback.len], fallback);
@@ -2541,7 +2581,7 @@ pub fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8
     }
 
     const stripped = std.mem.trim(u8, buf[0..out_len], " \t\r\n");
-    if (stripped.len > 0) return stripped;
+    if (stripped.len > 0 or !final) return stripped;
 
     const trimmed = std.mem.trimStart(u8, text, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, thinking_open_tag)) return stripped;
@@ -2724,6 +2764,7 @@ fn handleChatCompletions(
     }
 
     var generation_guard = GenerationGuard.acquire(server_state);
+    // Every streaming early return and propagated error releases this slot.
     defer generation_guard.release();
     if (!try ensureRequestedModelActive(conn, manager, server_state, parsed.parsed.value.model)) return;
     const resources = manager.currentResources() orelse {
@@ -2861,6 +2902,7 @@ fn handleChatCompletions(
     const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
     const is_atem = tokenizer.detectTemplateKind() == .atem;
     const tools_for_choice = if (parsed.tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else parsed.tools;
+    const tools_active = tools_for_choice.len > 0;
     const forced_tool_name = if (tool_format.forTokenizer(tokenizer).native_xml) null else forcedSingleToolName(tools_for_choice, parsed.tool_choice);
     const forced_tool_first_arg_name = if (forced_tool_name == null) null else forcedSingleToolFirstArgumentName(tools_for_choice, parsed.tool_choice);
     const seed_bits: u128 = @bitCast(seed_ns);
@@ -3122,11 +3164,11 @@ fn handleChatCompletions(
             }
         }.check;
         const stop_strs = try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
-        var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
+        var gen_text_buf: [max_stream_text_bytes]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
         var sent_visible_len: usize = if (is_atem and thinking_enabled and forced_tool_name == null) thinking_prefix.len else 0;
-        var visible_buf: [4096]u8 = undefined;
+        var visible_buf: [max_stream_text_bytes]u8 = undefined;
         var structured_stream_buf: [32768]u8 = undefined;
         var stopped = false;
         var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
@@ -3135,7 +3177,6 @@ fn handleChatCompletions(
         // (so deinit always works) but `tools_active` short-circuits the per-chunk
         // detection logic when the request didn't ask for tools — in that case
         // bytes flow through directly via streamText, matching mainline latency.
-        const tools_active = parsed.tools.len > 0 and parsed.tool_choice != .none;
         const stream_tool_fmt = tool_format.forTokenizer(tokenizer);
         const stream_detector = try stream_tool_fmt.newStreamingDetector(allocator);
         stream_detector.tools = parsed.tools;
@@ -3147,6 +3188,7 @@ fn handleChatCompletions(
         var tool_call_index: u32 = 0;
         var generated: u32 = 0;
         const decode_start_ns = host_io.nanoTimestamp();
+        var last_tool_keepalive_ns = decode_start_ns;
 
         if (max_tokens > 0) {
             var prev_token = runtime.sample(engine, &state, sampling, random);
@@ -3154,6 +3196,11 @@ fn handleChatCompletions(
 
             while (generated < max_tokens and !isEog(tokenizer, prev_token) and !stopped) {
                 if (conn.isPeerClosed()) return;
+                const now_ns = host_io.nanoTimestamp();
+                if (tools_active and now_ns - last_tool_keepalive_ns >= std.time.ns_per_s) {
+                    conn.writeSseComment("keepalive") catch return;
+                    last_tool_keepalive_ns = now_ns;
+                }
 
                 // Accumulate this token's decoded text
                 var dec_buf: [256]u8 = undefined;
@@ -3222,15 +3269,22 @@ fn handleChatCompletions(
                 }
 
                 // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
-                if (findStreamingStopStart(gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled)) |stop_idx| {
+                if (findChatGenerationStopStart(gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled, tools_active)) |stop_idx| {
                     gen_text_len = stop_idx;
-                    const pending_text = gen_text_buf[sent_text_len..gen_text_len];
-                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
-                    gen_text_len = sent_text_len + cleaned_pending.len;
+                    const pending_start = @min(sent_text_len, gen_text_len);
+                    const pending_text = gen_text_buf[pending_start..gen_text_len];
+                    const cleaned_pending = if (tools_active) completeUtf8Prefix(pending_text) else trimTrailingChatArtifacts(completeUtf8Prefix(pending_text));
+                    gen_text_len = pending_start + cleaned_pending.len;
                     if (forced_tool_name == null) {
-                        if (is_atem) {
+                        if (tools_active) {
+                            const visible = completeUtf8Prefix(if (thinking_enabled) gen_text_buf[0..gen_text_len] else toolStreamText(gen_text_buf[0..gen_text_len]));
+                            if (visible.len > sent_visible_len) {
+                                streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
+                                sent_visible_len = visible.len;
+                            }
+                        } else if (is_atem) {
                             const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
-                            const cleaned_structured = trimTrailingChatArtifacts(structured);
+                            const cleaned_structured = trimTrailingChatArtifacts(completeUtf8Prefix(structured));
                             if (cleaned_structured.len > sent_visible_len) {
                                 streamTextViaDetector(conn, cleaned_structured[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                                 sent_visible_len = cleaned_structured.len;
@@ -3265,6 +3319,14 @@ fn handleChatCompletions(
                 if (!is_partial) {
                     if (forced_tool_name != null) {
                         sent_text_len = gen_text_len;
+                    } else if (tools_active) {
+                        const visible = if (thinking_enabled) gen_text_buf[0..gen_text_len] else toolStreamText(gen_text_buf[0..gen_text_len]);
+                        const safe_visible = lastCompleteUtf8End(visible);
+                        if (safe_visible > sent_visible_len) {
+                            streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
+                            sent_visible_len = safe_visible;
+                        }
+                        sent_text_len = gen_text_len;
                     } else if (is_atem) {
                         const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                         const safe_visible = lastCompleteUtf8End(structured);
@@ -3284,7 +3346,7 @@ fn handleChatCompletions(
                         }
                         sent_text_len += safe_end_rel;
                     } else {
-                        const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
+                        const visible = stripThinkingForDisabledStream(gen_text_buf[0..gen_text_len], &visible_buf) catch return;
                         const safe_visible = lastCompleteUtf8End(visible);
                         if (safe_visible > sent_visible_len) {
                             streamTextViaDetector(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
@@ -3314,22 +3376,28 @@ fn handleChatCompletions(
 
             // Flush any remaining pending tokens (only if we didn't hit stop)
             if (!stopped) {
-                if (is_atem) {
+                if (tools_active) {
+                    const visible = completeUtf8Prefix(if (thinking_enabled) gen_text_buf[0..gen_text_len] else toolStreamText(gen_text_buf[0..gen_text_len]));
+                    if (visible.len > sent_visible_len and forced_tool_name == null) {
+                        streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
+                        sent_visible_len = visible.len;
+                    }
+                } else if (is_atem) {
                     const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
-                    const cleaned_structured = trimTrailingChatArtifacts(structured);
+                    const cleaned_structured = trimTrailingChatArtifacts(completeUtf8Prefix(structured));
                     if (cleaned_structured.len > sent_visible_len and forced_tool_name == null) {
                         streamTextViaDetector(conn, cleaned_structured[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                         sent_visible_len = cleaned_structured.len;
                     }
                 } else if (thinking_enabled) {
                     const pending_text = gen_text_buf[sent_text_len..gen_text_len];
-                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
+                    const cleaned_pending = trimTrailingChatArtifacts(completeUtf8Prefix(pending_text));
                     if (cleaned_pending.len > 0 and forced_tool_name == null) {
                         streamTextViaDetector(conn, cleaned_pending, req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                     }
                 } else {
                     const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
-                    const cleaned_visible = trimTrailingChatArtifacts(visible);
+                    const cleaned_visible = trimTrailingChatArtifacts(completeUtf8Prefix(visible));
                     if (cleaned_visible.len > sent_visible_len and forced_tool_name == null) {
                         streamTextViaDetector(conn, cleaned_visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
                     }
@@ -3364,9 +3432,7 @@ fn handleChatCompletions(
         }
         {
             var chunk_buf: [1024]u8 = undefined;
-            const chunk = std.fmt.bufPrint(&chunk_buf,
-                \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{}},"finish_reason":"{s}"}}]}}
-            , .{ req_id, ts, model_name, @tagName(finish_reason) }) catch "";
+            const chunk = formatStreamingFinishChunk(&chunk_buf, req_id, ts, model_name, finish_reason, prompt_tokens.len, generated) catch return;
             conn.writeSseEvent(chunk) catch return;
         }
 
@@ -3410,7 +3476,7 @@ fn handleChatCompletions(
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
                 ns_gen += 1;
-                const hit = if (findStreamingStopStart(text_buf.items, stop_strs, thinking_enabled)) |pos| blk: {
+                const hit = if (findChatGenerationStopStart(text_buf.items, stop_strs, thinking_enabled, tools_active)) |pos| blk: {
                     text_buf.shrinkRetainingCapacity(pos);
                     break :blk true;
                 } else false;
@@ -3422,7 +3488,7 @@ fn handleChatCompletions(
                 server_state.setActiveContextTokens(state.position);
                 state.generated_tokens.append(allocator, prev) catch {};
             }
-            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items, stop_strs, thinking_enabled) == null) {
+            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findChatGenerationStopStart(text_buf.items, stop_strs, thinking_enabled, tools_active) == null) {
                 finish_reason = .length;
             }
         }
@@ -3431,7 +3497,8 @@ fn handleChatCompletions(
 
         // Escape the full text for JSON
         var structured_buf: [16384]u8 = undefined;
-        const structured_text = normalizeStructuredAssistantOutput(tokenizer, text_buf.items, thinking_enabled, &structured_buf) catch text_buf.items;
+        const complete_text = completeUtf8Prefix(text_buf.items);
+        const structured_text = normalizeStructuredAssistantOutput(tokenizer, complete_text, thinking_enabled, &structured_buf) catch complete_text;
         var strip_buf: [16384]u8 = undefined;
         const base_text = if (thinking_enabled)
             structured_text
@@ -3441,7 +3508,9 @@ fn handleChatCompletions(
         var thinking_buf: [16384]u8 = undefined;
         const prefixed_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
         var sanitized_thinking_buf: [16384]u8 = undefined;
-        const response_text = if (thinking_enabled)
+        const response_text = if (tools_active)
+            (if (thinking_enabled) complete_text else toolStreamText(complete_text))
+        else if (thinking_enabled)
             sanitizeThinkingOutput(prefixed_text, &sanitized_thinking_buf) catch prefixed_text
         else
             prefixed_text;
@@ -3603,7 +3672,7 @@ fn handleCompletions(
 
     const finish_reason = completionFinishReason(parsed.max_tokens, max_tokens, output_tokens.len);
 
-    const escaped_text = try jsonEscapeAlloc(allocator, text_buf.items);
+    const escaped_text = try jsonEscapeAlloc(allocator, completeUtf8Prefix(text_buf.items));
     defer allocator.free(escaped_text);
 
     var wb: std.ArrayList(u8) = .empty;
@@ -4005,6 +4074,38 @@ test "chat JSON escaping preserves all control bytes and Unicode" {
     try std.testing.expectEqualStrings(input, parsed.value);
 }
 
+fn formatStreamingFinishChunk(
+    buf: []u8,
+    req_id: []const u8,
+    ts: i64,
+    model_name: []const u8,
+    finish_reason: FinishReason,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+) ![]const u8 {
+    return std.fmt.bufPrint(buf,
+        \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{}},"finish_reason":"{s}"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
+    , .{ req_id, ts, model_name, @tagName(finish_reason), prompt_tokens, completion_tokens, prompt_tokens + completion_tokens });
+}
+
+test "streaming finish reports usage for every terminal reason including an exhausted context" {
+    var buf: [1024]u8 = undefined;
+    for ([_]FinishReason{ .stop, .length, .tool_calls }) |reason| {
+        for ([_]usize{ 0, 1, 2048 }) |generated| {
+            const chunk = try formatStreamingFinishChunk(&buf, "chatcmpl-test", 123, "model", reason, 16000, generated);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, chunk, .{});
+            defer parsed.deinit();
+            const usage = parsed.value.object.get("usage").?.object;
+            try std.testing.expectEqual(@as(i64, 16000), usage.get("prompt_tokens").?.integer);
+            try std.testing.expectEqual(@as(i64, @intCast(generated)), usage.get("completion_tokens").?.integer);
+            try std.testing.expectEqual(@as(i64, @intCast(16000 + generated)), usage.get("total_tokens").?.integer);
+            const choice = parsed.value.object.get("choices").?.array.items[0].object;
+            try std.testing.expectEqualStrings(@tagName(reason), choice.get("finish_reason").?.string);
+            try std.testing.expectEqual(@as(usize, 0), choice.get("delta").?.object.count());
+        }
+    }
+}
+
 pub fn streamText(
     conn: *http.Connection,
     text: []const u8,
@@ -4046,6 +4147,14 @@ test "response token budgets retain only complete Unicode characters" {
         var expected = end;
         while (!std.unicode.utf8ValidateSlice(text[0..expected])) : (expected -= 1) {}
         try std.testing.expectEqualStrings(text[0..expected], completeUtf8Prefix(text[0..end]));
+        const a = std.testing.allocator;
+        const escaped = try jsonEscapeAlloc(a, completeUtf8Prefix(text[0..end]));
+        defer a.free(escaped);
+        const json = try std.fmt.allocPrint(a, "\"{s}\"", .{escaped});
+        defer a.free(json);
+        const parsed = try std.json.parseFromSlice([]const u8, a, json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(text[0..expected], parsed.value);
     }
 }
 
@@ -5587,6 +5696,90 @@ test "stripThinkingForDisabledResponse removes complete think block and keeps an
     var buf: [256]u8 = undefined;
     const stripped = try stripThinkingForDisabledResponse("<think>\n17 * 24 = 408\n</think>\n\n408", &buf);
     try std.testing.expectEqualStrings("408", stripped);
+}
+
+test "disabled-thinking streams preserve a native tool call after hidden reasoning at every byte boundary" {
+    const a = std.testing.allocator;
+    const input = "<think>\nLet me read the source before editing.\n</think>\n\n<tool_call>\n<function=read>\n<parameter=filePath>\n/project/src/rate_limiter.mjs\n</parameter>\n</function>\n</tool_call>";
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "read",
+        .description = "Read source",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"}}}",
+    }};
+    var detector = tool_format.StreamingDetector{ .allocator = a, .tools = &tools };
+    defer detector.deinit();
+    var emitted: std.ArrayList(u8) = .empty;
+    defer emitted.deinit(a);
+    var buf: [1024]u8 = undefined;
+    var calls: usize = 0;
+    for (0..input.len + 1) |end| {
+        const visible = toolStreamText(input[0..end]);
+        try std.testing.expect(std.mem.startsWith(u8, visible, emitted.items));
+        const delta = visible[emitted.items.len..];
+        _ = try detector.feed(delta);
+        try std.testing.expectEqualStrings("", detector.takeContentDelta());
+        while (detector.takePendingToolCall()) |call| {
+            defer a.free(call.id);
+            defer a.free(call.name);
+            defer a.free(call.arguments_json);
+            calls += 1;
+            try std.testing.expectEqualStrings("read", call.name);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, call.arguments_json, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings("/project/src/rate_limiter.mjs", parsed.value.object.get("filePath").?.string);
+        }
+        try emitted.appendSlice(a, delta);
+    }
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqualStrings("", detector.finalize());
+    try std.testing.expectEqualStrings(try stripThinkingForDisabledResponse(input, &buf), emitted.items);
+}
+
+test "disabled-thinking streams preserve a write argument larger than four KiB" {
+    const a = std.testing.allocator;
+    const code = host_io.repeatText("export const value = '<think>café 東京 🚀</think>';\n", 200);
+    const input = "<think>Plan the edit.</think>\n<tool_call>\n<function=write>\n<parameter=content>\n" ++ code ++ "\n</parameter>\n</function>\n</tool_call>";
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "write",
+        .description = "Write source",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}}}",
+    }};
+    for ([_]usize{ 1, 127, 4096 }) |chunk_size| {
+        var detector = tool_format.StreamingDetector{ .allocator = a, .tools = &tools };
+        defer detector.deinit();
+        var sent: usize = 0;
+        var end: usize = 0;
+        var calls: usize = 0;
+        while (end < input.len) {
+            end = @min(input.len, end + chunk_size);
+            const visible = completeUtf8Prefix(toolStreamText(input[0..end]));
+            try std.testing.expect(visible.len >= sent);
+            _ = try detector.feed(visible[sent..]);
+            sent = visible.len;
+            try std.testing.expectEqualStrings("", detector.takeContentDelta());
+            while (detector.takePendingToolCall()) |call| {
+                defer a.free(call.id);
+                defer a.free(call.name);
+                defer a.free(call.arguments_json);
+                calls += 1;
+                try std.testing.expectEqualStrings("write", call.name);
+                const parsed = try std.json.parseFromSlice(std.json.Value, a, call.arguments_json, .{});
+                defer parsed.deinit();
+                try std.testing.expectEqualStrings(&code, parsed.value.object.get("content").?.string);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), calls);
+        try std.testing.expectEqualStrings("", detector.finalize());
+    }
+}
+
+test "tool generation preserves repeated call envelopes while honoring explicit stops" {
+    const call = "<tool_call>\n<function=read>\n<parameter=filePath>source.zig</parameter>\n</function>\n</tool_call>";
+    const input = "Read the files. " ++ call ++ "\n" ++ call ++ "\n" ++ call;
+    try std.testing.expect(findStreamingStopStart(input, &.{}, false) != null);
+    try std.testing.expect(findChatGenerationStopStart(input, &.{}, false, false) != null);
+    try std.testing.expectEqual(@as(?usize, null), findChatGenerationStopStart(input, &.{}, false, true));
+    try std.testing.expectEqual(@as(?usize, input.len), findChatGenerationStopStart(input ++ "STOP", &.{"STOP"}, false, true));
 }
 
 test "stripThinkingForDisabledResponse promotes think-only answer when no final answer arrived" {
