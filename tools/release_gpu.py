@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from release import verify_candidate
-from release_lib import ROOT, extract_archive, policy, probe_binary, read_json, require, sha256, write_json
+from release_lib import ROOT, extract_archive, install_signal_handlers, policy, probe_binary, read_json, require, sha256, write_json
 
 CORPUS = [
     "The quick brown fox jumps over the lazy dog.", "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
@@ -255,6 +255,18 @@ def active_model_id(available):
     return active[0]["id"]
 
 
+def worker_for_profile(base, identifier):
+    # Vulkan and HIP can enumerate the same physical GPU at different indices
+    # and use different reference builds. Keep their host reservation shared.
+    overrides = base.get("profiles", {}).get(identifier, {})
+    allowed = {"device", "reference_args", "reference_bin", "reference_source", "models"}
+    require(isinstance(overrides, dict) and set(overrides).issubset(allowed), "unsupported worker override; the shared reservation cannot vary by backend")
+    result = {**base, **overrides}
+    if "models" in overrides:
+        result["models"] = {**base.get("models", {}), **overrides["models"]}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True)
@@ -269,6 +281,7 @@ def main():
     profiles = [p for p in policy()["gpu_profiles"] if p["id"] == args.profile]
     require(len(profiles) == 1, "unknown GPU profile")
     profile = profiles[0]
+    config = worker_for_profile(config, profile["id"])
     artifact = next(a for a in data["artifacts"] if a["target"] == profile["target"])
     device = config.get("device")
     require(type(device) is int and device >= 0, "worker must configure a device index")
@@ -333,13 +346,6 @@ def main():
         write_json(args.output, report)
     finally:
         lock.rmdir()
-
-
-def install_signal_handlers():
-    def interrupted(signum, _frame):
-        raise SystemExit(128 + signum)
-    signal.signal(signal.SIGTERM, interrupted)
-    signal.signal(signal.SIGINT, interrupted)
 
 
 if __name__ == "__main__":

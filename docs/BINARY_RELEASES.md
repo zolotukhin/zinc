@@ -71,4 +71,4 @@ gh attestation verify zinc-v0.1.0-linux-x86_64-vulkan.tar.gz \
   --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
-The publisher additionally binds the candidate run/workflow SHA, rechecks every required hardware report, and verifies public downloads against the approved bytes. See [release engineering](/zinc/docs/releasing/) for automation and remaining qualification steps.
+The publisher additionally binds the candidate run/workflow SHA, rechecks every required hardware report, and verifies public downloads against the approved bytes. See [release engineering](https://zolotukhin.ai/zinc/docs/releasing/) for automation and remaining qualification steps.

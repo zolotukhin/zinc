@@ -16,7 +16,7 @@ ZINC runs on consumer GPUs through Vulkan, ROCm/HIP, Metal, and an experimental 
 
 On AMD Radeon, Vulkan and ROCm are separate first-class builds. Vulkan is the broad RDNA3/RDNA4 path; ROCm uses HIP and dedicated AMD kernels, with the current public validation centered on `gfx1201`. Benchmark results are kept separate because the runtimes and driver stacks are different.
 
-The [binary release guide](/zinc/docs/binary-releases/) lists archive-specific OS/ABI floors. Release certification is narrower than source compatibility: use each release's validation report for the exact tested GPU, driver, backend and model combinations.
+The [binary release guide](https://zolotukhin.ai/zinc/docs/binary-releases/) lists archive-specific OS/ABI floors. Release certification is narrower than source compatibility: use each release's validation report for the exact tested GPU, driver, backend and model combinations.
 
 ## AMD GPUs (Linux)
 

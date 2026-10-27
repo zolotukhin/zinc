@@ -90,7 +90,14 @@ atomic_link() {
   ln -s "$value" "$prepared"
   if ! replace_link "$prepared" "$destination"; then rm -f "$prepared"; return 1; fi
 }
-check_pointer() { [ ! -e "$1" ] && [ ! -L "$1" ] || [ -L "$1" ] || fail "refusing to replace unmanaged path: $1"; }
+check_pointer() {
+  local pointer="$1" value
+  [ -e "$pointer" ] || [ -L "$pointer" ] || return 0
+  [ -L "$pointer" ] || fail "refusing to replace unmanaged path: $pointer"
+  value="$(readlink "$pointer")"
+  case "$value" in "$install_root"/zinc-v*) ;; *) fail "refusing unmanaged installation pointer: $pointer" ;; esac
+  [ "$value" = "$install_root/$(basename "$value")" ] && [ ! -L "$value" ] || fail "refusing unmanaged installation pointer: $pointer"
+}
 check_pointer "$install_root/current"
 check_pointer "$install_root/previous"
 if [ -e "$bin_dir/zinc" ] || [ -L "$bin_dir/zinc" ]; then

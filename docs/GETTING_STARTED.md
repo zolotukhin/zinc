@@ -5,7 +5,7 @@ Vulkan on Linux and Metal on Apple Silicon. AMD users can also choose the
 [ROCm backend](/zinc/docs/rocm/).
 
 For prebuilt archives and install/upgrade/rollback instructions, see
-[binary releases](/zinc/docs/binary-releases/). The 0.1.0 binary pipeline is
+[binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/). The 0.1.0 binary pipeline is
 undergoing qualification; the instructions below describe a source build.
 
 ## Install dependencies

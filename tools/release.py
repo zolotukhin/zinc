@@ -344,11 +344,12 @@ def finalize(args):
     require(validation.get("status") == "passed" and validation.get("manifest_sha256") == sha256(directory / "release-manifest.json"), "candidate is not validated")
     shutil.copyfile(ROOT / "scripts/install.sh", directory / "install.sh")
     shutil.copyfile(ROOT / "config/release/targets.json", directory / "release-policy.json")
-    notes = [f"# ZINC v{data['version']}", "", "Metal, Vulkan and ROCm binaries built from `" + data["commit"] + "`.", "",
+    notes = [f"# ZINC v{data['version']}", "", "Metal, Vulkan and ROCm binaries built from [" + data["commit"] + "](https://github.com/zolotukhin/zinc/commit/" + data["commit"] + ").", "",
              "Download the backend for your hardware. Models and GPU drivers are installed separately. CUDA remains experimental and source-only.", "",
              "| Archive | Runtime |", "| --- | --- |"]
     for artifact in data["artifacts"]:
-        notes.append(f"| `{artifact['filename']}` | {target(artifact['target'])['runtime']} |")
+        url = "https://github.com/zolotukhin/zinc/releases/download/v" + data["version"] + "/" + artifact["filename"]
+        notes.append(f"| [{artifact['filename']}]({url}) | {target(artifact['target'])['runtime']} |")
     notes.extend(["", "Verify archive hashes with `SHA256SUMS.txt`. The signed provenance in `provenance.jsonl` covers the archives, installer and validation report.", "",
                   "```bash", "# Download and inspect install.sh from this release, then:", f"ZINC_VERSION=v{data['version']} bash install.sh", "# Linux ROCm: ZINC_BACKEND=rocm ZINC_VERSION=v" + data["version"] + " bash install.sh", "zinc --check", "zinc model list --all", "```", "",
                   "Installer defaults: Metal on ARM64 macOS 15+, Vulkan on glibc Linux x86_64 (2.35+); ROCm is explicit (glibc 2.39+, ROCm 7.2.4). Intel Macs, musl, Linux ARM64 and native Windows have no 0.1.0 archive.", "",

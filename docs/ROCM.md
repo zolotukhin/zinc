@@ -5,6 +5,13 @@ model loader and scheduler behind the same C ABI, implemented with HIP, hipRTC,
 and hipBLAS. Vulkan and ROCm are independently supported AMD paths; select ROCm
 explicitly at build time.
 
+For prebuilt packages, see the [binary release guide](https://zolotukhin.ai/zinc/docs/binary-releases/).
+They remove the Zig/source-build requirement. HIP still compiles embedded kernels
+at runtime, so install matching HIP/hipRTC/hipBLAS development files and rocWMMA
+headers alongside the supported ROCm userspace. The standalone ROCm server
+provides CLI/HTTP chat and completion routes; it does not serve the Metal/Vulkan
+browser UI or hot model switching.
+
 ## Validated stack
 
 The current reference configuration is:

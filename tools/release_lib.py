@@ -6,6 +6,7 @@ import gzip
 import json
 import os
 import re
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -23,6 +24,14 @@ SAFE_PATH = re.compile(r"[A-Za-z0-9_./+-]+")
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_MEMBERS = 4096
+
+
+def install_signal_handlers():
+    """Unwind owned subprocess/keychain cleanup on normal Actions cancellation."""
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
 
 
 def require(condition, message):

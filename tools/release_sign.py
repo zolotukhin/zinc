@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from release_lib import extract_archive, read_json, require, sha256, version, source_sha, write_json
+from release_lib import extract_archive, install_signal_handlers, require, sha256, version, source_sha, write_json
 
 
 def run(command, timeout=120):
@@ -80,6 +80,7 @@ def main():
 
 
 if __name__ == "__main__":
+    install_signal_handlers()
     try:
         main()
     except (ValueError, OSError, subprocess.SubprocessError) as error:

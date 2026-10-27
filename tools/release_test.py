@@ -21,6 +21,7 @@ import release
 import release_gpu
 import release_lib
 import release_publish
+import release_sign
 from release_lib import (
     ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
     read_json, sha256, target, version, write_json,
@@ -239,6 +240,19 @@ class ReleaseTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unmanaged", result.stderr)
 
+    def test_installer_does_not_adopt_an_unmanaged_current_symlink(self):
+        self.bundle(self.tree())
+        outside = self.root / "outside installation"
+        outside.mkdir()
+        (outside / "keep").write_text("keep this installation")
+        (self.root / "installation").mkdir()
+        (self.root / "installation/current").symlink_to(outside)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unmanaged", result.stderr)
+        self.assertEqual((self.root / "installation/current").resolve(), outside.resolve())
+        self.assertEqual((outside / "keep").read_text(), "keep this installation")
+
     def test_explicit_prerelease_and_build_metadata_version(self):
         self.bundle(self.tree("9.8.7-rc.1+build-01"))
         result = self.install("9.8.7-rc.1+build-01")
@@ -454,11 +468,30 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release_gpu.active_model_id(data)
 
+    def test_backend_device_indices_can_differ_but_the_physical_reservation_cannot(self):
+        base = {"device": 1, "lock_directory": "<shared-reservation>", "models": {"one": "<model>"},
+                "profiles": {"rocm-rdna4": {"device": 0, "reference_bin": "<HIP-reference>"}}}
+        self.assertEqual(release_gpu.worker_for_profile(base, "vulkan-rdna4")["device"], 1)
+        rocm = release_gpu.worker_for_profile(base, "rocm-rdna4")
+        self.assertEqual(rocm["device"], 0)
+        self.assertEqual(rocm["lock_directory"], base["lock_directory"])
+        self.assertEqual(rocm["models"], base["models"])
+        base["profiles"]["rocm-rdna4"]["lock_directory"] = "<different-reservation>"
+        with self.assertRaisesRegex(ValueError, "shared reservation"):
+            release_gpu.worker_for_profile(base, "rocm-rdna4")
+
     def test_gpu_process_is_reaped_on_test_failure(self):
         with self.assertRaisesRegex(RuntimeError, "fixture failure"):
             with release_gpu.process([sys.executable, "-c", "import time; time.sleep(120)"], self.root / "child.log", self.root, os.environ) as child:
                 raise RuntimeError("fixture failure")
         self.assertIsNotNone(child.poll())
+
+    def test_signing_timeouts_do_not_expose_secret_arguments(self):
+        command = ["security", "-p", "synthetic-test-password"]
+        with patch.object(release_sign.subprocess, "run", side_effect=subprocess.TimeoutExpired(command, 1)):
+            with self.assertRaisesRegex(ValueError, "timed out: security") as caught:
+                release_sign.run(command, timeout=1)
+        self.assertNotIn("synthetic-test-password", str(caught.exception))
 
     def test_gpu_process_is_reaped_when_controller_receives_sigterm(self):
         script = ("import sys,time,os; sys.path.insert(0,sys.argv[1]); import release_gpu; "
