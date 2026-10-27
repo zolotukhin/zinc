@@ -12154,12 +12154,13 @@ extern "C" __global__ void attention_causal_batched(const float* q, const float*
 }
 
 // ---- attention_causal_batched_v2 — coalesced qwen prefill attention ----------
-// Coalesced twin of attention_causal_batched: pass 1 is WARP-PER-KEY (32 lanes
-// cooperate on one key's head_dim dot, contiguous ki reads + warp-shuffle reduce)
-// instead of thread-per-key strided reads. Query row staged in shared. Pass 2
-// (attention sinks / rescale) and pass 3 are byte-for-byte the naive kernel's.
-// NOT bit-identical (pass-1 reduction reorder) -> token-tolerance. Opt via
-// ZINC_ATTN_V2. Dynamic shared = (T + head_dim) floats.
+// Coalesced twin of attention_causal_batched. For fewer than one warp of keys,
+// keep the original serial head-dimension dot: changing its reduction order can
+// change Qwen greedy continuations even without activation quantization. Select
+// by each query's causal history, so appending queries cannot change a prefix.
+// Longer histories use warp-per-key coalesced reads and a shuffle reduction;
+// those are not bit-identical to the original. ZINC_ATTN_V2=0 keeps the original
+// kernel for all histories. Dynamic shared = (base_position + T + head_dim) floats.
 extern "C" __global__ void attention_causal_batched_v2(const float* q, const float* k, const float* v,
                                                        const float* sinks, float* out, AttnBatchPush pc) {
     extern __shared__ float smem2[];
@@ -12178,15 +12179,24 @@ extern "C" __global__ void attention_causal_batched_v2(const float* q, const flo
     for (unsigned d = tid; d < hd; d += nthr) qsh[d] = qh[d];
     __syncthreads();
 
-    // Pass 1: warp-per-key coalesced dot -> s_scores[i].
-    unsigned warp = tid >> 5, lane = tid & 31u, nwarp = nthr >> 5;
-    for (unsigned i = warp; i < seq_len; i += nwarp) {
-        const float* ki = k + ((size_t)i * pc.n_kv_heads + kv_head) * hd;
-        float p = 0.0f;
-        for (unsigned d = lane; d < hd; d += 32u) p += qsh[d] * ki[d];
-        #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) p += __shfl_down_sync(0xffffffffu, p, o);
-        if (lane == 0u) s_scores[i] = p * scale;
+    // Pass 1: retain serial dots for short histories, coalesce longer ones.
+    if (seq_len < 32u) {
+        for (unsigned i = tid; i < seq_len; i += nthr) {
+            const float* ki = k + ((size_t)i * pc.n_kv_heads + kv_head) * hd;
+            float dot = 0.0f;
+            for (unsigned d = 0; d < hd; d++) dot += qh[d] * ki[d];
+            s_scores[i] = dot * scale;
+        }
+    } else {
+        unsigned warp = tid >> 5, lane = tid & 31u, nwarp = nthr >> 5;
+        for (unsigned i = warp; i < seq_len; i += nwarp) {
+            const float* ki = k + ((size_t)i * pc.n_kv_heads + kv_head) * hd;
+            float p = 0.0f;
+            for (unsigned d = lane; d < hd; d += 32u) p += qsh[d] * ki[d];
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) p += __shfl_down_sync(0xffffffffu, p, o);
+            if (lane == 0u) s_scores[i] = p * scale;
+        }
     }
     __syncthreads();
 
