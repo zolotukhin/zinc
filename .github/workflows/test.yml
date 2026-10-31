@@ -3,8 +3,8 @@ name: Tests
 on:
   push:
     branches: [main]
+  # CPU-only checks cover stacked PRs targeting feature branches too.
   pull_request:
-    branches: [main]
 
 jobs:
   opencode-harness:

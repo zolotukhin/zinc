@@ -1,8 +1,8 @@
 name: Release packaging
 
 on:
+  # Packaging is untrusted and CPU-only, including stacked PRs.
   pull_request:
-    branches: [main]
     paths:
       [
         'src/**',
