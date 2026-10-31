@@ -2,6 +2,14 @@
 //! prompt allocation must not turn an otherwise usable GPU into serial prefill.
 const std = @import("std");
 
+/// Share Qwen's scratch limit knob without accepting a zero-sized chunk or
+/// letting a malformed setting replace the original prompt capacity.
+pub fn limit(tokens: u32, setting: ?[]const u8) u32 {
+    const text = setting orelse return tokens;
+    const parsed = std.fmt.parseInt(u32, text, 10) catch return tokens;
+    return if (parsed == 0) tokens else @min(tokens, parsed);
+}
+
 /// The allocator must release partial allocations on failure. Only device OOM
 /// is retryable; execution, host allocation and shape errors keep their cause.
 pub fn fit(context: anytype, tokens: u32, comptime allocate: anytype) !u32 {
@@ -37,6 +45,15 @@ test "available scratch preserves the whole prompt and short tail capacity" {
         try std.testing.expectEqual(tokens, try fit(&probe, tokens, AllocationProbe.allocate));
         try std.testing.expectEqual(@as(usize, 1), probe.count);
     }
+}
+
+test "explicit chunk limits preserve short prompts and reject invalid capacities" {
+    try std.testing.expectEqual(@as(u32, 5037), limit(5037, null));
+    for ([_][]const u8{ "0", "-1", "garbage", "4294967296", "" }) |setting|
+        try std.testing.expectEqual(@as(u32, 5037), limit(5037, setting));
+    try std.testing.expectEqual(@as(u32, 16), limit(5037, "16"));
+    try std.testing.expectEqual(@as(u32, 1), limit(5037, "1"));
+    try std.testing.expectEqual(@as(u32, 19), limit(19, "128"));
 }
 
 test "device OOM shrinks a coding prompt to a reusable batch before execution" {

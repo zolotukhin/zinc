@@ -562,6 +562,41 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             release_gpu.cli_reference_parity("topk: top=791\nOutput text: First line.\n", expected)
 
+    def test_bounded_prefill_gate_forces_chunks_and_compares_the_frozen_continuation(self):
+        commands, environments = [], []
+        @contextlib.contextmanager
+        def fake_process(command, log, _cwd, env):
+            commands.append(command)
+            environments.append(env)
+            Path(log).write_text("Gemma prefill scratch: 16 tokens per chunk for 19 prompt tokens\n"
+                                 "Generated tokens (2): { 760, 42 }\ninfo(zinc): Output text: The answer\n")
+            yield SimpleNamespace(wait=lambda **_kwargs: 0)
+        expected = {"content": "The answer", "completion_probabilities": [{"id": 760}, {"id": 42}]}
+        env = {"ZINC_PREFILL_CHUNK": "999", "fixture": "preserved"}
+        with patch.object(release_gpu, "process", fake_process):
+            result = release_gpu.bounded_prefill_parity(self.root, self.root / "model", 4096, 3,
+                                                      self.root, env, [("rendered prompt", expected)])
+        self.assertEqual(result, {"passed": True, "chunk_tokens": 16, "cases": 1, "tokens": 2})
+        self.assertEqual(environments, [{"ZINC_PREFILL_CHUNK": "16", "fixture": "preserved"}])
+        self.assertEqual(env["ZINC_PREFILL_CHUNK"], "999")
+        for flag, value in [("-d", "3"), ("-c", "4096"), ("-n", "2"), ("--prompt", "rendered prompt")]:
+            self.assertEqual(commands[0][commands[0].index(flag) + 1], value)
+
+    def test_bounded_prefill_gate_rejects_unexercised_and_incorrect_execution(self):
+        expected = {"content": "The answer", "completion_probabilities": [{"id": 760}, {"id": 42}]}
+        good = ("Gemma prefill scratch: 16 tokens per chunk for 19 prompt tokens\n"
+                "Generated tokens (2): { 760, 42 }\ninfo(zinc): Output text: The answer\n")
+        for text, status in [(good.replace("Gemma prefill scratch:", "unused:"), 0),
+                             (good.replace("760, 42", "760, 43"), 0),
+                             (good.replace("The answer", "The"), 0), (good, 1)]:
+            @contextlib.contextmanager
+            def fake_process(_command, log, _cwd, _env):
+                Path(log).write_text(text)
+                yield SimpleNamespace(wait=lambda **_kwargs: status)
+            with self.subTest(text=text, status=status), patch.object(release_gpu, "process", fake_process), self.assertRaises(ValueError):
+                release_gpu.bounded_prefill_parity(self.root, self.root / "model", 4096, 0,
+                                                  self.root, {}, [("rendered prompt", expected)])
+
     def test_reference_precision_is_fixed_after_worker_flags_and_cli_keeps_gpu_argmax(self):
         commands, environments = [], []
         @contextlib.contextmanager

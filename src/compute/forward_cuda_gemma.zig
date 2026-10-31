@@ -408,6 +408,8 @@ const Pipelines = struct {
 /// scratch (`hidden`/`q_buf`/… on ForwardGemma) — additive, never aliases it.
 const BatchScratch = struct {
     t_cap: u32,
+    positions: CudaBuffer, // absolute query positions for bounded prefill
+    slots: CudaBuffer, // zero: KV descriptors already select the request slot
     hidden: CudaBuffer, // [T, n_embd] residual stream
     norm: CudaBuffer, // [T, n_embd] pre-attn / pre-ffn norm output
     q: CudaBuffer, // [T, q_dim_max]
@@ -1184,7 +1186,8 @@ pub const ForwardGemma = struct {
         // keeps absolute RoPE positions and attends to the full preceding KV.
         if (!is_rocm or self.d.n_experts > 0 or self.d.is_muse)
             return self.prefillBatchedRange(tokens, 0, false, true);
-        const capacity = try bounded_prefill.fit(self, @intCast(tokens.len), ensureBatch);
+        const requested = bounded_prefill.limit(@intCast(tokens.len), host_io.getenv("ZINC_PREFILL_CHUNK"));
+        const capacity = try bounded_prefill.fit(self, requested, ensureBatch);
         const chunked = capacity < tokens.len;
         if (chunked) log.info("Gemma prefill scratch: {d} tokens per chunk for {d} prompt tokens", .{ capacity, tokens.len });
         var start: usize = 0;
@@ -1321,6 +1324,14 @@ pub const ForwardGemma = struct {
             self.prepareEmbeddingRow(tokens[t], row);
         }
         buffer.upload(ctx, &b.hidden, std.mem.sliceAsBytes(host));
+        if (chunked) {
+            const positions = try self.allocator.alloc(u32, T);
+            defer self.allocator.free(positions);
+            for (positions, 0..) |*position, row| position.* = base_position + @as(u32, @intCast(row));
+            buffer.upload(ctx, &b.positions, std.mem.sliceAsBytes(positions));
+            @memset(positions, 0);
+            buffer.upload(ctx, &b.slots, std.mem.sliceAsBytes(positions));
+        }
 
         var L: u32 = 0;
         while (L < d.n_layers) : (L += 1) {
@@ -1810,6 +1821,7 @@ pub const ForwardGemma = struct {
         const wpan = self.layer(L, "post_attention_norm.weight");
 
         var cmd = try command.beginCommand(ctx);
+        errdefer cmd.commitAndWait();
         const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
         const post_rms = RmsPush{ .N = d.n_embd, .eps = d.post_rms_eps };
         // Batched pre-attention norm: one block per token.
@@ -1873,25 +1885,25 @@ pub const ForwardGemma = struct {
             .window = window,
         };
         if (chunked) {
-            // Existing single-query attention gives each row its absolute causal
-            // limit and sliding window without allocating another score matrix.
-            // Q/K/V projection and FFN still use batched GEMMs.
-            for (0..T) |row| {
-                const position = base_position + @as(u32, @intCast(row));
-                var query = try buffer.aliasBuffer(&b.q, row * g.q_dim * f4, g.q_dim * f4);
-                defer buffer.freeBuffer(&query);
-                var output = try buffer.aliasBuffer(&b.attn_out, row * g.q_dim * f4, g.q_dim * f4);
-                defer buffer.freeBuffer(&output);
-                const one = GemmaAttnPush{
-                    .head_dim = g.head_dim,
-                    .n_heads = d.n_head,
-                    .n_kv_heads = g.n_kv_head,
-                    .seq_len = position + 1,
-                    .scale_bits = attn.scale_bits,
-                    .window = window,
-                };
-                cmd.dispatch(&self.pipes.gemma_attention, .{ d.n_head, 1, 1 }, .{ 256, 1, 1 }, &.{ &query, &self.kv_k[L], &self.kv_v[L], &output }, &one, @sizeOf(GemmaAttnPush), (position + 1) * f4);
-            }
+            // Treat query rows as a batch of positions in the same cache. This
+            // existing kernel keeps causal/SWA limits absolute and launches all
+            // queries together; one launch per row made 8K prefill time out.
+            const one_cache = GemmaAttnSlotPush{
+                .head_dim = g.head_dim,
+                .n_heads = d.n_head,
+                .n_kv_heads = g.n_kv_head,
+                .slot_ctx = self.max_ctx,
+                .scale_bits = attn.scale_bits,
+                .window = window,
+            };
+            const pipe = if (self.use_attn_v2 and g.head_dim <= 512)
+                &self.pipes.gemma_attention_batched_seq_v2
+            else
+                &self.pipes.gemma_attention_batched_seq;
+            const shared = (base_position + T) * f4;
+            if (shared + shim.cuda_pipeline_shared_mem(pipe.handle) > shim.cuda_max_shared_mem_per_block(ctx))
+                return error.AttentionContextTooLarge;
+            cmd.dispatch(pipe, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out, &b.positions, &b.slots }, &one_cache, @sizeOf(GemmaAttnSlotPush), shared);
         } else if (self.blasPrefillAttnOn(T, g)) {
             try self.blasPrefillAttention(&cmd, L, T, b, window);
         } else if (self.use_attn_v2) {
@@ -2833,6 +2845,8 @@ pub const ForwardGemma = struct {
         var batch = std.mem.zeroes(BatchScratch);
         errdefer freeBatchBuffers(&batch);
         batch.t_cap = T;
+        batch.positions = try buffer.createBuffer(ctx, @as(usize, T) * @sizeOf(u32));
+        batch.slots = try buffer.createBuffer(ctx, @as(usize, T) * @sizeOf(u32));
         batch.hidden = try buffer.createBuffer(ctx, T * d.n_embd * f4);
         batch.norm = try buffer.createBuffer(ctx, T * d.n_embd * f4);
         batch.q = try buffer.createBuffer(ctx, T * d.q_dim_max * f4);
@@ -2878,7 +2892,7 @@ pub const ForwardGemma = struct {
         // weight-staging branch. Reserving its unused 220.5 MiB prevents even
         // small batches from fitting beside Gemma 31B's 8K KV cache. Keep it for
         // CUDA and explicit BLAS thresholds below the MMQ boundary.
-        batch.w_f16 = try buffer.createBuffer(ctx, if (is_rocm and self.cublas_min_t >= 16) 1 else memory_plan.densePrefillWeightScratchBytes(d.n_embd, d.q_dim_max, ff));
+        batch.w_f16 = try buffer.createBuffer(ctx, if (is_rocm and d.n_experts == 0 and !d.is_muse and self.cublas_min_t >= 16) 1 else memory_plan.densePrefillWeightScratchBytes(d.n_embd, d.q_dim_max, ff));
         self.batch = batch;
         return &self.batch.?;
     }
