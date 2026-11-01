@@ -306,7 +306,7 @@ def aggregate(args):
         require(report.get("target") == spec["target"] and report.get("family") == spec["family"], "wrong GPU family or backend")
         require(report.get("archive_sha256") == artifact["sha256"] and report.get("binary_sha256") == artifact["binary_sha256"], "GPU tested different artifact bytes")
         checks = report.get("checks", {})
-        require(report.get("options") == {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True}, "untested or missing runtime option policy")
+        require(report.get("options") == {"parallel": 1, "kv_cache": "backend-default", "mtp": "backend-default", "greedy": True}, "untested or missing runtime option policy")
         require(required_checks.issubset(checks) and all(value is True for value in checks.values()), "GPU checks failed or were skipped")
         require(not spec["target"].endswith("vulkan") or checks.get("kernel_reference") is True, "missing packaged Vulkan numerical reference checks")
         profile = next(p for p in policy()["gpu_profiles"] if p["id"] == identifier)

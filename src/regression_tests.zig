@@ -24,6 +24,17 @@ fn expectMultiSubgroupFallback(shader_src: []const u8, reduce_name: []const u8) 
     try expectContains(shader_src, "barrier();");
 }
 
+test "Vulkan KV allocation and budgeting share actual Gemma projection widths" {
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "profileWithKvDimensions(plan_config, kv_dtype.bytesPer32Elems(), kv_layer_dimensions)");
+    try expectContains(src, "layerKvDimension(model, i)");
+    try expectContains(src, "kv_dtype.rowBytes(dim)");
+    try expectContains(src, "findLoadedTensor(model, v_name) orelse k");
+    try expectNotContains(src, "const kv_cache_per_layer =");
+    try expectContains(src, "kv_k_cache[i].deinit();");
+    try expectContains(src, "kv_v_cache[i].deinit();");
+}
+
 test "decode loop keeps deinterleave split for packed Q and gate" {
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.");

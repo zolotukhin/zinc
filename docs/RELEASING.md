@@ -114,8 +114,11 @@ Vulkan, and HIP/ROCm for ROCm. Set one explicit `--device` selector in
 `reference_args`: `Metal`, `Vulkan<N>`, or `ROCm<N>`. The gate rejects a different
 backend before probing the reference or starting model work, and aggregation
 requires the recorded `reference.device_backend` to match the target. Quantized
-backends can make different greedy choices even with identical GGUFs and F32 KV;
-a cross-backend disagreement is a separate diagnostic, not a reason to loosen
+backends can make different greedy choices even with identical GGUFs. The worker
+uses each backend's default KV format (Vulkan defaults to F16) and records
+`kv_cache: backend-default`; it does not force F32. Older diagnostic reports
+labelled this setting F32 even though they also used the backend defaults.
+A cross-backend disagreement is a separate diagnostic, not a reason to loosen
 the native reference agreement policy.
 
 Reports also inventory the reference's ggml/llama libraries. Their hashes and

@@ -1027,7 +1027,7 @@ class ReleaseTest(unittest.TestCase):
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": artifact["sha256"], "binary_sha256": artifact["binary_sha256"], "models": models,
                       "hardware": {"gpu": "CPU fixture, no GPU was executed", "os": "fixture", "driver": "fixture"},
-                      "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
+                      "options": {"parallel": 1, "kv_cache": "backend-default", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": policy()["reference"]["commit"], "generation": policy()["reference"]["generation"],
                                     "device_backend": target(profile["target"])["backend"],
                                     "library_sha256": {"libggml-base.so": "d" * 64},
@@ -1057,6 +1057,15 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(data["status"], "passed")
         self.assertEqual(len(data["profiles"]), 3)
         self.assertEqual(len(read_json(directory / "release-manifest.json")["artifacts"]), 2)
+
+    def test_report_cannot_mislabel_backend_default_kv_as_f32(self):
+        directory, reports = self.candidate()
+        path = reports / "vulkan-intel-xe2.json"
+        report = read_json(path)
+        report["options"]["kv_cache"] = "f32"
+        write_json(path, report)
+        with self.assertRaisesRegex(ValueError, "runtime option policy"):
+            self.aggregate(directory, reports)
 
     def test_preview_targets_and_hardware_cannot_replace_or_join_the_release_scope(self):
         directory, reports = self.candidate()
