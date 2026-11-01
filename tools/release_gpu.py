@@ -346,6 +346,11 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
         with request(port, "/v1/completions", {**body, "stream": True, "max_tokens": 256}) as response:
             require(response.readline(), "stream did not start")
         require(json_request(port, "/v1/completions", body).get("choices"), "server did not recover after stream cancellation")
+        # A healthy slot can still retain the wrong SSM reduction/state. Recheck
+        # complete frozen continuations, not just a nonempty recovery response.
+        after_cancel = work / "reference-after-cancellation"
+        after_cancel.mkdir(exist_ok=True)
+        reference_http_parity(port, body, reference_samples, after_cancel)
         prompt_file = work / "context.txt"
         low, high, near_prompt, count = 1, context * 2, "", 0
         while low <= high:
@@ -374,6 +379,11 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
         except urllib.error.HTTPError as error:
             require(error.code == 400, "oversized context did not return a client error")
         require(json_request(port, "/v1/completions", body).get("choices"), "server did not recover from invalid requests")
+        # Long prefill and rejected inputs must not change the short-prompt
+        # arithmetic on the reused slot (the MoE "fridge"/"box" regression).
+        after_context = work / "reference-after-context"
+        after_context.mkdir(exist_ok=True)
+        reference_http_parity(port, body, reference_samples, after_context)
 
 
 def active_model_id(available):

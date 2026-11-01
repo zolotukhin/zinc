@@ -1,6 +1,8 @@
-//! Host-only routing for accelerator CLI/debug prefill. Keep this policy shared
-//! so the diagnostic harness exercises the same arithmetic as the production CLI.
+//! Host-only routing for accelerator CLI, debug and slot prefill. Share the
+//! decisions so prompt batching and SSM reduction selection cannot drift apart.
 const std = @import("std");
+
+pub const batch_threshold: usize = 32;
 
 pub const Options = struct {
     rocm: bool,
@@ -17,7 +19,33 @@ pub fn useBatched(tokens: usize, options: Options) bool {
     // Use serial prefill at these lengths, like the HTTP scheduler's threshold.
     // MTP needs batched hidden rows for priming; keep that path and MoE's routed
     // prefill unchanged. Long prompts must stay batched to meet the 4K timeout.
-    return !options.rocm or !options.hybrid_dense or options.mtp_prepared or tokens >= 32;
+    return !options.rocm or !options.hybrid_dense or options.mtp_prepared or tokens >= batch_threshold;
+}
+
+pub const SlotOptions = struct {
+    rocm: bool,
+    moe: bool,
+    slots: u32,
+    kv_f32: bool,
+    b1_matvec: bool,
+};
+
+/// The MoE CLI batches short prompts with the warp SSM scan. Serial HTTP
+/// prefill instead chose "box" where the CLI/reference chose "fridge". Merely
+/// enabling slot batching still selects the block scan, so both the scheduler
+/// and slot scan must use this decision. Restrict it to the F32 single-slot B=1
+/// path; concurrent serving needs its existing batched-decode reduction.
+pub fn useCliMoeSlotPrefill(tokens: usize, options: SlotOptions) bool {
+    return options.rocm and options.moe and options.slots == 1 and
+        options.kv_f32 and options.b1_matvec and tokens > 1 and tokens < batch_threshold;
+}
+
+/// A long request can allocate Q8 scratch that remains cached for later ones.
+/// Its presence must not switch a fresh serial-prefilled request to different
+/// decode arithmetic. Batched prefill still enables the existing Q8 fast path.
+pub fn useSlotDecodeQ8(batched_prefill: bool, options: SlotOptions) bool {
+    return batched_prefill or !options.rocm or options.slots != 1 or
+        !options.kv_f32 or !options.b1_matvec;
 }
 
 test "short dense ROCm release prompts retain serial arithmetic" {
@@ -55,5 +83,56 @@ test "MoE, Gemma and CUDA keep their existing prefill routing" {
         try std.testing.expect(useBatched(2, options));
         try std.testing.expect(useBatched(31, options));
         try std.testing.expect(useBatched(32, options));
+    }
+}
+
+test "short MoE slot prefill preserves CLI arithmetic at the batching boundary" {
+    const options: SlotOptions = .{ .rocm = true, .moe = true, .slots = 1, .kv_f32 = true, .b1_matvec = true };
+    for ([_]usize{ 2, 18, 19, 22, 31 }) |tokens| {
+        try std.testing.expect(useCliMoeSlotPrefill(tokens, options));
+    }
+    for ([_]usize{ 0, 1, 32, 33, 4032, 4096 }) |tokens| {
+        try std.testing.expect(!useCliMoeSlotPrefill(tokens, options));
+    }
+}
+
+test "MoE slot exception leaves other backends, KV formats and concurrent decode alone" {
+    const options: SlotOptions = .{ .rocm = true, .moe = true, .slots = 1, .kv_f32 = true, .b1_matvec = true };
+    inline for (.{ "rocm", "moe", "kv_f32", "b1_matvec" }) |field| {
+        var disabled = options;
+        @field(disabled, field) = false;
+        try std.testing.expect(!useCliMoeSlotPrefill(19, disabled));
+    }
+    for ([_]u32{ 0, 2, 4 }) |slots| {
+        var concurrent = options;
+        concurrent.slots = slots;
+        try std.testing.expect(!useCliMoeSlotPrefill(19, concurrent));
+    }
+}
+
+test "short long short slot reuse does not enable Q8 solely through cached scratch" {
+    const options: SlotOptions = .{ .rocm = true, .moe = false, .slots = 1, .kv_f32 = true, .b1_matvec = true };
+    var scratch = false;
+    var batched_prefill = false;
+    try std.testing.expect(!(scratch and useSlotDecodeQ8(batched_prefill, options)));
+    scratch = true;
+    batched_prefill = true;
+    try std.testing.expect(scratch and useSlotDecodeQ8(batched_prefill, options));
+    // Reset the request's mode, keeping its allocation for the next long input.
+    batched_prefill = false;
+    try std.testing.expect(!(scratch and useSlotDecodeQ8(batched_prefill, options)));
+}
+
+test "request-scoped Q8 routing preserves CLI, CUDA, Q8 KV and concurrent serving" {
+    const options: SlotOptions = .{ .rocm = true, .moe = false, .slots = 1, .kv_f32 = true, .b1_matvec = true };
+    inline for (.{ "rocm", "kv_f32", "b1_matvec" }) |field| {
+        var unchanged = options;
+        @field(unchanged, field) = false;
+        try std.testing.expect(useSlotDecodeQ8(false, unchanged));
+    }
+    for ([_]u32{ 0, 2, 4 }) |slots| {
+        var unchanged = options;
+        unchanged.slots = slots;
+        try std.testing.expect(useSlotDecodeQ8(false, unchanged));
     }
 }

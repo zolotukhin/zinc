@@ -105,6 +105,11 @@ for priming. The debug harness shares this routing policy. See the
 [short-prompt agreement checks](ROCM_QWEN27_PREFILL.md) for the regression tests
 and packaged evidence.
 
+Single-slot F32 serving also aligns short MoE prefill with CLI. Cached scratch
+from an earlier request cannot enable packed decode on a later serial-prefilled
+request. See the [single-slot consistency checks](ROCM_SINGLE_SLOT_CORRECTNESS.md)
+for the controls, recovery regressions and complete ROCm model sweep.
+
 The ROCm-tuned prefill and decode fusions are default-on. These switches remain
 available as correctness/performance A/B opt-outs:
 

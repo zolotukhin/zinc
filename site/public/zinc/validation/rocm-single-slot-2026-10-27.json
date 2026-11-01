@@ -1,0 +1,1873 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-27",
+  "exported_utc": "2026-10-27T20:22:07.602276+00:00",
+  "scope": "Single-slot F32 ROCm developer checks on one R9700; all required ROCm models with explicit per-row reference backend. Not final candidate/full hardware-matrix qualification.",
+  "fix_commit": "8f957952fbada4bd51a3f34f1f9101163ea8cc19",
+  "developer_model_matrix_passed": true,
+  "release_qualified": false,
+  "method": [
+    "The merged #36 baseline and numerical controls preserve their executable/archive identities and failures.",
+    "One predicate selects short MoE slot batching and the CLI-compatible warp scan. Request-local decode permission prevents cached scratch from changing later serial-prefilled requests. Numerical GPU kernel source and the release policy are unchanged.",
+    "Seven CPU policy tests cover prompt boundaries, mode transitions, MTP, opt-outs and unchanged backend/KV/concurrency cases. Both old policies fail their corresponding new tests.",
+    "Live reference generation uses the policy-pinned commit, batch 512, micro-batch 1, one slot, F32 KV and flash attention disabled. Qwen uses the worker canonical HIP build; Gemma uses the same pinned Vulkan build as earlier controls. Each backend and executable hash is recorded per model.",
+    "Each packaged model row checks its exact GGUF hash, 12 tokenizer corpus cases, all 48 CLI choices and three full HTTP reference cases in each of three phases: initial, after cancellation and after long-context/error recovery.",
+    "The initial MoE-fix package passed the MoE row but failed the new post-context checks for dense 27B and 9B. That unsuccessful sweep remains separate.",
+    "Actual OpenCode 1.19.4 runs directly against each identified package at 16K, with bounded tools, a fresh server per fixture and independent frozen tests. No synthetic responses, supervisor edits or tool repairs.",
+    "All GPU/model work is remote. Owned process groups and clients are stopped before their command returns."
+  ],
+  "host_policy_tests": {
+    "count": 7,
+    "passed": true,
+    "source": "src/compute/prefill_policy.zig",
+    "sha256": "6a6215189e25df30a42c1f2ae4fd2d5f9dee0e14544afa261a35618b6226ca93",
+    "negative_controls": [
+      "Old short-slot routing fails the MoE batching-boundary regression.",
+      "Old scratch-only eligibility fails the short–long–short reuse regression."
+    ],
+    "checks": [
+      "./scripts/zig.sh build test",
+      "./scripts/zig.sh build check-cuda -Dtarget=x86_64-linux-gnu -Dshaders=false -Doptimize=ReleaseFast",
+      "python3 tools/release_test.py (44 tests)"
+    ]
+  },
+  "moe_numerical_controls": {
+    "scope": "Merged #36 package baseline and short-MoE prefill development ablations, not release certification",
+    "baseline_source_commit": "4bc8a5aa3bca278d51a041447e99699dd11fce86",
+    "baseline_archive_sha256": "0b74e95b479e5786a559725de426f120f6863558eb5726fc6a8f980e15634beb",
+    "baseline_binary_sha256": "73f7d1e1b0774d561fbf19a247361a743c9f9fbf2a037b1af2c308dcb44f28b4",
+    "development_binary_sha256": "987044c366b7515c3aa46bc036564ccea85bdfa1e3f147fa5697c50a7f330efe",
+    "base_commit": "f8d790580119096b757fe65473199f8277aed53c",
+    "model": "qwen36-35b-a3b-q4k-xl",
+    "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+    "source_files_sha256": {
+      "src/compute/prefill_policy.zig": "2c8a47bc567a28dc32f15fac4535da713fbb3808c5de2761328fc0deabc0974f",
+      "src/compute/forward_cuda.zig": "42ed04bdc26c3b3c488c97bbe0ca13151ba1ed5ff2b1920db5081cc868181517",
+      "src/server/cuda_serve.zig": "6e394b77c9fd872914f45d8d932b5b7627b3b53ca9f2848b9d51a59ee2db9da1",
+      "tools/release_gpu.py": "360c0e2d996ce38b97b3055705ce9846e7442ee815eea59f986eb64d9203b103"
+    },
+    "variants": [
+      {
+        "label": "baseline",
+        "environment": {},
+        "cases": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "expected_content": "The salt did not just sit on the skin; it worked its way into the",
+            "actual_content": "The salt did not just sit on the skin; it worked its way into the",
+            "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3"
+          },
+          {
+            "case": 1,
+            "matches_reference": false,
+            "expected_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+            "actual_content": "A refrigerator works by moving heat from the inside of the box to the outside environment",
+            "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "expected_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a"
+          }
+        ],
+        "passed": false
+      },
+      {
+        "label": "candidate",
+        "environment": {},
+        "cases": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "expected_content": "The salt did not just sit on the skin; it worked its way into the",
+            "actual_content": "The salt did not just sit on the skin; it worked its way into the",
+            "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "expected_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+            "actual_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+            "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "expected_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a"
+          }
+        ],
+        "passed": true
+      },
+      {
+        "label": "candidate-block-scan",
+        "environment": {
+          "ZINC_SSM_WARP": "0"
+        },
+        "cases": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "expected_content": "The salt did not just sit on the skin; it worked its way into the",
+            "actual_content": "The salt did not just sit on the skin; it worked its way into the",
+            "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3"
+          },
+          {
+            "case": 1,
+            "matches_reference": false,
+            "expected_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+            "actual_content": "A refrigerator works by moving heat from the inside of the box to the outside environment",
+            "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "expected_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a"
+          }
+        ],
+        "passed": false
+      },
+      {
+        "label": "candidate-serial-prefill",
+        "environment": {
+          "ZINC_BATCHED_PREFILL": "0"
+        },
+        "cases": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "expected_content": "The salt did not just sit on the skin; it worked its way into the",
+            "actual_content": "The salt did not just sit on the skin; it worked its way into the",
+            "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3"
+          },
+          {
+            "case": 1,
+            "matches_reference": false,
+            "expected_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+            "actual_content": "A refrigerator works by moving heat from the inside of the box to the outside environment",
+            "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "expected_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+            "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a"
+          }
+        ],
+        "passed": false
+      }
+    ],
+    "cleanup": true
+  },
+  "scratch_reuse_controls": {
+    "tested_package_archive_sha256": "769ab35c8de63fab58568392edaea272e30d31d8682b2208e9e2e407fb02d8f9",
+    "tested_binary_sha256": "628897f7118977d635489a240c57c696166ccfc9b301715a4f0b9ca3aebbea4f",
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "scope": "Short/64-token/short server reuse diagnostic on the first MoE fix package",
+    "warmup_prompt": "64 repetitions of copper",
+    "cases": [
+      {
+        "model": "qwen36-27b-q4k-m",
+        "variant": "default",
+        "environment": {},
+        "before": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not merely blow; it hunted. It sc"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring"
+          }
+        ],
+        "after": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not merely blow; it hunted. It sc"
+          },
+          {
+            "case": 1,
+            "matches_reference": false,
+            "actual_content": "A refrigerator works by moving heat from the inside of the fridge to the outside,"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring"
+          }
+        ]
+      },
+      {
+        "model": "qwen36-27b-q4k-m",
+        "variant": "decode-q8-off",
+        "environment": {
+          "ZINC_ROCM_DECODE_Q8_FFN": "0",
+          "ZINC_ROCM_DECODE_Q8_Q6": "0",
+          "ZINC_ROCM_DECODE_Q8_LM": "0",
+          "ZINC_ROCM_DECODE_Q8_Q4": "0",
+          "ZINC_ROCM_DECODE_Q8_Q6_PROJ": "0",
+          "ZINC_ROCM_DECODE_Q8_Q5": "0",
+          "ZINC_ROCM_DECODE_Q8_Q4_PAIR": "0"
+        },
+        "before": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not merely blow; it hunted. It sc"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring"
+          }
+        ],
+        "after": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not merely blow; it hunted. It sc"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring"
+          }
+        ]
+      },
+      {
+        "model": "qwen35-9b-q4k-m",
+        "variant": "default",
+        "environment": {},
+        "before": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not blow; it hunted. It was a"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by transferring heat from the inside of the appliance (where you want"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Copper is a versatile metal valued for its excellent electrical conductivity, thermal conductivity,"
+          }
+        ],
+        "after": [
+          {
+            "case": 0,
+            "matches_reference": false,
+            "actual_content": "The wind on Blackwood Rock did not blow; it hunted. It was a"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by transferring heat from the inside of the appliance (where you want"
+          },
+          {
+            "case": 2,
+            "matches_reference": false,
+            "actual_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring"
+          }
+        ]
+      },
+      {
+        "model": "qwen35-9b-q4k-m",
+        "variant": "decode-q8-off",
+        "environment": {
+          "ZINC_ROCM_DECODE_Q8_FFN": "0",
+          "ZINC_ROCM_DECODE_Q8_Q6": "0",
+          "ZINC_ROCM_DECODE_Q8_LM": "0",
+          "ZINC_ROCM_DECODE_Q8_Q4": "0",
+          "ZINC_ROCM_DECODE_Q8_Q6_PROJ": "0",
+          "ZINC_ROCM_DECODE_Q8_Q5": "0",
+          "ZINC_ROCM_DECODE_Q8_Q4_PAIR": "0"
+        },
+        "before": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not blow; it hunted. It was a"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by transferring heat from the inside of the appliance (where you want"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Copper is a versatile metal valued for its excellent electrical conductivity, thermal conductivity,"
+          }
+        ],
+        "after": [
+          {
+            "case": 0,
+            "matches_reference": true,
+            "actual_content": "The wind on Blackwood Point did not blow; it hunted. It was a"
+          },
+          {
+            "case": 1,
+            "matches_reference": true,
+            "actual_content": "A refrigerator works by transferring heat from the inside of the appliance (where you want"
+          },
+          {
+            "case": 2,
+            "matches_reference": true,
+            "actual_content": "Copper is a versatile metal valued for its excellent electrical conductivity, thermal conductivity,"
+          }
+        ]
+      }
+    ],
+    "cleanup": true
+  },
+  "first_package_sweep": {
+    "schema_version": 1,
+    "scope": "Packaged ROCm developer checks on one R9700, all required ROCm models with per-row pinned reference backend; not signed/final candidate qualification",
+    "tested_at_utc": "2026-10-27T19:41:33.580160+00:00",
+    "head_commit": "a4d33e27da59d6bbf801f4b0f501d92db83de461",
+    "source_commit": "12805cd8452df6b5d160c728e5b3c0ad74a1bb7f",
+    "archive": "zinc-v0.1.0-dev.40570238913-linux-x86_64-rocm.tar.gz",
+    "archive_sha256": "769ab35c8de63fab58568392edaea272e30d31d8682b2208e9e2e407fb02d8f9",
+    "binary_sha256": "628897f7118977d635489a240c57c696166ccfc9b301715a4f0b9ca3aebbea4f",
+    "packaging_run": 40570238913,
+    "hardware": {
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic",
+      "driver": "ROCm 7.2.4"
+    },
+    "options": {
+      "parallel": 1,
+      "context": 4096,
+      "kv_cache": "f32",
+      "mtp": "backend-default",
+      "greedy": true,
+      "runtime_overrides": {}
+    },
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_generation": {
+      "batch_size": 512,
+      "micro_batch": 1,
+      "parallel": 1,
+      "kv_cache": "f32",
+      "flash_attention": false
+    },
+    "reference_agreement_policy": {
+      "cases": 3,
+      "tokens_per_case": 16,
+      "min_exact_fraction": 0.975,
+      "max_logprob_gap": 0.05,
+      "max_near_ties_per_case": 1
+    },
+    "oracles": {
+      "qwen": {
+        "backend": "hip",
+        "binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc"
+      },
+      "gemma": {
+        "backend": "vulkan",
+        "binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47"
+      },
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+    },
+    "source_files_sha256": {
+      "src/compute/prefill_policy.zig": "2c8a47bc567a28dc32f15fac4535da713fbb3808c5de2761328fc0deabc0974f",
+      "src/compute/forward_cuda.zig": "42ed04bdc26c3b3c488c97bbe0ca13151ba1ed5ff2b1920db5081cc868181517",
+      "src/server/cuda_serve.zig": "6e394b77c9fd872914f45d8d932b5b7627b3b53ca9f2848b9d51a59ee2db9da1",
+      "tools/release_gpu.py": "360c0e2d996ce38b97b3055705ce9846e7442ee815eea59f986eb64d9203b103"
+    },
+    "kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "models": [
+      {
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 8.123
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 7.816
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 1857.2 ms (2171.03 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen38-27b-q4k-m",
+        "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 11.517
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 26.811
+          },
+          {
+            "name": "mtp-default-observed-active",
+            "passed": true
+          },
+          {
+            "name": "mtp-disabled-exact-reference",
+            "passed": true,
+            "tokens": 48
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 9325.8 ms (432.35 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen36-27b-q4k-m",
+        "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 12.07
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "passed": false,
+        "failure": "full HTTP reference continuation differed"
+      },
+      {
+        "id": "qwen35-9b-q4k-m",
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 5.271
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "passed": false,
+        "failure": "full HTTP reference continuation differed"
+      },
+      {
+        "id": "gemma4-31b-q4k-m",
+        "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "context": 4096,
+        "reference_backend": "vulkan",
+        "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 56.4
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 28.096
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 4898.8 ms (823.07 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "gemma4-26b-a4b-q4k-m",
+        "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "context": 4096,
+        "reference_backend": "vulkan",
+        "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 20.001
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 10.507
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 1505.1 ms (2678.92 tok/s)"
+        ],
+        "passed": true
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": false
+  },
+  "first_opencode_run": {
+    "scope": "Actual OpenCode core regression on one packaged ROCm executable; separate 16K developer scope, not release certification",
+    "archive_sha256": "769ab35c8de63fab58568392edaea272e30d31d8682b2208e9e2e407fb02d8f9",
+    "binary_sha256": "628897f7118977d635489a240c57c696166ccfc9b301715a4f0b9ca3aebbea4f",
+    "source_commit": "12805cd8452df6b5d160c728e5b3c0ad74a1bb7f",
+    "head_commit": "a4d33e27da59d6bbf801f4b0f501d92db83de461",
+    "model": "qwen36-35b-a3b-q4k-xl",
+    "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+    "context": 16384,
+    "parallel": 1,
+    "options": {
+      "max_tokens": 4096,
+      "steps": 16,
+      "timeout_ms": 300000,
+      "temperature": 0,
+      "top_p": 1,
+      "thinking": false,
+      "fresh_server_per_fixture": true
+    },
+    "opencode_version": "1.19.4",
+    "opencode_sha256": "538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7",
+    "harness_sha256": {
+      "tools/opencode_eval.mjs": "cc6b515145a5f20a19edf348a1cca557840139f142c90c8c92f9e50eb52fb89e",
+      "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+      "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "tools/validate_opencode_api.mjs": "e04f885ded44e5c30efbd54db147286d99d7df7982bf7c68d1204ba7f067c46e"
+    },
+    "fixtures": [
+      {
+        "id": "rate-limiter-single",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 3
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 8,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 60.088
+      },
+      {
+        "id": "cart-multi-file",
+        "passed": true,
+        "baseline": {
+          "pass": 1,
+          "fail": 2
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 6,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 28.805
+      },
+      {
+        "id": "python-log-cli",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 4
+        },
+        "final": {
+          "pass": 4,
+          "fail": 0
+        },
+        "tool_calls": 4,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 31.906
+      }
+    ],
+    "api": {
+      "model": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+      "context": 16384,
+      "passed": 24,
+      "total": 24,
+      "checks": [
+        {
+          "name": "JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 452
+        },
+        {
+          "name": "JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 95
+        },
+        {
+          "name": "JSON/SSE parity at 7 output tokens",
+          "pass": true,
+          "ms": 116
+        },
+        {
+          "name": "Unicode JSON/SSE parity",
+          "pass": true,
+          "ms": 226
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 165
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 97
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 3 output tokens",
+          "pass": true,
+          "ms": 117
+        },
+        {
+          "name": "JSON tool arguments and unique ID",
+          "pass": true,
+          "ms": 421
+        },
+        {
+          "name": "SSE tool arguments and unique ID",
+          "pass": true,
+          "ms": 409
+        },
+        {
+          "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 895
+        },
+        {
+          "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 891
+        },
+        {
+          "name": "Truncated tool calls remain text without an executable call",
+          "pass": true,
+          "ms": 196
+        },
+        {
+          "name": "Null assistant content and tool-result history",
+          "pass": true,
+          "ms": 131
+        },
+        {
+          "name": "tool_choice none",
+          "pass": true,
+          "ms": 64
+        },
+        {
+          "name": "Text content arrays",
+          "pass": true,
+          "ms": 57
+        },
+        {
+          "name": "Malformed JSON returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Invalid message content returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Empty messages returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Negative token budget returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Context overflow returns HTTP 400",
+          "pass": true,
+          "ms": 5
+        },
+        {
+          "name": "Queued requests keep conversations separate",
+          "pass": true,
+          "ms": 163
+        },
+        {
+          "name": "Streaming cancellation releases the slot",
+          "pass": true,
+          "ms": 123
+        },
+        {
+          "name": "Long prompt above the former 8192-token SSM limit",
+          "pass": true,
+          "ms": 10711
+        },
+        {
+          "name": "Buffered tool-call cancellation releases the slot",
+          "pass": true,
+          "ms": 1073
+        }
+      ],
+      "complete": true
+    },
+    "remaining_processes": {
+      "zinc": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": true
+  },
+  "final_package_sweep": {
+    "schema_version": 1,
+    "scope": "Packaged ROCm developer checks on one R9700, all required ROCm models with per-row pinned reference backend; not signed/final candidate qualification",
+    "tested_at_utc": "2026-10-27T20:09:36.180556+00:00",
+    "head_commit": "8f957952fbada4bd51a3f34f1f9101163ea8cc19",
+    "source_commit": "3fa5014b8d9754a39e71d3f8fdcd9bc371705e55",
+    "archive": "zinc-v0.1.0-dev.40574592584-linux-x86_64-rocm.tar.gz",
+    "archive_sha256": "e4761aafb038855108d87017e6701f991311f15f7a2ca0b1af395e81d1b24aa2",
+    "binary_sha256": "c1c822916697b7833a2430cf03c9aad466ec05da435e6ebeb333ad64659524ba",
+    "packaging_run": 40574592584,
+    "hardware": {
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic",
+      "driver": "ROCm 7.2.4"
+    },
+    "options": {
+      "parallel": 1,
+      "context": 4096,
+      "kv_cache": "f32",
+      "mtp": "backend-default",
+      "greedy": true,
+      "runtime_overrides": {}
+    },
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_generation": {
+      "batch_size": 512,
+      "micro_batch": 1,
+      "parallel": 1,
+      "kv_cache": "f32",
+      "flash_attention": false
+    },
+    "reference_agreement_policy": {
+      "cases": 3,
+      "tokens_per_case": 16,
+      "min_exact_fraction": 0.975,
+      "max_logprob_gap": 0.05,
+      "max_near_ties_per_case": 1
+    },
+    "oracles": {
+      "qwen": {
+        "backend": "hip",
+        "binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc"
+      },
+      "gemma": {
+        "backend": "vulkan",
+        "binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47"
+      },
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+    },
+    "source_files_sha256": {
+      "src/compute/prefill_policy.zig": "6a6215189e25df30a42c1f2ae4fd2d5f9dee0e14544afa261a35618b6226ca93",
+      "src/compute/forward_cuda.zig": "dce8ea7eb24d8578dd348b7d9f8826ded7fa5c4c41477f94e94a52815a1b1d00",
+      "src/server/cuda_serve.zig": "6e394b77c9fd872914f45d8d932b5b7627b3b53ca9f2848b9d51a59ee2db9da1",
+      "tools/release_gpu.py": "360c0e2d996ce38b97b3055705ce9846e7442ee815eea59f986eb64d9203b103"
+    },
+    "kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "models": [
+      {
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 8.752
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 7.992
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 1862.3 ms (2165.03 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen38-27b-q4k-m",
+        "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 12.048
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 26.493
+          },
+          {
+            "name": "mtp-default-observed-active",
+            "passed": true
+          },
+          {
+            "name": "mtp-disabled-exact-reference",
+            "passed": true,
+            "tokens": 48
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 9341.9 ms (431.61 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen36-27b-q4k-m",
+        "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 13.184
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 29.605
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 6402.7 ms (629.73 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen35-9b-q4k-m",
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 6.697
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 11.629
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 2361.3 ms (1707.56 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "gemma4-31b-q4k-m",
+        "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "context": 4096,
+        "reference_backend": "vulkan",
+        "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 57.81
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 28.288
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 4883.8 ms (825.59 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "gemma4-26b-a4b-q4k-m",
+        "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "context": 4096,
+        "reference_backend": "vulkan",
+        "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 20.51
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 10.269
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 1411.5 ms (2856.59 tok/s)"
+        ],
+        "passed": true
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": true
+  },
+  "final_opencode_run": {
+    "scope": "Actual OpenCode core regression on one packaged ROCm executable; separate 16K developer scope, not release certification",
+    "archive_sha256": "e4761aafb038855108d87017e6701f991311f15f7a2ca0b1af395e81d1b24aa2",
+    "binary_sha256": "c1c822916697b7833a2430cf03c9aad466ec05da435e6ebeb333ad64659524ba",
+    "source_commit": "3fa5014b8d9754a39e71d3f8fdcd9bc371705e55",
+    "head_commit": "8f957952fbada4bd51a3f34f1f9101163ea8cc19",
+    "model": "qwen36-35b-a3b-q4k-xl",
+    "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+    "context": 16384,
+    "parallel": 1,
+    "options": {
+      "max_tokens": 4096,
+      "steps": 16,
+      "timeout_ms": 300000,
+      "temperature": 0,
+      "top_p": 1,
+      "thinking": false,
+      "fresh_server_per_fixture": true
+    },
+    "opencode_version": "1.19.4",
+    "opencode_sha256": "538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7",
+    "harness_sha256": {
+      "tools/opencode_eval.mjs": "cc6b515145a5f20a19edf348a1cca557840139f142c90c8c92f9e50eb52fb89e",
+      "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+      "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "tools/validate_opencode_api.mjs": "e04f885ded44e5c30efbd54db147286d99d7df7982bf7c68d1204ba7f067c46e"
+    },
+    "fixtures": [
+      {
+        "id": "rate-limiter-single",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 3
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 8,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 59.387
+      },
+      {
+        "id": "cart-multi-file",
+        "passed": true,
+        "baseline": {
+          "pass": 1,
+          "fail": 2
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 7,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 31.654
+      },
+      {
+        "id": "python-log-cli",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 4
+        },
+        "final": {
+          "pass": 4,
+          "fail": 0
+        },
+        "tool_calls": 4,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 34.357
+      }
+    ],
+    "api": {
+      "model": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+      "context": 16384,
+      "passed": 24,
+      "total": 24,
+      "checks": [
+        {
+          "name": "JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 407
+        },
+        {
+          "name": "JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 95
+        },
+        {
+          "name": "JSON/SSE parity at 7 output tokens",
+          "pass": true,
+          "ms": 115
+        },
+        {
+          "name": "Unicode JSON/SSE parity",
+          "pass": true,
+          "ms": 226
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 78
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 98
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 3 output tokens",
+          "pass": true,
+          "ms": 117
+        },
+        {
+          "name": "JSON tool arguments and unique ID",
+          "pass": true,
+          "ms": 413
+        },
+        {
+          "name": "SSE tool arguments and unique ID",
+          "pass": true,
+          "ms": 409
+        },
+        {
+          "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 894
+        },
+        {
+          "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 889
+        },
+        {
+          "name": "Truncated tool calls remain text without an executable call",
+          "pass": true,
+          "ms": 195
+        },
+        {
+          "name": "Null assistant content and tool-result history",
+          "pass": true,
+          "ms": 131
+        },
+        {
+          "name": "tool_choice none",
+          "pass": true,
+          "ms": 64
+        },
+        {
+          "name": "Text content arrays",
+          "pass": true,
+          "ms": 57
+        },
+        {
+          "name": "Malformed JSON returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Invalid message content returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Empty messages returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Negative token budget returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Context overflow returns HTTP 400",
+          "pass": true,
+          "ms": 5
+        },
+        {
+          "name": "Queued requests keep conversations separate",
+          "pass": true,
+          "ms": 161
+        },
+        {
+          "name": "Streaming cancellation releases the slot",
+          "pass": true,
+          "ms": 122
+        },
+        {
+          "name": "Long prompt above the former 8192-token SSM limit",
+          "pass": true,
+          "ms": 10718
+        },
+        {
+          "name": "Buffered tool-call cancellation releases the slot",
+          "pass": true,
+          "ms": 1073
+        }
+      ],
+      "complete": true
+    },
+    "remaining_processes": {
+      "zinc": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": true
+  },
+  "final_cleanup": {
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true
+  },
+  "remaining_limits": [
+    "Unsigned previews and one-board developer checks do not qualify final release bytes or the other required Metal/Vulkan hardware profiles.",
+    "The model matrix uses explicitly identified HIP and Vulkan reference builds at the same policy commit; worker provisioning/final candidate qualification remain separate.",
+    "The new routing is scoped to default F32 single-slot B1 serving. Other KV/concurrency configurations retain their existing behavior and gain no new qualification claim.",
+    "The 16K MoE OpenCode trial is separate from required 4K model rows and from Gemma 31B OpenCode memory limits. Three core fixtures do not establish complete large-repository delivery.",
+    "No model catalog promotion, NVIDIA hardware validation or local workstation GPU/model inference was performed."
+  ]
+}
