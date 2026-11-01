@@ -1,0 +1,808 @@
+{
+  "schema_version": "zinc-release-worker-validation-v1",
+  "release_qualification": false,
+  "source_commit": "dbbfff543522ee4b9d36a51447d78e84d3f4bc2d",
+  "preview_run": 41267986685,
+  "preview_version": "0.1.0-dev.41267986685",
+  "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+  "ci": {
+    "tests": 41267986728,
+    "packaging": 41267986685,
+    "site": 41267986726,
+    "security": 41267986706,
+    "all_passed": true
+  },
+  "rdna4": {
+    "rocm": {
+      "workflow_run": 41268656993,
+      "report": {
+        "archive_sha256": "08ce143a331c19ec4c2139827ac796384c888342eee8b6b6e4daeb4bfb222d2f",
+        "cleanup": "no GPU process remains",
+        "hardware": {
+          "driver": "ROCm 7.2.4",
+          "gpu": "AMD Radeon Graphics",
+          "os": "Linux 7.2.2-070202-generic"
+        },
+        "models": [
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen38-27b-q4k-m",
+            "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [
+                    {
+                      "chosen_id": 36337,
+                      "logprob_gap": 0.032131314277648926,
+                      "position": 11,
+                      "rank": 2,
+                      "reference_id": 3618
+                    }
+                  ],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 47,
+              "near_tie_tokens": 1,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen36-35b-a3b-q4k-xl",
+            "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen36-27b-q4k-m",
+            "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen35-9b-q4k-m",
+            "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "bounded_prefill": {
+              "cases": 3,
+              "chunk_tokens": 16,
+              "passed": true,
+              "tokens": 48
+            },
+            "context": 4096,
+            "id": "gemma4-31b-q4k-m",
+            "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "gemma4-26b-a4b-q4k-m",
+            "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c"
+          }
+        ],
+        "models_exercised": true,
+        "passed": true,
+        "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+        "preview_version": "0.1.0-dev.41267986685",
+        "profile": "rocm-rdna4",
+        "reference": {
+          "backend": "rocm",
+          "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+          "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+          "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+        },
+        "release_qualification": false,
+        "schema_version": "zinc-worker-readiness-v1",
+        "source_commit": "dbbfff543522ee4b9d36a51447d78e84d3f4bc2d"
+      }
+    },
+    "vulkan": {
+      "workflow_run": 41269120680,
+      "report": {
+        "archive_sha256": "8129e362e0a9b37b46a1a2dde98745970037b22fdc51e0e6deb6aeef06d00d12",
+        "cleanup": "no GPU process remains",
+        "hardware": {
+          "driver": "1.4.305 / radv / Mesa 25.0.7-0ubuntu0.24.04.2",
+          "gpu": "AMD Radeon Graphics (RADV GFX1201)",
+          "os": "Linux 7.2.2-070202-generic"
+        },
+        "models": [
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 2048,
+            "id": "qwen3-0.6b-q8-0",
+            "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen36-35b-a3b-q4k-xl",
+            "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen36-27b-q4k-m",
+            "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "qwen35-9b-q4k-m",
+            "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "gemma4-31b-q4k-m",
+            "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84"
+          },
+          {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "api_passed": true,
+            "context": 4096,
+            "id": "gemma4-26b-a4b-q4k-m",
+            "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c"
+          }
+        ],
+        "models_exercised": true,
+        "passed": true,
+        "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+        "preview_version": "0.1.0-dev.41267986685",
+        "profile": "vulkan-rdna4",
+        "reference": {
+          "backend": "vulkan",
+          "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+          "server_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+          "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+        },
+        "release_qualification": false,
+        "schema_version": "zinc-worker-readiness-v1",
+        "source_commit": "dbbfff543522ee4b9d36a51447d78e84d3f4bc2d"
+      }
+    }
+  },
+  "intel": {
+    "archive_sha256": "8129e362e0a9b37b46a1a2dde98745970037b22fdc51e0e6deb6aeef06d00d12",
+    "cleanup": "no GPU process remains",
+    "complete_required_matrix": false,
+    "hardware": {
+      "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+      "gpu": "Intel(R) Graphics (BMG G31)",
+      "os": "Linux 7.2.7-arch1-1"
+    },
+    "kernel_reference": {
+      "cases": 84,
+      "passed": true
+    },
+    "missing_models": [
+      "gemma4-31b-q4k-m",
+      "gemma4-26b-a4b-q4k-m"
+    ],
+    "models": [
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 2048,
+        "id": "qwen3-0.6b-q8-0",
+        "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        "tokenizer_passed": true
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [
+                {
+                  "chosen_id": 3618,
+                  "logprob_gap": 0.015493392944335938,
+                  "position": 11,
+                  "rank": 2,
+                  "reference_id": 36337
+                }
+              ],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 47,
+          "near_tie_tokens": 1,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "tokenizer_passed": true
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen36-27b-q4k-m",
+        "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "tokenizer_passed": true
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen35-9b-q4k-m",
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "tokenizer_passed": true
+      }
+    ],
+    "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+    "preview_version": "0.1.0-dev.41267986685",
+    "profile": "vulkan-intel-xe2",
+    "reference": {
+      "backend": "vulkan",
+      "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+      "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+    },
+    "release_qualification": false,
+    "required_models": [
+      "qwen3-0.6b-q8-0",
+      "qwen36-35b-a3b-q4k-xl",
+      "qwen36-27b-q4k-m",
+      "qwen35-9b-q4k-m",
+      "gemma4-31b-q4k-m",
+      "gemma4-26b-a4b-q4k-m"
+    ],
+    "schema_version": "zinc-intel-preview-diagnostic-v1",
+    "selected_models": [
+      "qwen3-0.6b-q8-0",
+      "qwen36-35b-a3b-q4k-xl",
+      "qwen36-27b-q4k-m",
+      "qwen35-9b-q4k-m"
+    ],
+    "source_commit": "dbbfff543522ee4b9d36a51447d78e84d3f4bc2d",
+    "subset_passed": true
+  },
+  "eog_boundary": {
+    "schema_version": "zinc-eog-boundary-diagnostic-v1",
+    "release_qualification": false,
+    "source_commit": "dbbfff543522ee4b9d36a51447d78e84d3f4bc2d",
+    "preview_version": "0.1.0-dev.41267986685",
+    "archive_sha256": "08ce143a331c19ec4c2139827ac796384c888342eee8b6b6e4daeb4bfb222d2f",
+    "model_id": "qwen36-27b-q4k-m",
+    "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_backend": "rocm",
+    "cases": [
+      {
+        "interface": "raw",
+        "budget": 7,
+        "finish_reason": "length",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-json",
+        "budget": 7,
+        "finish_reason": "length",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-sse",
+        "budget": 7,
+        "finish_reason": "length",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "raw",
+        "budget": 8,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-json",
+        "budget": 8,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-sse",
+        "budget": 8,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "raw",
+        "budget": 9,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-json",
+        "budget": 9,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-sse",
+        "budget": 9,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "raw",
+        "budget": 32,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-json",
+        "budget": 32,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      },
+      {
+        "interface": "chat-sse",
+        "budget": 32,
+        "finish_reason": "stop",
+        "text_matches_reference": true
+      }
+    ],
+    "passed": true,
+    "eos_budget": 8,
+    "reference_text": "café 東京 🚀",
+    "cleanup": "no GPU process remains"
+  },
+  "scope": [
+    "Unsigned exact-preview-byte readiness; this is not signed-candidate qualification.",
+    "Both RDNA4 model matrices passed with active chat cancellation, context boundaries and full recovery replays.",
+    "Intel exercised four of six required pins; Gemma downloads and isolated runner provisioning remain pending.",
+    "This harness records clean reference source, executable versions and tool hashes, without a per-library snapshot.",
+    "All nine packaged hardware profiles and Apple signing remain required for the first stable release."
+  ],
+  "runtime_cache": {
+    "probe": {
+      "schema_version": "zinc-worker-runtime-probe-v1",
+      "release_qualification": false,
+      "source_commit": "dbbfff543522ee4b9d36a51447d78e84d3f4bc2d",
+      "preview_version": "0.1.0-dev.41267986685",
+      "inherited_library_overrides_removed": true,
+      "nonroot": true,
+      "profiles": [
+        {
+          "profile": "vulkan-rdna4",
+          "archive_sha256": "8129e362e0a9b37b46a1a2dde98745970037b22fdc51e0e6deb6aeef06d00d12",
+          "binary_sha256": "75c1eb4c160d27b78f563f0e72eee413d08bd8b0bec04603b735171033d01f2e",
+          "hardware": {
+            "gpu": "AMD Radeon Graphics (RADV GFX1201)",
+            "os": "Linux 7.2.2-070202-generic",
+            "driver": "1.4.305 / radv / Mesa 25.0.7-0ubuntu0.24.04.2"
+          },
+          "passed": true
+        },
+        {
+          "profile": "rocm-rdna4",
+          "archive_sha256": "08ce143a331c19ec4c2139827ac796384c888342eee8b6b6e4daeb4bfb222d2f",
+          "binary_sha256": "6741b1f12b695626abb5a3a7a826e9c701e7065a934aba06de7a7067d10dfd93",
+          "hardware": {
+            "gpu": "AMD Radeon Graphics",
+            "os": "Linux 7.2.2-070202-generic",
+            "driver": "ROCm 7.2.4"
+          },
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "immutable_hooks_preserved": true,
+      "guard_sha256": "056ed734f1e794eae5c569a03ca3d27a92d99ed909639adb8c841fbe5d52314e",
+      "loader_cache_sha256": "700b8fa7b3c6a84b5e9cb5441c8fff1cf58a7e3bb5b0549f697e041a39af88f5",
+      "cleanup": "no GPU process remains"
+    },
+    "dependency_comparison": {
+      "missing_dependencies": false,
+      "dependency_hash_differences": {
+        "libvulkan_radeon.so": [],
+        "libamdhip64.so": [],
+        "libhiprtc.so": [],
+        "libhipblas.so": [],
+        "libhipblaslt.so": []
+      },
+      "identical": true
+    },
+    "scope": "Cache update only; five runtime dependency trees retain identical bytes. Both packaged diagnostics pass without inherited library overrides. Earlier model matrices identify their exact preview archives.",
+    "dependency_sha256": {
+      "libvulkan_radeon.so": {
+        "missing": [],
+        "dependencies": {
+          "libLLVM.so.20.1": "4b93481bd1c9d42c0951275dd275d4a9d30db78c309ae2cc0405669bc6dbbf8a",
+          "libelf.so.1": "248c989360783cdc52f3659921de852c2efcc2097253ce58e34443f856412814",
+          "libxcb-dri3.so.0": "a919146693e71897484c2996beb837273a7a278d1a2afe477bc072f10681f3b0",
+          "libwayland-client.so.0": "1c22abb422953442aa12822ea51ac76d1c8be92ed143e0159e0f830776cde2b2",
+          "libz.so.1": "f61677c7bdb7c2aa2a243ea781bfd16afcb361cede7b4ef76127a9d8eb9a5242",
+          "libzstd.so.1": "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb",
+          "libxcb.so.1": "7958a0136b121bdc4c708968569ad152a9ed208ab026e2537b1005dde64ca440",
+          "libX11-xcb.so.1": "941ab0ca78131e168817049d4c9935bb0e29b584cf05b58c47e3071f1fa81cf8",
+          "libxcb-present.so.0": "d06d982abe6e9202aecd22322166be8ba49e68e05889fb6c6faec0daa88530a4",
+          "libxcb-xfixes.so.0": "e59ef497333a6ede2096a0bd9eeb6ec4023374c16d3a8d7511d1251fb7f9b9df",
+          "libxcb-sync.so.1": "27c2d6dddde34146904c3c64cfcc885a14a351636d6611877368a48e29355c39",
+          "libxcb-randr.so.0": "9fa6b0ec4af163a86bc9a9ded3309a5979155fb5ef2d311fdda7fff0e9eee01a",
+          "libxcb-shm.so.0": "ad78a7b22409685ca82e54346c2b9465d697f303e69e74a9c1693bb206e319df",
+          "libxshmfence.so.1": "7d40b02b27d449b6b26cea10ea10aafd0cce5a1e2d7859ea57f34b29fe88923f",
+          "libdrm.so.2": "3666067992714d60452faebefbb78ebf8b6bafeb38de394b7ac9dc2a67b64b54",
+          "libexpat.so.1": "286682ecbc5e59a638963b1a4e6351e65eb32fcf4bdcb9cb7569b6a61fe06a8d",
+          "libdrm_amdgpu.so.1": "f9a734ec7bd7594a4660c387e8e4393b2a509d563cdd06e83e0d13a6c1b0b112",
+          "libstdc++.so.6": "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11",
+          "libm.so.6": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+          "libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+          "libc.so.6": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+          "libffi.so.8": "00f593fe192f2851b8ce23b25cec2488d769beb5a8f63e8c9e563071e1075153",
+          "libedit.so.2": "195c607216f8581dbf516346ed38f4c73500cac4b84e18eb0a4fd49931e4cd56",
+          "libxml2.so.2": "209e941be9eb2eb9ab36caaa0b81d1c6b36c8f5d7268c24f19e81039137e6485",
+          "ld-linux-x86-64.so.2": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+          "libXau.so.6": "8040da3f8516c1acfe39f04ff022480cdb273705ba5e7a4ca70bbdb1527cd67a",
+          "libXdmcp.so.6": "667d97d6da16016400ab10de9f83ef4ab209ceb6adf68ff9650225ec13e723b0",
+          "libtinfo.so.6": "e6089d7bb95eee5b545f3770dd69095b0bca47d26701cad145af429561d16306",
+          "libbsd.so.0": "e86cd4f0019f42c2ba5e60602e0edc8694d2948377d98c3654d0f6bddb5254bb",
+          "libicuuc.so.74": "7560aadde38e5f4237a47a1ddd5891f9b36768a77a60faae30beee003ac01901",
+          "liblzma.so.5": "696e868dd0700a19a6d65fc01608ec2d70d3cb91f65710e89180cd2e688f30cb",
+          "libmd.so.0": "423e18586b6ea740f4465afd64f7a9a4cb7264ed979c8e7256f9085af5345fef",
+          "libicudata.so.74": "ddbb3718b8bd9cbd780e5ab08b4503c30a6c4fa0706ebe5d074ed6b596c1714e"
+        }
+      },
+      "libamdhip64.so": {
+        "missing": [],
+        "dependencies": {
+          "librocprofiler-register.so.0": "1a23a2b5a62dc7feee9259b9a307bca94caef7cfbaebc7b1b20a0289ed7e69f0",
+          "libhsa-runtime64.so.1": "b8cdfe93d343649a35c1daf73a0a3a6840f09379ebeee9be65670461ffea43f4",
+          "libstdc++.so.6": "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11",
+          "libm.so.6": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+          "libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+          "libc.so.6": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+          "ld-linux-x86-64.so.2": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+          "libelf.so.1": "248c989360783cdc52f3659921de852c2efcc2097253ce58e34443f856412814",
+          "libdrm.so.2": "3666067992714d60452faebefbb78ebf8b6bafeb38de394b7ac9dc2a67b64b54",
+          "libdrm_amdgpu.so.1": "f9a734ec7bd7594a4660c387e8e4393b2a509d563cdd06e83e0d13a6c1b0b112",
+          "libnuma.so.1": "ccce381ad9aca398846df70536100d3936eaa218b228ba589523ad6b67ef7f3c",
+          "libz.so.1": "f61677c7bdb7c2aa2a243ea781bfd16afcb361cede7b4ef76127a9d8eb9a5242",
+          "libzstd.so.1": "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb"
+        }
+      },
+      "libhiprtc.so": {
+        "missing": [],
+        "dependencies": {
+          "libstdc++.so.6": "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11",
+          "libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+          "libc.so.6": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+          "ld-linux-x86-64.so.2": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+          "libm.so.6": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0"
+        }
+      },
+      "libhipblas.so": {
+        "missing": [],
+        "dependencies": {
+          "librocsolver.so.0": "af4590ee6a03507d2264b20055f06a1304bbcb3a87c8193fe71e2fb27aacfafc",
+          "librocblas.so.5": "3f0e5b227d6cf340ac94b08c3061429064f58e18ef62c883bbb543248e1e814b",
+          "libstdc++.so.6": "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11",
+          "libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+          "libc.so.6": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+          "libamdhip64.so.7": "f1043337461c8e54ee135e95fa979a7d0e4344676ad5b0554652f844f8f098ac",
+          "libm.so.6": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+          "libhipblaslt.so.1": "4c89a592944beafe388d21cd491c654820baba3d0c12d35fb8fe7020722bb950",
+          "ld-linux-x86-64.so.2": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+          "librocprofiler-register.so.0": "1a23a2b5a62dc7feee9259b9a307bca94caef7cfbaebc7b1b20a0289ed7e69f0",
+          "libhsa-runtime64.so.1": "b8cdfe93d343649a35c1daf73a0a3a6840f09379ebeee9be65670461ffea43f4",
+          "libroctx64.so.4": "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17",
+          "librocroller.so.1": "cbbd056b2ebb0581a1ded7af6f798767716ff5b6af0eac30bf714975a77151bf",
+          "libelf.so.1": "248c989360783cdc52f3659921de852c2efcc2097253ce58e34443f856412814",
+          "libdrm.so.2": "3666067992714d60452faebefbb78ebf8b6bafeb38de394b7ac9dc2a67b64b54",
+          "libdrm_amdgpu.so.1": "f9a734ec7bd7594a4660c387e8e4393b2a509d563cdd06e83e0d13a6c1b0b112",
+          "libnuma.so.1": "ccce381ad9aca398846df70536100d3936eaa218b228ba589523ad6b67ef7f3c",
+          "libamd_comgr.so.3": "f893a0e750947d11c5ee8d77c7ae6de80d5c04b4f4c31ba3ff4d2df6de4bff79",
+          "libz.so.1": "f61677c7bdb7c2aa2a243ea781bfd16afcb361cede7b4ef76127a9d8eb9a5242",
+          "libzstd.so.1": "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb"
+        }
+      },
+      "libhipblaslt.so": {
+        "missing": [],
+        "dependencies": {
+          "libroctx64.so.4": "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17",
+          "librocroller.so.1": "cbbd056b2ebb0581a1ded7af6f798767716ff5b6af0eac30bf714975a77151bf",
+          "libamdhip64.so.7": "f1043337461c8e54ee135e95fa979a7d0e4344676ad5b0554652f844f8f098ac",
+          "libstdc++.so.6": "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11",
+          "libm.so.6": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+          "libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+          "libc.so.6": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+          "ld-linux-x86-64.so.2": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+          "libamd_comgr.so.3": "f893a0e750947d11c5ee8d77c7ae6de80d5c04b4f4c31ba3ff4d2df6de4bff79",
+          "librocprofiler-register.so.0": "1a23a2b5a62dc7feee9259b9a307bca94caef7cfbaebc7b1b20a0289ed7e69f0",
+          "libhsa-runtime64.so.1": "b8cdfe93d343649a35c1daf73a0a3a6840f09379ebeee9be65670461ffea43f4",
+          "libz.so.1": "f61677c7bdb7c2aa2a243ea781bfd16afcb361cede7b4ef76127a9d8eb9a5242",
+          "libzstd.so.1": "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb",
+          "libelf.so.1": "248c989360783cdc52f3659921de852c2efcc2097253ce58e34443f856412814",
+          "libdrm.so.2": "3666067992714d60452faebefbb78ebf8b6bafeb38de394b7ac9dc2a67b64b54",
+          "libdrm_amdgpu.so.1": "f9a734ec7bd7594a4660c387e8e4393b2a509d563cdd06e83e0d13a6c1b0b112",
+          "libnuma.so.1": "ccce381ad9aca398846df70536100d3936eaa218b228ba589523ad6b67ef7f3c"
+        }
+      }
+    }
+  }
+}

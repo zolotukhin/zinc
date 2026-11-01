@@ -53,9 +53,11 @@ subgroups, while the tested Xe2 driver exposes widths 16–32. A loaded pipeline
 was insufficient evidence because unsupported subgroup requests are optional
 in the pipeline factory. Dispatch now checks the subgroup capability and uses
 generic batched attention when 64 lanes are unavailable. This preserves the
-other accelerated prefill stages. The [release readiness note](releases/0.1.0-plan.md)
-tracks packaged retesting; historical performance results below describe their
-recorded executables.
+other accelerated prefill stages. Packaged preview `dbbfff54` now passes 84 kernel
+cases and all four available pinned model rows, including 27B. The two Gemma
+rows remain pending. The [release readiness note](releases/0.1.0-plan.md) and
+[portable evidence](/zinc/validation/worker-readiness-2026-11-01.json) record that
+scope; historical performance results below describe their recorded executables.
 
 Intel Arc is a supported Linux Vulkan target in ZINC. The current public Intel benchmark artifact validates four managed catalog rows:
 

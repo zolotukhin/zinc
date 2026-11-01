@@ -81,6 +81,36 @@ reference select the intended physical card. Remap its native lock-file mount
 to the container's observed index so host and container jobs still share the
 same lock.
 
+### Driver library lookup
+
+Packaged checks clear inherited library search overrides. If the driver's
+dependency closure lives under `/worker-driver`, generate a loader cache with
+the same worker base image and runtime mounts. Keep its build context outside
+the checkout: the cache is deployment data, not a portable source artifact.
+
+With the administrator's paths in the variables below, generate the cache
+without exposing a GPU or changing the mounted libraries. Set `ZINC_WORKER_BASE`
+to the currently configured image; verify any local build tag resolves to that
+immutable image ID before using it:
+
+```bash
+docker run --rm --network=none --read-only --user=0 --cap-drop=ALL \
+  --security-opt=no-new-privileges --entrypoint=/sbin/ldconfig \
+  --mount "type=bind,src=$ZINC_DRIVER_DIR,dst=/worker-driver,readonly" \
+  --mount "type=bind,src=$ZINC_ROCM_DIR,dst=/opt/rocm,readonly" \
+  --mount "type=bind,src=$ZINC_CACHE_CONTEXT,dst=/cache" \
+  "$ZINC_WORKER_BASE" -X -C /cache/ld.so.cache /worker-driver /opt/rocm/lib
+docker build --network=none --pull=false \
+  --build-arg "ZINC_WORKER_BASE=$ZINC_WORKER_BASE" \
+  -f scripts/release_worker/loader-cache.Dockerfile "$ZINC_CACHE_CONTEXT"
+```
+
+Update the private launch configuration to the resulting immutable image ID.
+Drain the runner before restarting its service, then verify driver dependencies
+and both packaged `--check` probes with library overrides removed. Regenerate
+the cache whenever the base image, driver closure or ROCm mount changes. The
+cache layer preserves the base image's non-root user and immutable job hooks.
+
 ## Job policy and registration
 
 `policy.json` is administrator-owned and read-only to the runner:
