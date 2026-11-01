@@ -730,6 +730,9 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(len(groups), 8 if include_metal else 2)
             self.assertEqual(sum(len(group["profiles"]) for group in groups), 9 if include_metal else 3)
             self.assertEqual(next(group for group in groups if group["id"] == "rdna4")["profiles"], ["vulkan-rdna4", "rocm-rdna4"])
+            self.assertEqual(next(group for group in groups if group["id"] == "rdna4")["timeout_minutes"], 315)
+            self.assertEqual(next(group for group in groups if group["id"] == "intel-xe2")["timeout_minutes"], 165)
+            self.assertTrue(all(group["timeout_minutes"] > 150 * len(group["profiles"]) for group in groups))
         with contextlib.redirect_stdout(io.StringIO()) as preview:
             release.matrix(SimpleNamespace(kind="build"))
         self.assertEqual(len(json.loads(preview.getvalue())["include"]), 3)
@@ -738,7 +741,8 @@ class ReleaseTest(unittest.TestCase):
         for fail_at in (None, 0, 1, "interrupt", "timeout"):
             launched, active, workdirs = [], [], []
             @contextlib.contextmanager
-            def child(command, log, work, env):
+            def child(command, log, work, env, grace_seconds):
+                self.assertEqual(grace_seconds, release_gpu_group.CHILD_CLEANUP_GRACE_SECONDS)
                 self.assertFalse(active)
                 profile = command[command.index("--profile") + 1]
                 self.assertTrue(Path(command[command.index("--directory") + 1]).is_absolute())
@@ -749,6 +753,7 @@ class ReleaseTest(unittest.TestCase):
                 launched.append(profile)
                 active.append(profile)
                 def wait(timeout):
+                    self.assertEqual(timeout, 150 * 60)
                     if fail_at == "interrupt":
                         raise KeyboardInterrupt()
                     if fail_at == "timeout":
@@ -1281,18 +1286,59 @@ class ReleaseTest(unittest.TestCase):
                 if failure != "changed_asset":
                     self.assertEqual(remote.uploads, uploads)
 
-    def test_stable_catalog_requires_reviewed_starter_qualification(self):
+    def starter_catalog(self, status="supported", profiles='"amd-rdna4-32gb", "intel-arc"'):
         catalog = (ROOT / "src/model/catalog.zig").read_text()
         # Exercise both qualification states even after the real starter is
         # promoted; this contract must not lock the current experimental state.
         match = re.search(r'(\.id = "qwen3-0.6b-q8-0",[\s\S]*?)(?=\n    \},)', catalog)
-        entry = re.sub(r'\.status = \.[a-z]+', '.status = .experimental', match.group(1))
-        unqualified = catalog[:match.start()] + entry + catalog[match.end():]
+        entry = re.sub(r'\.status = \.[a-z]+', '.status = .' + status, match.group(1))
+        entry = re.sub(r'\.tested_profiles\s*=\s*&\.\{[\s\S]*?\},', '.tested_profiles = &.{' + profiles + '},', entry, count=1)
+        return catalog[:match.start()] + entry + catalog[match.end():]
+
+    def test_stable_catalog_requires_reviewed_starter_qualification(self):
+        unqualified = self.starter_catalog(status="experimental", profiles="")
         release_publish.validate_catalog(unqualified, "0.1.0-rc.1")
         with self.assertRaisesRegex(ValueError, "starter model to be qualified"):
             release_publish.validate_catalog(unqualified, "0.1.0")
-        qualified = unqualified.replace(".status = .experimental", ".status = .supported", 1).replace(".tested_profiles = &.{}", '.tested_profiles = &.{"apple-silicon"}', 1)
-        release_publish.validate_catalog(qualified, "0.1.0")
+        release_publish.validate_catalog(self.starter_catalog(), "0.1.0")
+
+    def test_stable_starter_coverage_must_match_the_selected_linux_profiles(self):
+        for profiles in ('', '"apple-silicon"', '"amd-rdna4-32gb"', '"intel-arc"', '"unknown-profile"',
+                         '"amd-rdna4-32gb",\n // "intel-arc",\n'):
+            for version in ("0.1.0", "0.1.0+build.7"):
+                with self.subTest(profiles=profiles, version=version), self.assertRaisesRegex(ValueError, "coverage is missing selected release profiles"):
+                    release_publish.validate_catalog(self.starter_catalog(profiles=profiles), version)
+        # Extra documented preview coverage and the catalog's string constant
+        # syntax do not change which Linux roles the stable gate requires.
+        release_publish.validate_catalog(self.starter_catalog(profiles='"amd-rdna4-32gb", "intel-arc", apple_silicon_profile,'), "0.1.0")
+        selected = [p for p in policy()["gpu_profiles"] if p["id"] == "vulkan-intel-xe2"]
+        with patch.object(release_publish, "release_policy", return_value={"gpu_profiles": selected}):
+            release_publish.validate_catalog(self.starter_catalog(profiles='"intel-arc"'), "0.1.0")
+        unreviewed = [p for p in policy()["gpu_profiles"] if p["id"] == "vulkan-rdna3"]
+        with patch.object(release_publish, "release_policy", return_value={"gpu_profiles": unreviewed}), self.assertRaisesRegex(ValueError, "explicit catalog mapping"):
+            release_publish.validate_catalog(self.starter_catalog(), "0.1.0")
+
+    def test_starter_catalog_comments_or_unsupported_fields_cannot_fake_qualification(self):
+        commented = self.starter_catalog(status="experimental").replace(
+            '.status = .experimental,', '// .status = .supported,\n        .status = .experimental,', 1)
+        with self.assertRaisesRegex(ValueError, "starter model to be qualified"):
+            release_publish.validate_catalog(commented, "0.1.0")
+        duplicate = self.starter_catalog().replace('.status = .supported,', '.status = .supported,\n        .status = .experimental,', 1)
+        with self.assertRaisesRegex(ValueError, "catalog field is missing, duplicate or unsupported"):
+            release_publish.validate_catalog(duplicate, "0.1.0")
+        for profiles in ('"amd-rdna4-32gb", "intel-arc", "intel-arc"',
+                         '"amd-rdna4-32gb", unreviewed_profile', '"amd-rdna4-32gb", "intel-arc" ++ "extra"'):
+            with self.subTest(profiles=profiles), self.assertRaisesRegex(ValueError, "starter catalog profile"):
+                release_publish.validate_catalog(self.starter_catalog(profiles=profiles), "0.1.0")
+
+    def test_shipped_catalog_defaults_stay_within_the_model_qualification(self):
+        for name, value, error in (("size_bytes", "1", "model size differs"),
+                                   ("default_context_length", "4096", "default context exceeds"),
+                                   ("default_context_length", "0", "default context exceeds")):
+            changed = re.sub(r'(\.' + name + r'\s*=\s*)[0-9_]+', lambda m: m[1] + value, self.starter_catalog(), count=1)
+            for version in ("0.1.0-rc.1", "0.1.0"):
+                with self.subTest(field=name, value=value, version=version), self.assertRaisesRegex(ValueError, error):
+                    release_publish.validate_catalog(changed, version)
 
     def test_archive_decompression_limit_applies_before_tar_metadata_parsing(self):
         tree = self.tree()
@@ -1738,6 +1784,48 @@ class ReleaseTest(unittest.TestCase):
             with release_gpu.process([sys.executable, "-c", "import time; time.sleep(120)"], self.root / "child.log", self.root, os.environ) as child:
                 raise RuntimeError("fixture failure")
         self.assertIsNotNone(child.poll())
+
+    def test_group_cancellation_waits_for_a_profiles_nested_server_cleanup(self):
+        ready, done = self.root / "server-ready", self.root / "profile-cleanup.json"
+        server, controller = self.root / "server.py", self.root / "profile.py"
+        # CPU-only stand-ins reproduce the production process topology: the
+        # group owns a helper, and the helper owns a separate server session.
+        server.write_text("import os,pathlib,signal,time\n"
+                          "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                          f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+                          "while True: time.sleep(1)\n")
+        controller.write_text("import json,os,pathlib,sys,time\n"
+                              f"sys.path.insert(0,{str(ROOT / 'tools')!r})\n"
+                              "import release_gpu\nfrom release_lib import install_signal_handlers\n"
+                              "install_signal_handlers()\n"
+                              "try:\n"
+                              f" with release_gpu.process([sys.executable,{str(server)!r}],{str(self.root / 'server.log')!r},{str(self.root)!r},dict(os.environ)) as child:\n"
+                              "  try:\n   while True: time.sleep(1)\n"
+                              "  finally: time.sleep(2)\n"
+                              "finally:\n"
+                              f" pathlib.Path({str(done)!r}).write_text(json.dumps({{'child_returncode':child.poll()}}))\n")
+        server_pid, reaped = None, False
+        try:
+            with self.assertRaisesRegex(RuntimeError, "cancel profile"):
+                with release_gpu.process([sys.executable, str(controller)], self.root / "profile.log", self.root, dict(os.environ),
+                                         grace_seconds=release_gpu_group.CHILD_CLEANUP_GRACE_SECONDS) as child:
+                    import time
+                    deadline = time.monotonic() + 10
+                    while not ready.exists():
+                        self.assertIsNone(child.poll())
+                        self.assertLess(time.monotonic(), deadline, "CPU server fixture did not start")
+                        time.sleep(0.05)
+                    server_pid = int(ready.read_text())
+                    raise RuntimeError("cancel profile")
+            # The helper must finish its own cleanup, not merely disappear
+            # while its separately grouped child is still running.
+            self.assertEqual(read_json(done), {"child_returncode": -9})
+            reaped = True
+        finally:
+            if server_pid is not None and not reaped:
+                import signal
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(server_pid, signal.SIGKILL)
 
     def test_signing_timeouts_do_not_expose_secret_arguments(self):
         command = ["security", "-p", "synthetic-test-password"]

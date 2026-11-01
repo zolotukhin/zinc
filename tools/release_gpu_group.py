@@ -9,7 +9,9 @@ import tempfile
 from pathlib import Path
 
 import release_gpu as gpu
-from release_lib import ROOT, install_signal_handlers, release_policy, require
+from release_lib import ROOT, GPU_PROFILE_TIMEOUT_MINUTES, install_signal_handlers, release_policy, require
+
+CHILD_CLEANUP_GRACE_SECONDS = 30
 
 
 def check_group(role, directory, output):
@@ -24,11 +26,14 @@ def check_group(role, directory, output):
             print("Checking packaged profile: " + profile["id"], flush=True)
             command = [sys.executable, str(ROOT / "tools/release_gpu.py"), "--directory", str(directory),
                        "--profile", profile["id"], "--output", str(output / (profile["id"] + ".json"))]
-            with gpu.process(command, work / "private-validation.log", work, dict(os.environ)) as child:
+            # A profile owns separate server process groups. Let its signal
+            # handler reap those before forcibly killing the Python helper.
+            with gpu.process(command, work / "private-validation.log", work, dict(os.environ),
+                             grace_seconds=CHILD_CLEANUP_GRACE_SECONDS) as child:
                 try:
-                    result = child.wait(timeout=150 * 60)
+                    result = child.wait(timeout=GPU_PROFILE_TIMEOUT_MINUTES * 60)
                 except subprocess.TimeoutExpired:
-                    raise ValueError("packaged GPU profile timed out after 150 minutes: " + profile["id"]) from None
+                    raise ValueError(f"packaged GPU profile timed out after {GPU_PROFILE_TIMEOUT_MINUTES} minutes: " + profile["id"]) from None
                 require(result == 0, "packaged GPU profile failed: " + profile["id"])
 
 

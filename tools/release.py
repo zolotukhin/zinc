@@ -18,7 +18,8 @@ import urllib.request
 from pathlib import Path
 
 from release_lib import (
-    ROOT, REFERENCE_LIBRARY_NAME, archive_name, check_metadata, extract_archive, inventory, policy,
+    ROOT, GPU_GROUP_OVERHEAD_MINUTES, GPU_PROFILE_TIMEOUT_MINUTES, REFERENCE_LIBRARY_NAME,
+    archive_name, check_metadata, extract_archive, inventory, policy,
     probe_binary, read_json, release_policy, require, sha256, source_sha, target, verify_reference_agreement, version, write_json,
 )
 
@@ -197,6 +198,10 @@ def matrix(args):
             row = rows.setdefault(role, {"id": role.removeprefix("ZINC_RUNNER_").lower().replace("_", "-"),
                                          "runner_variable": role, "runner": labels, "profiles": []})
             row["profiles"].append(profile["id"])
+        for row in rows.values():
+            # Each sequential backend retains its full budget. Checkout,
+            # artifact transfer and report upload also consume job time.
+            row["timeout_minutes"] = len(row["profiles"]) * GPU_PROFILE_TIMEOUT_MINUTES + GPU_GROUP_OVERHEAD_MINUTES
         result = {"include": list(rows.values())}
     print(json.dumps(result, separators=(",", ":")))
 

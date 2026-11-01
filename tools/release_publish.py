@@ -19,6 +19,12 @@ from release_lib import ROOT, environment_main_only, environment_requires_review
 REPOSITORY = "zolotukhin/zinc"
 WORKFLOW = ".github/workflows/release-candidate.yml"
 PUBLIC_FILES = {"release-manifest.json", "validation.json", "release-policy.json", "SHA256SUMS.txt", "install.sh", "release-notes.md", "provenance.jsonl"}
+# Qualification roles and managed-catalog profiles use different names. An
+# expanded stable launch must explicitly review this mapping with the catalog.
+STARTER_CATALOG_PROFILES = {
+    "vulkan-rdna4": "amd-rdna4-32gb",
+    "vulkan-intel-xe2": "intel-arc",
+}
 
 
 def gh(args, body=None, optional=False):
@@ -57,6 +63,30 @@ def validate_environment(environment, branch_response):
             "restrict the release environment to only the main branch before publishing")
 
 
+def catalog_field(entry, name, pattern):
+    values = re.findall(r"^\s*\." + re.escape(name) + r"\s*=\s*(" + pattern + r")\s*,", entry, re.M)
+    require(len(values) == 1, "shipped catalog field is missing, duplicate or unsupported: " + name)
+    return values[0]
+
+
+def catalog_tested_profiles(entry, catalog):
+    values = re.findall(r"^\s*\.tested_profiles\s*=\s*&\.\{([\s\S]*?)\}\s*,", entry, re.M)
+    require(len(values) == 1, "starter tested profiles must be one explicit catalog list")
+    text = re.sub(r"//[^\n]*", "", values[0]).strip()
+    items = text.split(",") if text else []
+    if items and not items[-1].strip():
+        items.pop()
+    aliases = dict(re.findall(r'^pub const ([a-z_][a-z_0-9]*)\s*=\s*"([a-z][a-z0-9-]*)";', catalog, re.M))
+    profiles = []
+    for item in items:
+        item = item.strip()
+        literal = re.fullmatch(r'"([a-z][a-z0-9-]*)"', item)
+        require(literal is not None or item in aliases, "starter catalog profile must be an explicit string or string constant")
+        profiles.append(literal.group(1) if literal else aliases[item])
+    require(len(profiles) == len(set(profiles)), "starter catalog profiles are duplicated")
+    return set(profiles)
+
+
 def validate_catalog(catalog, release_version):
     for model in policy()["models"]:
         entry = re.search(r'\.id = "' + re.escape(model["id"]) + r'",([\s\S]*?)(?=\n    \},)', catalog)
@@ -64,9 +94,19 @@ def validate_catalog(catalog, release_version):
         text = entry.group(1)
         require('/resolve/' + model["revision"] + '/' + model["file"] + '?download=true' in text
                 and '.sha256 = "' + model["sha256"] + '"' in text, "shipped model pin differs from release policy")
+        require(int(catalog_field(text, "size_bytes", r"[0-9][0-9_]*").replace("_", "")) == model["size_bytes"],
+                "shipped model size differs from release policy")
+        context = int(catalog_field(text, "default_context_length", r"[0-9][0-9_]*").replace("_", ""))
+        require(0 < context <= model["context"], "shipped model default context exceeds its qualification or is invalid")
         if model["id"] == "qwen3-0.6b-q8-0" and "-" not in release_version.split("+")[0]:
-            require(".status = .supported" in text and not re.search(r"\.tested_profiles\s*=\s*&\.\{\s*\}", text),
+            require(catalog_field(text, "status", r"\.[a-z_]+") == ".supported",
                     "stable release requires the starter model to be qualified and promoted in the catalog; first run a nightly/RC, review the evidence, then build a new final-version candidate")
+            profiles = [p["id"] for p in release_policy(policy())["gpu_profiles"] if model["id"] in p["models"]]
+            require(profiles and all(p in STARTER_CATALOG_PROFILES for p in profiles),
+                    "stable starter qualification needs an explicit catalog mapping for every selected profile")
+            required = {STARTER_CATALOG_PROFILES[p] for p in profiles}
+            require(required.issubset(catalog_tested_profiles(text, catalog)),
+                    "stable starter catalog coverage is missing selected release profiles: " + ", ".join(sorted(required)))
 
 
 def verify_remote_assets(directory, tag):
