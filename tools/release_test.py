@@ -895,6 +895,85 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(api.call_count, 2)
             self.assertEqual(gh.call_count, 1)
 
+    @contextlib.contextmanager
+    def interrupted_publication(self, directory):
+        """A local GitHub boundary: an accepted upload loses its client reply."""
+        (directory / "release-notes.md").write_text("CPU-only publication rehearsal fixture.\n")
+        state = SimpleNamespace(tag=None, draft=None, assets={}, uploads=[], edits=0, interrupted=False)
+        def api(path, body=None, optional=False):
+            if path.startswith("git/ref/tags/"):
+                return state.tag
+            if path.startswith("releases/tags/"):
+                return None if state.draft is None else {**state.draft, "assets": [{"name": name} for name in state.assets]}
+            if path == "git/refs":
+                self.assertEqual(body, {"ref": "refs/tags/v9.8.7", "sha": COMMIT})
+                self.assertIsNone(state.tag)
+                state.tag = {"object": {"type": "commit", "sha": COMMIT}}
+                return state.tag
+            self.assertEqual(path, "releases")
+            self.assertIsNone(state.draft)
+            self.assertTrue(body["draft"])
+            state.draft = body
+            return {**body, "assets": []}
+        def gh(args):
+            self.assertEqual(args[0], "release")
+            self.assertNotIn("--clobber", args)
+            if args[1] == "upload":
+                path = Path(args[3])
+                self.assertNotIn(path.name, state.assets)
+                state.assets[path.name] = path.read_bytes()
+                state.uploads.append(path.name)
+                if len(state.uploads) == 2 and not state.interrupted:
+                    state.interrupted = True
+                    raise RuntimeError("fixture connection lost after accepted upload")
+            elif args[1] == "download":
+                destination = Path(args[args.index("--dir") + 1])
+                for name, content in state.assets.items():
+                    (destination / name).write_bytes(content)
+            else:
+                self.assertEqual(args[1], "edit")
+                self.assertIn("--draft=false", args)
+                state.edits += 1
+                state.draft["draft"] = False
+        with patch.object(release_publish, "api", side_effect=api), patch.object(release_publish, "gh", side_effect=gh):
+            yield state
+
+    def test_interrupted_upload_resumes_without_overwrite_and_published_retry_is_read_only(self):
+        directory, _ = self.candidate()
+        data = read_json(directory / "release-manifest.json")
+        with self.interrupted_publication(directory) as remote, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+                release_publish.publish(directory, data, "123")
+            self.assertTrue(remote.draft["draft"])
+            self.assertEqual(remote.edits, 0)
+            accepted = dict(remote.assets)
+            release_publish.publish(directory, data, "123")
+            self.assertFalse(remote.draft["draft"])
+            self.assertEqual(remote.edits, 1)
+            self.assertEqual(set(remote.uploads), {p.name for p in directory.iterdir()})
+            self.assertEqual(len(remote.uploads), len(set(remote.uploads)))
+            self.assertEqual({name: remote.assets[name] for name in accepted}, accepted)
+            uploads = list(remote.uploads)
+            release_publish.publish(directory, data, "123")
+            self.assertEqual(remote.uploads, uploads)
+            self.assertEqual(remote.edits, 1)
+
+    def test_interrupted_draft_rejects_changed_bytes_other_candidates_and_orphan_tags(self):
+        directory, _ = self.candidate()
+        data = read_json(directory / "release-manifest.json")
+        for failure in ("changed_asset", "other_candidate", "orphan_tag"):
+            with self.subTest(failure=failure), self.interrupted_publication(directory) as remote:
+                with self.assertRaises(RuntimeError): release_publish.publish(directory, data, "123")
+                if failure == "changed_asset":
+                    remote.assets[next(iter(remote.assets))] = b"changed uploaded bytes"
+                elif failure == "orphan_tag":
+                    remote.draft = None
+                uploads = list(remote.uploads)
+                with self.assertRaisesRegex(ValueError, {"changed_asset": "uploaded bytes differ", "other_candidate": "existing/published", "orphan_tag": "tag already exists"}[failure]):
+                    release_publish.publish(directory, data, "456" if failure == "other_candidate" else "123")
+                self.assertEqual(remote.edits, 0)
+                if failure != "changed_asset": self.assertEqual(remote.uploads, uploads)
+
     def test_stable_catalog_requires_reviewed_starter_qualification(self):
         catalog = (ROOT / "src/model/catalog.zig").read_text()
         # Exercise both qualification states even after the real starter is
