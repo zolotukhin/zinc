@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="460" viewBox="0 0 360 460" role="img" aria-labelledby="title desc">
+  <title id="title">Combining subgroup reductions across a workgroup</title>
+  <desc id="desc">A 64-thread workgroup contains two example 32-lane subgroups. Each produces a partial sum. Shared memory and workgroup barriers combine the partial sums into one full-workgroup result.</desc>
+  <style>
+    :root { --text: #202236; --line: #667085; --border: #bdc8db; --group: #f7f9fc; --box: #edf2ff; --result: #eaf6ef; }
+    @media (prefers-color-scheme: dark) {
+      :root { --text: #f0f2fa; --line: #b4bfd4; --border: #667594; --group: #1b2030; --box: #293450; --result: #203d32; }
+    }
+    text { fill: var(--text); font: 16px system-ui, sans-serif; text-anchor: middle; }
+    .small { font-size: 14px; }
+    .label { font-weight: 600; }
+    rect { stroke: var(--border); }
+    .group { fill: var(--group); stroke-dasharray: 5 4; }
+    .box { fill: var(--box); }
+    .result { fill: var(--result); }
+    .arrow { fill: none; stroke: var(--line); stroke-width: 1.5; marker-end: url(#arrow); }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="var(--line)"/>
+    </marker>
+  </defs>
+  <text x="180" y="24" class="label">64 threads, two subgroups</text>
+  <rect class="group" x="8" y="44" width="344" height="172" rx="12"/>
+  <text x="180" y="68" class="small">One workgroup</text>
+  <rect class="box" x="24" y="84" width="144" height="108" rx="10"/>
+  <text x="96" y="111" class="label">Subgroup 0</text>
+  <text x="96" y="139">32 lanes</text>
+  <text x="96" y="169" class="small">Partial sum A</text>
+  <rect class="box" x="192" y="84" width="144" height="108" rx="10"/>
+  <text x="264" y="111" class="label">Subgroup 1</text>
+  <text x="264" y="139">32 lanes</text>
+  <text x="264" y="169" class="small">Partial sum B</text>
+  <path class="arrow" d="M96 192v32l56 28"/>
+  <path class="arrow" d="M264 192v32l-56 28"/>
+  <rect class="box" x="24" y="256" width="312" height="64" rx="10"/>
+  <text x="180" y="283">Shared partial sums</text>
+  <text x="180" y="306" class="small">Workgroup barriers</text>
+  <path class="arrow" d="M180 320v28"/>
+  <rect class="result" x="24" y="352" width="312" height="64" rx="10"/>
+  <text x="180" y="378">Whole-workgroup sum</text>
+  <text x="180" y="402" class="label">A + B</text>
+  <text x="180" y="446" class="small">Example: SIMD32 inside a 64-thread group</text>
+</svg>
