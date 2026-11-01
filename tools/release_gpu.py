@@ -391,7 +391,38 @@ def cancel_chat_stream(port, body):
         raise ValueError("chat generated no content before cancellation")
 
 
-def api_checks(tree, model, context, device, work, env, browser_chat, reference_samples):
+def prefill_cancellation_check(port, model_id, context, timeout=10):
+    """Cancel before the first generated token, then reuse the same GPU slot."""
+    body = {"model": model_id, "messages": [{"role": "user", "content": "Summarize this text:" + " word" * min(3000, context - 256)}],
+            "max_tokens": 8, "temperature": 0, "enable_thinking": False}
+    observed = False
+    with request(port, "/v1/chat/completions", {**body, "stream": True}, timeout=timeout) as response:
+        require("text/event-stream" in response.headers.get("Content-Type", ""), "prefill cancellation did not open SSE")
+        for _ in range(1024):
+            raw = response.readline()
+            require(raw, "stream ended without exercising active prefill")
+            line = raw.decode("utf-8", errors="strict").strip()
+            if line == ": prefill":
+                observed = True
+                break
+            require(line != "data: [DONE]", "prefill completed before cancellation")
+            if line.startswith("data: "):
+                event = json.loads(line[6:])
+                require(not event.get("error"), "prefill stream returned an error")
+                require(not any(choice.get("delta", {}).get("content") for choice in event.get("choices", [])),
+                        "generation started before prefill cancellation")
+    require(observed, "prefill keepalive is missing")
+    started = time.monotonic()
+    recovery = {**body, "messages": [{"role": "user", "content": "Reply with OK."}], "stream": False}
+    with request(port, "/v1/chat/completions", recovery, timeout=timeout) as response:
+        result = json.load(response)
+    elapsed = time.monotonic() - started
+    require(not result.get("error") and result.get("choices"), "prefill cancellation poisoned the generation slot")
+    require(elapsed < timeout, "server did not recover promptly from prefill cancellation")
+    return {"passed": True, "recovery_ms": round(elapsed * 1000)}
+
+
+def api_checks(tree, model, context, device, work, env, browser_chat, reference_samples, check_prefill_cancellation=False):
     port = free_port()
     command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--port", str(port), "-c", str(context), "--parallel", "1"]
     with process(command, work / "server.log", work, env) as child:
@@ -416,6 +447,7 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
         # Disconnect an active stream; then prove the single-slot server recovers.
         cancel_chat_stream(port, {**chat, "messages": [{"role": "user", "content": PROMPTS[0]}], "max_tokens": 256})
         require(json_request(port, "/v1/completions", body).get("choices"), "server did not recover after stream cancellation")
+        prefill = prefill_cancellation_check(port, model_id, context) if check_prefill_cancellation else None
         # A healthy slot can still retain the wrong SSM reduction/state. Recheck
         # complete frozen continuations, not just a nonempty recovery response.
         after_cancel = work / "reference-after-cancellation"
@@ -454,6 +486,7 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
         after_context = work / "reference-after-context"
         after_context.mkdir(exist_ok=True)
         reference_http_parity(port, body, reference_samples, after_context)
+    return prefill
 
 
 def active_model_id(available):
@@ -576,11 +609,17 @@ def main():
                 print(identifier + f": reference choices {agreement['exact_tokens']}/{agreement['total_tokens']} exact, "
                       f"{agreement['near_tie_tokens']} qualified near ties; checking HTTP, cancellation and context", flush=True)
                 browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]
-                api_checks(tree, model, expected["context"], device, work, env, browser_chat, samples)
+                # The flagship's serial Intel prefill exposed this failure;
+                # require the same active-work probe on both Vulkan GPU roles.
+                check_prefill = profile["target"].endswith("vulkan") and identifier == "qwen36-35b-a3b-q4k-xl"
+                prefill = api_checks(tree, model, expected["context"], device, work, env, browser_chat, samples, check_prefill)
                 models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True,
                                "reference_agreement": agreement})
                 if bounded is not None:
                     models[-1]["bounded_prefill"] = bounded
+                if check_prefill:
+                    require(prefill and prefill.get("passed") is True, "prefill cancellation evidence is missing")
+                    models[-1]["prefill_cancellation"] = prefill
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
             require(reference_artifacts(reference) == reference_snapshot, "reference artifacts changed during GPU validation")
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],

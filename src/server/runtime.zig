@@ -28,6 +28,13 @@ pub const model_manager_mod = if (gpu.is_metal) @import("model_manager_metal.zig
 pub const InferenceEngine = forward_mod.InferenceEngine;
 /// Per-sequence decode state (KV cache position, token history, etc.).
 pub const DecodeState = forward_mod.DecodeState;
+pub const RequestControl = @import("../gpu/request_control.zig").RequestControl;
+
+/// Vulkan checks streaming-client liveness between prefill tokens/submissions.
+/// The Metal preview retains its existing decode-time cancellation behavior.
+pub fn setPrefillControl(engine: *InferenceEngine, control: ?RequestControl) void {
+    if (comptime gpu.is_vulkan) engine.prefill_control = control;
+}
 /// Loaded model handle (weights, hyperparams, GGUF metadata).
 pub const Model = loader_mod.Model;
 /// Manages loading, unloading, and switching between models at runtime.

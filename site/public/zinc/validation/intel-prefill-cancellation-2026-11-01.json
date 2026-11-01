@@ -1,0 +1,480 @@
+{
+  "schema": "zinc-intel-prefill-cancellation-v1",
+  "date": "2026-11-01",
+  "qualification": false,
+  "scope": "Native diagnostic builds, actual OpenCode failed 300-second controls and same-server active-prefill cancellation probes",
+  "original_coding_control": {
+    "baseline_shader_archive_sha256": "3d914b42a8ece2b8b3c38b17503a9da62ddf8bb37d3b24c4c52761895140113f",
+    "binary_sha256": "95d94d083fdc20801cfe038da299c214dca9873a1f0bbe09318b69fbf85944e9",
+    "build_scope": "native combined correctness diagnostic",
+    "cleanup": "no GPU process remains",
+    "client_executable_sha256": {
+      "bun": "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235",
+      "opencode": "7e2003e3834c27a8ee9f438b26563c37d97756505e2d507a125d17bdc164fef8"
+    },
+    "client_harness": {
+      "cpu_protocol_passed": true,
+      "manifest_sha256": "35600619fe0e6932c960accbfffa5f2d65550f07457f4311e37cf8ffb082c898",
+      "source": {
+        "base_source": "9e6d35e57c3b76351aeab1265378f8b184da64d9",
+        "files": {
+          "tools/fixtures/opencode/zinc-cli-args.mjs": "cad991dd85bf47b942f20f2414efb275eb712cc319d8cb40e418df2ee7fb03ad",
+          "tools/opencode_cli.mjs": "f249b690a3c1ddd4d853cbc861876f08ac12632dc099979e1e31672f48e5c43c",
+          "tools/opencode_eval.mjs": "9c96f71fce2547b112e9b223aa67de8b5eee18358d316c66854f8bb6eaf0eb2a",
+          "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+          "tools/setup_opencode.mjs": "be9c9581ab82effbf64a862745b83dc089888e178559026a3005638adbbd6b2d",
+          "tools/validate_opencode_api.mjs": "c0cf6dc96e79a4abf0c6e01f41ad20b123cb51f86d6b94f64c7363ea88d1fdaa",
+          "tools/validate_opencode_harness.mjs": "7345b84e3bcde53a0ac25d9c2bcc44ab001610f277af610e76169391011a11c0"
+        },
+        "local_changes": true
+      }
+    },
+    "clients": {
+      "bun": "1.4.4",
+      "opencode": "opencode v2.0.21"
+    },
+    "complete": false,
+    "gemma26_native_defaults": {
+      "cases": 3,
+      "environment_overrides": false,
+      "exact_cases": 3,
+      "passed": true,
+      "reference_artifacts": {
+        "library_sha256": {
+          "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+          "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+        },
+        "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+        "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+      },
+      "tokens": 48
+    },
+    "harness_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6",
+    "models": [
+      {
+        "actual_context": 16384,
+        "api": {
+          "checks": [
+            {
+              "ms": 787,
+              "name": "JSON/SSE parity at 1 output tokens",
+              "pass": true
+            },
+            {
+              "ms": 765,
+              "name": "JSON/SSE parity at 2 output tokens",
+              "pass": true
+            },
+            {
+              "ms": 802,
+              "name": "JSON/SSE parity at 7 output tokens",
+              "pass": true
+            },
+            {
+              "ms": 498,
+              "name": "JSON max_completion_tokens budget",
+              "pass": true
+            },
+            {
+              "ms": 486,
+              "name": "SSE max_completion_tokens budget",
+              "pass": true
+            },
+            {
+              "ms": 1059,
+              "name": "Unicode JSON/SSE parity",
+              "pass": true
+            },
+            {
+              "ms": 819,
+              "name": "Unicode JSON/SSE parity at 1 output tokens",
+              "pass": true
+            },
+            {
+              "ms": 846,
+              "name": "Unicode JSON/SSE parity at 2 output tokens",
+              "pass": true
+            },
+            {
+              "ms": 881,
+              "name": "Unicode JSON/SSE parity at 3 output tokens",
+              "pass": true
+            },
+            {
+              "ms": 2786,
+              "name": "JSON tool arguments and unique ID",
+              "pass": true
+            },
+            {
+              "ms": 2779,
+              "name": "SSE tool arguments and unique ID",
+              "pass": true
+            },
+            {
+              "ms": 4021,
+              "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+              "pass": true
+            },
+            {
+              "ms": 4009,
+              "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+              "pass": true
+            },
+            {
+              "ms": 4830,
+              "name": "Truncated tool calls remain text without an executable call",
+              "pass": true
+            },
+            {
+              "ms": 1200,
+              "name": "Null assistant content and tool-result history",
+              "pass": true
+            },
+            {
+              "ms": 402,
+              "name": "tool_choice none",
+              "pass": true
+            },
+            {
+              "ms": 406,
+              "name": "Text content arrays",
+              "pass": true
+            },
+            {
+              "ms": 2,
+              "name": "Malformed JSON returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 2,
+              "name": "Invalid message content returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 1,
+              "name": "Empty messages returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 1,
+              "name": "Negative token budget returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 2,
+              "name": "Negative modern token budget returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 1,
+              "name": "Conflicting token budgets returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 20,
+              "name": "Context overflow returns HTTP 400",
+              "pass": true
+            },
+            {
+              "ms": 1231,
+              "name": "Queued requests keep conversations separate",
+              "pass": true
+            },
+            {
+              "ms": 957,
+              "name": "Streaming cancellation releases the slot",
+              "pass": true
+            },
+            {
+              "ms": 121900,
+              "name": "Long prompt above the former 8192-token SSM limit",
+              "pass": true
+            },
+            {
+              "ms": 2917,
+              "name": "Buffered tool-call cancellation releases the slot",
+              "pass": true
+            }
+          ],
+          "complete": true,
+          "passed": 28,
+          "total": 28
+        },
+        "api_exit_code": 0,
+        "catalog_id": "qwen36-35b-a3b-q4k-xl",
+        "fixtures": [
+          {
+            "actual_context": 16384,
+            "baseline": {
+              "durationMs": 153,
+              "exitCode": 1,
+              "tests": {
+                "fail": 3,
+                "pass": 0
+              }
+            },
+            "driver_exit_code": 1,
+            "errors_count": 1,
+            "failed_tools": 0,
+            "final_test": {
+              "durationMs": 45,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "fixture": "rate-limiter-single",
+            "malformed_json_lines": 0,
+            "opencode": {
+              "durationMs": 300099,
+              "exitCode": 130,
+              "signal": null,
+              "timedOut": true
+            },
+            "protected_file_violations": 0,
+            "repaired_events": 0,
+            "server_recovery": {
+              "error_type": "TimeoutError",
+              "passed": false
+            },
+            "shortcuts_count": 0,
+            "success": false,
+            "suppressed_events": 0,
+            "timeout_ms": 300000,
+            "tool_calls": 5,
+            "tool_counts": {
+              "edit": 1,
+              "read": 3,
+              "shell": 1
+            },
+            "unexpected_files": 0
+          },
+          {
+            "actual_context": 16384,
+            "baseline": {
+              "durationMs": 40,
+              "exitCode": 1,
+              "tests": {
+                "fail": 2,
+                "pass": 1
+              }
+            },
+            "driver_exit_code": 1,
+            "errors_count": 1,
+            "failed_tools": 0,
+            "final_test": {
+              "durationMs": 61,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "fixture": "cart-multi-file",
+            "malformed_json_lines": 0,
+            "opencode": {
+              "durationMs": 300122,
+              "exitCode": 130,
+              "signal": null,
+              "timedOut": true
+            },
+            "protected_file_violations": 0,
+            "repaired_events": 0,
+            "server_recovery": {
+              "elapsed_ms": 29732,
+              "passed": true
+            },
+            "shortcuts_count": 0,
+            "success": false,
+            "suppressed_events": 0,
+            "timeout_ms": 300000,
+            "tool_calls": 6,
+            "tool_counts": {
+              "edit": 2,
+              "read": 3,
+              "shell": 1
+            },
+            "unexpected_files": 0
+          },
+          {
+            "actual_context": 16384,
+            "baseline": {
+              "durationMs": 299,
+              "exitCode": 1,
+              "tests": {
+                "fail": 4,
+                "pass": 0
+              }
+            },
+            "driver_exit_code": 1,
+            "errors_count": 1,
+            "failed_tools": 0,
+            "final_test": {
+              "durationMs": 148,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "fixture": "python-log-cli",
+            "malformed_json_lines": 0,
+            "opencode": {
+              "durationMs": 300080,
+              "exitCode": 130,
+              "signal": null,
+              "timedOut": true
+            },
+            "protected_file_violations": 0,
+            "repaired_events": 0,
+            "server_recovery": {
+              "error_type": "TimeoutError",
+              "passed": false
+            },
+            "shortcuts_count": 0,
+            "success": false,
+            "suppressed_events": 0,
+            "timeout_ms": 300000,
+            "tool_calls": 4,
+            "tool_counts": {
+              "read": 2,
+              "shell": 1,
+              "write": 1
+            },
+            "unexpected_files": 0
+          }
+        ],
+        "requested_context": 16384,
+        "served_id": "qwen36-35b-a3b-q4k-xl"
+      }
+    ],
+    "protocol": {
+      "fixture_timeout_ms": 300000,
+      "fresh_server_per_fixture": true,
+      "output_tokens": 2048,
+      "repair_proxy": false,
+      "steps": 16,
+      "supervisor_edits": false,
+      "temperature": 0,
+      "thinking": false,
+      "top_p": 1
+    },
+    "qualification": false,
+    "schema": "zinc-intel-opencode-validation-v1",
+    "source_snapshot_sha256": "c16bc0d523a16e7061f443ee36cefefa06c7dae8eaec679931469a8e926df7e6",
+    "token_budget_preflight": {
+      "cases": [
+        {
+          "actual_completion_tokens": 1,
+          "field": "max_tokens",
+          "finish_reason": "length",
+          "requested_tokens": 1
+        },
+        {
+          "actual_completion_tokens": 1,
+          "field": "max_completion_tokens",
+          "finish_reason": "length",
+          "requested_tokens": 1
+        }
+      ],
+      "passed": true
+    },
+    "tokenizer_helper_from_baseline_sha256": "e8c1e42568d3c01ccc7451e14fbca789cb1cab85ac52cdefef7845e059c5c1ec"
+  },
+  "prefill_probe": {
+    "after": {
+      "binary_sha256": "f9a68e89272eef6abf648b2dfeb1ea25f43424caa75d9395176d78f4b310d605",
+      "cases": [
+        {
+          "attempt": 1,
+          "exit_code": 0,
+          "prefill_keepalive_observed": true,
+          "recovery_ms": 418
+        },
+        {
+          "attempt": 2,
+          "exit_code": 0,
+          "prefill_keepalive_observed": true,
+          "recovery_ms": 419
+        },
+        {
+          "attempt": 3,
+          "exit_code": 0,
+          "prefill_keepalive_observed": true,
+          "recovery_ms": 417
+        }
+      ],
+      "source_snapshot_sha256": "e70c9f603a808480eec67db6c81c0e9ad2332e2c7b75aec67cd1652e2d39e90e"
+    },
+    "before": {
+      "binary_sha256": "95d94d083fdc20801cfe038da299c214dca9873a1f0bbe09318b69fbf85944e9",
+      "elapsed_ms": 10012,
+      "error_type": "TimeoutError",
+      "recovered_within_10_seconds": false,
+      "source_snapshot_sha256": "c16bc0d523a16e7061f443ee36cefefa06c7dae8eaec679931469a8e926df7e6"
+    },
+    "cleanup": "no GPU process remains",
+    "client_harness_manifest_sha256": "51b6b7aa04e3cc56174129bb0e4254306e25fd843aa520b9b589812d5587b5e1",
+    "context": 16384,
+    "model": "qwen36-35b-a3b-q4k-xl",
+    "qualification": false
+  },
+  "fixed_build_gemma26_native_defaults": {
+    "cases": 3,
+    "environment_overrides": false,
+    "exact_cases": 3,
+    "passed": true,
+    "reference_artifacts": {
+      "library_sha256": {
+        "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+        "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+        "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+        "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+      },
+      "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+      "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+    },
+    "tokens": 48
+  },
+  "tested_sources_sha256": {
+    "src/compute/forward.zig": "3f3e4968c34c17705cce8948c15ae6dd87bf1eb1be672eb58008d2face41a88a",
+    "src/server/routes.zig": "8678bb11e651c32a9a444ec2f833e3f506796129dac38f41c94291c6aadffef3",
+    "src/server/runtime.zig": "0ed582e347fce7bdcc674e6dde7c914b0e617107028ad8de6a6c71459bbf0387",
+    "src/gpu/request_control.zig": "af74abd294a6afcfd6ed89b5b60666dcb912d885c24a91dc881573fad00cd83a",
+    "src/server/prefill_progress.zig": "f136912f013a8e9c7edaa3a8948e8d6b486183d8381dea751b1e577b6e9c85b2",
+    "tools/validate_opencode_api.mjs": "e676d958a59e88ef2f326dba78169907416142dd905e77d8a20838a056d47ffd"
+  }
+}

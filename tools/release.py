@@ -315,6 +315,10 @@ def aggregate(args):
             require(model.get("sha256") == expected["sha256"] and model.get("context") == expected["context"] and model.get("passed") is True,
                     "model digest/context differs from policy")
             verify_reference_agreement(model.get("reference_agreement"))
+            if spec["target"].endswith("vulkan") and model["id"] == "qwen36-35b-a3b-q4k-xl":
+                prefill = model.get("prefill_cancellation") or {}
+                require(prefill.get("passed") is True and type(prefill.get("recovery_ms")) is int and
+                        0 <= prefill["recovery_ms"] < 10000, "missing or failed active-prefill cancellation evidence")
         reference = report.get("reference", {})
         require(reference.get("commit") == policy()["reference"]["commit"] and all(re.fullmatch(r"[0-9a-f]{64}", reference.get(key, "")) for key in ("server_sha256", "tokenizer_sha256")),
                 "missing pinned reference evidence")

@@ -1,5 +1,9 @@
 # OpenCode model validation for the first release
 
+The [Intel OpenCode investigation](INTEL_OPENCODE_VALIDATION.md) records the
+November 1 actual-client timeout failures and the active-prefill cancellation
+fix. Independently passing edits are kept separate from completed client runs.
+
 Client compatibility follow-up (2026-11-01): actual OpenCode 1.19.4 and 2.0.21
 each pass three CPU protocol fixtures: bounded tools, an API error, and
 timeout → independent failing check → repair → independent passing check.
