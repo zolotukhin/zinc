@@ -1,0 +1,1153 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-31",
+  "exported_utc": "2026-10-31T23:09:44.438662+00:00",
+  "scope": "Unsigned exact-byte ROCm developer validation on one 32 GB R9700; required 4K rows plus explicitly separate 8K diagnostics and 600-second OpenCode trials. Not final release qualification.",
+  "fix_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+  "developer_model_matrix_passed": true,
+  "all_core_coding_fixtures_passed": true,
+  "release_qualified": false,
+  "method": [
+    "Scratch allocation is retried at smaller capacities before executing any prefill layer. Absolute RoPE positions, causal/sliding-window limits and preceding KV are retained; existing GPU kernel source and the reference agreement policy are unchanged.",
+    "The exact extracted CI archive, executable, GGUF and harness digests are retained. All model/GPU work runs remotely; every owned model/client process is stopped before its parent command returns.",
+    "All six required ROCm models retain the 4K/F32/single-slot policy. Reference commit and serial/F32 settings remain pinned, with HIP for Qwen and Vulkan for Gemma explicitly identified per row.",
+    "There are 288 exact ordinary CLI choices, 72 tokenizer cases and 54 ordinary full HTTP reference replays. Gemma 31B adds 48 forced-small-chunk choices and nine full reference replays at 8K. Qwen 3.8 MTP-off also matches 48 choices.",
+    "The first one-query-per-launch prototype times out. The corrected development binary passes the 8K gate but its 300-second coding trial times out; neither failure is overwritten by later runs.",
+    "Actual OpenCode 1.19.4 runs directly against the exact CI executable, with one fresh server per fixture, 8K context, 2048 output tokens, 16 steps and a separately labeled 600-second budget. Frozen independent tests fail before each task; no supervisor edits or tool repairs are used.",
+    "The long-history replay retains its failed aggregate because the previous package differs from the reference text. The candidate separately matches the complete reference text and returns both stored codes. Its single cold-request latency is diagnostic, not a headline throughput benchmark.",
+    "Subsequent changes allow CPU-only checks on stacked PR bases and add documentation/evidence. Tested Zig/Python source hashes still match the current tree; protected launch workflows and hardware/model policy are unchanged."
+  ],
+  "host_checks": {
+    "new_cpu_policy_tests": 5,
+    "release_contract_tests": 46,
+    "full_cpu_unit_suite_passed": true,
+    "linux_cuda_host_compilation_passed": true,
+    "negative_controls": [
+      "Old single-allocation routing fails the OOM-capacity regressions.",
+      "Catch-all retries fail the non-retryable-error regression."
+    ]
+  },
+  "packaging": {
+    "run": 41247994350,
+    "url": "https://github.com/zolotukhin/zinc/actions/runs/41247994350",
+    "all_three_cpu_targets_passed": true,
+    "archive": "zinc-v0.1.0-dev.41247994350-linux-x86_64-rocm.tar.gz",
+    "sha256": "32da547b5b61532b6ceeb45b8decb8a8dd925bee3ab4d22a3650bf5979bdb294",
+    "metadata": {
+      "audit": {
+        "libraries": [
+          "ld-linux-x86-64.so.2",
+          "libamdhip64.so.7",
+          "libc.so.6",
+          "libhipblas.so.3",
+          "libhiprtc.so.7"
+        ],
+        "required_glibc": "2.36",
+        "runtime_paths": [
+          "/opt/rocm/lib"
+        ]
+      },
+      "backend": "rocm",
+      "built_at": "2026-10-31T22:21:38+00:00",
+      "commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+      "cpu": "baseline",
+      "minimum_glibc": "2.39",
+      "minimum_os": "linux",
+      "name": "zinc",
+      "optimize": "ReleaseFast",
+      "runtime": "ROCm 7.2.4: amdhip64, hiprtc, hipblas, HIP and rocWMMA headers",
+      "schema_version": 1,
+      "signing": {
+        "status": "unsigned"
+      },
+      "tag": "v0.1.0-dev.41247994350",
+      "target": "linux-x86_64-rocm",
+      "version": "0.1.0-dev.41247994350",
+      "zig_target": "x86_64-linux-gnu.2.39"
+    }
+  },
+  "first_prototype_timeout": {
+    "scope": "Development bounded-prefill diagnostic; not release qualification",
+    "source_commit": "b09604e1",
+    "binary_sha256": "dcbf21dd206391954afeb736afb02219ca3d7fe2616252992997fec631ec5000",
+    "kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "model": "gemma4-31b-q4k-m",
+    "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "context": 8192,
+    "reference_source": "Preserved policy-pinned Vulkan reference samples from the packaged six-model sweep",
+    "checks": [],
+    "passed": false,
+    "failure": "TimeoutError",
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true
+  },
+  "corrected_development_8k": {
+    "scope": "Development bounded-prefill diagnostic; not release qualification",
+    "source_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+    "binary_sha256": "cb5ab45c0060b471519e5ea12f49406bbad25d24be08c493069158543891df90",
+    "kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "model": "gemma4-31b-q4k-m",
+    "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "context": 8192,
+    "reference_source": "Preserved policy-pinned Vulkan reference samples from the packaged six-model sweep",
+    "checks": [
+      {
+        "name": "8k-full-api-including-long-context-and-reference-recovery",
+        "passed": true,
+        "seconds": 111.399
+      },
+      {
+        "name": "cli-reference-0",
+        "passed": true,
+        "tokens": 16
+      },
+      {
+        "name": "cli-reference-1",
+        "passed": true,
+        "tokens": 16
+      },
+      {
+        "name": "cli-reference-2",
+        "passed": true,
+        "tokens": 16
+      }
+    ],
+    "bounded_prefill": {
+      "passed": true,
+      "chunk_tokens": 16,
+      "cases": 3,
+      "tokens": 48
+    },
+    "passed": true,
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true
+  },
+  "failed_300_second_coding_trial": {
+    "scope": "Actual OpenCode on a development ROCm executable at 8K; not packaged qualification",
+    "binary_sha256": "cb5ab45c0060b471519e5ea12f49406bbad25d24be08c493069158543891df90",
+    "source_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+    "model": "gemma4-31b-q4k-m",
+    "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "context": 8192,
+    "parallel": 1,
+    "options": {
+      "max_tokens": 2048,
+      "steps": 16,
+      "timeout_ms": 300000,
+      "temperature": 0,
+      "top_p": 1,
+      "thinking": false,
+      "fresh_server_per_fixture": true
+    },
+    "opencode_version": "1.19.4",
+    "opencode_sha256": "538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7",
+    "harness_sha256": {
+      "tools/opencode_eval.mjs": "cc6b515145a5f20a19edf348a1cca557840139f142c90c8c92f9e50eb52fb89e",
+      "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+      "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "tools/validate_opencode_api.mjs": "e04f885ded44e5c30efbd54db147286d99d7df7982bf7c68d1204ba7f067c46e"
+    },
+    "fixtures": [
+      {
+        "id": "rate-limiter-single",
+        "passed": false,
+        "baseline": {
+          "pass": 0,
+          "fail": 3
+        },
+        "final": {
+          "pass": 0,
+          "fail": 3
+        },
+        "tool_calls": 7,
+        "timed_out": true,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 300.088
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": false
+  },
+  "final_packaged_sweep": {
+    "schema_version": 1,
+    "scope": "Packaged ROCm developer checks on one R9700, all required ROCm models with per-row pinned reference backend; not signed/final candidate qualification",
+    "tested_at_utc": "2026-10-31T22:35:48.452379+00:00",
+    "head_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+    "source_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+    "archive": "zinc-v0.1.0-dev.41247994350-linux-x86_64-rocm.tar.gz",
+    "archive_sha256": "32da547b5b61532b6ceeb45b8decb8a8dd925bee3ab4d22a3650bf5979bdb294",
+    "binary_sha256": "1781481750da9a5c4d09089a2307574dcb656296b784b5a38ced4328f8e1c7b4",
+    "packaging_run": 41247994350,
+    "hardware": {
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic",
+      "driver": "ROCm 7.2.4"
+    },
+    "options": {
+      "parallel": 1,
+      "context": 4096,
+      "kv_cache": "f32",
+      "mtp": "backend-default",
+      "greedy": true,
+      "runtime_overrides": {}
+    },
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_generation": {
+      "batch_size": 512,
+      "micro_batch": 1,
+      "parallel": 1,
+      "kv_cache": "f32",
+      "flash_attention": false
+    },
+    "reference_agreement_policy": {
+      "cases": 3,
+      "tokens_per_case": 16,
+      "min_exact_fraction": 0.975,
+      "max_logprob_gap": 0.05,
+      "max_near_ties_per_case": 1
+    },
+    "oracles": {
+      "qwen": {
+        "backend": "hip",
+        "binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc"
+      },
+      "gemma": {
+        "backend": "vulkan",
+        "binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47"
+      },
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+    },
+    "source_files_sha256": {
+      "src/compute/bounded_prefill.zig": "e7cbdbe49a1e1fd75402e51a9415f5dccce60b5f9a1db303382fbab049dcc0fc",
+      "src/compute/forward_cuda_gemma.zig": "18b9dbcc19759fbca4cc422bcc18af5d558788c70a90dcf479b404d93f0b2e8c",
+      "src/main.zig": "2dda0ad1dc2c16fd5fce754d60f5fb0c03eb3117c35cacdbecb175afff586bd3",
+      "tools/release_gpu.py": "79b26e396d55b33eee1f45fad4b8761be0f3d3a58898ea1c101c8eef3d12fb59",
+      "tools/release_test.py": "e6ff042afb4c646faa593e4106dc61f950bca6ba5c12f9411454e8c9e313c0a9"
+    },
+    "kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "models": [
+      {
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 9.702
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 8.083
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 1880.5 ms (2144.09 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen38-27b-q4k-m",
+        "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 11.032
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 26.492
+          },
+          {
+            "name": "mtp-default-observed-active",
+            "passed": true
+          },
+          {
+            "name": "mtp-disabled-exact-reference",
+            "passed": true,
+            "tokens": 48
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 9325.6 ms (432.36 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen36-27b-q4k-m",
+        "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 13.236
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 29.194
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 6339.7 ms (635.99 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "qwen35-9b-q4k-m",
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "context": 4096,
+        "reference_backend": "hip",
+        "reference_binary_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 5.215
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 11.096
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 2204.9 ms (1828.68 tok/s)"
+        ],
+        "passed": true
+      },
+      {
+        "id": "gemma4-31b-q4k-m",
+        "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "context": 4096,
+        "reference_backend": "vulkan",
+        "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 51.501
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 27.873
+          },
+          {
+            "name": "forced-small-chunk-reference",
+            "passed": true,
+            "cases": 3,
+            "tokens": 48
+          },
+          {
+            "name": "additional-8k-api",
+            "passed": true,
+            "seconds": 110.074,
+            "reference_cases": 9
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 4747.0 ms (849.37 tok/s)"
+        ],
+        "bounded_prefill": {
+          "passed": true,
+          "chunk_tokens": 16,
+          "cases": 3,
+          "tokens": 48
+        },
+        "context_8192": {
+          "passed": true,
+          "seconds": 110.074,
+          "reference_cases": 9,
+          "prefill_lines": [
+            "info(cuda_fwd_gemma): Gemma prefill scratch: 254 tokens per chunk for 8128 prompt tokens",
+            "info(forward): Prefill: 8128 tokens in 86817.8 ms (93.62 tok/s)"
+          ]
+        },
+        "passed": true
+      },
+      {
+        "id": "gemma4-26b-a4b-q4k-m",
+        "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "context": 4096,
+        "reference_backend": "vulkan",
+        "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "checks": [
+          {
+            "name": "model-pin",
+            "passed": true
+          },
+          {
+            "name": "tokenizer",
+            "passed": true,
+            "cases": 12
+          },
+          {
+            "name": "cli-reference",
+            "passed": true,
+            "cases": [
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              },
+              {
+                "tokens": 16,
+                "near_ties": []
+              }
+            ],
+            "total_tokens": 48,
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "wall_seconds": 19.298
+          },
+          {
+            "name": "api-reference-sse-unicode-cancellation-context-recovery",
+            "passed": true,
+            "reference_replay_cases": {
+              "initial": 3,
+              "after_cancellation": 3,
+              "after_context": 3
+            },
+            "wall_seconds": 9.833
+          }
+        ],
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "near_context_prefill_lines": [
+          "info(forward): Prefill: 4032 tokens in 1215.7 ms (3316.52 tok/s)"
+        ],
+        "passed": true
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": true
+  },
+  "long_history_replay": {
+    "candidate_exact_reference": true,
+    "raw_result": {
+      "scope": "Same frozen long prompt and reference, complete extracted CI bytes for the candidate; developer diagnostic, not final qualification",
+      "model": "gemma4-31b-q4k-m",
+      "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+      "reference_backend": "vulkan",
+      "reference_generation": {
+        "batch_size": 512,
+        "micro_batch": 1,
+        "parallel": 1,
+        "kv_cache": "f32",
+        "flash_attention": false
+      },
+      "context": 8192,
+      "max_tokens": 32,
+      "runs": [
+        {
+          "id": "baseline-8f957952",
+          "binary_sha256": "c1c822916697b7833a2430cf03c9aad466ec05da435e6ebeb333ad64659524ba",
+          "seconds": 192.784,
+          "content": "The codes are:\n\n1. AMBER-5921\n2. ORBIT-8734\n\n**How to store them safely:**",
+          "usage": {
+            "prompt_tokens": 4861,
+            "completion_tokens": 32,
+            "total_tokens": 4893
+          },
+          "exact_reference_text": false,
+          "both_codes_returned": true
+        },
+        {
+          "id": "bounded-11519aaa",
+          "binary_sha256": "1781481750da9a5c4d09089a2307574dcb656296b784b5a38ced4328f8e1c7b4",
+          "seconds": 26.418,
+          "content": "The codes are:\n\n1. **AMBER-5921**\n2. **ORBIT-8734**\n\n**How to",
+          "usage": {
+            "prompt_tokens": 4861,
+            "completion_tokens": 32,
+            "total_tokens": 4893
+          },
+          "exact_reference_text": true,
+          "both_codes_returned": true
+        }
+      ],
+      "prompt_sha256": "d637263e2d5afd5b15c03b49b86d55a5010dcee75c3974ee853a68e490a4887d",
+      "prompt_tokens": 4861,
+      "reference_content": "The codes are:\n\n1. **AMBER-5921**\n2. **ORBIT-8734**\n\n**How to",
+      "reference_seconds": 224.256,
+      "reference_result_sha256": "8bfbbf838703b05428ab1d0d33dc393758862edbf68d58a1a83d37424c9c660b",
+      "archive": {
+        "run": 41247994350,
+        "archive": "zinc-v0.1.0-dev.41247994350-linux-x86_64-rocm.tar.gz",
+        "sha256": "32da547b5b61532b6ceeb45b8decb8a8dd925bee3ab4d22a3650bf5979bdb294",
+        "metadata": {
+          "audit": {
+            "libraries": [
+              "ld-linux-x86-64.so.2",
+              "libamdhip64.so.7",
+              "libc.so.6",
+              "libhipblas.so.3",
+              "libhiprtc.so.7"
+            ],
+            "required_glibc": "2.36",
+            "runtime_paths": [
+              "/opt/rocm/lib"
+            ]
+          },
+          "backend": "rocm",
+          "built_at": "2026-10-31T22:21:38+00:00",
+          "commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+          "cpu": "baseline",
+          "minimum_glibc": "2.39",
+          "minimum_os": "linux",
+          "name": "zinc",
+          "optimize": "ReleaseFast",
+          "runtime": "ROCm 7.2.4: amdhip64, hiprtc, hipblas, HIP and rocWMMA headers",
+          "schema_version": 1,
+          "signing": {
+            "status": "unsigned"
+          },
+          "tag": "v0.1.0-dev.41247994350",
+          "target": "linux-x86_64-rocm",
+          "version": "0.1.0-dev.41247994350",
+          "zig_target": "x86_64-linux-gnu.2.39"
+        }
+      },
+      "passed": false,
+      "remaining_processes": {
+        "zinc": 0,
+        "rocm-dbg": 0,
+        "llama-server": 0,
+        "llama-cli": 0,
+        "llama-bench": 0,
+        "opencode": 0
+      },
+      "cleanup": true
+    },
+    "input_recipe": {
+      "concatenate": [
+        "Remember the first code: AMBER-5921.\n",
+        {
+          "repeat": "word ",
+          "count": 2400
+        },
+        "\nRemember the second code: ORBIT-8734.\n",
+        {
+          "repeat": "word ",
+          "count": 2400
+        },
+        "\nWrite both codes in their original order, then describe how to store them safely."
+      ],
+      "render_with": "Pinned reference /apply-template, one user message, enable_thinking=false; tokenize with add_special=true and parse_special=true"
+    }
+  },
+  "final_packaged_opencode": {
+    "scope": "Actual OpenCode on exact packaged ROCm bytes, 8K context and an extended 600-second fixture budget; separate from the failed 300-second trial and required 4K model row",
+    "archive_sha256": "32da547b5b61532b6ceeb45b8decb8a8dd925bee3ab4d22a3650bf5979bdb294",
+    "binary_sha256": "1781481750da9a5c4d09089a2307574dcb656296b784b5a38ced4328f8e1c7b4",
+    "source_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+    "head_commit": "11519aaa9128d2b9278334dbf04f1231ea41ce48",
+    "model": "gemma4-31b-q4k-m",
+    "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "context": 8192,
+    "parallel": 1,
+    "options": {
+      "max_tokens": 2048,
+      "steps": 16,
+      "timeout_ms": 600000,
+      "temperature": 0,
+      "top_p": 1,
+      "thinking": false,
+      "fresh_server_per_fixture": true
+    },
+    "opencode_version": "1.19.4",
+    "opencode_sha256": "538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7",
+    "harness_sha256": {
+      "tools/opencode_eval.mjs": "cc6b515145a5f20a19edf348a1cca557840139f142c90c8c92f9e50eb52fb89e",
+      "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+      "tools/setup_opencode.mjs": "ef526fbcdf4007c58ea77eb1c0043c15675c5e432f74d52456fd6598210fc6f0",
+      "tools/validate_opencode_api.mjs": "e04f885ded44e5c30efbd54db147286d99d7df7982bf7c68d1204ba7f067c46e"
+    },
+    "fixtures": [
+      {
+        "id": "rate-limiter-single",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 3
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 7,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 327.095
+      },
+      {
+        "id": "cart-multi-file",
+        "passed": true,
+        "baseline": {
+          "pass": 1,
+          "fail": 2
+        },
+        "final": {
+          "pass": 3,
+          "fail": 0
+        },
+        "tool_calls": 10,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 358.622
+      },
+      {
+        "id": "python-log-cli",
+        "passed": true,
+        "baseline": {
+          "pass": 0,
+          "fail": 4
+        },
+        "final": {
+          "pass": 4,
+          "fail": 0
+        },
+        "tool_calls": 5,
+        "timed_out": false,
+        "errors": 0,
+        "protected_files_changed": 0,
+        "unexpected_files": 0,
+        "seconds": 270.286
+      }
+    ],
+    "api": {
+      "model": "model.gguf",
+      "context": 8192,
+      "passed": 23,
+      "total": 23,
+      "complete": true,
+      "checks": [
+        {
+          "name": "JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 1278
+        },
+        {
+          "name": "JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 1260
+        },
+        {
+          "name": "JSON/SSE parity at 7 output tokens",
+          "pass": true,
+          "ms": 1260
+        },
+        {
+          "name": "Unicode JSON/SSE parity",
+          "pass": true,
+          "ms": 1892
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 1 output tokens",
+          "pass": true,
+          "ms": 1407
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 2 output tokens",
+          "pass": true,
+          "ms": 1471
+        },
+        {
+          "name": "Unicode JSON/SSE parity at 3 output tokens",
+          "pass": true,
+          "ms": 1471
+        },
+        {
+          "name": "JSON tool arguments and unique ID",
+          "pass": true,
+          "ms": 1012
+        },
+        {
+          "name": "SSE tool arguments and unique ID",
+          "pass": true,
+          "ms": 769
+        },
+        {
+          "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 1445
+        },
+        {
+          "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+          "pass": true,
+          "ms": 1442
+        },
+        {
+          "name": "Truncated tool calls remain text without an executable call",
+          "pass": true,
+          "ms": 268
+        },
+        {
+          "name": "Null assistant content and tool-result history",
+          "pass": true,
+          "ms": 381
+        },
+        {
+          "name": "tool_choice none",
+          "pass": true,
+          "ms": 630
+        },
+        {
+          "name": "Text content arrays",
+          "pass": true,
+          "ms": 630
+        },
+        {
+          "name": "Malformed JSON returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Invalid message content returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Empty messages returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Negative token budget returns HTTP 400",
+          "pass": true,
+          "ms": 0
+        },
+        {
+          "name": "Context overflow returns HTTP 400",
+          "pass": true,
+          "ms": 7
+        },
+        {
+          "name": "Queued requests keep conversations separate",
+          "pass": true,
+          "ms": 2136
+        },
+        {
+          "name": "Streaming cancellation releases the slot",
+          "pass": true,
+          "ms": 780
+        },
+        {
+          "name": "Buffered tool-call cancellation releases the slot",
+          "pass": true,
+          "ms": 1682
+        }
+      ]
+    },
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": true
+  },
+  "final_cleanup": {
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true
+  },
+  "remaining_limits": [
+    "One-board unsigned preview evidence does not qualify the final signed candidate or the other required Metal/Vulkan hardware profiles.",
+    "The required 4K release context is unchanged. The 8K coding result uses a 600-second fixture budget; the 300-second trial failed.",
+    "Three core fixtures do not establish large-repository delivery, support for every tool string, optional KV/concurrency modes or a catalog promotion.",
+    "Registered release workers, Apple signing credentials, full hardware qualification and protected promotion remain launch gates. CUDA remains experimental/source-only."
+  ],
+  "coding_model": "gemma4-31b-q4k-m",
+  "long_history_initial_capture_failure": {
+    "scope": "Same-prompt server diagnostic with preserved baseline bytes; not a headline performance suite or final release qualification",
+    "model": "gemma4-31b-q4k-m",
+    "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_binary_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+    "reference_backend": "vulkan",
+    "reference_generation": {
+      "batch_size": 512,
+      "micro_batch": 1,
+      "parallel": 1,
+      "kv_cache": "f32",
+      "flash_attention": false
+    },
+    "context": 8192,
+    "max_tokens": 32,
+    "runs": [],
+    "prompt_sha256": "d637263e2d5afd5b15c03b49b86d55a5010dcee75c3974ee853a68e490a4887d",
+    "prompt_tokens": 4861,
+    "reference_content": "The codes are:\n\n1. **AMBER-5921**\n2. **ORBIT-8734**\n\n**How to",
+    "reference_seconds": 224.256,
+    "passed": false,
+    "failure": "tokenizer did not return token IDs",
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true
+  }
+}

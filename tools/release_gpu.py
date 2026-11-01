@@ -297,6 +297,25 @@ def reference_http_parity(port, body, samples, work=None):
                 "full HTTP reference continuation differed")
 
 
+def bounded_prefill_parity(tree, model, context, device, work, env, samples):
+    """Exercise absolute positions, cache history and short tails on a roomy GPU."""
+    # Default 4K qualification may never exhaust scratch. Force small chunks so
+    # an offset reset cannot hide until a user fills an 8K cache. The oracle and
+    # full continuation remain unchanged; this is a separate correctness check.
+    limited = {**env, "ZINC_PREFILL_CHUNK": "16"}
+    for index, (prompt, expected) in enumerate(samples):
+        log = work / f"bounded-prefill-{index}.log"
+        command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--raw", "--debug",
+                   "--prompt", prompt, "-n", str(len(reference_generated_ids(expected))), "-c", str(context)]
+        with process(command, log, work, limited) as child:
+            require(child.wait(timeout=360) == 0, "bounded prefill CLI failed")
+        text = log.read_text(errors="replace")
+        require("Gemma prefill scratch: 16 tokens per chunk" in text, "bounded prefill was not exercised")
+        cli_reference_parity(text, expected)
+    return {"passed": True, "chunk_tokens": 16, "cases": len(samples),
+            "tokens": sum(len(reference_generated_ids(expected)) for _, expected in samples)}
+
+
 def unicode_chat_checks(port, model_id):
     """Require real UTF-8 and matching JSON/SSE, including split code points."""
     for budget in (1, 2, 3, 32):
@@ -469,12 +488,17 @@ def main():
                 print(identifier + ": tokenizer matched; checking reference continuations", flush=True)
                 samples = inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
                 agreement = reference_agreement([sample["comparison"] for _, sample in samples])
+                bounded = None
+                if profile["target"] == "linux-x86_64-rocm" and identifier == "gemma4-31b-q4k-m":
+                    bounded = bounded_prefill_parity(tree, model, expected["context"], device, work, env, samples)
                 print(identifier + f": reference choices {agreement['exact_tokens']}/{agreement['total_tokens']} exact, "
                       f"{agreement['near_tie_tokens']} qualified near ties; checking HTTP, cancellation and context", flush=True)
                 browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]
                 api_checks(tree, model, expected["context"], device, work, env, browser_chat, samples)
                 models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True,
                                "reference_agreement": agreement})
+                if bounded is not None:
+                    models[-1]["bounded_prefill"] = bounded
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},

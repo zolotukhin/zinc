@@ -157,6 +157,7 @@ comptime {
     _ = @import("runtime_assets.zig");
     _ = @import("regression_tests.zig");
     _ = prefill_policy;
+    _ = @import("compute/bounded_prefill.zig");
     _ = @import("server/http.zig");
     _ = @import("server/runtime.zig");
     _ = @import("scheduler/request.zig");

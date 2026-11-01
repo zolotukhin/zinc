@@ -1,5 +1,11 @@
 # OpenCode model validation for the first release
 
+Latest follow-up (2026-10-31): [bounded dense Gemma prefill](ROCM_GEMMA_BOUNDED_PREFILL.md)
+passes 23/23 API checks and all three Gemma 31B core fixtures on exact packaged
+ROCm bytes at 8K, with a separately recorded 600-second fixture budget. The
+300-second retry remains failed. The chronological reports below preserve their
+original executables, contexts, budgets and outcomes.
+
 On 2026-10-26, release validation covered all seven managed catalog models on
 a 32 GB Radeon AI PRO R9700 through Vulkan, plus the six ROCm-supported models.
 It combined API probes with actual OpenCode 1.19.4 sessions where serving
@@ -11,7 +17,7 @@ with the limits below. It does not qualify every model for the first release.
 **The original Gemma trials could not use tools.** Gemma 26B failed tool use on both backends.
 Gemma 31B could not meet the helper's 8K context minimum on Vulkan. Its initial
 ROCm allocation failure was fixed in the memory follow-up below; chat now works,
-but its actual OpenCode attempt still made no tool calls and failed the fixture.
+but that revision's actual OpenCode attempt made no tool calls and failed the fixture.
 The native-tool follow-up below now passes all API checks and three core coding
 fixtures for Gemma 26B on ROCm. The experimental Qwen3 0.6B starter also failed
 the coding fixture and several API checks.
@@ -205,8 +211,8 @@ qualifies one packaged model row on this board, not the complete release matrix.
 
 With the server now running at 8K, actual OpenCode 1.19.4 completed a
 rate-limiter attempt without a timeout or API error. It made zero tool calls
-and failed all three independent tests. Gemma 31B therefore remains outside
-the OpenCode support claim despite the working inference path.
+and failed all three independent tests. That revision did not establish
+OpenCode support for Gemma 31B despite the working inference path.
 
 ## Gemma native-tool follow-up (2026-10-27)
 
@@ -262,12 +268,13 @@ Final input checks on `a9c13da0` pass on both backends: invalid histories and
 schemas return 400, later requests recover, and Unicode keys round-trip. ROCm
 also passes 24/24 API checks including buffered-tool cancellation.
 
-Gemma 31B passes **22/22 API checks at 8K**, including actual native tool calls.
+That Gemma 31B revision passes **22/22 API checks at 8K**, including actual native tool calls.
 Its rate-limiter task made one tool call but hit the 300-second limit without
 fixing the source (0/3 tests). The first 5,037-token prompt took about 199 seconds
 to prefill after a temporary-allocation failure selected the serial fallback.
-Tool transport works; this 32 GB configuration does not establish practical
-OpenCode readiness for 31B. Its required 4K release configuration is unchanged.
+Tool transport worked, but that run did not establish practical coding readiness.
+The [bounded-prefill follow-up](ROCM_GEMMA_BOUNDED_PREFILL.md) below records the
+subsequent packaged trials; the required 4K release configuration is unchanged.
 
 Gemma 26B also passes **22/22 API checks on Vulkan at 8K**, but its actual
 rate-limiter task makes no tool calls and passes 0/3 tests. It reaches the
@@ -341,3 +348,27 @@ real tool calls, fresh servers and no protected-file changes. The
 the failed intermediate sweep and earlier executable identities. This does not
 change the Gemma 31B OpenCode memory limitation, promote catalog models, or
 qualify the final hardware matrix.
+
+## Dense Gemma bounded-prefill follow-up (2026-10-31)
+
+The [bounded-prefill fix](ROCM_GEMMA_BOUNDED_PREFILL.md) removes whole-prompt
+scratch as a reason to select serial prefill when a smaller batch fits. The new
+exact ROCm archive passes all six required 4K model rows (288/288 exact CLI
+choices and complete API recovery), plus forced-small-chunk and 8K checks for
+Gemma 31B. A 4,861-token history replay returns both stored codes and matches the
+complete pinned reference text.
+
+On that same package, Gemma 31B passes **23/23 OpenCode API checks at 8K** and
+**3/3 core fixtures**, with **10/10 independent tests** passing. Rate limiter,
+cart and Python CLI use 7, 10 and 5 real tool calls and finish in 327, 359 and
+270 seconds. Every fixture gets a fresh server, 2,048 output tokens, 16 steps
+and a **600-second budget**, with thinking off and temperature zero. No errors,
+timeouts, protected-file changes, unexpected files, tool repairs or supervisor
+edits occur.
+
+The earlier 300-second retry still fails (seven calls, 0/3 tests, timeout).
+These different budgets and executable identities remain separate in the
+[portable evidence](/zinc/validation/rocm-gemma-bounded-prefill-2026-10-31.json).
+The required 4K model policy, native quote-delimiter transport limit and larger
+repository qualification remain unchanged. This one-board unsigned preview does
+not qualify Metal, the remaining Vulkan hardware or final release bytes.

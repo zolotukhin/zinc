@@ -27,6 +27,7 @@ const shim = @import("../cuda/c.zig").shim;
 const gguf = @import("../model/gguf.zig");
 const loader = @import("../model/loader_cuda.zig");
 const memory_plan = @import("../gpu/memory_plan.zig");
+const bounded_prefill = @import("bounded_prefill.zig");
 
 const log = std.log.scoped(.cuda_fwd_gemma);
 const CudaBuffer = buffer.CudaBuffer;
@@ -407,6 +408,8 @@ const Pipelines = struct {
 /// scratch (`hidden`/`q_buf`/… on ForwardGemma) — additive, never aliases it.
 const BatchScratch = struct {
     t_cap: u32,
+    positions: CudaBuffer, // absolute query positions for bounded prefill
+    slots: CudaBuffer, // zero: KV descriptors already select the request slot
     hidden: CudaBuffer, // [T, n_embd] residual stream
     norm: CudaBuffer, // [T, n_embd] pre-attn / pre-ffn norm output
     q: CudaBuffer, // [T, q_dim_max]
@@ -1176,6 +1179,28 @@ pub const ForwardGemma = struct {
     /// FFN is position-independent → looping it is output-identical; full
     /// batched-expert routing (group T tokens by expert) is a later cycle.
     pub fn prefillBatched(self: *ForwardGemma, tokens: []const u32) !u32 {
+        if (tokens.len == 0) return error.EmptyPrompt;
+        if (tokens.len > self.max_ctx) return error.ContextLengthExceeded;
+        // Keep existing CUDA/MoE/Muse routing. On memory-limited ROCm dense
+        // Gemma, find scratch that fits BEFORE executing a layer. Each chunk
+        // keeps absolute RoPE positions and attends to the full preceding KV.
+        if (!is_rocm or self.d.n_experts > 0 or self.d.is_muse)
+            return self.prefillBatchedRange(tokens, 0, false, true);
+        const requested = bounded_prefill.limit(@intCast(tokens.len), host_io.getenv("ZINC_PREFILL_CHUNK"));
+        const capacity = try bounded_prefill.fit(self, requested, ensureBatch);
+        const chunked = capacity < tokens.len;
+        if (chunked) log.info("Gemma prefill scratch: {d} tokens per chunk for {d} prompt tokens", .{ capacity, tokens.len });
+        var start: usize = 0;
+        var next: u32 = 0;
+        while (start < tokens.len) {
+            const end = @min(tokens.len, start + capacity);
+            next = try self.prefillBatchedRange(tokens[start..end], @intCast(start), chunked, end == tokens.len);
+            start = end;
+        }
+        return next;
+    }
+
+    fn prefillBatchedRange(self: *ForwardGemma, tokens: []const u32, base_position: u32, chunked: bool, last_chunk: bool) !u32 {
         const d = self.d;
         const ctx = self.ctx;
         const T: u32 = @intCast(tokens.len);
@@ -1299,6 +1324,14 @@ pub const ForwardGemma = struct {
             self.prepareEmbeddingRow(tokens[t], row);
         }
         buffer.upload(ctx, &b.hidden, std.mem.sliceAsBytes(host));
+        if (chunked) {
+            const positions = try self.allocator.alloc(u32, T);
+            defer self.allocator.free(positions);
+            for (positions, 0..) |*position, row| position.* = base_position + @as(u32, @intCast(row));
+            buffer.upload(ctx, &b.positions, std.mem.sliceAsBytes(positions));
+            @memset(positions, 0);
+            buffer.upload(ctx, &b.slots, std.mem.sliceAsBytes(positions));
+        }
 
         var L: u32 = 0;
         while (L < d.n_layers) : (L += 1) {
@@ -1310,12 +1343,12 @@ pub const ForwardGemma = struct {
                 var t: u32 = 0;
                 while (t < T) : (t += 1) {
                     self.hidden = try buffer.aliasBuffer(&b.hidden, t * d.n_embd * f4, d.n_embd * f4);
-                    try self.attentionLayer(L, t);
+                    try self.attentionLayer(L, base_position + t);
                     buffer.freeBuffer(&self.hidden);
                 }
                 self.hidden = saved_hidden;
             } else {
-                try self.attentionLayerBatched(L, T, b);
+                try self.attentionLayerBatched(L, T, b, base_position, chunked);
             }
             if (profile) {
                 self.waitPending();
@@ -1445,6 +1478,7 @@ pub const ForwardGemma = struct {
         // TAIL on the last token only: rms_norm → LM head → argmax. Reuse the
         // single-token decode scratch (norm_buf/logits_buf/argmax_buf) on the
         // last token's slice of the batched hidden stream.
+        if (!last_chunk) return 0;
         const last = T - 1;
         const out_norm = self.model.get("output_norm.weight") orelse return error.MissingTensor;
         const lm_head = self.model.get("output.weight") orelse self.model.get("token_embd.weight") orelse return error.MissingTensor;
@@ -1770,7 +1804,7 @@ pub const ForwardGemma = struct {
         }
     }
 
-    fn attentionLayerBatched(self: *ForwardGemma, L: u32, T: u32, b: *BatchScratch) !void {
+    fn attentionLayerBatched(self: *ForwardGemma, L: u32, T: u32, b: *BatchScratch, base_position: u32, chunked: bool) !void {
         const d = self.d;
         const ctx = self.ctx;
         const g = self.geom[L];
@@ -1787,6 +1821,7 @@ pub const ForwardGemma = struct {
         const wpan = self.layer(L, "post_attention_norm.weight");
 
         var cmd = try command.beginCommand(ctx);
+        errdefer cmd.commitAndWait();
         const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
         const post_rms = RmsPush{ .N = d.n_embd, .eps = d.post_rms_eps };
         // Batched pre-attention norm: one block per token.
@@ -1818,18 +1853,22 @@ pub const ForwardGemma = struct {
         const inv_freq = if (g.is_swa) &self.inv_freq_swa else &self.inv_freq_full;
         const nr_sh = g.head_dim * f4;
         const v_base = if (wv_opt != null) &b.v else &b.k;
+        var k_dest = try buffer.aliasBuffer(&self.kv_k[L], @as(usize, base_position) * g.kv_dim * f4, @as(usize, T) * g.kv_dim * f4);
+        defer buffer.freeBuffer(&k_dest);
+        var v_dest = try buffer.aliasBuffer(&self.kv_v[L], @as(usize, base_position) * g.kv_dim * f4, @as(usize, T) * g.kv_dim * f4);
+        defer buffer.freeBuffer(&v_dest);
         if (d.is_muse) {
-            const qkv = MuseQkvBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = 0, .n_head = d.n_head, .n_kv_head = g.n_kv_head, .use_rope = @intFromBool(g.is_swa) };
+            const qkv = MuseQkvBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = base_position, .n_head = d.n_head, .n_kv_head = g.n_kv_head, .use_rope = @intFromBool(g.is_swa) };
             cmd.dispatch(&self.pipes.muse_norm_qkv_batched, .{ d.n_head + 2 * g.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &b.k, v_base, &wqn.gpu_buffer, &wkn.gpu_buffer, inv_freq, &b.q, &self.kv_k[L], &self.kv_v[L] }, &qkv, @sizeOf(MuseQkvBatchPush), nr_sh);
         } else {
             // V per-head plain-normalize fused with the V KV-cache write.
             const kvw = RmsKvWriteBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .src_stride = g.kv_dim, .dst_stride = g.kv_dim };
-            cmd.dispatch(&self.pipes.rms_norm_kvwrite_batched, .{ g.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ v_base, &self.kv_v[L] }, &kvw, @sizeOf(RmsKvWriteBatchPush), 0);
+            cmd.dispatch(&self.pipes.rms_norm_kvwrite_batched, .{ g.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ v_base, &v_dest }, &kvw, @sizeOf(RmsKvWriteBatchPush), 0);
             // Q/K per-head rms_norm fused with NEOX RoPE; K writes into kv_k.
-            const nr_q = RmsRopeBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = 0, .src_stride = g.q_dim, .dst_stride = g.q_dim };
-            const nr_k = RmsRopeBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = 0, .src_stride = g.kv_dim, .dst_stride = g.kv_dim };
+            const nr_q = RmsRopeBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = base_position, .src_stride = g.q_dim, .dst_stride = g.q_dim };
+            const nr_k = RmsRopeBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = base_position, .src_stride = g.kv_dim, .dst_stride = g.kv_dim };
             cmd.dispatch(&self.pipes.rms_norm_rope_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &wqn.gpu_buffer, inv_freq, &b.q }, &nr_q, @sizeOf(RmsRopeBatchPush), nr_sh);
-            cmd.dispatch(&self.pipes.rms_norm_rope_batched, .{ g.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.k, &wkn.gpu_buffer, inv_freq, &self.kv_k[L] }, &nr_k, @sizeOf(RmsRopeBatchPush), nr_sh);
+            cmd.dispatch(&self.pipes.rms_norm_rope_batched, .{ g.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.k, &wkn.gpu_buffer, inv_freq, &k_dest }, &nr_k, @sizeOf(RmsRopeBatchPush), nr_sh);
         }
 
         // Single batched causal (sliding-window on SWA) softmax attention over all
@@ -1845,7 +1884,27 @@ pub const ForwardGemma = struct {
             .scale_bits = if (d.attn_scale != 0) @bitCast(d.attn_scale) else 0,
             .window = window,
         };
-        if (self.blasPrefillAttnOn(T, g)) {
+        if (chunked) {
+            // Treat query rows as a batch of positions in the same cache. This
+            // existing kernel keeps causal/SWA limits absolute and launches all
+            // queries together; one launch per row made 8K prefill time out.
+            const one_cache = GemmaAttnSlotPush{
+                .head_dim = g.head_dim,
+                .n_heads = d.n_head,
+                .n_kv_heads = g.n_kv_head,
+                .slot_ctx = self.max_ctx,
+                .scale_bits = attn.scale_bits,
+                .window = window,
+            };
+            const pipe = if (self.use_attn_v2 and g.head_dim <= 512)
+                &self.pipes.gemma_attention_batched_seq_v2
+            else
+                &self.pipes.gemma_attention_batched_seq;
+            const shared = (base_position + T) * f4;
+            if (shared + shim.cuda_pipeline_shared_mem(pipe.handle) > shim.cuda_max_shared_mem_per_block(ctx))
+                return error.AttentionContextTooLarge;
+            cmd.dispatch(pipe, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out, &b.positions, &b.slots }, &one_cache, @sizeOf(GemmaAttnSlotPush), shared);
+        } else if (self.blasPrefillAttnOn(T, g)) {
             try self.blasPrefillAttention(&cmd, L, T, b, window);
         } else if (self.use_attn_v2) {
             cmd.dispatch(&self.pipes.gemma_attention_v2, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), (T + g.head_dim) * 4);
@@ -2786,6 +2845,8 @@ pub const ForwardGemma = struct {
         var batch = std.mem.zeroes(BatchScratch);
         errdefer freeBatchBuffers(&batch);
         batch.t_cap = T;
+        batch.positions = try buffer.createBuffer(ctx, @as(usize, T) * @sizeOf(u32));
+        batch.slots = try buffer.createBuffer(ctx, @as(usize, T) * @sizeOf(u32));
         batch.hidden = try buffer.createBuffer(ctx, T * d.n_embd * f4);
         batch.norm = try buffer.createBuffer(ctx, T * d.n_embd * f4);
         batch.q = try buffer.createBuffer(ctx, T * d.q_dim_max * f4);
@@ -2827,7 +2888,11 @@ pub const ForwardGemma = struct {
         batch.attn_probs = try buffer.createBuffer(ctx, d.n_head * self.max_ctx * @sizeOf(u16));
         // Largest dense Q4_K weight: gate/up (ff·n_embd), O (n_embd·q_dim),
         // Q (q_dim·n_embd). Avoid an unused ff·q_dim allocation.
-        batch.w_f16 = try buffer.createBuffer(ctx, memory_plan.densePrefillWeightScratchBytes(d.n_embd, d.q_dim_max, ff));
+        // ROCm's T>=16 quantized GEMMs return through MMQ before the fp16
+        // weight-staging branch. Reserving its unused 220.5 MiB prevents even
+        // small batches from fitting beside Gemma 31B's 8K KV cache. Keep it for
+        // CUDA and explicit BLAS thresholds below the MMQ boundary.
+        batch.w_f16 = try buffer.createBuffer(ctx, if (is_rocm and d.n_experts == 0 and !d.is_muse and self.cublas_min_t >= 16) 1 else memory_plan.densePrefillWeightScratchBytes(d.n_embd, d.q_dim_max, ff));
         self.batch = batch;
         return &self.batch.?;
     }

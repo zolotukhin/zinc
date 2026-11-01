@@ -99,6 +99,13 @@ Gemma 31B Q4_K_M passed the packaged 4K/F32 checks on the 32GB R9700 after
 removing a duplicate single-slot cache. Larger contexts and additional slots
 still need their own memory budget and validation.
 
+Dense Gemma now reduces prefill scratch capacity on allocation failure before
+executing prompt layers. Absolute positions and KV history carry across chunks;
+`ZINC_PREFILL_CHUNK` optionally caps their size. The
+[bounded-prefill checks](ROCM_GEMMA_BOUNDED_PREFILL.md) include exact packaged
+reference/recovery checks and three OpenCode fixtures at 8K with a 600-second
+fixture budget. The required release model row stays at 4K/F32/single-slot.
+
 Short dense hybrid Qwen CLI prompts use per-token prefill below 32 tokens;
 long prompts remain batched. Prepared MTP retains the batched hidden rows needed
 for priming. The debug harness shares this routing policy. See the
