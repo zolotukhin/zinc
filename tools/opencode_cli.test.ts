@@ -256,5 +256,9 @@ if (process.argv.includes('--help')) {
     expect(result.args).not.toContain('--dir');
     expect(result.args.includes('--standalone')).toBe(standalone);
     expect(result.args.slice(-2)).toEqual(['--', 'Fix $(literal) `text`']);
+    const hook = contextPluginPaths(
+      configForOpenCode(buildConfig(), standalone ? ['--standalone'] : []),
+    )[0];
+    expect((await stat(path.join(dir, hook))).isFile()).toBe(true);
   });
 }

@@ -612,8 +612,7 @@ export async function runOpenCode(
   const timeoutMs = timeoutValue(opts.timeoutMs ?? 900000);
   const flags = runFlags ?? openCodeRunFlags({ env });
   const portable = configForOpenCode(config, flags);
-  if (flags.includes('--standalone') || config.plugins)
-    await ensureContextPlugin(path.resolve(opts.project), portable);
+  await ensureContextPlugin(path.resolve(opts.project), portable);
   const live = runtimeConfig(portable, env, { project: opts.project });
   const args = ['run', ...flags, '--format', 'json', '--model', live.model, '--agent', 'zinc'];
   if (opts.auto) args.push('--auto');
