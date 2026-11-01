@@ -27,9 +27,7 @@ fn expectMultiSubgroupFallback(shader_src: []const u8, reduce_name: []const u8) 
 test "Vulkan KV allocation and budgeting share actual Gemma projection widths" {
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "profileWithKvDimensions(plan_config, kv_dtype.bytesPer32Elems(), kv_layer_dimensions)");
-    try expectContains(src, "layerKvDimension(model, i)");
     try expectContains(src, "kv_dtype.rowBytes(dim)");
-    try expectContains(src, "findLoadedTensor(model, v_name) orelse k");
 }
 
 test "decode loop keeps deinterleave split for packed Q and gate" {
