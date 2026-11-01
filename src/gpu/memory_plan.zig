@@ -269,6 +269,31 @@ pub fn profileWithKvBytes(config: ModelConfig, kv_elem_bytes: u64) RuntimeMemory
     return profileWithKvBlockBytes(config, kv_elem_bytes * 32);
 }
 
+/// Match the forward pass's projected K/V width, including K-as-V layers.
+/// The scalar metadata can combine a sliding layer's head count with a global
+/// layer's head size, so it must not override a valid, narrower projection.
+pub fn kvDimensionFromProjections(metadata_dimension: u32, key_rows: ?u32, value_rows: ?u32) u32 {
+    const fallback = std.mem.alignForward(u32, metadata_dimension, 32);
+    const key = key_rows orelse return fallback;
+    const value = value_rows orelse key;
+    if (key == 0 or key % 32 != 0 or key != value) return std.mem.alignForward(u32, @max(fallback, @max(key, value)), 32);
+    return key;
+}
+
+/// Use the cache widths that the forward pass actually writes. A zero width
+/// denotes a recurrent layer with no KV cache; appended draft layers are
+/// included by the caller. Gemma's global and sliding layers have different
+/// projection widths, so multiplying the metadata maxima overcounts memory.
+pub fn profileWithKvDimensions(config: ModelConfig, kv_bytes_per_32_elems: u64, layer_dimensions: []const u32) RuntimeMemoryProfile {
+    var result = profileWithKvBlockBytes(config, kv_bytes_per_32_elems);
+    result.device_local_bytes_per_token = 0;
+    for (layer_dimensions) |dim| {
+        std.debug.assert(dim % 32 == 0);
+        result.device_local_bytes_per_token += @as(u64, dim / 32) * kv_bytes_per_32_elems * 2;
+    }
+    return result;
+}
+
 /// Like profileWithKvBytes, but the cache is sized per 32-element block so a
 /// block-quantized layout (q8_0: 32 int8 + an f16 scale, 36 bytes) fits the
 /// arithmetic. kv_dim is a multiple of 32 for every supported model.
@@ -423,6 +448,93 @@ test "profile reports context-scaled and fixed bytes" {
     try std.testing.expect(p.runtimeDeviceLocalBytes(ctx) > p.deviceLocalContextBytes(ctx));
     try std.testing.expect(p.runtimeHostVisibleBytes(ctx) > p.hostVisibleContextBytes(ctx));
     try std.testing.expect(p.gpu_ssm_bytes > 0);
+}
+
+test "Gemma mixed projection widths fit coding contexts without quantizing KV" {
+    const cfg = ModelConfig{
+        .architecture = .gemma,
+        .n_layers = 60,
+        .n_heads = 32,
+        .n_kv_heads = 16,
+        .head_dim = 512,
+        .hidden_dim = 5376,
+        .intermediate_dim = 21504,
+        .vocab_size = 262144,
+        .context_length = 131072,
+        .rope_freq_base = 1000000,
+        .n_experts = 0,
+        .n_experts_used = 0,
+        .rope_dim = 512,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 0,
+        .shared_expert_intermediate_dim = 0,
+    };
+    // Pinned Gemma 31B: 50 sliding layers (16 × 256) and 10 global
+    // layers (4 × 512, including K-as-V). Both K and V need storage.
+    var dimensions: [60]u32 = undefined;
+    for (&dimensions, 0..) |*dim, i| dim.* = if ((i + 1) % 6 == 0) 2048 else 4096;
+    const half_profile = profileWithKvDimensions(cfg, 64, &dimensions);
+    try std.testing.expectEqual(@as(u64, 901120), half_profile.device_local_bytes_per_token);
+    try std.testing.expectEqual(@as(u64, 11072962560), half_profile.deviceLocalContextBytes(12288));
+    const weights_and_scratch = 18323733440 + @as(u64, 1024 * 1024 * 1024);
+    const card_bytes = @as(u64, 32) * 1024 * 1024 * 1024;
+    try std.testing.expectEqual(@as(u32, 12288), half_profile.maxContextTokensForDeviceLocalBudget(weights_and_scratch, card_bytes, 12288));
+    // The old metadata-max allocation cannot fit even 8K with this reserve.
+    try std.testing.expect(profileWithKvBlockBytes(cfg, 64).maxContextTokensForDeviceLocalBudget(weights_and_scratch, card_bytes, 8192) < 8192);
+    try std.testing.expectEqual(@as(u64, 1802240), profileWithKvDimensions(cfg, 128, &dimensions).device_local_bytes_per_token);
+    try std.testing.expectEqual(@as(u64, 506880), profileWithKvDimensions(cfg, 36, &dimensions).device_local_bytes_per_token);
+    try std.testing.expectEqual(profileWithKvBlockBytes(cfg, 64).fixed_device_local_bytes, half_profile.fixed_device_local_bytes);
+
+    // Pinned Gemma 26B has half as many layers and half the row width.
+    var moe_cfg = cfg;
+    moe_cfg.n_layers = 30;
+    moe_cfg.n_kv_heads = 8;
+    var moe_dimensions: [30]u32 = undefined;
+    for (&moe_dimensions, 0..) |*dim, i| dim.* = if ((i + 1) % 6 == 0) 1024 else 2048;
+    try std.testing.expectEqual(@as(u64, 225280), profileWithKvDimensions(moe_cfg, 64, &moe_dimensions).device_local_bytes_per_token);
+    // Recurrent placeholders consume no context-scaled memory. A draft block
+    // must be included rather than silently omitted from the budget.
+    try std.testing.expectEqual(@as(u64, 4096), profileWithKvDimensions(cfg, 64, &.{ 0, 512, 0, 512 }).device_local_bytes_per_token);
+}
+
+test "KV projection widths retain K-as-V and conservative unsupported fallbacks" {
+    try std.testing.expectEqual(@as(u32, 4096), kvDimensionFromProjections(8192, 4096, 4096));
+    try std.testing.expectEqual(@as(u32, 2048), kvDimensionFromProjections(8192, 2048, null));
+    try std.testing.expectEqual(@as(u32, 8192), kvDimensionFromProjections(8192, 4096, 2048));
+    try std.testing.expectEqual(@as(u32, 8224), kvDimensionFromProjections(8193, null, null));
+    try std.testing.expectEqual(@as(u32, 8192), kvDimensionFromProjections(8192, 4097, 4097));
+    try std.testing.expectEqual(@as(u32, 8192), kvDimensionFromProjections(8192, 0, null));
+    try std.testing.expectEqual(@as(u32, 16384), kvDimensionFromProjections(8192, 16384, 16384));
+}
+
+test "projection-aware KV budget includes appended NextN layers and preserves uniform models" {
+    var cfg: ModelConfig = std.mem.zeroes(ModelConfig);
+    cfg.architecture = .qwen35;
+    cfg.n_layers = 64;
+    cfg.n_nextn_layers = 1;
+    cfg.full_attn_interval = 4;
+    cfg.n_kv_heads = 4;
+    cfg.head_dim = 128;
+    cfg.hidden_dim = 2048;
+    cfg.ssm_d_conv = 4;
+    cfg.ssm_d_inner = 4096;
+    cfg.ssm_d_state = 128;
+    cfg.ssm_dt_rank = 32;
+    cfg.ssm_n_group = 16;
+    var dimensions: [65]u32 = @splat(0);
+    for (0..64) |i| {
+        if ((i + 1) % 4 == 0) dimensions[i] = 512;
+    }
+    dimensions[64] = 512; // MTP always attends, independently of the interval.
+    const with_draft = profileWithKvDimensions(cfg, 64, &dimensions);
+    try std.testing.expectEqual(@as(u64, 17 * 512 * 2 * 2), with_draft.device_local_bytes_per_token);
+    try std.testing.expectEqualDeep(profileWithKvBlockBytes(cfg, 64), with_draft);
+    cfg.n_nextn_layers = 0;
+    try std.testing.expectEqualDeep(profileWithKvBlockBytes(cfg, 64), profileWithKvDimensions(cfg, 64, dimensions[0..64]));
 }
 
 test "maxContextTokensForBudget clamps to available budget and ceiling" {

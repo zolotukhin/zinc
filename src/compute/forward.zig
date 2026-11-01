@@ -862,6 +862,24 @@ fn findLoadedTensor(model: *const Model, name: []const u8) ?*const LoadedTensor 
     return null;
 }
 
+fn layerKvDimension(model: *const Model, layer_idx: usize) u32 {
+    const cfg = model.config;
+    const fallback = memory_plan.kvDimensionFromProjections(cfg.n_kv_heads * cfg.head_dim, null, null);
+    if (cfg.architecture != .gemma) return fallback;
+    var name_buf: [128]u8 = undefined;
+    const k_name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_k.weight", .{layer_idx}) catch return fallback;
+    const k = findLoadedTensor(model, k_name) orelse return fallback;
+    const k_rows: u32 = @intCast(k.info.numElements() / cfg.hidden_dim);
+    const v_name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_v.weight", .{layer_idx}) catch return fallback;
+    // Global Gemma layers may use K as V. Both caches still own storage: V is
+    // normalized separately before K receives RoPE.
+    const v = findLoadedTensor(model, v_name) orelse k;
+    const v_rows: u32 = @intCast(v.info.numElements() / cfg.hidden_dim);
+    // Decode and batched prefill derive layer_kv_dim from these same tensors;
+    // using metadata maxima here would restore the original over-allocation.
+    return memory_plan.kvDimensionFromProjections(fallback, k_rows, v_rows);
+}
+
 pub fn tensorBytes(model: *const Model) u64 {
     // Only count device-local tensors against the VRAM budget. MoE expert
     // tensors offloaded to host-visible memory live in system RAM and do not
@@ -2018,13 +2036,18 @@ pub const InferenceEngine = struct {
         // NextN/MTP (Vulkan): decided up-front because the appended draft block
         // needs its own KV pair, which the context budget has to account for.
         const mtp_candidate = mtpModelEligible(config.*, model) and envFlagEnabled("ZINC_MTP", true);
-        const n_kv_layers: u32 = config.n_layers + (if (mtp_candidate) config.n_nextn_layers else 0);
+        const total_kv_layers: u32 = config.n_layers + (if (mtp_candidate) config.n_nextn_layers else 0);
         var plan_config = config.*;
         // memory_plan.kvLayerCount() counts the attending layers of n_layers plus
         // n_nextn_layers, so pass the base layer count and let the NextN block be
         // budgeted only when MTP will actually allocate its cache.
         plan_config.n_nextn_layers = if (mtp_candidate) config.n_nextn_layers else 0;
-        const runtime_profile = memory_plan.profileWithKvBlockBytes(plan_config, kv_dtype.bytesPer32Elems());
+        const kv_layer_dimensions = try allocator.alloc(u32, total_kv_layers);
+        defer allocator.free(kv_layer_dimensions);
+        for (kv_layer_dimensions, 0..) |*dim, i| {
+            dim.* = if (layerOwnsKvCache(config.*, i)) layerKvDimension(model, i) else 0;
+        }
+        const runtime_profile = memory_plan.profileWithKvDimensions(plan_config, kv_dtype.bytesPer32Elems(), kv_layer_dimensions);
         const mtp_reserved_bytes: u64 = if (mtp_candidate) mtpReservedBytes(config.*) else 0;
         if (mtp_candidate) {
             log.info("NextN/MTP: Vulkan draft block enabled ({d} extra KV layer(s) budgeted; set ZINC_MTP=0 to disable)", .{config.n_nextn_layers});
@@ -2376,7 +2399,7 @@ pub const InferenceEngine = struct {
         // Populated once after layer_tensors is resolved (see below); flash_attn reads
         // with sink_offset = layer_idx * n_heads. Eliminates per-token CPU memset+read
         // that previously ran for every attention-layer dispatch (cycle 8).
-        const attn_sinks_total_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_kv_layers) * @as(vk.c.VkDeviceSize, config.n_heads);
+        const attn_sinks_total_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, total_kv_layers) * @as(vk.c.VkDeviceSize, config.n_heads);
         const attn_sinks_size = @max(attn_sinks_total_floats * @sizeOf(f32), 4);
         var attn_sinks_buf = try Buffer.init(
             instance,
@@ -2400,36 +2423,37 @@ pub const InferenceEngine = struct {
         if (mtp_candidate and mtp_reserved_bytes > 0) {
             mtp_vram_hold = Buffer.initDeviceLocal(instance, mtp_reserved_bytes, storage_xfer) catch null;
         }
-        // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32)).
+        // KV cache: per-layer, flat layout in the selected storage format.
         // Only full-attention layers own one — the DeltaNet/SSM layers of a hybrid
         // model keep recurrent state and never read it, so they get a placeholder
         // (same layout as the Metal backend). On Qwen 3.8 27B this is 17 caches
         // instead of 65, i.e. 136 KB/token instead of 520 KB.
-        const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dtype.rowBytes(kv_dim));
-        const kv_k_cache = try allocator.alloc(Buffer, n_kv_layers);
+        const kv_k_cache = try allocator.alloc(Buffer, total_kv_layers);
         errdefer allocator.free(kv_k_cache);
-        const kv_v_cache = try allocator.alloc(Buffer, n_kv_layers);
+        const kv_v_cache = try allocator.alloc(Buffer, total_kv_layers);
         errdefer allocator.free(kv_v_cache);
 
+        var kv_k_initialized: usize = 0;
+        errdefer for (kv_k_cache[0..kv_k_initialized]) |*buffer| buffer.deinit();
+        var kv_v_initialized: usize = 0;
+        errdefer for (kv_v_cache[0..kv_v_initialized]) |*buffer| buffer.deinit();
         var kv_owned_layers: u32 = 0;
-        for (0..n_kv_layers) |i| {
-            const bytes = if (layerOwnsKvCache(config.*, i)) kv_cache_per_layer else kv_placeholder_bytes;
-            if (bytes == kv_cache_per_layer) kv_owned_layers += 1;
+        var kv_total_bytes: u64 = 0;
+        for (kv_layer_dimensions, 0..) |dim, i| {
+            const bytes = if (dim > 0) @as(vk.c.VkDeviceSize, max_ctx) * kv_dtype.rowBytes(dim) else kv_placeholder_bytes;
+            if (dim > 0) kv_owned_layers += 1;
             kv_k_cache[i] = try Buffer.initDeviceLocal(instance, bytes, storage_xfer);
+            kv_k_initialized += 1;
             kv_v_cache[i] = try Buffer.initDeviceLocal(instance, bytes, storage_xfer);
+            kv_v_initialized += 1;
+            kv_total_bytes += bytes * 2;
         }
         log.info("KV cache: {d}/{d} layers attend, {s} ({d} MB total at {d} tokens)", .{
             kv_owned_layers,
-            n_kv_layers,
+            total_kv_layers,
             @tagName(kv_dtype.layout()),
-            @as(u64, kv_owned_layers) * kv_cache_per_layer * 2 / (1024 * 1024),
+            kv_total_bytes / (1024 * 1024),
             max_ctx,
-        });
-
-        log.debug("KV cache: {d} layers × {d} MB = {d} MB total", .{
-            config.n_layers,
-            kv_cache_per_layer * 2 / (1024 * 1024),
-            config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
         });
 
         // Active page table for flash attention, backed by a request-owned page pool.
@@ -7908,6 +7932,8 @@ pub const InferenceEngine = struct {
                         @intCast(kn.info.numElements())
                     else
                         config.head_dim;
+                    // This is the cache row stride, also used by layerKvDimension
+                    // at allocation time. Gemma metadata maxima are not the stride.
                     const layer_kv_dim: u32 = k_rows;
                     const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else config.n_kv_heads;
                     const layer_kv_vec_size = @as(vk.c.VkDeviceSize, layer_kv_dim) * @sizeOf(f32);

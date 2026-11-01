@@ -626,7 +626,7 @@ def main():
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": sha256(Path(args.directory) / artifact["filename"]), "binary_sha256": sha256(tree / "bin/zinc"),
                       "hardware": hardware, "models": models,
-                      "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
+                      "options": {"parallel": 1, "kv_cache": "backend-default", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": commit, "generation": policy()["reference"]["generation"],
                                     "device_backend": reference_backend,
                                     **reference_snapshot},
