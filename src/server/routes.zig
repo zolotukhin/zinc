@@ -1061,7 +1061,8 @@ fn logGeneratedTiming(token_count: usize, start_ns: i128, end_ns: i128) void {
     });
 }
 
-fn completionFinishReason(requested_max_tokens: u32, effective_max_tokens: u32, produced_tokens: usize, ended_on_eog: bool) FinishReason {
+/// Classify completed generation; an EOG token takes precedence over the budget.
+pub fn completionFinishReason(requested_max_tokens: u32, effective_max_tokens: u32, produced_tokens: usize, ended_on_eog: bool) FinishReason {
     if (ended_on_eog) return .stop;
     if (requested_max_tokens > 0 and produced_tokens >= @as(usize, effective_max_tokens)) {
         return .length;
