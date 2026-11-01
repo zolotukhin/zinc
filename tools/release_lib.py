@@ -80,6 +80,14 @@ def source_sha(value):
     return value
 
 
+def comparison_proves_ancestor(comparison, commit):
+    """Require the requested immutable base, not just an API status string."""
+    return (isinstance(comparison, dict) and comparison.get("status") in ("ahead", "identical") and
+            type(comparison.get("behind_by")) is int and comparison["behind_by"] == 0 and
+            isinstance(comparison.get("base_commit"), dict) and comparison["base_commit"].get("sha") == commit and
+            isinstance(comparison.get("merge_base_commit"), dict) and comparison["merge_base_commit"].get("sha") == commit)
+
+
 def sha256(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as stream:

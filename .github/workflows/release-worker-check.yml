@@ -19,7 +19,7 @@ on:
           - metal-apple9
           - metal-apple10
       preview_run:
-        description: 'Successful packaging preview run for this exact main commit'
+        description: 'Successful main preview; an older ancestor is allowed with unchanged policy'
         required: true
         type: string
       exercise_models:
@@ -39,11 +39,13 @@ jobs:
       runner: ${{ steps.resolve.outputs.runner }}
       target: ${{ steps.resolve.outputs.target }}
       commit: ${{ steps.resolve.outputs.commit }}
+      validation_commit: ${{ steps.resolve.outputs.validation_commit }}
       version: ${{ steps.resolve.outputs.version }}
       runner_variable: ${{ steps.resolve.outputs.runner_variable }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Resolve one configured worker and verify trusted preview identity
         id: resolve
@@ -65,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
+          ref: ${{ needs.prepare.outputs.validation_commit }}
           persist-credentials: false
           clean: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -73,21 +75,22 @@ jobs:
           name: preview-${{ needs.prepare.outputs.target }}
           run-id: ${{ inputs.preview_run }}
           github-token: ${{ github.token }}
-          path: preview
+          path: ${{ runner.temp }}/zinc-worker-preview
       - name: Check package, actual hardware, pinned reference, models and cleanup
         env:
           WORKER_PROFILE: ${{ inputs.profile }}
           PREVIEW_VERSION: ${{ needs.prepare.outputs.version }}
           PREVIEW_COMMIT: ${{ needs.prepare.outputs.commit }}
+          VALIDATION_COMMIT: ${{ needs.prepare.outputs.validation_commit }}
           EXERCISE_MODELS: ${{ inputs.exercise_models }}
         run: |
           extra=()
           if [ "$EXERCISE_MODELS" = true ]; then extra+=(--exercise-models); fi
-          python3 tools/release_worker.py check --profile "$WORKER_PROFILE" --directory preview --version "$PREVIEW_VERSION" --commit "$PREVIEW_COMMIT" --output worker-readiness.json "${extra[@]}"
+          python3 tools/release_worker.py check --profile "$WORKER_PROFILE" --directory "$RUNNER_TEMP/zinc-worker-preview" --version "$PREVIEW_VERSION" --commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT" --output "$RUNNER_TEMP/zinc-worker-readiness.json" "${extra[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: worker-readiness-${{ inputs.profile }}
-          path: worker-readiness.json
+          path: ${{ runner.temp }}/zinc-worker-readiness.json
           if-no-files-found: warn
           retention-days: 14

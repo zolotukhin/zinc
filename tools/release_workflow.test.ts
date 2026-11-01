@@ -83,4 +83,24 @@ test('worker readiness is main-only, protected, and separate from candidate cert
   expect(JSON.stringify(check)).not.toContain('secrets.');
   expect(JSON.stringify(check)).not.toContain('release.py aggregate');
   expect(check.permissions).toEqual({ contents: 'read', actions: 'read' });
+  expect(check.jobs.prepare.outputs.validation_commit).toBe(
+    '${{ steps.resolve.outputs.validation_commit }}',
+  );
+  expect(check.jobs.prepare.steps[0].with.ref).toBe('${{ github.sha }}');
+  const checkout = check.jobs.check.steps.find((step: any) =>
+    step.uses?.startsWith('actions/checkout@'),
+  );
+  expect(checkout.with.ref).toBe('${{ needs.prepare.outputs.validation_commit }}');
+  const validation = check.jobs.check.steps.find((step: any) => step.env?.PREVIEW_COMMIT);
+  expect(validation.env.PREVIEW_COMMIT).toBe('${{ needs.prepare.outputs.commit }}');
+  expect(validation.env.VALIDATION_COMMIT).toBe('${{ needs.prepare.outputs.validation_commit }}');
+  expect(validation.run).toContain(
+    '--commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT"',
+  );
+  expect(validation.run).toContain('--directory "$RUNNER_TEMP/zinc-worker-preview"');
+  expect(validation.run).toContain('--output "$RUNNER_TEMP/zinc-worker-readiness.json"');
+  expect(
+    check.jobs.check.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@'))
+      .with.path,
+  ).toBe('${{ runner.temp }}/zinc-worker-preview');
 });

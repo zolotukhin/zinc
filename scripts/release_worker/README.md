@@ -156,8 +156,11 @@ launcher and call `stop` from `ExecStop`.
 Create the `release-workers` GitHub environment restricted to main, and set the
 role variable, for example `ZINC_RUNNER_RDNA4`, to
 `["self-hosted","linux","x64","zinc-rdna4"]`. Leave unavailable roles unset.
-Run the separate readiness workflow against a successful preview of the exact
-main commit. Its reports cannot be aggregated into release qualification.
+Run the separate readiness workflow against a successful main preview. An older
+preview must be an ancestor of the workflow's frozen main commit with identical
+release policy bytes. The worker uses that frozen commit's validation code and
+records its identity separately from the tested archive's source. Its reports
+cannot be aggregated into release qualification.
 
 Automatic runner updates are disabled to preserve the reviewed image. Check
 official runner releases regularly and rebuild with a verified archive hash

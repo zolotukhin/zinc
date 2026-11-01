@@ -1,6 +1,7 @@
 """Release contract tests. Fixtures execute CPU-only C programs, never a GPU/model."""
 
 import contextlib
+import base64
 import io
 import importlib.util
 import json
@@ -396,21 +397,103 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "event"):
             release_worker_guard.validate_context(config, {**env, "GITHUB_EVENT_NAME": "pull_request_target"})
 
-    def test_worker_preview_resolution_rejects_pr_failed_and_stale_bytes(self):
+    def test_worker_preview_resolution_rejects_untrusted_failed_or_unproven_bytes(self):
         profile = release_worker.profile_for("vulkan-rdna4")
         run = {"id": 123, "repository": {"full_name": "zolotukhin/zinc"}, "path": ".github/workflows/release-preview.yml",
                "event": "push", "head_branch": "main", "status": "completed", "conclusion": "success", "head_sha": COMMIT}
         variables = {profile["runner_variable"]: '["self-hosted","linux","x64","zinc-rdna4"]'}
         result = release_worker.resolve_preview(profile, run, variables, COMMIT)
         self.assertEqual(result["version"], "0.1.0-dev.123")
+        self.assertEqual(result["validation_commit"], COMMIT)
         self.assertEqual(result["runner_variable"], "ZINC_RUNNER_RDNA4")
         for changed in ({"event": "pull_request"}, {"head_branch": "feature"}, {"conclusion": "failure"},
-                        {"head_sha": "2" * 40}, {"path": ".github/workflows/other.yml"}, {"id": True}):
+                        {"head_sha": "2" * 40}, {"path": ".github/workflows/other.yml"}, {"id": True},
+                        {"repository": None}, {"repository": {"full_name": "example/zinc"}}, {"path": None}, {"head_sha": None}):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 release_worker.resolve_preview(profile, {**run, **changed}, variables, COMMIT)
         for labels in (None, "null", "[]", '["<private-selector>"]'):
             with self.subTest(labels=labels), self.assertRaises((ValueError, TypeError)):
                 release_worker.resolve_preview(profile, run, {profile["runner_variable"]: labels}, COMMIT)
+
+    def test_worker_older_preview_needs_immutable_ancestry_and_identical_policy(self):
+        profile = release_worker.profile_for("vulkan-rdna4")
+        run = {"id": 123, "repository": {"full_name": "zolotukhin/zinc"}, "path": ".github/workflows/release-preview.yml",
+               "event": "workflow_dispatch", "head_branch": "main", "status": "completed", "conclusion": "success", "head_sha": COMMIT}
+        variables = {profile["runner_variable"]: '["self-hosted","linux","x64","zinc-rdna4"]'}
+        comparison = {"status": "ahead", "behind_by": 0, "base_commit": {"sha": COMMIT}, "merge_base_commit": {"sha": COMMIT}}
+        digest = sha256(ROOT / "config/release/targets.json")
+        result = release_worker.resolve_preview(profile, run, variables, PREFLIGHT_MAIN, comparison, digest)
+        self.assertEqual((result["commit"], result["validation_commit"]), (COMMIT, PREFLIGHT_MAIN))
+        for changed in (None, [], {}, {"status": "behind"}, {"status": "diverged"}, {"behind_by": 1},
+                        {"behind_by": False}, {"base_commit": None}, {"base_commit": {"sha": PREFLIGHT_MAIN}},
+                        {"merge_base_commit": {"sha": PREFLIGHT_MAIN}}):
+            evidence = {**comparison, **changed} if isinstance(changed, dict) and changed else changed
+            with self.subTest(comparison=changed), self.assertRaisesRegex(ValueError, "verified ancestor"):
+                release_worker.resolve_preview(profile, run, variables, PREFLIGHT_MAIN, evidence, digest)
+        for changed in (None, "", "0" * 64):
+            with self.subTest(digest=changed), self.assertRaisesRegex(ValueError, "policy differs"):
+                release_worker.resolve_preview(profile, run, variables, PREFLIGHT_MAIN, comparison, changed)
+
+    def test_worker_resolver_fetches_frozen_policy_only_after_trusted_ancestry(self):
+        run = {"id": 123, "repository": {"full_name": "zolotukhin/zinc"}, "path": ".github/workflows/release-preview.yml",
+               "event": "push", "head_branch": "main", "status": "completed", "conclusion": "success", "head_sha": COMMIT}
+        comparison = {"status": "ahead", "behind_by": 0, "base_commit": {"sha": COMMIT}, "merge_base_commit": {"sha": COMMIT}}
+        frozen = {"type": "file", "path": "config/release/targets.json", "encoding": "base64",
+                  "content": base64.encodebytes((ROOT / "config/release/targets.json").read_bytes()).decode()}
+        args = SimpleNamespace(profile="vulkan-rdna4", preview_run="123")
+        for failure in (None, "same_commit", "untrusted", "failed", "identity", "diverged", "policy", "malformed"):
+            destination = self.root / (str(failure) + ".outputs")
+            metadata = {**run, **({"event": "pull_request"} if failure == "untrusted" else
+                                    {"conclusion": "failure"} if failure == "failed" else {"id": 456} if failure == "identity" else {})}
+            ancestry = {**comparison, **({"status": "diverged"} if failure == "diverged" else {})}
+            policy_file = {**frozen, **({"content": base64.b64encode(b"{}").decode()} if failure == "policy" else
+                                      {"content": "%%invalid%%"} if failure == "malformed" else {})}
+            with self.subTest(failure=failure), patch.dict(os.environ, {
+                "GITHUB_SHA": COMMIT if failure == "same_commit" else PREFLIGHT_MAIN, "GITHUB_OUTPUT": str(destination),
+                "RELEASE_VARIABLES": json.dumps({"ZINC_RUNNER_RDNA4": '["self-hosted","linux","x64","zinc-rdna4"]'}),
+            }), patch.object(release_gpu, "output", side_effect=[COMMIT if failure == "same_commit" else PREFLIGHT_MAIN, ""]) as git, \
+                    patch.object(release_worker, "github_json", side_effect=[metadata, ancestry, policy_file]) as api, contextlib.redirect_stdout(io.StringIO()):
+                if failure in (None, "same_commit"):
+                    release_worker.resolve(args)
+                    output = dict(line.split("=", 1) for line in destination.read_text().splitlines())
+                    self.assertEqual(output["commit"], COMMIT)
+                    self.assertEqual(output["validation_commit"], COMMIT if failure else PREFLIGHT_MAIN)
+                else:
+                    with self.assertRaises(ValueError): release_worker.resolve(args)
+                    self.assertFalse(destination.exists())
+                expected = ["actions/runs/123"]
+                if failure not in ("same_commit", "untrusted", "failed", "identity"):
+                    expected += [f"compare/{COMMIT}...{PREFLIGHT_MAIN}?per_page=1"]
+                    if failure != "diverged": expected += [f"contents/config/release/targets.json?ref={COMMIT}"]
+                self.assertEqual([call.args[0] for call in api.call_args_list], expected)
+                self.assertEqual(git.call_args_list[1].args[0], ["git", "-C", str(release_worker.ROOT), "status", "--porcelain", "--untracked-files=all"])
+
+    def test_worker_resolver_rejects_wrong_or_dirty_checkout_before_using_its_policy(self):
+        for failure in ("commit", "tracked", "untracked"):
+            output = [COMMIT] if failure == "commit" else [PREFLIGHT_MAIN, " M tools/release_worker.py" if failure == "tracked" else "?? tools/unexpected.py"]
+            with self.subTest(failure=failure), patch.dict(os.environ, {"GITHUB_SHA": PREFLIGHT_MAIN}), \
+                    patch.object(release_gpu, "output", side_effect=output), patch.object(release_worker, "github_json") as api, \
+                    self.assertRaisesRegex(ValueError, "validation checkout"):
+                release_worker.resolve(SimpleNamespace(profile="vulkan-rdna4", preview_run="123"))
+            api.assert_not_called()
+
+    def test_worker_cli_requires_an_explicit_validation_commit(self):
+        with patch.object(release_gpu, "output", return_value=COMMIT), self.assertRaises(ValueError):
+            release_worker.validation_identity(None)
+        result = subprocess.run([sys.executable, str(ROOT / "tools/release_worker.py"), "check", "--profile", "vulkan-rdna4",
+                                 "--directory", str(self.root), "--version", "9.8.7", "--commit", COMMIT,
+                                 "--output", str(self.root / "absent.json")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--validation-commit", result.stderr)
+        self.assertFalse((self.root / "absent.json").exists())
+
+    def test_worker_frozen_policy_rejects_non_file_and_unreadable_api_responses(self):
+        response = {"type": "file", "path": "config/release/targets.json", "encoding": "base64", "content": "e30="}
+        for changed in (None, [], {}, {"type": "dir"}, {"path": "other.json"}, {"encoding": "none"},
+                        {"content": None}, {"content": "<invalid>"}):
+            value = {**response, **changed} if isinstance(changed, dict) and changed else changed
+            with self.subTest(response=changed), self.assertRaises(ValueError):
+                release_worker.policy_digest_from_response(value)
 
     def test_worker_reservation_never_removes_an_occupied_reservation(self):
         path = self.root / "reservation"
@@ -1001,7 +1084,9 @@ class ReleaseTest(unittest.TestCase):
 
     def test_candidate_and_readiness_reject_stale_cross_backend_or_changed_references(self):
         for entrypoint in ("candidate", "readiness"):
-            for failure in (None, "library", "during_version_probe", "stale_server", "wrong_backend"):
+            failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend"]
+            if entrypoint == "readiness": failures += ["wrong_validation", "dirty_validation", "late_cleanup"]
+            for failure in failures:
                 folder = self.root / (entrypoint + "-" + str(failure))
                 reference, tree = folder / "reference", folder / "package"
                 reference.mkdir(parents=True)
@@ -1024,7 +1109,8 @@ class ReleaseTest(unittest.TestCase):
                 candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
                              "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
                 def output(command, *args, **kwargs):
-                    if command[-1] == "HEAD": return real["reference"]["commit"]
+                    if command[-1] == "HEAD": return COMMIT if command[2] == str(release_worker.ROOT) else real["reference"]["commit"]
+                    if "status" in command and command[2] == str(release_worker.ROOT) and failure == "dirty_validation": return " M tools/release_worker.py"
                     if command[-1] == "--version":
                         if failure == "during_version_probe": (reference / "libggml-hip.so").write_bytes(b"changed during version probe")
                         return "b96806d96" if failure == "stale_server" else real["reference"]["commit"][:7]
@@ -1035,7 +1121,9 @@ class ReleaseTest(unittest.TestCase):
                     if failure == "library": (reference / "libggml-hip.so").write_bytes(b"rebuilt library")
                 samples = [("prompt", {"comparison": {"tokens": 16, "near_ties": []}}) for _ in range(3)]
                 argv = ["release_gpu.py", "--directory", str(folder), "--profile", "rocm-rdna4", "--output", str(folder / "report.json")]
-                args = SimpleNamespace(profile="rocm-rdna4", directory=folder, version="9.8.7", commit=COMMIT, output=folder / "report.json", exercise_models=True)
+                args = SimpleNamespace(profile="rocm-rdna4", directory=folder, version="9.8.7", commit=PREFLIGHT_MAIN,
+                                       validation_commit="3" * 40 if failure == "wrong_validation" else COMMIT,
+                                       output=folder / "report.json", exercise_models=True)
                 with self.subTest(entrypoint=entrypoint, failure=failure), contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
                     stack.enter_context(patch.object(sys, "argv", argv))
                     stack.enter_context(patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(folder / "worker.json"),
@@ -1048,6 +1136,13 @@ class ReleaseTest(unittest.TestCase):
                         stack.enter_context(patch.object(release_worker, name, return_value=value))
                     stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
                     stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
+                    if failure == "late_cleanup":
+                        original_reservation = release_worker.reservation
+                        @contextlib.contextmanager
+                        def cleanup_failure(path):
+                            with original_reservation(path): yield
+                            raise ValueError("fixture cleanup failed")
+                        stack.enter_context(patch.object(release_worker, "reservation", side_effect=cleanup_failure))
                     launch = stack.enter_context(patch.object(release_gpu, "process"))
                     module = release_gpu if entrypoint == "candidate" else release_worker
                     report = stack.enter_context(patch.object(module, "write_json"))
@@ -1056,7 +1151,9 @@ class ReleaseTest(unittest.TestCase):
                         else: release_worker.check(args)
                     if failure:
                         reason = {"library": "reference artifacts changed", "during_version_probe": "reference artifacts changed",
-                                  "stale_server": "reference executable", "wrong_backend": "native GPU backend"}[failure]
+                                  "stale_server": "reference executable", "wrong_backend": "native GPU backend",
+                                  "wrong_validation": "validation checkout differs", "dirty_validation": "validation checkout is dirty",
+                                  "late_cleanup": "fixture cleanup failed"}[failure]
                         with self.assertRaisesRegex(ValueError, reason): run()
                         if entrypoint == "candidate": report.assert_not_called()
                         else: self.assertFalse(report.call_args.args[1]["passed"])
@@ -1064,6 +1161,12 @@ class ReleaseTest(unittest.TestCase):
                         run()
                         self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
                         self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
+                        if entrypoint == "readiness":
+                            evidence = report.call_args.args[1]
+                            self.assertTrue(evidence["passed"])
+                            self.assertEqual((evidence["source_commit"], evidence["validation_source_commit"]), (PREFLIGHT_MAIN, COMMIT))
+                            self.assertEqual(evidence["validation_helpers_sha256"], {
+                                name: sha256(ROOT / "tools" / name) for name in ("release_worker.py", "release_gpu.py", "release_lib.py", "release.py")})
                     launch.assert_not_called()  # Every inference boundary is mocked: these are CPU lifecycle tests.
                 after = release_gpu.reference_artifacts(reference)
                 self.assertEqual(before["server_sha256"], after["server_sha256"])
