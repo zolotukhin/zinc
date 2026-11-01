@@ -129,6 +129,38 @@ test('manifest permits an unnecessary skipped signer and blocks failed or requir
   expect(signedDownload.if).toBe("needs.prepare.outputs.signing_required == 'true'");
 });
 
+test('optional signing cannot propagate a skip past a successful manifest', () => {
+  const candidate = workflow('release-candidate.yml');
+  for (const name of ['hardware', 'certify']) {
+    const job = candidate.jobs[name];
+    // Without a status function, GitHub applies implicit success() to the
+    // dependency chain, including the intentionally skipped signing ancestor.
+    expect(job.if).toContain('!cancelled()');
+    const evaluate = (results: Record<string, string>, cancelled = false) => {
+      let expression = job.if
+        .replace(/^\s*\$\{\{|\}\}\s*$/g, '')
+        .replaceAll('cancelled()', JSON.stringify(cancelled));
+      for (const dependency of job.needs) {
+        expression = expression.replaceAll(
+          `needs.${dependency}.result`,
+          JSON.stringify(results[dependency]),
+        );
+      }
+      return new Function(`return (${expression});`)();
+    };
+    const passed = Object.fromEntries(
+      job.needs.map((dependency: string) => [dependency, 'success']),
+    );
+    expect(evaluate(passed)).toBe(true);
+    expect(evaluate(passed, true)).toBe(false);
+    for (const dependency of job.needs) {
+      for (const status of ['failure', 'cancelled', 'skipped']) {
+        expect(evaluate({ ...passed, [dependency]: status })).toBe(false);
+      }
+    }
+  }
+});
+
 test('publication requires review of a candidate before the protected job and verifies public installs afterwards', () => {
   const publisher = workflow('release.yml');
   expect(Object.keys(publisher.on)).toEqual(['workflow_dispatch']);

@@ -288,7 +288,14 @@ work.
 These are development-source results on one RDNA4 board. They do not qualify
 Gemma on Metal, or certify final release archives.
 
-## What still blocks 0.1.0
+## Earlier launch blockers
+
+The audit below records the earlier, wider launch plan. The approved 0.1.0
+scope is now Linux first: Vulkan on R9700 and Intel Xe2, plus ROCm on R9700.
+Metal remains an unsigned preview. The R9700 worker is registered; Intel is
+being tested over SSH. See the [current release gates](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md)
+for candidate qualification and publication. Historical coding outcomes and
+executable identities below retain their original scope.
 
 The original required ROCm Gemma 31B allocation blocker is fixed. Gemma 26B
 now completes the core OpenCode sweep on ROCm; other Gemma/backend combinations

@@ -173,6 +173,9 @@ jobs:
 
   hardware:
     needs: [prepare, manifest]
+    # Explicit status checks stop an intentionally skipped signer from
+    # propagating a skip through the remaining qualification chain.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.manifest.result == 'success' }}
     environment: release-workers
     strategy:
       fail-fast: false
@@ -206,6 +209,7 @@ jobs:
 
   certify:
     needs: [prepare, hardware]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.hardware.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
