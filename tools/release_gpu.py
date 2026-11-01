@@ -174,6 +174,14 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged Gemma router reference validation failed")
     require("PASS: 36 Gemma router workgroup/reference/guard/replay cases" in log.read_text(), "Gemma router reference suite was incomplete")
+    executable = work / "validate-attention-window"
+    output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_attention_window.c"),
+            "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
+            "-lggml-base", "-lvulkan", "-lm", "-o", str(executable)])
+    log = work / "attention-window-reference.log"
+    with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
+        require(child.wait(timeout=300) == 0, "packaged sliding-window reference validation failed")
+    require("PASS: 256 sliding-window/page/reference/guard/replay cases" in log.read_text(), "sliding-window reference suite was incomplete")
 
 
 def tokenizer_parity(tree, reference, model, work, env):
@@ -254,10 +262,12 @@ def qualify_reference_branch(port, tree, model, prompt, expected, actual, text, 
     expected["validated_content"] = content
 
 
-def inference_parity(tree, reference, model, context, device, llama_args, work, env):
+def inference_parity(tree, reference, model, context, device, llama_args, work, env, prompts=None):
     port = free_port()
     samples = []
     generation = policy()["reference"]["generation"]
+    prompts = PROMPTS if prompts is None else prompts
+    require(prompts and all(isinstance(p, str) and p for p in prompts), "invalid reference prompts")
     # A batched quantized reference can choose different greedy tokens from its
     # own serial path. Freeze the oracle's arithmetic and report these settings.
     def reference_command(port):
@@ -269,7 +279,7 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
     limit = policy()["reference"]["agreement"]["tokens_per_case"]
     with process(reference_command(port), work / "reference.log", work, reference_environment(reference, env)) as child:
         ready(child, port)
-        for prompt in PROMPTS:
+        for prompt in prompts:
             rendered = json_request(port, "/apply-template", {"messages": [{"role": "user", "content": prompt}],
                                                               "chat_template_kwargs": {"enable_thinking": False}})["prompt"]
             expected = json_request(port, "/completion", {"prompt": rendered, "n_predict": limit, "temperature": 0,
@@ -293,7 +303,7 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
             ties.append(tie)
             pending.append((prompt, expected, actual, text, tie))
         expected["comparison"] = {"tokens": len(actual), "near_ties": ties}
-    reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(PROMPTS))
+    reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(prompts))
     if pending:
         port = free_port()
         with process(reference_command(port), work / "reference-near-ties.log", work, reference_environment(reference, env)) as child:
@@ -302,6 +312,31 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
                 qualify_reference_branch(port, tree, model, prompt, expected, actual, text, tie, work, env)
     write_json(work / "reference-samples.json", [{"prompt": prompt, "expected": expected} for prompt, expected in samples])
     return samples
+
+
+def sliding_window_reference(tree, reference, model, context, device, llama_args, work, env, window):
+    """Short answers cannot expose a missing mask: prefill beyond its boundary."""
+    require(type(window) is int and 0 < window and window + 256 <= context, "invalid sliding-window reference context")
+    folder = work / "sliding-window-reference"
+    folder.mkdir(exist_ok=True)
+    prompts = ["The following is reference filler.\n" + "word " * (window + 76) +
+               "\nIgnore the filler and answer this request: " + prompt for prompt in PROMPTS]
+    samples = inference_parity(tree, reference, model, context, device, llama_args, folder, env, prompts=prompts)
+    counts = []
+    for index, (rendered, _) in enumerate(samples):
+        prompt_file = folder / f"rendered-{index}.txt"
+        prompt_file.write_text(rendered)
+        counts.append(len(token_ids(output([str(tree / "bin/zinc-tokenize"), str(model), str(prompt_file)], env))))
+    require(counts and min(counts) > window and max(counts) + policy()["reference"]["agreement"]["tokens_per_case"] <= context, "sliding-window boundary was not exercised")
+    port = free_port()
+    command = [str(tree / "bin/zinc"), "-m", str(model), "-d", str(device), "--port", str(port), "-c", str(context), "--parallel", "1"]
+    with process(command, folder / "http-server.log", folder, env) as child:
+        ready(child, port)
+        model_id = active_model_id(json_request(port, "/v1/models")["data"])
+        reference_http_parity(port, {"model": model_id, "temperature": 0, "stream": False}, samples, folder)
+    return {"passed": True, "http_passed": True, "context": context, "window_tokens": window,
+            "minimum_prompt_tokens": min(counts), "maximum_prompt_tokens": max(counts),
+            "reference_agreement": reference_agreement([sample["comparison"] for _, sample in samples])}
 
 
 def reference_http_parity(port, body, samples, work=None):
@@ -589,7 +624,7 @@ def main():
                     output(["codesign", "--verify", "--strict", str(executable)])
                     output(["spctl", "--assess", "--type", "execute", str(executable)], timeout=120)
             if profile["target"].endswith("vulkan"):
-                print("Running 84 packaged shader/reference cases", flush=True)
+                print("Running 376 packaged shader/reference cases", flush=True)
                 kernel_reference(tree, reference, checkout, device, work, env)
             models = []
             for identifier in profile["models"]:
@@ -603,6 +638,10 @@ def main():
                 print(identifier + ": tokenizer matched; checking reference continuations", flush=True)
                 samples = inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
                 agreement = reference_agreement([sample["comparison"] for _, sample in samples])
+                sliding = None
+                if expected.get("sliding_window"):
+                    sliding = sliding_window_reference(tree, reference, model, expected["context"], device,
+                                                       llama_args, work, env, expected["sliding_window"])
                 bounded = None
                 if profile["target"] == "linux-x86_64-rocm" and identifier == "gemma4-31b-q4k-m":
                     bounded = bounded_prefill_parity(tree, model, expected["context"], device, work, env, samples)
@@ -617,6 +656,8 @@ def main():
                                "reference_agreement": agreement})
                 if bounded is not None:
                     models[-1]["bounded_prefill"] = bounded
+                if sliding is not None:
+                    models[-1]["sliding_window_reference"] = sliding
                 if check_prefill:
                     require(prefill and prefill.get("passed") is True, "prefill cancellation evidence is missing")
                     models[-1]["prefill_cancellation"] = prefill

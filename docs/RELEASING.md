@@ -107,7 +107,7 @@ Populate every model assigned to that profile in the policy. On Metal, use `zinc
 
 For a worker serving multiple profiles, an optional `profiles` object maps profile IDs to overrides for `device`, `reference_args`, `reference_bin`, `reference_source` or `models`. Vulkan and HIP often assign different indices to the same card, so configure each backend's observed index/reference flags separately. Model-path overrides merge with the base model map. The shared `lock_directory` cannot be overridden by profile.
 
-Build the exact llama.cpp commit in the policy. The harness checks clean Git source, executable version and hashes. Workers need Python 3, Git and the supported backend runtime. Vulkan workers also need `cc`, Vulkan headers, `vulkaninfo`, and matching shared `libggml-base` beside the reference tools for the 84-case numerical shader check.
+Build the exact llama.cpp commit in the policy. The harness checks clean Git source, executable version and hashes. Workers need Python 3, Git and the supported backend runtime. Vulkan workers also need `cc`, Vulkan headers, `vulkaninfo`, and matching shared `libggml-base` beside the reference tools for the 376 numerical shader cases: 84 cache-boundary, 36 router, and 256 sliding-window cases.
 
 Use a reference build matching the tested backend: Metal for Metal, Vulkan for
 Vulkan, and HIP/ROCm for ROCm. Set one explicit `--device` selector in
@@ -120,6 +120,12 @@ uses each backend's default KV format (Vulkan defaults to F16) and records
 labelled this setting F32 even though they also used the backend defaults.
 A cross-backend disagreement is a separate diagnostic, not a reason to loosen
 the native reference agreement policy.
+
+Gemma qualification additionally compares three complete native continuations
+from prompts beyond its pinned sliding window, through both CLI and HTTP.
+The report records measured token bounds and reference agreement. A missing
+mask is invisible to the short continuations; missing, unexercised or failed
+window evidence blocks aggregation. See the [Vulkan correction](VULKAN_GEMMA_SLIDING_WINDOW.md).
 
 Reports also inventory the reference's ggml/llama libraries. Their hashes and
 both executable hashes must remain unchanged from the version probe through

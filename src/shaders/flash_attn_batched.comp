@@ -30,6 +30,7 @@ layout(push_constant) uniform PushConstants {
     uint page_size;       // tokens per page
     uint attn_scale_bits; // 0 => rsqrt(head_dim)
     uint sink_offset;     // layer_idx * n_heads — index into sink_data
+    uint sliding_window_size; // lower bound is computed separately for each query
 };
 
 // Q, K, V, and Output aliased as vec4 so the inner dot/V-acc loops issue
@@ -99,6 +100,8 @@ void main() {
     // Causal mask: query at position (seq_start + query_idx) can attend
     // to KV entries [0 .. seq_start + query_idx] inclusive.
     const uint causal_len = seq_start + query_idx + 1u;
+    const uint window_start = sliding_window_size > 0u && causal_len > sliding_window_size
+        ? causal_len - sliding_window_size : 0u;
 
     // Initialize per-query running state, vec4-packed s_out, and stage Q
     // into LDS as vec4 chunks. For head_dim=128 (head_dim_v4=32) only
@@ -118,7 +121,7 @@ void main() {
 
     const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
 
-    for (uint block_start = 0u; block_start < causal_len; block_start += BLOCK_SIZE) {
+    for (uint block_start = window_start; block_start < causal_len; block_start += BLOCK_SIZE) {
         const uint block_end = min(block_start + BLOCK_SIZE, causal_len);
         const uint block_len = block_end - block_start;
 

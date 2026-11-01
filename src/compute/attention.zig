@@ -28,6 +28,8 @@ pub const FlashAttnPush = extern struct {
     /// batched callers that run the decode kernel per query; 0 otherwise.
     q_offset_v4: u32,
     o_offset_v4: u32, // layer_idx * n_heads — starting index into sink_data for this layer
+    /// Number of visible causal tokens, including the query; 0 keeps full history.
+    sliding_window_size: u32 = 0,
 };
 
 /// Push constants for flash_attn_batched. Shared by two callers:
@@ -46,6 +48,7 @@ pub const FlashAttnBatchedPush = extern struct {
     page_size: u32,
     attn_scale_bits: u32,
     sink_offset: u32,
+    sliding_window_size: u32 = 0,
 };
 
 /// Push constants for flash_attn_split_merge. Reads N_I_CHUNKS partial outputs
@@ -321,6 +324,7 @@ pub const AttentionDispatch = struct {
         attn_scale: f32,
         /// Offset into the per-model sink buffer for this layer (layer_idx * n_heads).
         sink_offset: u32,
+        sliding_window_size: u32,
     ) !void {
         const pip = if (self.pipeline) |*p| p else return error.ShaderNotLoaded;
 
@@ -332,6 +336,7 @@ pub const AttentionDispatch = struct {
             .page_size = page_size,
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
+            .sliding_window_size = sliding_window_size,
             .n_chunks = 1,
             .q_offset_v4 = 0,
             .o_offset_v4 = 0,
@@ -483,6 +488,7 @@ pub const AttentionDispatch = struct {
         page_size: u32,
         attn_scale: f32,
         sink_offset: u32,
+        sliding_window_size: u32,
     ) !void {
         const pip = if (self.pipeline_batched) |*p| p else return error.ShaderNotLoaded;
         const push = FlashAttnBatchedPush{
@@ -494,6 +500,7 @@ pub const AttentionDispatch = struct {
             .page_size = page_size,
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
+            .sliding_window_size = sliding_window_size,
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, n_queries, 1);
     }
@@ -557,6 +564,7 @@ pub const AttentionDispatch = struct {
         attn_scale: f32,
         sink_offset: u32,
         n_chunks: u32,
+        sliding_window_size: u32,
     ) !void {
         const pip = if (self.pipeline_split) |*p| p else return error.ShaderNotLoaded;
         const push = FlashAttnPush{
@@ -567,6 +575,7 @@ pub const AttentionDispatch = struct {
             .page_size = page_size,
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
+            .sliding_window_size = sliding_window_size,
             .n_chunks = n_chunks,
             .q_offset_v4 = 0,
             .o_offset_v4 = 0,

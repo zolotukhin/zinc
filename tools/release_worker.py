@@ -183,6 +183,9 @@ def check(args):
                     print("Checking pinned model: " + model["id"], flush=True)
                     gpu.tokenizer_parity(tree, reference, path, model_work, env)
                     samples = gpu.inference_parity(tree, reference, path, model["context"], config["device"], config["reference_args"], model_work, env)
+                    if model.get("sliding_window"):
+                        model["sliding_window_reference"] = gpu.sliding_window_reference(tree, reference, path, model["context"],
+                            config["device"], config["reference_args"], model_work, env, model["sliding_window"])
                     if profile["target"] == "linux-x86_64-rocm" and model["id"] == "gemma4-31b-q4k-m":
                         model["bounded_prefill"] = gpu.bounded_prefill_parity(tree, path, model["context"], config["device"], model_work, env, samples)
                     browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]

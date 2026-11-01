@@ -34,6 +34,8 @@ const MoeGateUpGegluPushConstants = dmmv_mod.MoeGateUpGegluPushConstants;
 const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
 const elementwise_mod = @import("elementwise.zig");
 const kv_dtype = @import("kv_dtype.zig");
+const attention_window = @import("../gpu/attention_window.zig");
+const prefill_policy = @import("../gpu/prefill_policy.zig");
 const ElementwiseDispatch = elementwise_mod.ElementwiseDispatch;
 const RmsNormPush = elementwise_mod.RmsNormPush;
 const SwigluPush = elementwise_mod.SwigluPush;
@@ -1633,6 +1635,7 @@ pub const InferenceEngine = struct {
     // Q8_0 x Q8_1 integer-dot DMMV for medium/large overwrite projections.
     // Enable with ZINC_GEMMA_Q8_1_DMMV=1 (approximate output).
     use_gemma_q8_1_dmmv: bool = false,
+    gemma_prefill_dp4a_enabled: bool = false,
     // Intel Qwen A3B SSM-out Q8_0 prefill path through the existing four-row
     // DMMV shader. Normal decode stays on generic Q8 unless the env flag is
     // explicitly forced on; 7-run Intel A3B core validation showed a small
@@ -2003,6 +2006,10 @@ pub const InferenceEngine = struct {
         allocator: std.mem.Allocator,
     ) !InferenceEngine {
         const config = &model.config;
+        const gemma_prefill_dp4a_enabled = envFlagEnabled("ZINC_GEMMA_PREFILL_DP4A", prefill_policy.vulkanActivationQuantDefault(config.*));
+        if (config.architecture == .gemma and config.n_experts == 0 and gemma_prefill_dp4a_enabled) {
+            log.warn("Dense Gemma prefill activation quantization enabled via ZINC_GEMMA_PREFILL_DP4A (approximate output)", .{});
+        }
 
         var cmd_pool = try CommandPool.init(instance);
         errdefer cmd_pool.deinit();
@@ -4140,6 +4147,7 @@ pub const InferenceEngine = struct {
             .gemma_q8_geglu_rows = gemma_q8_geglu_rows,
             .use_gemma_q8_wide4_dmmv = gemma_q8_wide4_enabled,
             .use_gemma_q8_1_dmmv = gemma_q8_1_dmmv_enabled,
+            .gemma_prefill_dp4a_enabled = gemma_prefill_dp4a_enabled,
             .use_qwen36_q8_wide4_ssm_out = qwen36_q8_wide4_ssm_out_enabled,
             .use_qwen36_q8_wide4_ssm_out_decode = qwen36_q8_wide4_ssm_out_enabled and qwen36_q8_wide4_ssm_out_forced_on,
             .use_q8_batch_lm_head = q8_batch_lm_enabled,
@@ -7935,6 +7943,7 @@ pub const InferenceEngine = struct {
                     // This is the cache row stride, also used by layerKvDimension
                     // at allocation time. Gemma metadata maxima are not the stride.
                     const layer_kv_dim: u32 = k_rows;
+                    const layer_sliding_window = attention_window.forLayer(config.*, layer_head_dim);
                     const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else config.n_kv_heads;
                     const layer_kv_vec_size = @as(vk.c.VkDeviceSize, layer_kv_dim) * @sizeOf(f32);
                     // Gemma 4 proportional RoPE: global attention layers (use_k_as_v) rotate
@@ -8543,11 +8552,11 @@ pub const InferenceEngine = struct {
                         // Grouped variant: one workgroup per KV head serves all
                         // the query heads that share it, so each K/V row is
                         // streamed once per token instead of once per head.
-                        const use_gqa_decode = self.attention.pipeline_gqa_split != null and
+                        const use_gqa_decode = layer_sliding_window == 0 and self.attention.pipeline_gqa_split != null and
                             layer_head_dim == attn_mod.flash_attn_gqa_head_dim and
                             config.n_heads == layer_n_kv_heads * attn_mod.flash_attn_gqa_heads and
                             envFlagEnabled("ZINC_FA_GQA_DECODE", false);
-                        const use_mmq_decode = !use_gqa_decode and kv_dtype.isQ8() and
+                        const use_mmq_decode = layer_sliding_window == 0 and !use_gqa_decode and kv_dtype.isQ8() and
                             self.attention.pipeline_split_mmq != null and
                             layer_head_dim == attn_mod.flash_attn_gqa_head_dim and
                             envFlagEnabled("ZINC_FA_Q8_MMQ", true);
@@ -8562,6 +8571,7 @@ pub const InferenceEngine = struct {
                                 .page_size = kv_page_size_tokens,
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
+                                .sliding_window_size = layer_sliding_window,
                                 .n_chunks = attn_chunks,
                                 .q_offset_v4 = 0,
                                 .o_offset_v4 = 0,
@@ -8605,7 +8615,7 @@ pub const InferenceEngine = struct {
                             if (use_gqa_decode) {
                                 try self.attention.recordFlashAttnGqaSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset, attn_chunks);
                             } else {
-                                try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset, attn_chunks);
+                                try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset, attn_chunks, layer_sliding_window);
                             }
                         }
                         self.decode_cmd.computeBarrier();
@@ -8659,6 +8669,7 @@ pub const InferenceEngine = struct {
                                 .page_size = kv_page_size_tokens,
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
+                                .sliding_window_size = layer_sliding_window,
                             };
                             self.pushDispatch6(
                                 pip,
@@ -8696,7 +8707,7 @@ pub const InferenceEngine = struct {
                                 sink_buf.handle,
                                 sink_buf.size,
                             );
-                            try self.attention.recordFlashAttnBatched(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position, 1, kv_page_size_tokens, config.attn_scale, sink_offset);
+                            try self.attention.recordFlashAttnBatched(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position, 1, kv_page_size_tokens, config.attn_scale, sink_offset, layer_sliding_window);
                         }
                     } else if (self.attention.pipeline) |*pip| {
                         const sink_buf = self.attn_sinks_buf;
@@ -8710,6 +8721,7 @@ pub const InferenceEngine = struct {
                                 .page_size = kv_page_size_tokens,
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
+                                .sliding_window_size = layer_sliding_window,
                                 .n_chunks = 1,
                                 .q_offset_v4 = 0,
                                 .o_offset_v4 = 0,
@@ -8750,7 +8762,7 @@ pub const InferenceEngine = struct {
                                 sink_buf.handle,
                                 sink_buf.size,
                             );
-                            try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset);
+                            try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset, layer_sliding_window);
                         }
                     }
                     self.decode_cmd.computeBarrier();
@@ -13227,6 +13239,7 @@ pub const InferenceEngine = struct {
         page_size: u32,
         attn_scale: f32,
         sink_offset: u32,
+        sliding_window_size: u32,
     ) !void {
         // A small batch deep in the context — a speculative verify — has no
         // split-K in the tiled kernel: 3 queries x 6 heads is 8 workgroups
@@ -13240,7 +13253,7 @@ pub const InferenceEngine = struct {
             self.fa_split_k > 1 and
             envFlagEnabled("ZINC_FA_SMALL_BATCH_DECODE", true))
         {
-            const small_mmq = kv_dtype.isQ8() and head_dim == attn_mod.flash_attn_gqa_head_dim and self.attention.pipeline_split_mmq != null and envFlagEnabled("ZINC_FA_Q8_MMQ", true);
+            const small_mmq = sliding_window_size == 0 and kv_dtype.isQ8() and head_dim == attn_mod.flash_attn_gqa_head_dim and self.attention.pipeline_split_mmq != null and envFlagEnabled("ZINC_FA_Q8_MMQ", true);
             const small_split: ?*const Pipeline = if (small_mmq) &self.attention.pipeline_split_mmq.? else if (self.attention.pipeline_split) |*p| p else null;
             if (small_split) |split_pip| {
                 if (self.attention.pipeline_split_merge) |*merge_pip| {
@@ -13258,6 +13271,7 @@ pub const InferenceEngine = struct {
                                 .page_size = page_size,
                                 .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
                                 .sink_offset = sink_offset,
+                                .sliding_window_size = sliding_window_size,
                                 .n_chunks = chunks,
                                 .q_offset_v4 = off_v4,
                                 .o_offset_v4 = off_v4,
@@ -13302,19 +13316,19 @@ pub const InferenceEngine = struct {
         // loaded pipeline alone does not prove that this contract is met.
         // On Xe2, silently running them at 16/32 lanes corrupts 27B prefill.
         const wave64_available = self.wave64BatchedAttentionAvailable();
-        const use_tile = wave64_available and (n_queries >= qt_min_queries or kv_dtype.isQ8()) and
+        const use_tile = sliding_window_size == 0 and wave64_available and (n_queries >= qt_min_queries or kv_dtype.isQ8()) and
             head_dim == attn_mod.flash_attn_gqa_head_dim and
             n_kv_heads > 0 and
             n_heads % n_kv_heads == 0 and
             self.attention.pipeline_batched_tile != null and
             envFlagEnabled("ZINC_FA_TILE", true);
-        const use_gqa = wave64_available and !use_tile and n_queries >= qt_min_queries and
+        const use_gqa = sliding_window_size == 0 and wave64_available and !use_tile and n_queries >= qt_min_queries and
             head_dim == attn_mod.flash_attn_gqa_head_dim and
             n_kv_heads > 0 and
             n_heads == n_kv_heads * attn_mod.flash_attn_gqa_heads and
             self.attention.pipeline_batched_gqa != null and
             envFlagEnabled("ZINC_FA_GQA_GROUP", true);
-        const use_qt = !use_gqa and n_queries >= qt_min_queries and
+        const use_qt = sliding_window_size == 0 and !use_gqa and n_queries >= qt_min_queries and
             head_dim <= 512 and
             self.attention.pipeline_batched_qt != null and
             envFlagEnabled("ZINC_FA_QUERY_TILE", false);
@@ -13351,6 +13365,7 @@ pub const InferenceEngine = struct {
             .page_size = page_size,
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
+            .sliding_window_size = sliding_window_size,
         };
         if (pip.uses_push_descriptors) {
             self.pushDispatch6(
@@ -13385,7 +13400,7 @@ pub const InferenceEngine = struct {
         } else if (use_qt) {
             try self.attention.recordFlashAttnBatchedQt(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
         } else {
-            try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
+            try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset, sliding_window_size);
         }
     }
 
@@ -14099,6 +14114,7 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaDenseGegluDp4aEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
+        if (!self.gemma_prefill_dp4a_enabled) return false;
         if (self.validation_diagnostics_enabled) return false;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return false;
         if (!self.instance.caps.integer_dot_product) return false;
@@ -14113,6 +14129,7 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaDenseDownDp4aEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
+        if (!self.gemma_prefill_dp4a_enabled) return false;
         if (self.validation_diagnostics_enabled) return false;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return false;
         if (!self.instance.caps.integer_dot_product) return false;
@@ -14134,6 +14151,7 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaDenseQ6RaggedTailDp4aEnabled(self: *const InferenceEngine, down_t: *const LoadedTensor, n_tokens: u32) bool {
+        if (!self.gemma_prefill_dp4a_enabled) return false;
         if (down_t.info.type_ != .q6_k) return false;
         const full_cols = n_tokens & ~@as(u32, 31);
         const tail_cols = n_tokens - full_cols;
@@ -14145,6 +14163,7 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaDenseQ4RaggedTailDp4aEnabled(self: *const InferenceEngine, down_t: *const LoadedTensor, n_tokens: u32) bool {
+        if (!self.gemma_prefill_dp4a_enabled) return false;
         if (down_t.info.type_ != .q4_k) return false;
         const full_cols = n_tokens & ~@as(u32, 31);
         const tail_cols = n_tokens - full_cols;
@@ -14156,6 +14175,7 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaDenseProjectionDp4aEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
+        if (!self.gemma_prefill_dp4a_enabled) return false;
         if (self.validation_diagnostics_enabled) return false;
         if (!self.use_mul_mm_proj) return false;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return false;
@@ -25387,6 +25407,7 @@ pub const InferenceEngine = struct {
             kv_page_size_tokens,
             cfg.attn_scale,
             sink_offset,
+            0,
         );
         self.decode_cmd.computeBarrier();
 
@@ -27487,6 +27508,7 @@ pub const InferenceEngine = struct {
             kv_page_size_tokens,
             cfg.attn_scale,
             sink_offset,
+            attention_window.forLayer(cfg, layer_head_dim),
         );
         self.decode_cmd.computeBarrier();
         self.endProfilePhase(.flash_attn_kernel, flash_attn_kernel_phase);
@@ -29250,6 +29272,11 @@ pub const InferenceEngine = struct {
     }
 
     fn prefillBatchedImpl(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        // Q8's optimized prefill readers have no sliding mask. The ordinary
+        // decode shader supports it, including the cache's packed layout.
+        if (kv_dtype.isQ8() and self.model.config.architecture == .gemma and self.model.config.sliding_window_size > 0) {
+            return self.prefillBatch(state, prompt_tokens);
+        }
         // Default ON for models that pass `canUseBatchedPrefillRdna` — the gate
         // already rejects anything the batched body doesn't handle. Set
         // `ZINC_BATCHED_PREFILL=0` to force the per-token fallback (escape
@@ -29689,7 +29716,7 @@ pub const InferenceEngine = struct {
             // position within the batch (causal_len = base_token + query + 1).
             const sink_offset = layer * cfg.n_heads;
             const flash_attn_kernel_phase = self.beginProfilePhase();
-            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, layer_head_dim, cfg.n_heads, layer_n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
+            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, layer_head_dim, cfg.n_heads, layer_n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset, attention_window.forLayer(cfg, layer_head_dim));
             self.decode_cmd.computeBarrier();
             self.endProfilePhase(.flash_attn_kernel, flash_attn_kernel_phase);
 

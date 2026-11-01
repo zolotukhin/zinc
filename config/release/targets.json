@@ -216,7 +216,8 @@
       "size_bytes": 18323733440,
       "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
       "context": 4096,
-      "license": "apache-2.0"
+      "license": "apache-2.0",
+      "sliding_window": 1024
     },
     {
       "id": "gemma4-26b-a4b-q4k-m",
@@ -226,7 +227,8 @@
       "size_bytes": 16868236288,
       "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
       "context": 4096,
-      "license": "apache-2.0"
+      "license": "apache-2.0",
+      "sliding_window": 1024
     }
   ],
   "reference": {

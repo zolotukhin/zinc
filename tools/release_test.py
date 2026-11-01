@@ -1,6 +1,7 @@
 """Release contract tests. Fixtures execute CPU-only C programs, never a GPU/model."""
 
 import contextlib
+import copy
 import base64
 import io
 import importlib.util
@@ -408,10 +409,11 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(release_gpu.packaged_environment(), {"PATH": "<system-tools>"})
             self.assertEqual(dict(os.environ), inherited)
 
-    def test_packaged_kernel_gate_requires_cache_and_gemma_router_reference_suites(self):
+    def test_packaged_kernel_gate_requires_cache_router_and_window_reference_suites(self):
         markers = {"validate-shared-cache": "PASS: 84 cache-boundary/reference/offset/stride/guard cases",
-                   "validate-gemma-router": "PASS: 36 Gemma router workgroup/reference/guard/replay cases"}
-        for missing in (None, "validate-shared-cache", "validate-gemma-router"):
+                   "validate-gemma-router": "PASS: 36 Gemma router workgroup/reference/guard/replay cases",
+                   "validate-attention-window": "PASS: 256 sliding-window/page/reference/guard/replay cases"}
+        for missing in (None, *markers):
             launched, reaped = [], []
             @contextlib.contextmanager
             def child(command, log, cwd, env):
@@ -428,8 +430,41 @@ class ReleaseTest(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, "reference suite was incomplete"):
                         release_gpu.kernel_reference(self.root, self.root, self.root, 0, self.root, {})
-            self.assertEqual(launched, ["validate-shared-cache"] if missing == "validate-shared-cache" else list(markers))
+            self.assertEqual(launched, list(markers) if missing is None else list(markers)[:list(markers).index(missing) + 1])
             self.assertEqual(reaped, launched)
+
+    def test_sliding_window_reference_measures_prompts_beyond_the_mask_boundary(self):
+        samples = [("rendered prompt " + str(i), {"comparison": {"tokens": 16, "near_ties": []}}) for i in range(3)]
+        for count in (1025, 1024):
+            with self.subTest(count=count), patch.object(release_gpu, "inference_parity", return_value=samples) as native, \
+                    patch.object(release_gpu, "output", return_value=json.dumps([1] * count)), \
+                    patch.object(release_gpu, "process", return_value=contextlib.nullcontext(SimpleNamespace())), \
+                    patch.object(release_gpu, "ready"), patch.object(release_gpu, "free_port", return_value=0), \
+                    patch.object(release_gpu, "json_request", return_value={"data": [{"id": "fixture", "active": True}]}), \
+                    patch.object(release_gpu, "reference_http_parity") as http:
+                if count == 1025:
+                    result = release_gpu.sliding_window_reference(self.root, self.root, self.root / "fixture.gguf",
+                        4096, 0, [], self.root, {}, 1024)
+                    self.assertTrue(result["passed"])
+                    self.assertEqual(result["minimum_prompt_tokens"], count)
+                    self.assertEqual(result["reference_agreement"]["exact_tokens"], 48)
+                    self.assertTrue(result["http_passed"])
+                    http.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(ValueError, "boundary was not exercised"):
+                        release_gpu.sliding_window_reference(self.root, self.root, self.root / "fixture.gguf",
+                            4096, 0, [], self.root, {}, 1024)
+                prompts = native.call_args.kwargs["prompts"]
+                self.assertEqual(len(prompts), 3)
+                self.assertTrue(all(prompt.count("word ") == 1100 for prompt in prompts))
+
+    def test_invalid_sliding_window_context_does_not_start_model_work(self):
+        with patch.object(release_gpu, "inference_parity") as native:
+            for window in (None, True, 0, -1, 4000):
+                with self.subTest(window=window), self.assertRaisesRegex(ValueError, "invalid sliding-window"):
+                    release_gpu.sliding_window_reference(self.root, self.root, self.root / "fixture.gguf",
+                        4096, 0, [], self.root, {}, window)
+            native.assert_not_called()
 
     def test_worker_guard_accepts_only_the_admin_selected_main_workflow_job(self):
         workflow = "example/zinc/.github/workflows/release-worker-check.yml@refs/heads/main"
@@ -1019,6 +1054,12 @@ class ReleaseTest(unittest.TestCase):
             models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True,
                            reference_agreement=release_lib.reference_agreement([{"tokens": 16, "near_ties": []} for _ in range(3)]))
                       for m in policy()["models"] if m["id"] in profile["models"]]
+            for model in models:
+                pin = next(m for m in policy()["models"] if m["id"] == model["id"])
+                if pin.get("sliding_window"):
+                    model["sliding_window_reference"] = {"passed": True, "http_passed": True, "context": pin["context"], "window_tokens": pin["sliding_window"],
+                        "minimum_prompt_tokens": 1104, "maximum_prompt_tokens": 1108,
+                        "reference_agreement": release_lib.reference_agreement([{"tokens": 16, "near_ties": []} for _ in range(3)])}
             if profile["target"].endswith("vulkan"):
                 for model in models:
                     if model["id"] == "qwen36-35b-a3b-q4k-xl":
@@ -1066,6 +1107,42 @@ class ReleaseTest(unittest.TestCase):
         write_json(path, report)
         with self.assertRaisesRegex(ValueError, "runtime option policy"):
             self.aggregate(directory, reports)
+
+    def test_gemma_policy_requires_an_explicit_sliding_window_boundary(self):
+        data = copy.deepcopy(policy())
+        self.assertEqual({m["sliding_window"] for m in data["models"] if m["id"].startswith("gemma4-")}, {1024})
+        path = self.root / "window-policy.json"
+        for bad in (None, True, 0, -1, 4000):
+            changed = copy.deepcopy(data)
+            model = next(m for m in changed["models"] if m["id"] == "gemma4-31b-q4k-m")
+            if bad is None:
+                model.pop("sliding_window")
+            else:
+                model["sliding_window"] = bad
+            write_json(path, changed)
+            with self.subTest(window=bad), self.assertRaisesRegex(ValueError, "sliding-window boundary"):
+                policy(path)
+
+    def test_gemma_cannot_qualify_with_only_short_reference_prompts(self):
+        directory, reports = self.candidate()
+        path = reports / "vulkan-intel-xe2.json"
+        saved = read_json(path)
+        changes = [lambda m: m.pop("sliding_window_reference"),
+                   lambda m: m.update(sliding_window_reference={}),
+                   lambda m: m["sliding_window_reference"].update(passed=False),
+                   lambda m: m["sliding_window_reference"].pop("http_passed"),
+                   lambda m: m["sliding_window_reference"].update(window_tokens=True),
+                   lambda m: m["sliding_window_reference"].update(context=2048),
+                   lambda m: m["sliding_window_reference"].update(minimum_prompt_tokens=1024),
+                   lambda m: m["sliding_window_reference"].update(maximum_prompt_tokens=4096),
+                   lambda m: m["sliding_window_reference"].update(reference_agreement=None)]
+        for index, change in enumerate(changes):
+            report = copy.deepcopy(saved)
+            model = next(m for m in report["models"] if m["id"] == "gemma4-31b-q4k-m")
+            change(model)
+            write_json(path, report)
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
 
     def test_preview_targets_and_hardware_cannot_replace_or_join_the_release_scope(self):
         directory, reports = self.candidate()
