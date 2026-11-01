@@ -28,6 +28,7 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
   expect(candidate.jobs.sign.environment).toBe('release-signing');
   expect(candidate.jobs.manifest.needs).toContain('sign');
   expect(candidate.jobs.hardware.needs).toContain('manifest');
+  expect(candidate.jobs.hardware.environment).toBe('release-workers');
   expect(
     candidate.jobs.hardware.steps.some((step: any) => step.with?.name === 'candidate-inputs'),
   ).toBe(true);
@@ -56,7 +57,12 @@ test('publication requires review of a candidate before the protected job and ve
 });
 
 test('release actions use immutable commit references and no saved checkout credentials', () => {
-  for (const name of ['release-preview.yml', 'release-candidate.yml', 'release.yml']) {
+  for (const name of [
+    'release-preview.yml',
+    'release-candidate.yml',
+    'release-worker-check.yml',
+    'release.yml',
+  ]) {
     const data = workflow(name);
     for (const job of Object.values(data.jobs) as any[]) {
       for (const step of job.steps ?? []) {
@@ -66,4 +72,15 @@ test('release actions use immutable commit references and no saved checkout cred
       }
     }
   }
+});
+
+test('worker readiness is main-only, protected, and separate from candidate certification', () => {
+  const check = workflow('release-worker-check.yml');
+  expect(Object.keys(check.on)).toEqual(['workflow_dispatch']);
+  expect(check.jobs.prepare.if).toContain("github.ref == 'refs/heads/main'");
+  expect(check.jobs.check.environment).toBe('release-workers');
+  expect(check.jobs.check.concurrency.group).toContain('runner_variable');
+  expect(JSON.stringify(check)).not.toContain('secrets.');
+  expect(JSON.stringify(check)).not.toContain('release.py aggregate');
+  expect(check.permissions).toEqual({ contents: 'read', actions: 'read' });
 });

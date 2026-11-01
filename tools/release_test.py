@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import importlib.util
 import json
 import os
 import re
@@ -21,6 +22,8 @@ import release_lib
 import release_publish
 import release_preflight
 import release_sign
+import release_worker
+import release_worker_guard
 from release_lib import (
     ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
     read_json, sha256, target, version, write_json,
@@ -29,6 +32,9 @@ from release_lib import (
 COMMIT = "1" * 40
 PREFLIGHT_MAIN = "2" * 40
 NATIVE = "macos-aarch64-metal" if sys.platform == "darwin" else "linux-x86_64-vulkan"
+_launcher_spec = importlib.util.spec_from_file_location("release_worker_launcher", ROOT / "scripts/release_worker/launch.py")
+worker_launcher = importlib.util.module_from_spec(_launcher_spec)
+_launcher_spec.loader.exec_module(worker_launcher)
 
 
 class PreflightGitHub(release_preflight.GitHub):
@@ -46,7 +52,7 @@ class PreflightGitHub(release_preflight.GitHub):
                             "labels": [{"name": label.upper()} for label in labels]})
         self.rows("actions/variables", "variables", variables)
         self.rows("actions/runners", "runners", runners)
-        for name in ("release", "release-signing"):
+        for name in ("release", "release-signing", "release-workers"):
             self.responses[f"environments/{name}"] = {
                 "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False},
                 "protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User", "reviewer": {"id": 1, "login": "<private-reviewer>"}}]}],
@@ -141,7 +147,7 @@ class ReleasePreflightTest(unittest.TestCase):
                 self.assertNotIn("<private-invalid-json>", json.dumps(report))
 
     def test_environment_requires_only_main_branch_and_publication_reviewer(self):
-        for name in ("release", "release-signing"):
+        for name in ("release", "release-signing", "release-workers"):
             for branch_rows in ([], [{"id": 1, "name": "*", "type": "branch"}],
                                 [{"id": 1, "name": "main", "type": "tag"}],
                                 [{"id": 1, "name": "main", "type": "branch"}, {"id": 2, "name": "v*", "type": "tag"}]):
@@ -336,6 +342,90 @@ class ReleasePreflightTest(unittest.TestCase):
 
 
 class ReleaseTest(unittest.TestCase):
+    def test_worker_launcher_limits_host_access_and_keeps_inputs_read_only(self):
+        config = {"name": "zinc-release-fixture", "uid": 10001, "gid": 10001, "image": "sha256:" + "a" * 64,
+                  "gpu_devices": ["/dev/dri"], "gpu_groups": [100], "repository": "example/zinc", "labels": "zinc-fixture",
+                  "mounts": [{"source": str(self.root / "model"), "target": "/models/qwen3-0.6b-q8-0/model.gguf"},
+                             {"source": str(self.root / "work"), "target": "/runner"}]}
+        args = worker_launcher.container_args(config)
+        self.assertIn("--cap-drop=ALL", args)
+        self.assertIn("--security-opt=no-new-privileges", args)
+        self.assertIn("--read-only", args)
+        mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "--mount"]
+        self.assertTrue(mounts[0].endswith(",readonly"))
+        self.assertFalse(mounts[1].endswith(",readonly"))
+        for changed in ({"uid": 0}, {"gid": 0}, {"image": "ubuntu:latest"},
+                        {"gpu_devices": ["/dev"]},
+                        {"mounts": [{"source": "/", "target": "/runner"}]},
+                        {"mounts": [{"source": "/var/run/docker.sock", "target": "/runner"}]},
+                        {"mounts": [{"source": str(self.root), "target": "/etc"}]}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                worker_launcher.container_args({**config, **changed})
+
+    def test_reference_loader_uses_selected_build_without_changing_parent_environment(self):
+        env = {"LD_LIBRARY_PATH": "/other-reference:/toolkit", "FIXTURE": "kept"}
+        with patch.object(release_gpu.sys, "platform", "linux"):
+            selected = release_gpu.reference_environment(Path("/selected-reference"), env)
+        self.assertEqual(selected["LD_LIBRARY_PATH"], "/selected-reference:/other-reference:/toolkit")
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/other-reference:/toolkit")
+        self.assertEqual(selected["FIXTURE"], "kept")
+        with patch.object(release_gpu.sys, "platform", "darwin"):
+            self.assertEqual(release_gpu.reference_environment(Path("/selected-reference"), env), env)
+
+    def test_worker_guard_accepts_only_the_admin_selected_main_workflow_job(self):
+        workflow = "example/zinc/.github/workflows/release-worker-check.yml@refs/heads/main"
+        config = {"repository": "example/zinc", "actors": ["maintainer"],
+                  "workflows": {workflow: {"events": ["workflow_dispatch"], "jobs": ["check"]}}}
+        env = {"GITHUB_REPOSITORY": "example/zinc", "GITHUB_REF": "refs/heads/main", "GITHUB_ACTOR": "maintainer",
+               "GITHUB_SHA": COMMIT, "GITHUB_RUN_ID": "123", "GITHUB_WORKFLOW_REF": workflow,
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_JOB": "check"}
+        release_worker_guard.validate_context(config, env)
+        for key in env:
+            for value in ("", "<untrusted>"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    release_worker_guard.validate_context(config, {**env, key: value})
+        with self.assertRaisesRegex(ValueError, "event"):
+            release_worker_guard.validate_context(config, {**env, "GITHUB_EVENT_NAME": "pull_request_target"})
+
+    def test_worker_preview_resolution_rejects_pr_failed_and_stale_bytes(self):
+        profile = release_worker.profile_for("vulkan-rdna4")
+        run = {"id": 123, "repository": {"full_name": "zolotukhin/zinc"}, "path": ".github/workflows/release-preview.yml",
+               "event": "push", "head_branch": "main", "status": "completed", "conclusion": "success", "head_sha": COMMIT}
+        variables = {profile["runner_variable"]: '["self-hosted","linux","x64","zinc-rdna4"]'}
+        result = release_worker.resolve_preview(profile, run, variables, COMMIT)
+        self.assertEqual(result["version"], "0.1.0-dev.123")
+        self.assertEqual(result["runner_variable"], "ZINC_RUNNER_RDNA4")
+        for changed in ({"event": "pull_request"}, {"head_branch": "feature"}, {"conclusion": "failure"},
+                        {"head_sha": "2" * 40}, {"path": ".github/workflows/other.yml"}, {"id": True}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                release_worker.resolve_preview(profile, {**run, **changed}, variables, COMMIT)
+        for labels in (None, "null", "[]", '["<private-selector>"]'):
+            with self.subTest(labels=labels), self.assertRaises((ValueError, TypeError)):
+                release_worker.resolve_preview(profile, run, {profile["runner_variable"]: labels}, COMMIT)
+
+    def test_worker_reservation_never_removes_an_occupied_reservation(self):
+        path = self.root / "reservation"
+        path.mkdir()
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            with release_worker.reservation(path):
+                self.fail("occupied reservation was entered")
+        self.assertTrue(path.is_dir())
+        path.rmdir()
+        with patch.object(release_worker, "idle"), self.assertRaisesRegex(ValueError, "fixture"):
+            with release_worker.reservation(path):
+                raise ValueError("fixture")
+        self.assertFalse(path.exists())
+
+    def test_worker_readiness_schema_cannot_be_aggregated_as_release_evidence(self):
+        reports = self.root / "reports"
+        reports.mkdir()
+        write_json(reports / "worker.json", {"schema_version": release_worker.SCHEMA, "passed": True,
+                                            "release_qualification": False})
+        with patch.object(release, "verify_candidate", return_value={"artifacts": [], "required_profiles": []}), \
+             self.assertRaisesRegex(ValueError, "unsupported GPU report schema"):
+            release.aggregate(SimpleNamespace(directory=self.root, results=reports, version="9.8.7", commit=COMMIT))
+        self.assertFalse((self.root / "validation.json").exists())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="zinc release test ")
         self.addCleanup(self.temporary.cleanup)

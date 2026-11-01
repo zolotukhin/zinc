@@ -164,6 +164,7 @@ jobs:
 
   hardware:
     needs: [prepare, manifest]
+    environment: release-workers
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.gpus) }}

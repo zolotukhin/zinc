@@ -35,6 +35,15 @@ def output(command, env=None, timeout=180):
     return result.stdout + result.stderr
 
 
+def reference_environment(reference, env):
+    """Use the selected reference's sibling libraries, even with multiple builds."""
+    result = dict(env)
+    if sys.platform.startswith("linux"):
+        previous = result.get("LD_LIBRARY_PATH", "")
+        result["LD_LIBRARY_PATH"] = str(reference) + (os.pathsep + previous if previous else "")
+    return result
+
+
 def free_port():
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -448,7 +457,7 @@ def main():
     commit = policy()["reference"]["commit"]
     require(output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == commit, "reference checkout is not pinned")
     require(not output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference checkout is dirty")
-    require(commit[:7] in output([str(reference / "llama-server"), "--version"]), "reference executable does not match pinned source")
+    require(commit[:7] in output([str(reference / "llama-server"), "--version"], reference_environment(reference, os.environ)), "reference executable does not match pinned source")
     llama_args = config.get("reference_args")
     require(isinstance(llama_args, list) and llama_args and all(isinstance(a, str) for a in llama_args), "worker must explicitly configure reference GPU flags")
     lock = Path(config["lock_directory"]).expanduser().resolve()
@@ -469,6 +478,7 @@ def main():
             # Runtime assets must resolve from the installed archive itself.
             diagnostics = output([str(tree / "bin/zinc"), "--check", "-d", str(device)], env, timeout=360)
             hardware = hardware_evidence(diagnostics, profile["family"], device)
+            env = reference_environment(reference, env)
             if profile["family"].startswith("apple"):
                 for executable in (tree / "bin/zinc", tree / "bin/zinc-tokenize"):
                     output(["codesign", "--verify", "--strict", str(executable)])

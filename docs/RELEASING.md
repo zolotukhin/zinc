@@ -13,11 +13,12 @@ Land implementation changes through ordinary reviewed PRs. A later release prepa
 
 ## Workflows
 
-| Workflow                | Trigger                           | Result                                                                                                                                                                   |
-| ----------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `release-preview.yml`   | Relevant PRs/main changes, manual | Unsigned CPU-only packages for Metal, Vulkan and ROCm, with ABI/dependency audits and actual archive installation outside the checkout. No GPU coverage or publication.  |
-| `release-candidate.yml` | Manual from main; opt-in nightly  | Frozen full SHA/version, host tests, baseline builds, Developer ID/notarization, mandatory GPU reports, generated notes, attestation and a `release-candidate` artifact. |
-| `release.yml`           | Manual candidate run ID from main | Read-only preflight summary, protected approval, re-verification, final tag, draft/upload/read-back/publish, then public-download and clean-install checks. No rebuild.  |
+| Workflow                   | Trigger                           | Result                                                                                                                                                                   |
+| -------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `release-preview.yml`      | Relevant PRs/main changes, manual | Unsigned CPU-only packages for Metal, Vulkan and ROCm, with ABI/dependency audits and actual archive installation outside the checkout. No GPU coverage or publication.  |
+| `release-worker-check.yml` | Manual from main                  | Readiness of one configured worker against a successful preview from the same main commit. Optional full model/API exercise; cannot certify or publish a release.        |
+| `release-candidate.yml`    | Manual from main; opt-in nightly  | Frozen full SHA/version, host tests, baseline builds, Developer ID/notarization, mandatory GPU reports, generated notes, attestation and a `release-candidate` artifact. |
+| `release.yml`              | Manual candidate run ID from main | Read-only preflight summary, protected approval, re-verification, final tag, draft/upload/read-back/publish, then public-download and clean-install checks. No rebuild.  |
 
 PR code never runs on GPU/signing workers. Actions use commit pins, checkout credentials are not retained, and only the publisher has release-write permission. Nightly runs cannot be promoted. Enable them with repository variable `ZINC_ENABLE_RELEASE_NIGHTLY=true` after provisioning workers and signing configuration.
 
@@ -47,6 +48,19 @@ Use dedicated workers with generic role labels. Set these repository variables t
 | `ZINC_RUNNER_INTEL_XE2`     | Intel Battlemage Vulkan      | 32 GB for required dense/MoE matrix                |
 
 A generic label array is `["self-hosted", "linux", "x64", "zinc-rdna4"]`. Missing/empty assignments fail resolution. The packaged executable verifies the actual selected family; software Vulkan implementations and device-index fallbacks fail.
+
+For Linux administrators, the [worker container kit](https://github.com/zolotukhin/zinc/blob/main/scripts/release_worker/README.md)
+provides a pinned runner image, a non-root launcher and administrator-owned job
+hooks. Create `release-workers` with a main-only deployment branch policy before
+dispatching readiness or candidate hardware jobs. Keep private configuration,
+registration credentials and host mount sources outside Git.
+
+Once a role is configured, dispatch `release-worker-check.yml` on main with its
+profile and a successful `release-preview.yml` run ID for that exact main commit.
+Keep `exercise_models=true` for actual tokenizer, reference, API and cleanup
+checks. Set it to false only to diagnose package/hardware/configuration startup.
+Its artifact uses a separate schema and is rejected by candidate aggregation;
+even a full readiness pass does not qualify signed candidate bytes.
 
 Each runner service sets `ZINC_RELEASE_WORKER_CONFIG` to a private JSON file outside the checkout. Replace these placeholders locally; `device` must become an integer:
 
