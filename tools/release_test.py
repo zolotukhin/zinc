@@ -617,6 +617,7 @@ class ReleaseTest(unittest.TestCase):
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": policy()["reference"]["commit"], "generation": policy()["reference"]["generation"],
                                     "device_backend": target(profile["target"])["backend"],
+                                    "library_sha256": {"libggml-base.so": "d" * 64},
                                     "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup", "kernel_reference")}}
             write_json(reports / (profile["id"] + ".json"), report)
@@ -674,7 +675,10 @@ class ReleaseTest(unittest.TestCase):
                    lambda d: d["models"][0]["reference_agreement"].update(exact_tokens=1),
                    lambda d: d["reference"].pop("generation"), lambda d: d["reference"]["generation"].update(micro_batch=2),
                    lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver"),
-                   lambda d: d["reference"].pop("device_backend"), lambda d: d["reference"].update(device_backend="rocm")]
+                   lambda d: d["reference"].pop("device_backend"), lambda d: d["reference"].update(device_backend="rocm"),
+                   lambda d: d["reference"].pop("library_sha256"),
+                   lambda d: d["reference"].update(library_sha256={"libggml-base.so": "not-a-digest"}),
+                   lambda d: d["reference"].update(library_sha256={"<private-path>/libggml-base.so": "d" * 64})]
         for index, change in enumerate(changes):
             data = json.loads(saved)
             change(data)
@@ -884,6 +888,60 @@ class ReleaseTest(unittest.TestCase):
             release_gpu.main()
         probe.assert_not_called()
         launch.assert_not_called()
+
+    def test_reference_library_changes_abort_certification_even_when_executables_are_unchanged(self):
+        for changed in (False, True):
+            folder = self.root / ("changed-reference" if changed else "stable-reference")
+            reference, tree = folder / "reference", folder / "package"
+            reference.mkdir(parents=True)
+            (tree / "bin").mkdir(parents=True)
+            for path, content in ((reference / "llama-server", b"server"), (reference / "llama-tokenize", b"tokenizer"),
+                                  (reference / "libggml-hip.so", b"original library"), (reference / "notes.txt", b"private notes"),
+                                  (tree / "bin/zinc", b"packaged binary"), (folder / "model.gguf", b"pinned model"),
+                                  (folder / "candidate.tar.gz", b"archive")):
+                path.write_bytes(content)
+            before = release_gpu.reference_artifacts(reference)
+            model = folder / "model.gguf"
+            real = policy()
+            data = {"reference": real["reference"], "gpu_profiles": [{"id": "rocm-rdna4", "target": "linux-x86_64-rocm", "family": "gfx1201", "models": ["fixture"]}],
+                    "targets": [{"id": "linux-x86_64-rocm", "backend": "rocm", "interfaces": {"browser_chat": False}}],
+                    "models": [{"id": "fixture", "context": 32, "size_bytes": model.stat().st_size, "sha256": sha256(model)}]}
+            config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "ROCm7"], "reference_bin": str(reference),
+                      "reference_source": str(folder), "lock_directory": str(folder / "reservation"), "models": {"fixture": str(model)}}
+            write_json(folder / "worker.json", config)
+            candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
+                         "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
+            def output(command, *args, **kwargs):
+                if command[-1] == "HEAD": return real["reference"]["commit"]
+                if command[-1] == "--version": return real["reference"]["commit"][:7]
+                return ""
+            def requests(*args):
+                self.assertNotIn("LD_LIBRARY_PATH", args[5])
+                if changed: (reference / "libggml-hip.so").write_bytes(b"rebuilt library")
+            samples = [("prompt", {"comparison": {"tokens": 16, "near_ties": []}}) for _ in range(3)]
+            argv = ["release_gpu.py", "--directory", str(folder), "--profile", "rocm-rdna4", "--output", str(folder / "report.json")]
+            with self.subTest(changed=changed), contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+                stack.enter_context(patch.object(sys, "argv", argv))
+                stack.enter_context(patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(folder / "worker.json"), "LD_LIBRARY_PATH": "<private-library-override>"}))
+                for name, replacement in (("verify_candidate", candidate), ("policy", data), ("extract_archive", tree),
+                                          ("probe_binary", None), ("tokenizer_parity", None), ("inference_parity", samples),
+                                          ("hardware_evidence", {"gpu": "CPU fixture", "os": "fixture", "driver": "fixture"})):
+                    stack.enter_context(patch.object(release_gpu, name, return_value=replacement))
+                stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
+                stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
+                report = stack.enter_context(patch.object(release_gpu, "write_json"))
+                if changed:
+                    with self.assertRaisesRegex(ValueError, "reference artifacts changed"):
+                        release_gpu.main()
+                    report.assert_not_called()
+                    after = release_gpu.reference_artifacts(reference)
+                    self.assertEqual(before["server_sha256"], after["server_sha256"])
+                    self.assertEqual(before["tokenizer_sha256"], after["tokenizer_sha256"])
+                else:
+                    release_gpu.main()
+                    self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
+                    self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
+            self.assertFalse((folder / "reservation").exists())
 
     def test_release_unicode_gate_rejects_invalid_bytes_missing_usage_and_lost_text(self):
         def nonstream(port, path, body):

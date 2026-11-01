@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from release_lib import (
-    ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
+    ROOT, REFERENCE_LIBRARY_NAME, archive_name, check_metadata, extract_archive, inventory, policy,
     probe_binary, read_json, require, sha256, source_sha, target, verify_reference_agreement, version, write_json,
 )
 
@@ -308,6 +308,10 @@ def aggregate(args):
                 "missing pinned reference evidence")
         require(reference.get("generation") == policy()["reference"]["generation"], "reference generation settings differ from policy")
         require(reference.get("device_backend") == target(spec["target"])["backend"], "reference GPU backend differs from tested target")
+        libraries = reference.get("library_sha256")
+        require(isinstance(libraries, dict) and all(isinstance(name, str) and REFERENCE_LIBRARY_NAME.fullmatch(name) and
+                isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) for name, digest in libraries.items()),
+                "missing or invalid reference library evidence")
         require(all(report.get("hardware", {}).get(key) for key in ("gpu", "os", "driver")), "missing public hardware/driver evidence")
         reports.append(report)
     require(seen == {p["id"] for p in data["required_profiles"]}, "required GPU reports are missing")

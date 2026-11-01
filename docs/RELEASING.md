@@ -78,6 +78,12 @@ backends can make different greedy choices even with identical GGUFs and F32 KV;
 a cross-backend disagreement is a separate diagnostic, not a reason to loosen
 the native reference agreement policy.
 
+Reports also inventory the reference's ggml/llama libraries. Their hashes and
+both executable hashes must remain unchanged through validation; rebuilding a
+tool can replace shared libraries without changing the server executable.
+Only library basenames and digests are published. Library search overrides from
+the worker's shell are excluded from packaged execution.
+
 The policy also freezes reference generation: one slot, a 512-token logical
 batch, one-token microbatches, F32 K/V, and flash attention disabled. The harness
 applies these settings after worker arguments and records them in the report;
