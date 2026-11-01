@@ -434,6 +434,13 @@ def main():
     frozen_notes.set_defaults(run=finalize)
     upstream = sub.add_parser("upstream-check")
     upstream.set_defaults(run=upstream_check)
+    from release_preflight import run as preflight
+    readiness = sub.add_parser("preflight", help="audit runner/signing/environment configuration using maintainer gh authentication")
+    readiness.add_argument("--repo", help="owner/repo; defaults to the current gh repository")
+    readiness.add_argument("--json", action="store_true", help="emit a redacted, machine-readable report")
+    readiness.add_argument("--dispatch", metavar="VERSION", help="dispatch a candidate on main only if configuration checks pass")
+    readiness.add_argument("--source", default="main", help="candidate source: main or a full SHA (requires --dispatch)")
+    readiness.set_defaults(run=preflight)
     args = parser.parse_args()
     try:
         args.run(args)
