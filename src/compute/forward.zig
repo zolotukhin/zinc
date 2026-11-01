@@ -864,7 +864,7 @@ fn findLoadedTensor(model: *const Model, name: []const u8) ?*const LoadedTensor 
 
 fn layerKvDimension(model: *const Model, layer_idx: usize) u32 {
     const cfg = model.config;
-    const fallback = cfg.n_kv_heads * cfg.head_dim;
+    const fallback = memory_plan.kvDimensionFromProjections(cfg.n_kv_heads * cfg.head_dim, null, null);
     if (cfg.architecture != .gemma) return fallback;
     var name_buf: [128]u8 = undefined;
     const k_name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_k.weight", .{layer_idx}) catch return fallback;
@@ -875,10 +875,9 @@ fn layerKvDimension(model: *const Model, layer_idx: usize) u32 {
     // normalized separately before K receives RoPE.
     const v = findLoadedTensor(model, v_name) orelse k;
     const v_rows: u32 = @intCast(v.info.numElements() / cfg.hidden_dim);
-    // Existing attention dispatches use one shared K/V row width. Preserve the
-    // conservative allocation for an unfamiliar asymmetric projection.
-    if (k_rows == 0 or k_rows % 32 != 0 or k_rows != v_rows) return std.mem.alignForward(u32, @max(fallback, @max(k_rows, v_rows)), 32);
-    return k_rows;
+    // Decode and batched prefill derive layer_kv_dim from these same tensors;
+    // using metadata maxima here would restore the original over-allocation.
+    return memory_plan.kvDimensionFromProjections(fallback, k_rows, v_rows);
 }
 
 pub fn tensorBytes(model: *const Model) u64 {

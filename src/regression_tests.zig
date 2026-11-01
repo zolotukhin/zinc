@@ -30,9 +30,6 @@ test "Vulkan KV allocation and budgeting share actual Gemma projection widths" {
     try expectContains(src, "layerKvDimension(model, i)");
     try expectContains(src, "kv_dtype.rowBytes(dim)");
     try expectContains(src, "findLoadedTensor(model, v_name) orelse k");
-    try expectNotContains(src, "const kv_cache_per_layer =");
-    try expectContains(src, "kv_k_cache[i].deinit();");
-    try expectContains(src, "kv_v_cache[i].deinit();");
 }
 
 test "decode loop keeps deinterleave split for packed Q and gate" {

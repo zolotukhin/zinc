@@ -269,6 +269,17 @@ pub fn profileWithKvBytes(config: ModelConfig, kv_elem_bytes: u64) RuntimeMemory
     return profileWithKvBlockBytes(config, kv_elem_bytes * 32);
 }
 
+/// Match the forward pass's projected K/V width, including K-as-V layers.
+/// The scalar metadata can combine a sliding layer's head count with a global
+/// layer's head size, so it must not override a valid, narrower projection.
+pub fn kvDimensionFromProjections(metadata_dimension: u32, key_rows: ?u32, value_rows: ?u32) u32 {
+    const fallback = std.mem.alignForward(u32, metadata_dimension, 32);
+    const key = key_rows orelse return fallback;
+    const value = value_rows orelse key;
+    if (key == 0 or key % 32 != 0 or key != value) return std.mem.alignForward(u32, @max(fallback, @max(key, value)), 32);
+    return key;
+}
+
 /// Use the cache widths that the forward pass actually writes. A zero width
 /// denotes a recurrent layer with no KV cache; appended draft layers are
 /// included by the caller. Gemma's global and sliding layers have different
@@ -488,6 +499,42 @@ test "Gemma mixed projection widths fit coding contexts without quantizing KV" {
     // Recurrent placeholders consume no context-scaled memory. A draft block
     // must be included rather than silently omitted from the budget.
     try std.testing.expectEqual(@as(u64, 4096), profileWithKvDimensions(cfg, 64, &.{ 0, 512, 0, 512 }).device_local_bytes_per_token);
+}
+
+test "KV projection widths retain K-as-V and conservative unsupported fallbacks" {
+    try std.testing.expectEqual(@as(u32, 4096), kvDimensionFromProjections(8192, 4096, 4096));
+    try std.testing.expectEqual(@as(u32, 2048), kvDimensionFromProjections(8192, 2048, null));
+    try std.testing.expectEqual(@as(u32, 8192), kvDimensionFromProjections(8192, 4096, 2048));
+    try std.testing.expectEqual(@as(u32, 8224), kvDimensionFromProjections(8193, null, null));
+    try std.testing.expectEqual(@as(u32, 8192), kvDimensionFromProjections(8192, 4097, 4097));
+    try std.testing.expectEqual(@as(u32, 8192), kvDimensionFromProjections(8192, 0, null));
+    try std.testing.expectEqual(@as(u32, 16384), kvDimensionFromProjections(8192, 16384, 16384));
+}
+
+test "projection-aware KV budget includes appended NextN layers and preserves uniform models" {
+    var cfg: ModelConfig = std.mem.zeroes(ModelConfig);
+    cfg.architecture = .qwen35;
+    cfg.n_layers = 64;
+    cfg.n_nextn_layers = 1;
+    cfg.full_attn_interval = 4;
+    cfg.n_kv_heads = 4;
+    cfg.head_dim = 128;
+    cfg.hidden_dim = 2048;
+    cfg.ssm_d_conv = 4;
+    cfg.ssm_d_inner = 4096;
+    cfg.ssm_d_state = 128;
+    cfg.ssm_dt_rank = 32;
+    cfg.ssm_n_group = 16;
+    var dimensions: [65]u32 = @splat(0);
+    for (0..64) |i| {
+        if ((i + 1) % 4 == 0) dimensions[i] = 512;
+    }
+    dimensions[64] = 512; // MTP always attends, independently of the interval.
+    const with_draft = profileWithKvDimensions(cfg, 64, &dimensions);
+    try std.testing.expectEqual(@as(u64, 17 * 512 * 2 * 2), with_draft.device_local_bytes_per_token);
+    try std.testing.expectEqualDeep(profileWithKvBlockBytes(cfg, 64), with_draft);
+    cfg.n_nextn_layers = 0;
+    try std.testing.expectEqualDeep(profileWithKvBlockBytes(cfg, 64), profileWithKvDimensions(cfg, 64, dimensions[0..64]));
 }
 
 test "maxContextTokensForBudget clamps to available budget and ceiling" {
