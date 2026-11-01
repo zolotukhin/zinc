@@ -75,6 +75,12 @@ Radeon; adapt the administrator launcher and ICD for another vendor before use.
 device indices. Backend profiles share one reservation. No network port is
 published; inference servers stay inside the container.
 
+Enumerate devices inside the final container: an ICD or driver mount can change
+their order relative to the host. Verify that both packaged diagnostics and the
+reference select the intended physical card. Remap its native lock-file mount
+to the container's observed index so host and container jobs still share the
+same lock.
+
 ## Job policy and registration
 
 `policy.json` is administrator-owned and read-only to the runner:
