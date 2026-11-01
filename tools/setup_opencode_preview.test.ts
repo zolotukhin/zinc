@@ -23,7 +23,11 @@ async function cli(args: string[], env: Record<string, string> = {}) {
     return {
       code: 0,
       ...(await exec(process.execPath, [helper, ...args], {
-        env: { ...process.env, ...env },
+        env: {
+          ...process.env,
+          OPENCODE_BIN: path.join(import.meta.dir, 'fixtures', 'uninstalled-opencode'),
+          ...env,
+        },
         timeout: 10000,
       })),
     };
@@ -43,6 +47,28 @@ test('preview matches the written config byte for byte without creating a projec
   expect((await cli(['setup', '--project', project])).code).toBe(0);
   expect(await readFile(path.join(project, CONFIG_NAME), 'utf8')).toBe(result.stdout);
 });
+
+for (const modern of [false, true]) {
+  test(`preview matches setup for the installed OpenCode ${modern ? '2' : '1'} CLI`, async () => {
+    const root = await temp(),
+      project = path.join(root, 'project');
+    const binary = path.join(root, 'fake-opencode');
+    await writeFile(
+      binary,
+      `#!${process.execPath}\nconsole.log('--model --format ${modern ? '--standalone' : '--dir'}');\n`,
+      { mode: 0o700 },
+    );
+    const env = { OPENCODE_BIN: binary };
+    const preview = await cli(['--project', project, '--dry-run'], env);
+    expect(preview.code).toBe(0);
+    expect(await readdir(root)).toEqual(['fake-opencode']);
+    expect((await cli(['--project', project], env)).code).toBe(0);
+    expect(await readFile(path.join(project, CONFIG_NAME), 'utf8')).toBe(preview.stdout);
+    const config = JSON.parse(preview.stdout);
+    expect(Array.isArray(modern ? config.plugins : config.plugin)).toBe(true);
+    expect(preview.stdout).not.toContain(root);
+  });
+}
 
 test('explicit preview honors model, context, output, steps and force', async () => {
   const root = await temp();

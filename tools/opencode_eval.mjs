@@ -9,7 +9,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { FIXTURES, fixtureById, readOnlyPathsForFixture } from './opencode_eval_fixtures.mjs';
-import { buildConfig, CONTEXT_PLUGIN_PATH, runtimeConfig, writeConfig } from './setup_opencode.mjs';
+import {
+  buildConfig,
+  openCodeRunFlags,
+  CONTEXT_PLUGIN_PATH,
+  configForOpenCode,
+  contextPluginPaths,
+  runtimeConfig,
+  writeConfig,
+} from './setup_opencode.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
@@ -269,7 +277,11 @@ export async function readOnlyViolations(projectDir, before) {
   return violations;
 }
 
-export async function unexpectedProjectFiles(projectDir, fixture) {
+export async function unexpectedProjectFiles(
+  projectDir,
+  fixture,
+  pluginPaths = [CONTEXT_PLUGIN_PATH],
+) {
   const expected = new Set([
     ...Object.keys(fixture.files),
     'opencode.zinc.json',
@@ -277,7 +289,7 @@ export async function unexpectedProjectFiles(projectDir, fixture) {
     'baseline-test.log',
     'final-test.log',
     'result.json',
-    CONTEXT_PLUGIN_PATH,
+    ...pluginPaths,
   ]);
   const violations = [];
   async function walk(dir, relative = '') {
@@ -308,6 +320,7 @@ export async function runCommand(
 export function buildOpenCodeArgs(provider, fixture, projectDir, opts, baselineOutput = '') {
   return [
     'run',
+    ...(opts.openCodeRunFlags ?? []),
     '--model',
     opts.model,
     '--auto',
@@ -317,8 +330,7 @@ export function buildOpenCodeArgs(provider, fixture, projectDir, opts, baselineO
     'json',
     '--title',
     `${provider}-${fixture.id}`,
-    '--dir',
-    projectDir,
+    '--',
     buildPrompt(fixture, projectDir, baselineOutput),
   ];
 }
@@ -379,7 +391,7 @@ export function parseOpenCodeJsonl(text) {
     summary.toolCounts[tool] = (summary.toolCounts[tool] ?? 0) + 1;
     if (state.status && state.status !== 'completed') summary.failedTools += 1;
 
-    if (tool === 'bash') {
+    if (tool === 'bash' || tool === 'shell') {
       const command = String(input.command ?? '');
       const item = {
         command,
@@ -659,6 +671,14 @@ async function startManagedProxy(provider, opts, traceDir, logFile) {
 }
 
 export async function runFixture(provider, fixture, opts, providerDir) {
+  if (!opts.dryRun && !opts.openCodeRunFlags) {
+    opts = {
+      ...opts,
+      openCodeRunFlags: openCodeRunFlags({
+        env: { ...process.env, OPENCODE_BIN: opts.opencodeBin },
+      }),
+    };
+  }
   const rawProjectDir = path.join(providerDir, 'projects', fixture.id);
   const traceDir = opts.traceDir ?? path.join(providerDir, 'traces');
   await ensureDir(path.dirname(rawProjectDir));
@@ -667,24 +687,31 @@ export async function runFixture(provider, fixture, opts, providerDir) {
   const projectDir = await realpath(rawProjectDir);
 
   const beforeReadOnly = await snapshotReadOnlyFiles(projectDir, fixture);
-  const config = buildConfig({
-    model: opts.model.replace(/^zinc\//, ''),
-    context: opts.context,
-    output: opts.maxTokensCap,
-    steps: opts.steps,
-  });
+  const config = configForOpenCode(
+    buildConfig({
+      model: opts.model.replace(/^zinc\//, ''),
+      context: opts.context,
+      output: opts.maxTokensCap,
+      steps: opts.steps,
+    }),
+    opts.openCodeRunFlags ?? [],
+  );
   await writeConfig(projectDir, config);
   beforeReadOnly['opencode.zinc.json'] = await sha256File(
     path.join(projectDir, 'opencode.zinc.json'),
   );
-  beforeReadOnly[CONTEXT_PLUGIN_PATH] = await sha256File(
-    path.join(projectDir, CONTEXT_PLUGIN_PATH),
+  const pluginPaths = contextPluginPaths(config);
+  for (const pluginPath of pluginPaths)
+    beforeReadOnly[pluginPath] = await sha256File(path.join(projectDir, pluginPath));
+  const live = runtimeConfig(
+    config,
+    {
+      ZINC_API_BASE_URL: opts.manageProxy
+        ? `http://127.0.0.1:${opts.proxyPort}/v1`
+        : providerUpstream(provider, opts),
+    },
+    { project: projectDir },
   );
-  const live = runtimeConfig(config, {
-    ZINC_API_BASE_URL: opts.manageProxy
-      ? `http://127.0.0.1:${opts.proxyPort}/v1`
-      : providerUpstream(provider, opts),
-  });
   const stateDir = path.join(providerDir, 'state', fixture.id);
   const baseline = opts.runBaseline
     ? await runCommand(fixture.testCommand, {
@@ -728,7 +755,7 @@ export async function runFixture(provider, fixture, opts, providerDir) {
     outputFile: path.join(projectDir, 'final-test.log'),
   });
   const violations = await readOnlyViolations(projectDir, beforeReadOnly);
-  const unexpectedFiles = await unexpectedProjectFiles(projectDir, fixture);
+  const unexpectedFiles = await unexpectedProjectFiles(projectDir, fixture, pluginPaths);
   const openCodeSummary = parseOpenCodeJsonl(opencode?.output ?? '');
   const traceSummary = await summarizeTraceFiles(traceFiles);
   const finalSummary = parseTestSummary(finalTest.output);
@@ -818,6 +845,14 @@ export function renderSummary(results) {
 }
 
 export async function runEval(opts) {
+  if (!opts.dryRun) {
+    opts = {
+      ...opts,
+      openCodeRunFlags: openCodeRunFlags({
+        env: { ...process.env, OPENCODE_BIN: opts.opencodeBin },
+      }),
+    };
+  }
   const providers = providersForOption(opts.provider);
   const fixtures = fixturesForOption(opts.fixtureIds);
   if (providers.length > 1 && !opts.manageProxy) {

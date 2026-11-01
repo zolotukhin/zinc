@@ -33,7 +33,13 @@ async function cli(args: string[], env: Record<string, string> = {}) {
     return {
       code: 0,
       ...(await exec(process.execPath, [helper, ...args], {
-        env: { ...process.env, ZINC_API_BASE_URL: '', ZINC_API_KEY: '', ...env },
+        env: {
+          ...process.env,
+          OPENCODE_BIN: path.join(import.meta.dir, 'fixtures', 'uninstalled-opencode'),
+          ZINC_API_BASE_URL: '',
+          ZINC_API_KEY: '',
+          ...env,
+        },
         timeout: 15000,
       })),
     };

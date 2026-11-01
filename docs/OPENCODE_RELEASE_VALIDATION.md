@@ -1,5 +1,18 @@
 # OpenCode model validation for the first release
 
+Client compatibility follow-up (2026-11-01): actual OpenCode 1.19.4 and 2.0.21
+each pass three CPU protocol fixtures: bounded tools, an API error, and
+timeout → independent failing check → repair → independent passing check.
+The [portable evidence](/zinc/validation/opencode-client-compatibility-2026-11-01.json)
+includes the exact request settings and source hashes. These scripted responses
+test the client and helper, without inference or a model coding claim.
+
+Intel testing also reproduced a server compatibility defect: a request for
+`max_completion_tokens: 1` generated 256 tokens, while `max_tokens: 1` generated
+one. A native diagnostic build with both aliases supported now generates one
+for either field. The model-by-model Intel coding sweep is separate from these
+checks; a successful protocol fixture does not qualify all models.
+
 Latest follow-up (2026-10-31): [bounded dense Gemma prefill](ROCM_GEMMA_BOUNDED_PREFILL.md)
 passes 23/23 API checks and all three Gemma 31B core fixtures on exact packaged
 ROCm bytes at 8K, with a separately recorded 600-second fixture budget. The

@@ -1329,7 +1329,10 @@ const ChatRequestBody = struct {
     model: []const u8 = "",
     session_id: []const u8 = "",
     messages: []const ChatMessage = &.{},
-    max_tokens: u32 = 256,
+    // Modern clients (including OpenCode 2) use max_completion_tokens.
+    // Ignoring it silently truncated tool calls at the old 256-token default.
+    max_tokens: ?u32 = null,
+    max_completion_tokens: ?u32 = null,
     stream: bool = false,
     temperature: f32 = 0.0,
     top_p: f32 = 1.0,
@@ -1825,6 +1828,12 @@ pub fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedC
     });
     errdefer parsed.deinit();
 
+    if (parsed.value.max_tokens) |legacy| {
+        if (parsed.value.max_completion_tokens) |modern| {
+            if (legacy != modern) return error.ConflictingTokenLimits;
+        }
+    }
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -1914,7 +1923,7 @@ pub fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedC
         .roles = roles[0..count],
         .contents = contents[0..count],
         .session_id = parsed.value.session_id,
-        .max_tokens = parsed.value.max_tokens,
+        .max_tokens = parsed.value.max_completion_tokens orelse parsed.value.max_tokens orelse 256,
         .stream = parsed.value.stream,
         .temperature = parsed.value.temperature,
         .top_p = parsed.value.top_p,
@@ -2799,8 +2808,12 @@ fn handleChatCompletions(
     body: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
-    var parsed = parseChatRequest(allocator, body) catch {
-        try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
+    var parsed = parseChatRequest(allocator, body) catch |err| {
+        const message = if (err == error.ConflictingTokenLimits)
+            "max_tokens and max_completion_tokens must agree when both are provided"
+        else
+            "Invalid JSON in request body";
+        try conn.sendError(400, "invalid_request_error", message);
         return;
     };
     defer parsed.deinit();
@@ -4442,6 +4455,39 @@ fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {
         .chat_template = chat_template,
         .allocator = std.testing.allocator,
     };
+}
+
+test "chat token budgets accept the modern alias without silently using 256" {
+    const cases = .{
+        .{ "{}", @as(u32, 256) },
+        .{ "{\"max_tokens\":41}", @as(u32, 41) },
+        .{ "{\"max_completion_tokens\":2048}", @as(u32, 2048) },
+        .{ "{\"max_completion_tokens\":1}", @as(u32, 1) },
+        .{ "{\"max_completion_tokens\":0}", @as(u32, 0) },
+        .{ "{\"max_tokens\":null,\"max_completion_tokens\":null}", @as(u32, 256) },
+        .{ "{\"max_tokens\":null,\"max_completion_tokens\":41}", @as(u32, 41) },
+        .{ "{\"max_tokens\":41,\"max_completion_tokens\":null}", @as(u32, 41) },
+        .{ "{\"max_tokens\":41,\"max_completion_tokens\":41}", @as(u32, 41) },
+    };
+    inline for (cases) |case| {
+        var parsed = try parseChatRequest(std.testing.allocator, case[0]);
+        defer parsed.deinit();
+        try std.testing.expectEqual(case[1], parsed.max_tokens);
+    }
+    try std.testing.expectError(error.ConflictingTokenLimits, parseChatRequest(std.testing.allocator, "{\"max_tokens\":1,\"max_completion_tokens\":2}"));
+}
+
+test "chat modern token budgets reject malformed or out of range values" {
+    for ([_][]const u8{
+        "{\"max_completion_tokens\":-1}",
+        "{\"max_completion_tokens\":4294967296}",
+        "{\"max_completion_tokens\":1.5}",
+        "{\"max_completion_tokens\":true}",
+    }) |body| {
+        var parsed = parseChatRequest(std.testing.allocator, body) catch continue;
+        defer parsed.deinit();
+        return error.TestUnexpectedResult;
+    }
 }
 
 test "parseJsonFields extracts stream flag" {

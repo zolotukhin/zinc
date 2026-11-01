@@ -1,9 +1,45 @@
 #!/usr/bin/env bun
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile } from 'node:fs/promises';
 import path from 'node:path';
+
+export function parseOpenCodeVersion(text) {
+  const match = String(text)
+    .trim()
+    .match(/^(?:opencode\s+)?v?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)$/);
+  if (!match) throw new Error('OpenCode returned an invalid version');
+  return match[1];
+}
+
+// OpenCode 1 runs privately already. OpenCode 2 defaults to a background
+// service and offers --standalone instead; discover that capability without
+// starting an agent or depending on the spelling of a version string.
+export function openCodeRunFlags({
+  env = process.env,
+  spawnSyncImpl = spawnSync,
+  allowMissing = false,
+} = {}) {
+  const result = spawnSyncImpl(env.OPENCODE_BIN || 'opencode', ['run', '--help'], {
+    env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 10000,
+    maxBuffer: 64 * 1024,
+    killSignal: 'SIGKILL',
+  });
+  const help = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  if (allowMissing && result.error?.code === 'ENOENT') return [];
+  if (
+    result.error ||
+    result.status !== 0 ||
+    !help.includes('--model') ||
+    !help.includes('--format')
+  )
+    throw new Error('OpenCode run help failed; check the installed OpenCode executable');
+  return /(?:^|\s)--standalone(?:\s|,|$)/m.test(help) ? ['--standalone'] : [];
+}
 
 export const DEFAULT_BASE_URL = 'http://127.0.0.1:9090/v1';
 export const CONFIG_NAME = 'opencode.zinc.json';
@@ -39,7 +75,120 @@ const CONTEXT_PLUGIN_HASH = createHash('sha256')
   .slice(0, 16);
 export const CONTEXT_PLUGIN_PATH = `.zinc/opencode-context-${CONTEXT_PLUGIN_HASH}.js`;
 
-async function ensureContextPlugin(dir) {
+// OpenCode 2 registers hooks through a plugin definition instead of returning
+// the legacy hook map. Keep both packages immutable and portable.
+export async function contextPluginV2(context) {
+  const shorten = (text) =>
+    text.slice(0, 4000).replace(/[\uD800-\uDBFF]$/, '') +
+    '\n[ZINC context limit: output shortened. Read smaller ranges with offset/limit, or narrow the command.]\n' +
+    text.slice(-1500).replace(/^[\uDC00-\uDFFF]/, '');
+  await context.tool.hook('execute.before', async (event) => {
+    if (event.tool !== 'read' || !event.input || typeof event.input !== 'object') return;
+    const requested = event.input.limit;
+    event.input.limit = Number.isSafeInteger(requested) ? Math.min(80, Math.max(0, requested)) : 80;
+  });
+  await context.tool.hook('execute.after', async (event) => {
+    if (event.status !== 'completed') return;
+    const result = event.result;
+    const text =
+      typeof result.content === 'string'
+        ? result.content
+        : Array.isArray(result.content)
+          ? result.content
+              .filter((item) => item.type === 'text')
+              .map((item) => item.text)
+              .join('\n')
+          : '';
+    if (text.length <= 6000) return;
+    let written = false;
+    const content =
+      typeof result.content === 'string'
+        ? shorten(text)
+        : result.content.flatMap((item) => {
+            if (item.type !== 'text') return [item];
+            if (written) return [];
+            written = true;
+            return [{ ...item, text: shorten(text) }];
+          });
+    event.result = {
+      ...result,
+      content,
+      metadata: { ...result.metadata, truncated: true, zinc_context_truncated: true },
+    };
+  });
+}
+
+const CONTEXT_PLUGIN_V2_SOURCE = `export default { id: 'zinc.context', setup: ${contextPluginV2.toString()} };\n`;
+const CONTEXT_PLUGIN_V2_PACKAGE =
+  '{"name":"zinc-context-hook","type":"module","exports":"./index.js"}\n';
+const CONTEXT_PLUGIN_V2_HASH = createHash('sha256')
+  .update(CONTEXT_PLUGIN_V2_SOURCE)
+  .update(CONTEXT_PLUGIN_V2_PACKAGE)
+  .digest('hex')
+  .slice(0, 16);
+export const CONTEXT_PLUGIN_V2_PATH = `.zinc/opencode-context-v2-${CONTEXT_PLUGIN_V2_HASH}/index.js`;
+const CONTEXT_PLUGIN_V2_ENTRY = `./${path.posix.dirname(CONTEXT_PLUGIN_V2_PATH)}`;
+
+export function configForOpenCode(config, runFlags) {
+  const copy = structuredClone(config);
+  const modern = runFlags.includes('--standalone');
+  if (
+    !modern &&
+    !copy.plugins &&
+    copy.plugin?.length === 1 &&
+    copy.plugin[0] === `./${CONTEXT_PLUGIN_PATH}`
+  )
+    return copy;
+  if (
+    modern &&
+    !copy.plugin &&
+    copy.plugins?.length === 1 &&
+    copy.plugins[0] === CONTEXT_PLUGIN_V2_ENTRY
+  )
+    return copy;
+  const other = [...(copy.plugin ?? []), ...(copy.plugins ?? [])].filter(
+    (entry) =>
+      typeof entry !== 'string' ||
+      !/^\.\/\.zinc\/opencode-context-(?:v2-)?[0-9a-f]{16}(?:\.js)?$/.test(entry),
+  );
+  delete copy.plugin;
+  delete copy.plugins;
+  if (modern)
+    copy.plugins = [
+      ...other.map((entry) =>
+        Array.isArray(entry) ? { package: entry[0], options: entry[1] } : entry,
+      ),
+      CONTEXT_PLUGIN_V2_ENTRY,
+    ];
+  else
+    copy.plugin = [
+      ...other.map((entry) =>
+        entry && typeof entry === 'object' && !Array.isArray(entry) && entry.package
+          ? entry.options === undefined
+            ? entry.package
+            : [entry.package, entry.options]
+          : entry,
+      ),
+      `./${CONTEXT_PLUGIN_PATH}`,
+    ];
+  return copy;
+}
+
+function contextPluginFiles(config) {
+  return config.plugins?.includes(CONTEXT_PLUGIN_V2_ENTRY)
+    ? {
+        [CONTEXT_PLUGIN_V2_PATH]: CONTEXT_PLUGIN_V2_SOURCE,
+        [path.posix.join(path.posix.dirname(CONTEXT_PLUGIN_V2_PATH), 'package.json')]:
+          CONTEXT_PLUGIN_V2_PACKAGE,
+      }
+    : { [CONTEXT_PLUGIN_PATH]: CONTEXT_PLUGIN_SOURCE };
+}
+
+export function contextPluginPaths(config) {
+  return Object.keys(contextPluginFiles(config));
+}
+
+async function ensureContextPlugin(dir, config) {
   const pluginDir = path.join(dir, '.zinc');
   await mkdir(pluginDir, { mode: 0o700 }).catch((error) => {
     if (error.code !== 'EEXIST') throw error;
@@ -47,26 +196,40 @@ async function ensureContextPlugin(dir) {
   const stat = await lstat(pluginDir);
   if (!stat.isDirectory() || stat.isSymbolicLink())
     throw new Error('ZINC context hook directory must be a directory, not a symlink');
-  const file = path.join(dir, CONTEXT_PLUGIN_PATH);
-  let handle;
-  try {
-    handle = await open(
-      file,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    await handle.writeFile(CONTEXT_PLUGIN_SOURCE);
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const existing = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const files = contextPluginFiles(config);
+  if (files[CONTEXT_PLUGIN_V2_PATH]) {
+    const nested = path.join(dir, path.posix.dirname(CONTEXT_PLUGIN_V2_PATH));
+    await mkdir(nested, { mode: 0o700 }).catch((error) => {
+      if (error.code !== 'EEXIST') throw error;
+    });
+    const stat = await lstat(nested);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error('ZINC context hook directory must be a directory, not a symlink');
+  }
+  for (const [relative, source] of Object.entries(files)) {
+    const file = path.join(dir, relative);
+    let handle;
     try {
-      if ((await existing.readFile('utf8')) !== CONTEXT_PLUGIN_SOURCE)
-        throw new Error('ZINC context hook conflicts with an existing file; no file was replaced');
+      handle = await open(
+        file,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      await handle.writeFile(source);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const existing = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        if ((await existing.readFile('utf8')) !== source)
+          throw new Error(
+            'ZINC context hook conflicts with an existing file; no file was replaced',
+          );
+      } finally {
+        await existing.close();
+      }
     } finally {
-      await existing.close();
+      await handle?.close();
     }
-  } finally {
-    await handle?.close();
   }
 }
 
@@ -180,7 +343,13 @@ export function buildConfig(opts = {}) {
       zinc: {
         npm: '@ai-sdk/openai-compatible',
         name: 'ZINC',
-        options: { baseURL: DEFAULT_BASE_URL, apiKey: '{env:ZINC_API_KEY}' },
+        options: {
+          baseURL: DEFAULT_BASE_URL,
+          apiKey: '{env:ZINC_API_KEY}',
+          // OpenCode 2 applies provider body overlays; the legacy SDK uses
+          // the agent options below. Require the same coding settings in both.
+          body: { temperature: 0, top_p: 1, enable_thinking: false },
+        },
         models: { [model]: { name: model, tool_call: true, limit: { context, output } } },
       },
     },
@@ -190,6 +359,7 @@ export function buildConfig(opts = {}) {
         mode: 'primary',
         temperature: 0,
         top_p: 1,
+        options: { enable_thinking: false },
         steps,
         prompt:
           'Complete the coding task using the available tools. File reads return at most 80 lines: use offset and limit to read the relevant ranges, then make a focused edit and run the requested tests before exploring further. Use compiler and test output to correct failures. Tool output is bounded: save verbose build/test logs to a temporary file and show only failure diagnostics and a short summary. Never change tests just to make them pass. Use portable paths in source, tests, and examples; do not copy this workspace path or private endpoints into them. Finish with a short report of the changes and actual test results.',
@@ -212,7 +382,7 @@ export async function writeConfig(project, config, { force = false } = {}) {
   if (existing && !force) throw Object.assign(new Error('Config exists'), { code: 'EEXIST' });
   if (existing?.isSymbolicLink())
     throw new Error('ZINC context hook setup refuses config symlinks');
-  await ensureContextPlugin(dir);
+  await ensureContextPlugin(dir, config);
   // O_NOFOLLOW also protects an existing symlink when explicitly replacing a
   // generated config. Other OpenCode config/auth files are never written.
   const flags =
@@ -229,7 +399,7 @@ export async function writeConfig(project, config, { force = false } = {}) {
   return file;
 }
 
-export function runtimeConfig(config, env = process.env) {
+export function runtimeConfig(config, env = process.env, { project } = {}) {
   const copy = structuredClone(config);
   const baseURL = env.ZINC_API_BASE_URL || DEFAULT_BASE_URL;
   let url;
@@ -254,6 +424,12 @@ export function runtimeConfig(config, env = process.env) {
   // Keep the actual key in the environment, including in inline config. No
   // runtime URL or secret is written to the portable configuration on disk.
   copy.provider.zinc.options.apiKey = '{env:ZINC_API_KEY}';
+  // OpenCode 2 resolves inline plugin paths against the user's home. Resolve
+  // only at launch; the saved config remains portable and contains no paths.
+  if (project && copy.plugins)
+    copy.plugins = copy.plugins.map((entry) =>
+      entry === CONTEXT_PLUGIN_V2_ENTRY ? path.resolve(project, entry) : entry,
+    );
   return copy;
 }
 
@@ -429,22 +605,16 @@ export async function runOpenCode(
     stdout = process.stdout,
     stderr = process.stderr,
     onEvent,
+    runFlags,
   } = {},
 ) {
   requireTask(opts);
   const timeoutMs = timeoutValue(opts.timeoutMs ?? 900000);
-  const live = runtimeConfig(config, env);
-  const args = [
-    'run',
-    '--format',
-    'json',
-    '--model',
-    live.model,
-    '--agent',
-    'zinc',
-    '--dir',
-    path.resolve(opts.project),
-  ];
+  const flags = runFlags ?? openCodeRunFlags({ env });
+  const portable = configForOpenCode(config, flags);
+  await ensureContextPlugin(path.resolve(opts.project), portable);
+  const live = runtimeConfig(portable, env, { project: opts.project });
+  const args = ['run', ...flags, '--format', 'json', '--model', live.model, '--agent', 'zinc'];
   if (opts.auto) args.push('--auto');
   if (opts.session) args.push('--session', opts.session);
   args.push('--', opts.prompt.join(' '));
@@ -490,11 +660,21 @@ export async function runOpenCode(
   const inspectLine = (line) => {
     try {
       const event = JSON.parse(line);
-      if (event.type === 'error') {
+      // Stopping OpenCode 2's private server can close its own client socket.
+      // Preserve genuine API errors, including those received after a timeout.
+      const expectedTimeoutShutdown =
+        timedOut &&
+        stopping &&
+        event.type === 'error' &&
+        event.error?.type === 'unknown' &&
+        /^Transport: The socket connection was closed unexpectedly\./.test(
+          event.error?.message ?? '',
+        );
+      if (event.type === 'error' && !expectedTimeoutShutdown) {
         agentError = true;
         if (!stopping && !closed) terminate('SIGTERM');
       }
-      onEvent?.(event);
+      onEvent?.(event, { expectedTimeoutShutdown });
     } catch {
       /* Other CLI output is forwarded verbatim. */
     }
@@ -702,9 +882,9 @@ export async function runVerifiedOpenCode(config, opts, deps = {}) {
       { ...opts, session, prompt, timeoutMs: modelBudget },
       {
         ...deps,
-        onEvent: (event) => {
+        onEvent: (event, details) => {
           if (event.sessionID) session = event.sessionID;
-          deps.onEvent?.(event);
+          deps.onEvent?.(event, details);
         },
       },
     );
@@ -799,11 +979,12 @@ Interactive: OPENCODE_CONFIG=./opencode.zinc.json opencode
       opts.context === 'auto'
         ? buildConfig({ ...opts, context: await resolveAutoContext(opts) })
         : buildConfig(opts);
+    const portable = configForOpenCode(config, openCodeRunFlags({ allowMissing: true }));
     if (opts.dryRun) {
-      console.log(JSON.stringify(config, null, 2));
+      console.log(JSON.stringify(portable, null, 2));
       return;
     }
-    await writeConfig(opts.project, config, opts);
+    await writeConfig(opts.project, portable, opts);
     console.log(
       `Created ${CONFIG_NAME}. Start ZINC with the same context limit, then use check or run.`,
     );
