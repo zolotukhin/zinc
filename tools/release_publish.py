@@ -48,6 +48,8 @@ def validate_run(run, run_id):
 def validate_environment(environment, branch_response):
     require(environment_requires_reviewers(environment),
             "configure required reviewers on the release environment before publishing; an unprotected/missing environment cannot approve a release")
+    require(branch_response is not None,
+            "could not read release environment branch policies; inspect environment access and configuration before publishing")
     # Only one rule can be valid, so an exact count also rejects truncated
     # first pages. Recheck live metadata after approval, before any writes.
     require(isinstance(branch_response, dict) and type(branch_response.get("total_count")) is int and

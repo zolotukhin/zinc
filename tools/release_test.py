@@ -170,6 +170,22 @@ class ReleasePreflightTest(unittest.TestCase):
         # Repository-level credentials do not satisfy the protected environment contract.
         self.assertFalse(any(command[-1].startswith("repos/owner/repo/actions/secrets") for command in github.commands))
 
+    def test_preflight_and_publication_agree_on_one_complete_branch_policy(self):
+        main = {"id": 1, "name": "main", "type": "branch"}
+        tag = {"id": 2, "name": "v*", "type": "tag"}
+        for total, rows, accepted in ((1, [main], True), (2, [main], False), (1, [main, tag], False), (2, [main, tag], False)):
+            github = PreflightGitHub()
+            response = {"total_count": total, "branch_policies": rows}
+            github.responses["environments/release/deployment-branch-policies"] = [response]
+            with self.subTest(total=total, rows=rows):
+                self.assertEqual(self.audit(github)["configuration_ready"], accepted)
+                environment = github.responses["environments/release"]
+                if accepted:
+                    release_publish.validate_environment(environment, response)
+                else:
+                    with self.assertRaises(ValueError):
+                        release_publish.validate_environment(environment, response)
+
     def test_human_and_json_reports_never_disclose_private_api_fields(self):
         github = PreflightGitHub()
         github.responses["environments/release-signing/secrets"][0]["secrets"].append({"name": "<unrelated-secret>", "value": "<secret-value>"})
@@ -705,7 +721,9 @@ class ReleaseTest(unittest.TestCase):
         github = PreflightGitHub()
         environment = github.responses["environments/release"]
         correct = github.responses["environments/release/deployment-branch-policies"][0]
-        for branches in (None, {}, {"total_count": 0, "branch_policies": []},
+        with self.assertRaisesRegex(ValueError, "could not read"):
+            release_publish.validate_environment(environment, None)
+        for branches in ({}, {"total_count": 0, "branch_policies": []},
                          {"total_count": True, "branch_policies": correct["branch_policies"]},
                          {"total_count": 2, "branch_policies": correct["branch_policies"]},
                          {"total_count": 1, "branch_policies": [{"name": "main", "type": "tag"}]},

@@ -149,6 +149,8 @@ def audit(github, repo, data):
             continue
         branches = inspect(name + " branch policies API", lambda: github.collection(base + "environments/" + name + "/deployment-branch-policies", "branch_policies", "id"))
         if branches is not None:
+            # collection() already proved every page's total_count equals the
+            # complete row count, before sharing this predicate with publishing.
             main_only = environment_main_only(environment, branches)
             checks.append(check(name + " branches", main_only, "Restricted to the main branch." if main_only else
                                 "Restrict this environment to one custom branch policy: main (branch, not tag)."))
