@@ -28,17 +28,10 @@ MAX_MEMBERS = 4096
 GPU_PROFILE_TIMEOUT_MINUTES = 150
 GPU_GROUP_OVERHEAD_MINUTES = 15
 REFERENCE_LIBRARY_NAME = re.compile(r"lib(?:ggml|llama)[A-Za-z0-9_.+-]*\.(?:so(?:\.[0-9]+)*|dylib|a)")
-# An older engine/docs commit is reusable only when it uses this workflow's
-# release contract. Include added/deleted helpers through Git pathspecs too.
-RELEASE_INPUT_PATHS = (
-    ".github/workflows/release-candidate.yml", ".github/workflows/release.yml",
-    ".github/workflows/release-preview.yml", ".github/workflows/release-worker-check.yml",
-    ".github/workflows/test.yml", "config/release", "scripts/release_worker",
-    "scripts/setup_release_shaderc.sh", "scripts/package_release.sh", "scripts/install.sh",
-    "build.zig", "build.zig.zon", ".zig-version", ".bun-version", "package.json", "bun.lock",
-    "src/model/catalog.zig", ":(glob)tools/release*", ":(glob)tools/validate_*.c",
-    ":(glob)tools/opencode*", ":(glob)tools/setup_opencode*", ":(glob)tools/validate_opencode*",
-)
+# Explicit engine/docs ancestry is reusable. Everything else is a release
+# input by default, including new tooling/workflow names and driver setup.
+# Catalog status/pins remain part of qualification despite living in src/.
+REUSABLE_SOURCE_PREFIXES = ("src/", "docs/", "site/", "writing/", "research/", "assets/", "benchmarks/")
 
 
 def install_signal_handlers():
@@ -93,11 +86,18 @@ def source_sha(value):
     return value
 
 
+def git_inspection(args, message, root=None, timeout=30):
+    try:
+        result = subprocess.run(["git", *args], cwd=root or ROOT, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError(message + " timed out") from None
+    require(result.returncode == 0, message)
+    return result.stdout
+
+
 def git_revision(ref, root=None):
-    result = subprocess.run(["git", "rev-parse", "--verify", ref + "^{commit}"], cwd=root or ROOT,
-                            capture_output=True, text=True, timeout=30)
-    require(result.returncode == 0, "release source revision is unavailable")
-    return source_sha(result.stdout.strip())
+    return source_sha(git_inspection(["rev-parse", "--verify", ref + "^{commit}"],
+                                    "release source revision is unavailable", root).strip())
 
 
 def frozen_checkout(root=None):
@@ -110,18 +110,19 @@ def frozen_checkout(root=None):
 
 
 def require_source_ancestor(older, newer, root=None):
-    result = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha(older), source_sha(newer)],
-                            cwd=root or ROOT, capture_output=True, timeout=30)
-    require(result.returncode == 0, "release source must be an ancestor of the frozen workflow")
+    git_inspection(["merge-base", "--is-ancestor", source_sha(older), source_sha(newer)],
+                   "release source must be an ancestor of the frozen workflow", root)
 
 
 def verify_release_sources(older, newer, root=None):
     """Fail before build/publication if the selected source uses other gates."""
     require_source_ancestor(older, newer, root)
-    result = subprocess.run(["git", "diff", "--name-only", "--no-renames", older, newer, "--", *RELEASE_INPUT_PATHS],
-                            cwd=root or ROOT, capture_output=True, text=True, timeout=30)
-    require(result.returncode == 0, "release input comparison failed")
-    require(not result.stdout.strip(), "release qualification inputs changed; prepare a fresh candidate from the current workflow")
+    changed = git_inspection(["diff", "--name-only", "--no-renames", "-z", older, newer], "release input comparison failed", root)
+    paths = [path for path in changed.split("\0") if path]
+    reusable = lambda path: path != "src/model/catalog.zig" and (path.startswith(REUSABLE_SOURCE_PREFIXES) or
+                                                                ("/" not in path and path.endswith(".md")))
+    require(all(reusable(path) for path in paths),
+            "release qualification inputs changed; prepare a fresh candidate from the current workflow")
 
 
 def comparison_proves_ancestor(comparison, commit):

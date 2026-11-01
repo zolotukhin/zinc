@@ -1996,7 +1996,8 @@ class ReleaseSourceFreezeTests(unittest.TestCase):
         for name in ("tools/release.py", "tools/release_gpu_group.py", "tools/release_workflow.test.ts",
                      "config/release/targets.json", ".github/workflows/release-candidate.yml",
                      "tools/validate_gemma_router.c", "scripts/release_worker/launch.py",
-                     "build.zig", "src/model/catalog.zig", "tools/setup_opencode.mjs"):
+                     "build.zig", "src/model/catalog.zig", "tools/setup_opencode.mjs",
+                     ".github/workflows/new-qualification.yml", "tools/new-gate.py", "future-driver/setup.sh"):
             self.git("reset", "--hard", self.base)
             newer = self.commit(name, "changed qualification input\n")
             self.git("update-ref", "refs/remotes/origin/main", newer)
@@ -2082,6 +2083,15 @@ class ReleaseSourceFreezeTests(unittest.TestCase):
                 release_publish.main()
             refresh.assert_called_once_with(data, self.base, refresh=True)
             mutate.assert_not_called()
+
+    def test_source_inspection_timeouts_fail_closed_without_echoing_private_output(self):
+        for args in (["rev-parse", "HEAD"], ["merge-base", "--is-ancestor", self.base, self.base],
+                     ["diff", "--name-only", self.base, self.base], ["fetch", "origin"]):
+            error = subprocess.TimeoutExpired(["git", *args], 1, output=b"<private-output>")
+            with self.subTest(command=args[0]), patch.object(release_lib.subprocess, "run", side_effect=error), \
+                    self.assertRaisesRegex(ValueError, "release inspection timed out") as failure:
+                release_lib.git_inspection(args, "release inspection", self.repo, timeout=1)
+            self.assertNotIn("private-output", str(failure.exception))
 
 
 if __name__ == "__main__":

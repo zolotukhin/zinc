@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from release import aggregate, verify_candidate
-from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, release_policy, require, sha256, source_sha, write_json, frozen_checkout, git_revision, verify_release_sources
+from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, release_policy, require, sha256, source_sha, write_json, frozen_checkout, git_revision, git_inspection, verify_release_sources
 
 REPOSITORY = "zolotukhin/zinc"
 WORKFLOW = ".github/workflows/release-candidate.yml"
@@ -120,8 +120,8 @@ def verify_remote_assets(directory, tag):
 
 def verify_publication_sources(data, workflow_sha, refresh=False):
     if refresh:
-        subprocess.run(["git", "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
-                       cwd=ROOT, check=True, capture_output=True, timeout=60)
+        git_inspection(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+                       "release main refresh failed", ROOT, timeout=60)
     publisher = frozen_checkout(ROOT)
     verify_release_sources(data["commit"], workflow_sha, ROOT)
     verify_release_sources(workflow_sha, publisher, ROOT)
