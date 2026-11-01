@@ -74,9 +74,9 @@ def policy_digest_from_response(response):
     return hashlib.sha256(data).hexdigest()
 
 
-def validation_identity(expected_sha=None):
+def validation_identity(expected_sha):
     actual = source_sha(gpu.output(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip())
-    require(actual == source_sha(expected_sha or actual), "validation checkout differs from the frozen workflow commit")
+    require(actual == source_sha(expected_sha), "validation checkout differs from the frozen workflow commit")
     require(not gpu.output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=all"]).strip(), "validation checkout is dirty")
     return actual
 
@@ -220,7 +220,7 @@ def main():
     for name in ("profile", "directory", "version", "commit", "output"):
         run.add_argument("--" + name, required=True)
     run.add_argument("--exercise-models", action="store_true")
-    run.add_argument("--validation-commit")
+    run.add_argument("--validation-commit", required=True)
     args = parser.parse_args()
     try:
         (resolve if args.command == "resolve" else check)(args)

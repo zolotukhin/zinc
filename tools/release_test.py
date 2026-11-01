@@ -477,6 +477,16 @@ class ReleaseTest(unittest.TestCase):
                 release_worker.resolve(SimpleNamespace(profile="vulkan-rdna4", preview_run="123"))
             api.assert_not_called()
 
+    def test_worker_cli_requires_an_explicit_validation_commit(self):
+        with patch.object(release_gpu, "output", return_value=COMMIT), self.assertRaises(ValueError):
+            release_worker.validation_identity(None)
+        result = subprocess.run([sys.executable, str(ROOT / "tools/release_worker.py"), "check", "--profile", "vulkan-rdna4",
+                                 "--directory", str(self.root), "--version", "9.8.7", "--commit", COMMIT,
+                                 "--output", str(self.root / "absent.json")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--validation-commit", result.stderr)
+        self.assertFalse((self.root / "absent.json").exists())
+
     def test_worker_frozen_policy_rejects_non_file_and_unreadable_api_responses(self):
         response = {"type": "file", "path": "config/release/targets.json", "encoding": "base64", "content": "e30="}
         for changed in (None, [], {}, {"type": "dir"}, {"path": "other.json"}, {"encoding": "none"},
