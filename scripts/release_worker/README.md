@@ -124,7 +124,9 @@ Run the separate readiness workflow against a successful preview of the exact
 main commit. Its reports cannot be aggregated into release qualification.
 
 Automatic runner updates are disabled to preserve the reviewed image. Check
-official runner releases regularly, rebuild with a verified archive hash and
-replace the image before GitHub's 30-day update deadline. Drain the worker before
-maintenance. Retain private logs locally; only the harness's sanitized report
-belongs in public artifacts.
+official runner releases regularly and rebuild with a verified archive hash
+before GitHub's 30-day update deadline. Drain and stop the worker first. Register
+the new image with a fresh runner volume and token; replacing the image alone
+does not replace application files already copied into the persistent volume.
+Retain private logs locally; only the harness's sanitized report belongs in
+public artifacts.

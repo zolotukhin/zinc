@@ -24,7 +24,7 @@ def container_args(config):
                "--label", "org.zinc.release-worker=true", "--read-only", "--cap-drop=ALL",
                "--security-opt=no-new-privileges", "--pid=host", "--user", f"{config['uid']}:{config['gid']}",
                "--pids-limit=768", "--memory=32g", "--memory-swap=32g", "--cpus=4", "--cpu-shares=256",
-               "--shm-size=1g", "--tmpfs", "/tmp:rw,nosuid,nodev,size=8g,mode=1777"]
+               "--shm-size=1g", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"]
     require(isinstance(config["gpu_devices"], list) and config["gpu_devices"] and
             set(config["gpu_devices"]).issubset({"/dev/kfd", "/dev/dri"}), "invalid GPU device access")
     for device in config["gpu_devices"]:

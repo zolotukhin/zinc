@@ -351,6 +351,8 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("--cap-drop=ALL", args)
         self.assertIn("--security-opt=no-new-privileges", args)
         self.assertIn("--read-only", args)
+        # Package probes and the numerical reference execute from private /tmp.
+        self.assertIn("exec", args[args.index("--tmpfs") + 1].split(":", 1)[1].split(","))
         mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "--mount"]
         self.assertTrue(mounts[0].endswith(",readonly"))
         self.assertFalse(mounts[1].endswith(",readonly"))
