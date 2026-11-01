@@ -30,7 +30,7 @@ jobs:
       - run: test "$GITHUB_REF" = refs/heads/main
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Prepare the exact candidate for review; require a protected environment
@@ -54,7 +54,7 @@ jobs:
       - run: test "$GITHUB_REF" = refs/heads/main
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Reverify, create the final tag, upload and verify the same bytes, publish
@@ -74,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Re-download public release and verify all bytes and provenance

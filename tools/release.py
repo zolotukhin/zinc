@@ -21,6 +21,7 @@ from release_lib import (
     ROOT, GPU_GROUP_OVERHEAD_MINUTES, GPU_PROFILE_TIMEOUT_MINUTES, REFERENCE_LIBRARY_NAME,
     archive_name, check_metadata, extract_archive, inventory, policy,
     probe_binary, read_json, release_policy, require, sha256, source_sha, target, verify_reference_agreement, version, write_json,
+    frozen_checkout, git_revision, require_source_ancestor, verify_release_sources,
 )
 
 
@@ -209,16 +210,17 @@ def matrix(args):
 def resolve(args):
     release_version = version(args.version)
     require(args.ref in ("main", "refs/heads/main") or re.fullmatch(r"[0-9a-f]{40}", args.ref), "candidate source must be main or a full SHA")
-    ref = "origin/main" if args.ref in ("main", "refs/heads/main") else args.ref
-    commit = source_sha(command_output(["git", "rev-parse", "--verify", ref + "^{commit}"]).strip())
-    subprocess.run(["git", "merge-base", "--is-ancestor", commit, "origin/main"], check=True, capture_output=True)
-    require(not command_output(["git", "status", "--porcelain"]).strip(), "release source checkout is dirty")
+    frozen = frozen_checkout(ROOT)
+    commit = frozen if args.ref in ("main", "refs/heads/main") else git_revision(args.ref, ROOT)
+    require_source_ancestor(frozen, git_revision("origin/main", ROOT), ROOT)
+    verify_release_sources(commit, frozen, ROOT)
+    require(not command_output(["git", "-C", str(ROOT), "status", "--porcelain"]).strip(), "release source checkout is dirty")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         matrix(argparse.Namespace(kind="gpu"))
     gpu_matrix = output.getvalue().strip()
     values = {
         "version": release_version, "commit": commit,
-        "epoch": command_output(["git", "show", "-s", "--format=%ct", commit]).strip(),
+        "epoch": command_output(["git", "-C", str(ROOT), "show", "-s", "--format=%ct", commit]).strip(),
         "build_matrix": json.dumps({"include": release_policy(policy())["targets"]}, separators=(",", ":")),
         "signing_required": str(any(t["signing_required"] for t in release_policy(policy())["targets"])).lower(),
         "gpu_matrix": gpu_matrix,

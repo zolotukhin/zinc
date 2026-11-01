@@ -46,6 +46,21 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
   expect(candidate.jobs.certify.permissions['attestations']).toBe('write');
 });
 
+test('candidate preparation and all publisher checkouts use the dispatched SHA', () => {
+  const prepare = workflow('release-candidate.yml').jobs.prepare;
+  const checkout = prepare.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+  expect(checkout.with.ref).toBe('${{ github.sha }}');
+  expect(checkout.with['fetch-depth']).toBe(0);
+  const publisher = workflow('release.yml');
+  for (const job of Object.values(publisher.jobs) as any[]) {
+    for (const step of job.steps ?? []) {
+      if (!step.uses?.startsWith('actions/checkout@')) continue;
+      expect(step.with.ref).toBe('${{ github.sha }}');
+      expect(step.with['fetch-depth']).toBe(0);
+    }
+  }
+});
+
 test('manifest permits an unnecessary skipped signer and blocks failed or required signing', () => {
   const candidate = workflow('release-candidate.yml');
   const expression = candidate.jobs.manifest.if.replace(/^\s*\$\{\{|\}\}\s*$/g, '');

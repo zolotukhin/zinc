@@ -743,7 +743,9 @@ class ReleaseTest(unittest.TestCase):
             variables = {p["runner_variable"]: '["self-hosted","zinc-fixture"]' for p in release_lib.release_policy(data)["gpu_profiles"]}
             output = self.root / (str(include_metal) + ".outputs")
             with self.subTest(include_metal=include_metal), patch.object(release, "policy", return_value=data), \
-                    patch.object(release, "command_output", side_effect=[COMMIT, "", "1234567"]), patch.object(release.subprocess, "run"), \
+                    patch.object(release, "command_output", side_effect=["", "1234567"]), \
+                    patch.object(release, "frozen_checkout", return_value=COMMIT), patch.object(release, "git_revision", return_value=COMMIT), \
+                    patch.object(release, "require_source_ancestor"), patch.object(release, "verify_release_sources"), \
                     patch.dict(os.environ, {"RELEASE_VARIABLES": json.dumps(variables), "GITHUB_OUTPUT": str(output)}), contextlib.redirect_stdout(io.StringIO()):
                 release.resolve(SimpleNamespace(version="0.1.0-rc.1", ref="main"))
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
@@ -1404,8 +1406,10 @@ class ReleaseTest(unittest.TestCase):
         (directory / "provenance.jsonl").write_text("CPU fixture: signature verification is mocked\n")
         run = {"id": 123, "path": release_publish.WORKFLOW, "event": "workflow_dispatch", "head_branch": "main",
                "head_repository": {"full_name": release_publish.REPOSITORY}, "status": "completed", "conclusion": "success", "head_sha": COMMIT}
-        with patch.object(release_publish, "gh", return_value="") as gh, patch.object(release_publish.subprocess, "run"), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(release_publish, "gh", return_value="") as gh, patch.object(release_publish.subprocess, "run"), \
+                patch.object(release_publish, "verify_publication_sources") as sources, contextlib.redirect_stdout(io.StringIO()):
             release_publish.verify_bundle(directory, "123", run)
+            sources.assert_called_once()
             expected = {p.name for p in directory.iterdir()} - {"provenance.jsonl"}
             self.assertEqual({Path(call.args[0][2]).name for call in gh.call_args_list}, expected)
             for call in gh.call_args_list:
@@ -1418,7 +1422,7 @@ class ReleaseTest(unittest.TestCase):
         validation = read_json(directory / "validation.json")
         validation["profiles"][0]["models"][0]["context"] = 1
         write_json(directory / "validation.json", validation)
-        with self.assertRaisesRegex(ValueError, "context"):
+        with patch.object(release_publish, "verify_publication_sources"), self.assertRaisesRegex(ValueError, "context"):
             release_publish.verify_bundle(directory, "123", run)
 
     def test_gpu_family_assertions_reject_software_and_wrong_devices(self):
@@ -1927,6 +1931,157 @@ class ReleaseTest(unittest.TestCase):
             if controller.poll() is None:
                 controller.kill()
                 controller.communicate(timeout=10)
+
+
+class ReleaseSourceFreezeTests(unittest.TestCase):
+    """Source binding and publication order, including real Git histories."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="zinc-source-freeze-")
+        self.root = Path(self.temporary.name)
+        self.repo = self.root / "repository"
+        self.repo.mkdir()
+        self.git("init", "-b", "main")
+        self.git("config", "user.name", "Release fixture")
+        self.git("config", "user.email", "release-fixture@example.invalid")
+        self.env = patch.dict(os.environ, {"GITHUB_SHA": ""})
+        self.env.start()
+        self.base = self.commit("tools/release.py", "qualification-v1\n")
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+
+    def tearDown(self):
+        self.env.stop()
+        self.temporary.cleanup()
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.repo), *args], stderr=subprocess.PIPE,
+                                       text=True, timeout=10).strip()
+
+    def commit(self, name, text):
+        file = self.repo / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text)
+        self.git("add", "--", name)
+        self.git("commit", "-m", "CPU-only source-freeze fixture")
+        return self.git("rev-parse", "HEAD")
+
+    def resolver(self, ref, frozen):
+        output = self.root / "outputs"
+        variables = {p["runner_variable"]: '["self-hosted","zinc-fixture"]'
+                     for p in release_lib.release_policy(policy())["gpu_profiles"]}
+        with patch.object(release, "ROOT", self.repo), \
+                patch.dict(os.environ, {"GITHUB_SHA": frozen, "GITHUB_OUTPUT": str(output),
+                                        "RELEASE_VARIABLES": json.dumps(variables)}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            release.resolve(SimpleNamespace(version="0.1.0-rc.1", ref=ref))
+        return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    def test_main_resolution_uses_the_dispatch_snapshot_even_when_origin_moves(self):
+        newer = self.commit("docs/guide.md", "Later documentation\n")
+        self.git("update-ref", "refs/remotes/origin/main", newer)
+        self.git("checkout", "--detach", self.base)
+        result = self.resolver("main", self.base)
+        self.assertEqual(result["commit"], self.base)
+        self.assertNotEqual(result["commit"], newer)
+        with self.assertRaisesRegex(ValueError, "ancestor of the frozen workflow"):
+            self.resolver(newer, self.base)
+
+    def test_explicit_engine_and_docs_ancestors_keep_the_same_qualification_contract(self):
+        engine = self.commit("src/main.zig", "// older selectable engine\n")
+        newer = self.commit("docs/guide.md", "Documentation-only update\n")
+        self.git("update-ref", "refs/remotes/origin/main", newer)
+        release_lib.verify_release_sources(self.base, newer, self.repo)
+        self.assertEqual(self.resolver(engine, newer)["commit"], engine)
+
+    def test_changed_added_and_deleted_release_inputs_are_rejected_before_outputs(self):
+        for name in ("tools/release.py", "tools/release_gpu_group.py", "tools/release_workflow.test.ts",
+                     "config/release/targets.json", ".github/workflows/release-candidate.yml",
+                     "tools/validate_gemma_router.c", "scripts/release_worker/launch.py",
+                     "build.zig", "src/model/catalog.zig", "tools/setup_opencode.mjs"):
+            self.git("reset", "--hard", self.base)
+            newer = self.commit(name, "changed qualification input\n")
+            self.git("update-ref", "refs/remotes/origin/main", newer)
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "qualification inputs changed"):
+                self.resolver(self.base, newer)
+            self.assertFalse((self.root / "outputs").exists())
+        self.git("reset", "--hard", self.base)
+        self.git("rm", "tools/release.py")
+        self.git("commit", "-m", "Deleted qualification helper")
+        with self.assertRaisesRegex(ValueError, "qualification inputs changed"):
+            release_lib.verify_release_sources(self.base, self.git("rev-parse", "HEAD"), self.repo)
+
+    def test_future_or_divergent_source_is_not_an_ancestor_even_with_unchanged_gates(self):
+        main = self.commit("docs/main.md", "Main history\n")
+        self.git("checkout", "-b", "other", self.base)
+        other = self.commit("docs/other.md", "Divergent history\n")
+        with self.assertRaisesRegex(ValueError, "ancestor of the frozen workflow"):
+            release_lib.verify_release_sources(other, main, self.repo)
+
+    def test_dispatch_sha_mismatch_and_dirty_checkout_fail_before_output(self):
+        newer = self.commit("docs/guide.md", "Newer dispatch\n")
+        self.git("checkout", "--detach", self.base)
+        with patch.dict(os.environ, {"GITHUB_SHA": newer}), self.assertRaisesRegex(ValueError, "dispatched workflow SHA"):
+            release_lib.frozen_checkout(self.repo)
+        self.git("update-ref", "refs/remotes/origin/main", newer)
+        (self.repo / "untracked-input").write_text("unreviewed\n")
+        with self.assertRaisesRegex(ValueError, "checkout is dirty"):
+            self.resolver("main", self.base)
+        self.assertFalse((self.root / "outputs").exists())
+
+    def test_publisher_rejects_changed_gates_before_assets_attestations_or_writes(self):
+        newer = self.commit("tools/release_gpu.py", "new mandatory GPU check\n")
+        self.git("update-ref", "refs/remotes/origin/main", newer)
+        run = {"id": 123, "path": release_publish.WORKFLOW, "event": "workflow_dispatch", "head_branch": "main",
+               "head_repository": {"full_name": release_publish.REPOSITORY}, "status": "completed",
+               "conclusion": "success", "head_sha": self.base}
+        data = {"candidate_run": "123", "workflow_sha": self.base, "commit": self.base}
+        # Both a newer publisher and main advancing during approval must fail.
+        for publisher in (self.base, newer):
+            self.git("checkout", "--detach", publisher)
+            with self.subTest(publisher=publisher), patch.object(release_publish, "ROOT", self.repo), \
+                    patch.object(release_publish, "verify_candidate", return_value=data), \
+                    patch.object(release_publish, "gh") as attest, patch.object(release_publish, "api") as writes, \
+                    patch.dict(os.environ, {"GITHUB_SHA": publisher}), \
+                    self.assertRaisesRegex(ValueError, "qualification inputs changed"):
+                release_publish.verify_bundle(self.root / "not-yet-inspected", "123", run)
+            attest.assert_not_called()
+            writes.assert_not_called()
+
+    def test_publication_refresh_detects_main_advancing_after_checkout(self):
+        origin = self.root / "origin.git"
+        self.git("init", "--bare", str(origin))
+        self.git("remote", "add", "origin", str(origin))
+        newer = self.commit("tools/release_gpu.py", "New qualification check during approval\n")
+        self.git("push", "origin", "HEAD:refs/heads/main")
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        self.git("checkout", "--detach", self.base)
+        data = {"commit": self.base, "workflow_sha": self.base}
+        with patch.object(release_publish, "ROOT", self.repo), patch.dict(os.environ, {"GITHUB_SHA": self.base}), \
+                self.assertRaisesRegex(ValueError, "qualification inputs changed"):
+            release_publish.verify_publication_sources(data, self.base, refresh=True)
+        self.assertEqual(self.git("rev-parse", "origin/main"), newer)
+
+    def test_publish_refresh_failure_prevents_all_tag_and_release_mutation(self):
+        run = {"id": 123, "path": release_publish.WORKFLOW, "event": "workflow_dispatch", "head_branch": "main",
+               "head_repository": {"full_name": release_publish.REPOSITORY}, "status": "completed",
+               "conclusion": "success", "head_sha": self.base}
+        data = {"version": "0.1.0-rc.1", "commit": self.base, "workflow_sha": self.base,
+                "required_profiles": [], "artifacts": []}
+        for error in (ValueError("qualification inputs changed"), subprocess.CalledProcessError(1, ["git", "fetch"])):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(sys, "argv", ["release_publish.py", "--run", "123", "--directory", str(self.root), "--publish"]), \
+                    patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": release_publish.REPOSITORY,
+                                            "GITHUB_OUTPUT": "", "GITHUB_STEP_SUMMARY": ""}), \
+                    patch.object(release_publish, "api", return_value=run), \
+                    patch.object(release_publish, "validate_environment"), \
+                    patch.object(release_publish, "verify_bundle", return_value=data), \
+                    patch.object(release_publish.subprocess, "check_output", return_value=""), \
+                    patch.object(release_publish, "validate_catalog"), \
+                    patch.object(release_publish, "verify_publication_sources", side_effect=error) as refresh, \
+                    patch.object(release_publish, "publish") as mutate, \
+                    self.assertRaises(type(error)):
+                release_publish.main()
+            refresh.assert_called_once_with(data, self.base, refresh=True)
+            mutate.assert_not_called()
 
 
 if __name__ == "__main__":

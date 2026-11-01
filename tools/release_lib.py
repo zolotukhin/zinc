@@ -28,6 +28,17 @@ MAX_MEMBERS = 4096
 GPU_PROFILE_TIMEOUT_MINUTES = 150
 GPU_GROUP_OVERHEAD_MINUTES = 15
 REFERENCE_LIBRARY_NAME = re.compile(r"lib(?:ggml|llama)[A-Za-z0-9_.+-]*\.(?:so(?:\.[0-9]+)*|dylib|a)")
+# An older engine/docs commit is reusable only when it uses this workflow's
+# release contract. Include added/deleted helpers through Git pathspecs too.
+RELEASE_INPUT_PATHS = (
+    ".github/workflows/release-candidate.yml", ".github/workflows/release.yml",
+    ".github/workflows/release-preview.yml", ".github/workflows/release-worker-check.yml",
+    ".github/workflows/test.yml", "config/release", "scripts/release_worker",
+    "scripts/setup_release_shaderc.sh", "scripts/package_release.sh", "scripts/install.sh",
+    "build.zig", "build.zig.zon", ".zig-version", ".bun-version", "package.json", "bun.lock",
+    "src/model/catalog.zig", ":(glob)tools/release*", ":(glob)tools/validate_*.c",
+    ":(glob)tools/opencode*", ":(glob)tools/setup_opencode*", ":(glob)tools/validate_opencode*",
+)
 
 
 def install_signal_handlers():
@@ -80,6 +91,37 @@ def version(value):
 def source_sha(value):
     require(isinstance(value, str) and SHA.fullmatch(value), "source commit must be a full lowercase SHA")
     return value
+
+
+def git_revision(ref, root=None):
+    result = subprocess.run(["git", "rev-parse", "--verify", ref + "^{commit}"], cwd=root or ROOT,
+                            capture_output=True, text=True, timeout=30)
+    require(result.returncode == 0, "release source revision is unavailable")
+    return source_sha(result.stdout.strip())
+
+
+def frozen_checkout(root=None):
+    """The dispatched workflow SHA, never a later tip of the main branch."""
+    commit = git_revision("HEAD", root)
+    dispatched = os.environ.get("GITHUB_SHA")
+    if dispatched:
+        require(commit == source_sha(dispatched), "release checkout differs from the dispatched workflow SHA")
+    return commit
+
+
+def require_source_ancestor(older, newer, root=None):
+    result = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha(older), source_sha(newer)],
+                            cwd=root or ROOT, capture_output=True, timeout=30)
+    require(result.returncode == 0, "release source must be an ancestor of the frozen workflow")
+
+
+def verify_release_sources(older, newer, root=None):
+    """Fail before build/publication if the selected source uses other gates."""
+    require_source_ancestor(older, newer, root)
+    result = subprocess.run(["git", "diff", "--name-only", "--no-renames", older, newer, "--", *RELEASE_INPUT_PATHS],
+                            cwd=root or ROOT, capture_output=True, text=True, timeout=30)
+    require(result.returncode == 0, "release input comparison failed")
+    require(not result.stdout.strip(), "release qualification inputs changed; prepare a fresh candidate from the current workflow")
 
 
 def comparison_proves_ancestor(comparison, commit):
