@@ -40,6 +40,35 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def environment_main_only(environment, branches):
+    """One main-branch rule; tag rules, globs and broad protected access fail."""
+    restriction = environment.get("deployment_branch_policy") if isinstance(environment, dict) else None
+    return (isinstance(restriction, dict) and restriction.get("custom_branch_policies") is True and
+            restriction.get("protected_branches") is False and isinstance(branches, list) and len(branches) == 1 and
+            isinstance(branches[0], dict) and branches[0].get("name") == "main" and branches[0].get("type") == "branch")
+
+
+def environment_requires_reviewers(environment):
+    """A malformed reviewer entry cannot stand in for a configured approval."""
+    rules = environment.get("protection_rules") if isinstance(environment, dict) else None
+    if not isinstance(rules, list):
+        return False
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("type") != "required_reviewers":
+            continue
+        reviewers = rule.get("reviewers")
+        if not isinstance(reviewers, list) or not reviewers:
+            return False
+        for reviewer in reviewers:
+            if not isinstance(reviewer, dict) or reviewer.get("type") not in ("User", "Team"):
+                return False
+            identity = reviewer.get("reviewer")
+            if not isinstance(identity, dict) or type(identity.get("id")) is not int or identity["id"] <= 0:
+                return False
+        return True
+    return False
+
+
 def version(value):
     require(isinstance(value, str) and SEMVER.fullmatch(value), "invalid semantic version")
     return value

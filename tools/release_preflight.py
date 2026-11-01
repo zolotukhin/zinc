@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 
-from release_lib import ROOT, policy, require, source_sha, version
+from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, require, source_sha, version
 from release_sign import SIGNING_SECRETS
 
 
@@ -149,19 +149,13 @@ def audit(github, repo, data):
             continue
         branches = inspect(name + " branch policies API", lambda: github.collection(base + "environments/" + name + "/deployment-branch-policies", "branch_policies", "id"))
         if branches is not None:
-            restriction = environment["deployment_branch_policy"]
-            main_only = (isinstance(restriction, dict) and restriction.get("custom_branch_policies") is True and
-                         restriction.get("protected_branches") is False and len(branches) == 1 and
-                         branches[0].get("name") == "main" and branches[0].get("type") == "branch")
+            # collection() already proved every page's total_count equals the
+            # complete row count, before sharing this predicate with publishing.
+            main_only = environment_main_only(environment, branches)
             checks.append(check(name + " branches", main_only, "Restricted to the main branch." if main_only else
                                 "Restrict this environment to one custom branch policy: main (branch, not tag)."))
         if name == "release":
-            rules = environment.get("protection_rules", []) if isinstance(environment, dict) else []
-            reviewers = isinstance(rules, list) and any(isinstance(rule, dict) and rule.get("type") == "required_reviewers" and
-                isinstance(rule.get("reviewers"), list) and rule["reviewers"] and all(
-                    isinstance(reviewer, dict) and reviewer.get("type") in ("User", "Team") and
-                    isinstance(reviewer.get("reviewer"), dict) and type(reviewer["reviewer"].get("id")) is int and
-                    reviewer["reviewer"]["id"] > 0 for reviewer in rule["reviewers"]) for rule in rules)
+            reviewers = environment_requires_reviewers(environment)
             checks.append(check("release approval", reviewers, "Publication requires reviewer approval." if reviewers else
                                 "Configure at least one required reviewer on the release environment."))
 
