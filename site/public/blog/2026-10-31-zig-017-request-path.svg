@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="548" viewBox="0 0 280 548" role="img" aria-labelledby="title desc">
+  <title id="title">The path from prompt bytes to visible text</title>
+  <desc id="desc">Prompt bytes pass through CPU tokenization, GPU prefill, GPU decode and HTTP or SSE writes before becoming visible text.</desc>
+  <style>
+    :root { --box: #f5f7fb; --line: #667085; --border: #bdc8db; --text: #202236; }
+    @media (prefers-color-scheme: dark) {
+      :root { --box: #22283a; --line: #a9b4cc; --border: #626f8c; --text: #f0f2fa; }
+    }
+    rect { fill: var(--box); stroke: var(--border); }
+    text { fill: var(--text); font: 16px system-ui, sans-serif; text-anchor: middle; }
+    .arrow { fill: none; stroke: var(--line); stroke-width: 1.5; marker-end: url(#arrow); }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line)"/>
+    </marker>
+  </defs>
+  <path class="arrow" d="M140 76v24 M140 168v24 M140 260v24 M140 352v24 M140 444v24"/>
+  <rect x="28" y="12" width="224" height="64" rx="10"/>
+  <text x="140" y="50">Prompt bytes</text>
+  <rect x="28" y="104" width="224" height="64" rx="10"/>
+  <text x="140" y="132">CPU<tspan x="140" dy="22">tokenization</tspan></text>
+  <rect x="28" y="196" width="224" height="64" rx="10"/>
+  <text x="140" y="234">GPU prefill</text>
+  <rect x="28" y="288" width="224" height="64" rx="10"/>
+  <text x="140" y="326">GPU decode</text>
+  <rect x="28" y="380" width="224" height="64" rx="10"/>
+  <text x="140" y="408">HTTP / SSE<tspan x="140" dy="22">writes</tspan></text>
+  <rect x="28" y="472" width="224" height="64" rx="10"/>
+  <text x="140" y="510">Visible text</text>
+</svg>
