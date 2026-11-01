@@ -408,6 +408,29 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(release_gpu.packaged_environment(), {"PATH": "<system-tools>"})
             self.assertEqual(dict(os.environ), inherited)
 
+    def test_packaged_kernel_gate_requires_cache_and_gemma_router_reference_suites(self):
+        markers = {"validate-shared-cache": "PASS: 84 cache-boundary/reference/offset/stride/guard cases",
+                   "validate-gemma-router": "PASS: 36 Gemma router workgroup/reference/guard/replay cases"}
+        for missing in (None, "validate-shared-cache", "validate-gemma-router"):
+            launched, reaped = [], []
+            @contextlib.contextmanager
+            def child(command, log, cwd, env):
+                name = Path(command[0]).name
+                launched.append(name)
+                Path(log).write_text(markers[name] if name != missing else "incomplete suite")
+                try:
+                    yield SimpleNamespace(wait=lambda timeout: 0)
+                finally:
+                    reaped.append(name)
+            with self.subTest(missing=missing), patch.object(release_gpu, "output", return_value=""), patch.object(release_gpu, "process", side_effect=child):
+                if missing is None:
+                    release_gpu.kernel_reference(self.root, self.root, self.root, 0, self.root, {})
+                else:
+                    with self.assertRaisesRegex(ValueError, "reference suite was incomplete"):
+                        release_gpu.kernel_reference(self.root, self.root, self.root, 0, self.root, {})
+            self.assertEqual(launched, ["validate-shared-cache"] if missing == "validate-shared-cache" else list(markers))
+            self.assertEqual(reaped, launched)
+
     def test_worker_guard_accepts_only_the_admin_selected_main_workflow_job(self):
         workflow = "example/zinc/.github/workflows/release-worker-check.yml@refs/heads/main"
         config = {"repository": "example/zinc", "actors": ["maintainer"],

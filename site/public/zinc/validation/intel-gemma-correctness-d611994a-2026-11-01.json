@@ -1,0 +1,1124 @@
+{
+  "schema_version": "zinc-intel-correctness-diagnostic-v1",
+  "checked_at_utc": "2026-11-01",
+  "release_qualification": false,
+  "gpu": "Intel Arc Pro B70 / Xe2",
+  "source_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6",
+  "preview_run": 41285999239,
+  "preview_version": "0.1.0-dev.41285999239",
+  "archive_sha256": "3d914b42a8ece2b8b3c38b17503a9da62ddf8bb37d3b24c4c52761895140113f",
+  "model": {
+    "id": "gemma4-26b-a4b-q4k-m",
+    "size_bytes": 16868236288,
+    "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c"
+  },
+  "baseline_worker_report": {
+    "report": {
+      "archive_sha256": "3d914b42a8ece2b8b3c38b17503a9da62ddf8bb37d3b24c4c52761895140113f",
+      "error": "reference choice is not a near-tied second choice",
+      "failed_stage": "gemma4-26b-a4b-q4k-m",
+      "hardware": {
+        "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+        "gpu": "Intel(R) Graphics (BMG G31)",
+        "os": "Linux 7.2.7-arch1-1"
+      },
+      "models": [
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 2048,
+          "id": "qwen3-0.6b-q8-0",
+          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 3618,
+                    "logprob_gap": 0.015493392944335938,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 36337
+                  }
+                ],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen36-27b-q4k-m",
+          "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen35-9b-q4k-m",
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "gemma4-31b-q4k-m",
+          "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84"
+        },
+        {
+          "context": 4096,
+          "id": "gemma4-26b-a4b-q4k-m",
+          "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c"
+        }
+      ],
+      "passed": false,
+      "policy_sha256": "521d7fd0a99c3c572dc2504cd4bf5c0a9e089c9d952d1587c953c2b04bb9b808",
+      "preview_version": "0.1.0-dev.41285999239",
+      "profile": "vulkan-intel-xe2",
+      "reference": {
+        "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "device_backend": "vulkan",
+        "generation": {
+          "batch_size": 512,
+          "flash_attention": false,
+          "kv_cache": "f32",
+          "micro_batch": 1,
+          "parallel": 1
+        },
+        "library_sha256": {
+          "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+          "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+        },
+        "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+        "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+      },
+      "release_qualification": false,
+      "schema_version": "zinc-worker-readiness-v1",
+      "source_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6",
+      "validation_helpers_sha256": {
+        "release.py": "3483f43b3694662d751342a4ad4bdc8e6e09c5015460b1bb08ba45d40510a701",
+        "release_gpu.py": "c374389603f423b11121ff27e2c970489dc374799bdb1904c45de2d47e315a07",
+        "release_lib.py": "4f9c4320628d63d6b8f48a533b61e49446bd8c75d4e17fda34b9aaf3f1e6cab2",
+        "release_worker.py": "df3d4a9f44807cfa92041081fcace8ad88aced0ddee83803571bcdcda635ea4a"
+      },
+      "validation_source_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6"
+    },
+    "gpu_process_counts": {
+      "zinc": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0
+    }
+  },
+  "diagnostic_controls": {
+    "router-kernel-reference": {
+      "cases": [
+        {
+          "exit_code": 1,
+          "summary": [
+            "router mismatch: actual -0.313987255 expected 0.0682756081",
+            "FAIL: full-workgroup router reference"
+          ],
+          "variant": "original"
+        },
+        {
+          "exit_code": 0,
+          "summary": [
+            "PASS: 36 Gemma router workgroup/reference/guard/replay cases"
+          ],
+          "variant": "workgroup-sum"
+        }
+      ],
+      "cleanup": "no GPU process remains"
+    },
+    "router-workgroup-sum-control": {
+      "base_source_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6",
+      "cases": [
+        {
+          "actual_ids": [
+            818,
+            9551,
+            691,
+            496,
+            13160,
+            10704,
+            528,
+            103592,
+            236858,
+            236751,
+            38464,
+            236761,
+            1030,
+            35911,
+            914,
+            5716
+          ],
+          "case": 0,
+          "exact": false,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ]
+        },
+        {
+          "actual_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            611,
+            735,
+            531,
+            16052,
+            506,
+            623,
+            47734,
+            236775,
+            529
+          ],
+          "case": 1,
+          "exact": false,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ]
+        },
+        {
+          "actual_ids": [
+            127749,
+            563,
+            12865,
+            1456,
+            3418,
+            3572,
+            13390,
+            2779,
+            531,
+            1061,
+            7516,
+            11775,
+            532,
+            12214,
+            28530,
+            236764
+          ],
+          "case": 2,
+          "exact": false,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ]
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "control": "three router shaders merge all workgroup subgroups",
+      "model": "gemma4-26b-a4b-q4k-m",
+      "passed": false,
+      "qualification": false,
+      "shaders": {
+        "rms_norm_scale_dmmv_f32": {
+          "source_sha256": "07374570411daa30f3710263535feef8fb2154d61754d3c20786cb7f8def960f",
+          "spirv_sha256": "3907a6e901681afd9e9f039cbe25dde12f3241247ca29409e1807eed4ce3135a"
+        },
+        "rms_norm_scale_dmmv_f32_batch": {
+          "source_sha256": "f9ab24ce3e7b6e855ece0fe04b9e516d46d7849d1c4ce86d49273d8b4a076c66",
+          "spirv_sha256": "c95a32bdf98cc85f462001242d3751c53431d7ba3cbcc982e3186e9d832b9719"
+        },
+        "rms_norm_scale_dmmv_f32_topk": {
+          "source_sha256": "fd8fb134b80deda64458368fd20f08df1a292ba1cf139719a785324a2ad92902",
+          "spirv_sha256": "7f737da976b1669fbde7149495519abf4943e875d1824e7e342d16d423671155"
+        }
+      }
+    },
+    "exact-experts-control": {
+      "cases": [
+        {
+          "actual_ids": [
+            818,
+            28575,
+            48181,
+            529,
+            506,
+            11072,
+            2025,
+            10241,
+            3782,
+            236858,
+            236745,
+            1164,
+            7202,
+            236793,
+            901,
+            113361
+          ],
+          "agreement_passed": false,
+          "case": 0,
+          "control": "original-shaders",
+          "error": "CLI reference token IDs differed",
+          "exact": false,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "flags": {
+            "ZINC_GEMMA_MOE_TOPK": "0"
+          }
+        },
+        {
+          "actual_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            625,
+            563,
+            11045,
+            531,
+            1171,
+            3582,
+            872,
+            496,
+            3364
+          ],
+          "agreement_passed": false,
+          "case": 1,
+          "control": "original-shaders",
+          "error": "CLI reference token IDs differed",
+          "exact": false,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "flags": {
+            "ZINC_GEMMA_MOE_TOPK": "0"
+          }
+        },
+        {
+          "actual_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "agreement_passed": true,
+          "case": 2,
+          "control": "original-shaders",
+          "error": null,
+          "exact": true,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "flags": {
+            "ZINC_GEMMA_MOE_TOPK": "0"
+          }
+        },
+        {
+          "actual_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            1164,
+            2178,
+            580,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "agreement_passed": false,
+          "case": 0,
+          "control": "router-workgroup-fix",
+          "error": "CLI reference token IDs differed",
+          "exact": false,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "flags": {
+            "ZINC_GEMMA_MOE_TOPK": "0"
+          }
+        },
+        {
+          "actual_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "agreement_passed": true,
+          "case": 1,
+          "control": "router-workgroup-fix",
+          "error": null,
+          "exact": true,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "flags": {
+            "ZINC_GEMMA_MOE_TOPK": "0"
+          }
+        },
+        {
+          "actual_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "agreement_passed": true,
+          "case": 2,
+          "control": "router-workgroup-fix",
+          "error": null,
+          "exact": true,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "flags": {
+            "ZINC_GEMMA_MOE_TOPK": "0"
+          }
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "model": "gemma4-26b-a4b-q4k-m",
+      "qualification": false
+    },
+    "exact-experts-full-reference": {
+      "cases": [
+        {
+          "actual_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            1164,
+            2178,
+            580,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "case": 0,
+          "exact": false,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "reference_content": "The salt did not merely sit upon the skin of Elias Thorne; it lived there"
+        },
+        {
+          "case": 1,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "reference_content": "To understand how a refrigerator works, the most important thing to realize is that **"
+        },
+        {
+          "case": 2,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "reference_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring:**"
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "control": "full metadata expert routing and corrected subgroup reductions",
+      "error": "reference choice exceeds near-tie policy",
+      "passed": false,
+      "qualification": false
+    },
+    "exact-experts-f32-decode-reference": {
+      "cases": [
+        {
+          "actual_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            1164,
+            2178,
+            580,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "case": 0,
+          "exact": false,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "reference_content": "The salt did not merely sit upon the skin of Elias Thorne; it lived there"
+        },
+        {
+          "case": 1,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "reference_content": "To understand how a refrigerator works, the most important thing to realize is that **"
+        },
+        {
+          "case": 2,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "reference_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring:**"
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "control": "full metadata expert routing, corrected subgroups, F32 decode activations",
+      "error": "reference choice exceeds near-tie policy",
+      "passed": false,
+      "qualification": false
+    },
+    "exact-experts-serial-f32-reference": {
+      "cases": [
+        {
+          "actual_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "case": 0,
+          "exact": true,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "reference_content": "The salt did not merely sit upon the skin of Elias Thorne; it lived there"
+        },
+        {
+          "actual_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "case": 1,
+          "exact": true,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "reference_content": "To understand how a refrigerator works, the most important thing to realize is that **"
+        },
+        {
+          "actual_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "case": 2,
+          "exact": true,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "reference_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring:**"
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "control": "full metadata expert routing, corrected subgroups, serial F32 activations",
+      "passed": true,
+      "qualification": false
+    },
+    "exact-experts-grouped-f32-reference": {
+      "cases": [
+        {
+          "actual_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            1164,
+            2178,
+            580,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "case": 0,
+          "exact": false,
+          "expected_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "reference_content": "The salt did not merely sit upon the skin of Elias Thorne; it lived there"
+        },
+        {
+          "case": 1,
+          "expected_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "reference_content": "To understand how a refrigerator works, the most important thing to realize is that **"
+        },
+        {
+          "case": 2,
+          "expected_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "reference_content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring:**"
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "control": "full metadata expert routing, corrected subgroups, grouped F32 activations",
+      "error": "reference choice exceeds near-tie policy",
+      "passed": false,
+      "qualification": false
+    }
+  },
+  "successful_control": {
+    "rebuilt_shader_overlay": true,
+    "environment": {
+      "ZINC_GEMMA_MOE_TOPK": "0",
+      "ZINC_GEMMA_Q8_1_DMMV": "0",
+      "ZINC_GEMMA_MOE_Q8_1_GATE_UP": "0",
+      "ZINC_GEMMA_MOE_GROUPED_PREFILL": "0"
+    },
+    "cases": 3,
+    "exact_tokens": 48,
+    "total_tokens": 48
+  },
+  "limitations": [
+    "The unmodified archive failed Gemma 26B; the six-model archive is not qualified.",
+    "The passing control uses rebuilt shaders and explicit environment overrides, not new packaged defaults.",
+    "Grouped prefill still fails the unchanged near-tie policy.",
+    "OpenCode model coding tests are a separate validation track."
+  ],
+  "fix_sources_sha256": {
+    "src/compute/forward.zig": "a82ff23784edfc3e77542f7f3aa9312b1865bc35814dbc4b2e4b8f5e6a8a23f9",
+    "src/shaders/rms_norm_scale_dmmv_f32.comp": "07374570411daa30f3710263535feef8fb2154d61754d3c20786cb7f8def960f",
+    "src/shaders/rms_norm_scale_dmmv_f32_batch.comp": "f9ab24ce3e7b6e855ece0fe04b9e516d46d7849d1c4ce86d49273d8b4a076c66",
+    "src/shaders/rms_norm_scale_dmmv_f32_topk.comp": "fd8fb134b80deda64458368fd20f08df1a292ba1cf139719a785324a2ad92902",
+    "tools/validate_gemma_router.c": "7c43c600a1e2d2ae74dadf7b2df26d9eab329b4dcc1d66412da01366b35b872b"
+  },
+  "rdna4_router_regression": {
+    "gpu_family": "rdna4",
+    "passed": true,
+    "cases": 36,
+    "reference_library_sha256": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+    "shader_source_sha256": {
+      "rms_norm_scale_dmmv_f32": "07374570411daa30f3710263535feef8fb2154d61754d3c20786cb7f8def960f",
+      "rms_norm_scale_dmmv_f32_batch": "f9ab24ce3e7b6e855ece0fe04b9e516d46d7849d1c4ce86d49273d8b4a076c66",
+      "rms_norm_scale_dmmv_f32_topk": "fd8fb134b80deda64458368fd20f08df1a292ba1cf139719a785324a2ad92902"
+    },
+    "summary": [
+      "PASS: 36 Gemma router workgroup/reference/guard/replay cases"
+    ],
+    "qualification": false,
+    "cleanup": "no GPU process remains"
+  }
+}

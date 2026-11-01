@@ -8,6 +8,7 @@
 // Input hidden is token-major [token][K]. Router weights are f32 row-major
 // [M][K]. Output logits are token-major [token][M].
 
+#extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
@@ -35,6 +36,22 @@ layout(set = 0, binding = 3) writeonly buffer RouterLogits {
     float router_out[];
 };
 
+// A 64-thread workgroup can contain several Intel SIMD16/SIMD32 subgroups.
+// Merge all of them for both RMS energy and the router dot product. The first
+// barrier also protects the previous call's shared reads from being overwritten.
+shared float s_router_sums[64];
+float workgroup_sum(float value) {
+    float total = subgroupAdd(value);
+    if (gl_NumSubgroups > 1u) {
+        barrier();
+        if (subgroupElect()) s_router_sums[gl_SubgroupID] = total;
+        barrier();
+        total = 0.0;
+        for (uint sg = 0u; sg < gl_NumSubgroups; sg++) total += s_router_sums[sg];
+    }
+    return total;
+}
+
 void main() {
     const uint row = gl_WorkGroupID.x;
     const uint tok = gl_WorkGroupID.y;
@@ -50,7 +67,7 @@ void main() {
         const vec4 v = hidden_v4[x_base + i];
         sum_sq += dot(v, v);
     }
-    sum_sq = subgroupAdd(sum_sq);
+    sum_sq = workgroup_sum(sum_sq);
 
     const float rms_inv = inversesqrt(sum_sq / float(K) + eps);
     const uint w_base_v4 = row * K_v4;
@@ -60,7 +77,7 @@ void main() {
         const vec4 x = hidden_v4[x_base + k_v4] * rms_inv * scale_v4[k_v4];
         sum += dot(x, router_w_v4[w_base_v4 + k_v4]);
     }
-    sum = subgroupAdd(sum);
+    sum = workgroup_sum(sum);
     if (tid == 0u) {
         router_out[tok * M + row] = sum;
     }

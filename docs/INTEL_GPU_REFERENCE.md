@@ -54,14 +54,25 @@ was insufficient evidence because unsupported subgroup requests are optional
 in the pipeline factory. Dispatch now checks the subgroup capability and uses
 generic batched attention when 64 lanes are unavailable. This preserves the
 other accelerated prefill stages. Packaged preview `dbbfff54` now passes 84 kernel
-cases and four pinned model rows, including 27B. The later `f1ef2aa9` preview
-separately passes Gemma 31B with pinned native Vulkan references: 48/48 exact
-choices, tokenizer/API checks and 84 kernel cases. Gemma 26B and a complete
-six-model matrix on one archive remain pending. The
+cases and four pinned model rows, including 27B. The `d611994a` preview passes
+five of the six required rows on one archive, including Gemma 31B. Gemma 26B's
+weights are now pinned and installed, but its continuation fails the unchanged
+native-reference policy. The full six-model archive remains unqualified. The
 [release readiness note](releases/0.1.0-plan.md) and
-[latest portable evidence](/zinc/validation/worker-readiness-c1d2b7b4-2026-11-01.json)
-record these distinct sources; historical performance results below describe
-their recorded executables.
+[correctness evidence](/zinc/validation/intel-gemma-correctness-d611994a-2026-11-01.json)
+retain that failure and the diagnostic controls.
+
+The investigation found subgroup-local reductions in three Gemma router
+kernels and an Intel-only default that silently selected two experts instead
+of the model's full count. A new 36-case numerical GPU regression fails the
+original Intel shaders and passes the corrected shaders on both Intel and
+R9700. With corrected routing, full expert selection and conservative serial
+prefill/F32 activations, Gemma 26B matches all 48 reference choices. Grouped
+prefill still fails the policy, so the fix defaults to the conservative Intel
+path and keeps approximations opt-in. That passing diagnostic uses a rebuilt
+shader overlay and explicit flags; a new packaged-default check and actual
+OpenCode coding checks are separate gates. Historical performance rows below
+describe their recorded executables and settings.
 
 Intel Arc is a supported Linux Vulkan target in ZINC. The current public Intel benchmark artifact validates four managed catalog rows:
 
