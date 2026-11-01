@@ -41,6 +41,7 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
   ).toBe(true);
   expect(JSON.stringify(candidate.jobs.hardware)).not.toContain('zig.sh build');
   expect(candidate.jobs.hardware.concurrency['cancel-in-progress']).toBe(false);
+  expect(candidate.jobs.hardware['timeout-minutes']).toBe('${{ matrix.timeout_minutes }}');
   expect(candidate.jobs.certify.needs).toContain('hardware');
   expect(candidate.jobs.certify.permissions['attestations']).toBe('write');
 });

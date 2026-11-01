@@ -57,7 +57,7 @@ def free_port():
 
 
 @contextlib.contextmanager
-def process(command, log, cwd, env):
+def process(command, log, cwd, env, grace_seconds=3):
     """Own the entire subprocess group, including timeout/error/cancel paths."""
     with Path(log).open("wb") as stream:
         child = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
@@ -69,7 +69,7 @@ def process(command, log, cwd, env):
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(child.pid, signal.SIGTERM)
             try:
-                child.wait(timeout=3)
+                child.wait(timeout=grace_seconds)
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)

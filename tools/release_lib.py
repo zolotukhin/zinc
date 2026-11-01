@@ -25,6 +25,8 @@ SAFE_PATH = re.compile(r"[A-Za-z0-9_./+-]+")
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_MEMBERS = 4096
+GPU_PROFILE_TIMEOUT_MINUTES = 150
+GPU_GROUP_OVERHEAD_MINUTES = 15
 REFERENCE_LIBRARY_NAME = re.compile(r"lib(?:ggml|llama)[A-Za-z0-9_.+-]*\.(?:so(?:\.[0-9]+)*|dylib|a)")
 
 

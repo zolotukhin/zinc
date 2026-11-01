@@ -46,7 +46,12 @@ Candidates queue one job per worker role. The R9700 job checks Vulkan and ROCm
 sequentially and uploads an individual report for each profile. This avoids
 losing one backend's pending job to GitHub's concurrency-group queue limit.
 Each child owns its GPU processes and reservation; a failed profile stops the
-group and prevents certification.
+group and prevents certification. Each profile has a 150-minute budget. The
+job budget includes every sequential profile plus 15 minutes for checkout,
+artifact transfer and report upload: 315 minutes for R9700 and 165 for Intel.
+The group allows 30 seconds for a cancelled profile helper to stop and reap its
+own server groups before escalating; server processes retain their shorter
+termination grace period.
 
 | Variable                    | Required role                | Practical allocation for this matrix               |
 | --------------------------- | ---------------------------- | -------------------------------------------------- |
@@ -221,7 +226,7 @@ automatically; inspect Actions runs before retrying to avoid duplicate candidate
 After workflows merge to main and infrastructure is configured:
 
 1. Run the configuration preflight above, then dispatch `release-candidate.yml` on main with an explicit nightly/RC version first. Resolution accepts main or a full SHA already on main, freezes it once, and rejects dirty source/incomplete hardware assignments.
-2. Review all three Linux reports and model results. The small starter starts experimental. Promote its catalog status/tested profiles only after reviewing the R9700 and Intel Vulkan evidence. Stable publication rejects an unqualified starter; that source change needs another candidate.
+2. Review all three Linux reports and model results. The small starter starts experimental. Promote its catalog status/tested profiles only after reviewing the R9700 and Intel Vulkan evidence. Stable publication requires catalog coverage for both selected roles (`amd-rdna4-32gb` and `intel-arc`); Apple-only or partial coverage cannot satisfy it. Adding a stable hardware role requires an explicit reviewed catalog mapping. All shipped model sizes must match the policy and default contexts must stay within the qualified limits. Promotion is a source change and needs another candidate.
 3. Dispatch the final candidate with `version=0.1.0`. An RC cannot be renamed. Every final archive already embeds `0.1.0` and the full SHA.
 4. Review the `release-candidate` artifact: two Linux archives, policy, checksums, validation, generated notes, installer and offline provenance. Artifacts expire after 14 days; rebuild/requalify if unavailable.
 5. Dispatch `release.yml` on main with the successful manual candidate run ID. Preflight verifies workflow identity, source ancestry, provenance, complete model/report matrix and protected environment. Review its summary, then approve `release`.
