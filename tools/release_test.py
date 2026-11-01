@@ -583,6 +583,35 @@ class ReleaseTest(unittest.TestCase):
             child.stdout.close()
             child.stderr.close()
 
+    def test_reservation_atomic_publish_never_replaces_an_empty_legacy_owner(self):
+        source, occupied = self.root / "prepared", self.root / "occupied"
+        source.mkdir()
+        occupied.mkdir()
+        (source / "marker").write_text("prepared marker")
+        with self.assertRaises(FileExistsError):
+            release_lib.rename_worker_directory(source, occupied)
+        self.assertEqual(list(occupied.iterdir()), [])
+        self.assertTrue((source / "marker").is_file())
+
+    def test_reservation_survives_hard_kills_during_preparation_and_retirement(self):
+        for boundary in ("before_publish", "after_retire"):
+            path = self.root / boundary
+            code = ("import os,signal,sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\n"
+                    "import release_lib as lib\noriginal=lib.rename_worker_directory\ncalls=0\n"
+                    "def crash(source,target):\n global calls\n calls+=1\n"
+                    " if calls==1 and sys.argv[3]=='before_publish':os.kill(os.getpid(),signal.SIGKILL)\n"
+                    " original(source,target)\n"
+                    " if calls==2 and sys.argv[3]=='after_retire':os.kill(os.getpid(),signal.SIGKILL)\n"
+                    "lib.rename_worker_directory=crash\n"
+                    "with lib.worker_reservation(Path(sys.argv[2])):pass\n")
+            result = subprocess.run([sys.executable, "-c", code, str(ROOT / "tools"), str(path), boundary],
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, -9, boundary)
+            self.assertFalse(path.exists(), boundary)
+            with release_lib.worker_reservation(path):
+                self.assertTrue(path.is_dir())
+            self.assertFalse(path.exists())
+
     def test_worker_readiness_schema_cannot_be_aggregated_as_release_evidence(self):
         reports = self.root / "reports"
         reports.mkdir()
@@ -706,7 +735,7 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(len(json.loads(preview.getvalue())["include"]), 3)
 
     def test_shared_worker_profiles_run_sequentially_and_failure_stops_the_group(self):
-        for fail_at in (None, 0, 1, "interrupt"):
+        for fail_at in (None, 0, 1, "interrupt", "timeout"):
             launched, active, workdirs = [], [], []
             @contextlib.contextmanager
             def child(command, log, work, env):
@@ -722,6 +751,8 @@ class ReleaseTest(unittest.TestCase):
                 def wait(timeout):
                     if fail_at == "interrupt":
                         raise KeyboardInterrupt()
+                    if fail_at == "timeout":
+                        raise subprocess.TimeoutExpired(command, timeout)
                     return int(index == fail_at)
                 try:
                     yield SimpleNamespace(wait=wait)
@@ -733,12 +764,15 @@ class ReleaseTest(unittest.TestCase):
                 elif fail_at == "interrupt":
                     with self.assertRaises(KeyboardInterrupt):
                         release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / "interrupted")
+                elif fail_at == "timeout":
+                    with self.assertRaisesRegex(ValueError, "timed out after 150 minutes: vulkan-rdna4"):
+                        release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / "timed-out")
                 else:
                     with self.assertRaisesRegex(ValueError, "packaged GPU profile failed"):
                         release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / ("failed-" + str(fail_at)))
             self.assertFalse(active)
             self.assertTrue(all(not path.exists() for path in workdirs))
-            self.assertEqual(launched, ["vulkan-rdna4"] if fail_at in (0, "interrupt") else ["vulkan-rdna4", "rocm-rdna4"])
+            self.assertEqual(launched, ["vulkan-rdna4"] if fail_at in (0, "interrupt", "timeout") else ["vulkan-rdna4", "rocm-rdna4"])
         with patch.object(release_gpu_group.gpu, "process") as process, self.assertRaisesRegex(ValueError, "unknown release worker role"):
             release_gpu_group.check_group("ZINC_RUNNER_METAL_APPLE7", self.root, self.root / "preview-only")
         process.assert_not_called()

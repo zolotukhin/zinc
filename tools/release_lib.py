@@ -102,25 +102,52 @@ def worker_reservation(path):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("GPU worker is reserved; no process was interrupted") from None
-        marker = path / ".zinc-flock-reservation-v1"
-        try:
-            path.mkdir()
-        except FileExistsError:
-            # An empty directory may belong to a live older harness which does
-            # not use flock. Only our marked, unlocked protocol is recoverable.
-            require(path.is_dir() and not path.is_symlink() and marker.is_file() and not marker.is_symlink() and
-                    marker.read_bytes() == b"zinc-flock-reservation-v1\n" and set(path.iterdir()) == {marker},
-                    "GPU worker is reserved; inspect the legacy reservation without interrupting its owner")
-        else:
-            with marker.open("x") as stream:
+        marker_name = ".zinc-flock-reservation-v1"
+        with tempfile.TemporaryDirectory(prefix="." + path.name + ".preparing-", dir=path.parent) as temporary:
+            prepared = Path(temporary)
+            with (prepared / marker_name).open("x") as stream:
                 stream.write("zinc-flock-reservation-v1\n")
+            try:
+                rename_worker_directory(prepared, path)
+            except FileExistsError:
+                pass
+        # Publish a fully marked directory atomically. Plain rename() could
+        # replace an empty reservation owned by a live older harness.
+        marker = path / marker_name
+        require(path.is_dir() and not path.is_symlink() and marker.is_file() and not marker.is_symlink() and
+                marker.read_bytes() == b"zinc-flock-reservation-v1\n" and set(path.iterdir()) == {marker},
+                "GPU worker is reserved; inspect the legacy reservation without interrupting its owner")
         try:
             yield
         finally:
-            marker.unlink()
-            path.rmdir()
+            # Retire the marked directory before removing its contents, so a
+            # kill during cleanup cannot leave an unmarked active reservation.
+            require(not path.is_symlink() and set(path.iterdir()) == {marker}, "worker reservation changed while held")
+            with tempfile.TemporaryDirectory(prefix="." + path.name + ".retiring-", dir=path.parent) as temporary:
+                rename_worker_directory(path, Path(temporary) / "reservation")
     finally:
         os.close(descriptor)
+
+
+def rename_worker_directory(source, destination):
+    """Atomic directory publication without replacing even an empty owner."""
+    import ctypes
+    import sys
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(source), os.fsencode(destination), 4)  # RENAME_EXCL
+    else:
+        require(sys.platform.startswith("linux"), "unsupported GPU worker operating system")
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1)  # AT_FDCWD, RENAME_NOREPLACE
+    if result:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def sha256(path):

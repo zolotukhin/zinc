@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -15,6 +16,7 @@ def check_group(role, directory, output):
     profiles = [p for p in release_policy()["gpu_profiles"] if p["runner_variable"] == role]
     require(profiles, "unknown release worker role")
     directory, output = Path(directory).resolve(), Path(output).resolve()
+    # A previous report must never silently join this qualification attempt.
     output.mkdir(parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="zinc-gpu-group-") as temporary:
         work = Path(temporary)
@@ -23,7 +25,11 @@ def check_group(role, directory, output):
             command = [sys.executable, str(ROOT / "tools/release_gpu.py"), "--directory", str(directory),
                        "--profile", profile["id"], "--output", str(output / (profile["id"] + ".json"))]
             with gpu.process(command, work / "private-validation.log", work, dict(os.environ)) as child:
-                require(child.wait(timeout=150 * 60) == 0, "packaged GPU profile failed: " + profile["id"])
+                try:
+                    result = child.wait(timeout=150 * 60)
+                except subprocess.TimeoutExpired:
+                    raise ValueError("packaged GPU profile timed out after 150 minutes: " + profile["id"]) from None
+                require(result == 0, "packaged GPU profile failed: " + profile["id"])
 
 
 def main():
