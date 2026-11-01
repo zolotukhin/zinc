@@ -166,6 +166,14 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged kernel reference validation failed")
     require("PASS: 84 cache-boundary/reference/offset/stride/guard cases" in log.read_text(), "kernel reference suite was incomplete")
+    executable = work / "validate-gemma-router"
+    output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_gemma_router.c"),
+            "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
+            "-lggml-base", "-lvulkan", "-lm", "-o", str(executable)])
+    log = work / "gemma-router-reference.log"
+    with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
+        require(child.wait(timeout=300) == 0, "packaged Gemma router reference validation failed")
+    require("PASS: 36 Gemma router workgroup/reference/guard/replay cases" in log.read_text(), "Gemma router reference suite was incomplete")
 
 
 def tokenizer_parity(tree, reference, model, work, env):

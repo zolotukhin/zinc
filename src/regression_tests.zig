@@ -328,11 +328,10 @@ test "Vulkan Gemma MoE shared expert keeps Q8_0 fused GEGLU front-end" {
     try expectContains(forward, "config.architecture == .gemma and config.n_experts > 0 and isIntelGpuVendor(gpu_config.vendor)");
     try expectContains(forward, "K == self.model.config.hidden_dim");
     try expectContains(forward, "ZINC_GEMMA_Q8_1_DMMV");
-    try expectContains(forward, "Gemma Q8_0 x Q8_1 DMMV path ENABLED by default on Intel");
-    try expectContains(forward, "const gemma_q8_1_dmmv_default_on =");
-    try expectContainsNear(forward, "const gemma_q8_1_dmmv_default_on =", "config.architecture == .gemma", 220);
-    try expectContainsNear(forward, "const gemma_q8_1_dmmv_default_on =", "config.n_experts > 0", 260);
-    try expectContainsNear(forward, "const gemma_q8_1_dmmv_default_on =", "isIntelGpuVendor(gpu_config.vendor)", 320);
+    try expectContains(forward, "const gemma_q8_1_dmmv_requested = gemma_q8_1_dmmv_forced_on;");
+    try expectContains(forward, "via ZINC_GEMMA_Q8_1_DMMV (approximate output)");
+    try expectContainsNear(forward, "const gemma_q8_1_dmmv_enabled =", "config.architecture == .gemma", 220);
+    try expectContainsNear(forward, "const gemma_q8_1_dmmv_enabled =", "config.n_experts > 0", 260);
     try expectContainsNear(forward, "if (self.use_gemma_q8_1_dmmv", "qt == .q8_0", 500);
     try expectContainsNear(forward, "if (self.use_gemma_q8_1_dmmv", "try self.dmmv.recordQuantizeQ8_1(", 1600);
     try expectContainsNear(forward, "if (self.use_gemma_q8_1_dmmv", "pipeline_q8_0_q8_1", 2200);
@@ -383,8 +382,9 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContains(src, "ZINC_GEMMA_MOE_GROUPED_PREFILL");
     try expectContains(src, "fn prefillGemmaRecordBatchedAttentionToFfnNorm");
     try expectContains(src, "fn prefillGemmaRunBatchedAttentionToFfnNorm");
-    try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnvEnabled", "orelse return true", 200);
-    try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnvEnabled", "std.ascii.eqlIgnoreCase(env, \"off\")", 500);
+    try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnvEnabled", "orelse return !isIntelGpuVendor(vendor)", 650);
+    try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnvEnabled", "std.ascii.eqlIgnoreCase(env, \"off\")", 900);
+    try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnabled", "gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 200);
     try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnabled", "isIntelGpuVendor(self.gpu_config.vendor)", 900);
     try expectContainsNear(src, "fn gemmaShortMoePrefixPrefillEnabled", "!self.isAmdRdna()", 900);
     try expectContainsNear(src, marker, "try self.prefillGemmaRecordBatchedAttentionToFfnNorm", 22500);
@@ -399,7 +399,7 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, "fn prefillGemmaRecordBatchedAttentionToFfnNorm", "try self.dispatchGemmaQkvProjectionsBatched", 9000);
     try expectContainsNear(src, "fn prefillGemmaRecordBatchedAttentionToFfnNorm", "try self.dispatchFlashAttnBatched", 22000);
     try expectContains(src, "fn gemmaProjectionPrefillPaddedTokenCount");
-    try expectContainsNear(src, "fn gemmaDenseProjectionDp4aEnabled", "cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()", 900);
+    try expectContainsNear(src, "fn gemmaDenseProjectionDp4aEnabled", "cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 900);
     try expectContainsNear(src, "fn gemmaDenseProjectionDp4aEnabled", "isIntelGpuVendor(self.gpu_config.vendor)", 400);
     try expectContainsNear(src, "fn gemmaDenseGegluDp4aEnabled", "isIntelGpuVendor(self.gpu_config.vendor)", 400);
     try expectContainsNear(src, "fn gemmaDenseDownDp4aEnabled", "isIntelGpuVendor(self.gpu_config.vendor)", 400);
@@ -408,7 +408,7 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, "fn gemmaDenseProjectionDp4aSupported", ".q8_0 => (K & 31) == 0", 1400);
     try expectContainsNear(src, "fn gemmaDenseProjectionDp4aSupported", "self.batched_scratch_norm_q8", 1500);
     try expectContainsNear(src, "fn dispatchGemmaProjectionBatchedDp4a", "recordMulMmQ8_0FullDp4a", 7000);
-    try expectContainsNear(src, "fn gemmaDenseGegluDp4aEnabled", "cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()", 900);
+    try expectContainsNear(src, "fn gemmaDenseGegluDp4aEnabled", "cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 900);
     try expectContainsNear(src, marker, "const scratch_route_ids = scratch_shared_up;", 4600);
     try expectContainsNear(src, marker, "if (scratch_route_ids.size < route_pack_ids_bytes) return error.BufferTooSmall;", 16000);
     try expectContainsNear(src, marker, "const collect_route_profile =", 18000);
@@ -897,7 +897,7 @@ test "Vulkan Intel batched prefill keeps chunk override for fallback debugging" 
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine", "intelBatchedPrefillChunkLimit", 1800);
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine", "const intel_gemma_moe_default", 1200);
     try expectContainsNear(src, "const intel_gemma_moe_default", "cfg.n_experts > 0", 300);
-    try expectContainsNear(src, "const intel_gemma_moe_default", "gemmaGroupedMoePrefillEnvEnabled()", 500);
+    try expectContainsNear(src, "const intel_gemma_moe_default", "gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 500);
     try expectContainsNear(src, "const intel_batched_requested", "intel_gemma_chunk_default", 500);
     try expectContainsNear(src, "const intel_default_chunk_limit", "if (intel_gemma_moe_default) self.gemmaPrefillDp4aMaxTokens() else 96", 250);
     try expectContainsNear(src, "fn gemmaDenseProjectionDp4aEnabled", "padded_tokens <= self.gemmaPrefillDp4aMaxTokens()", 1000);
@@ -949,6 +949,14 @@ test "Vulkan Qwen 3.6 MoE runs the metadata top-k unless a cap is requested" {
     try expectContains(src, "const qwen36_prefill_topk_default: u32 = 0;");
     try expectContains(src, "Qwen 3.6 MoE top-k capped at {d} via ZINC_QWEN36_MOE_TOPK (approximate output");
     try expectContains(src, "via ZINC_QWEN36_MOE_PREFILL_TOPK (approximate output; unset it for exact prefill)");
+}
+
+test "Vulkan Gemma MoE preserves the metadata top-k on Intel" {
+    // The full-model Intel reference check exposed a silent top-2 quality cap.
+    // Keep approximations opt-in, as on the Qwen path, across GPU vendors.
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "const gemma_topk_default: u32 = 0;");
+    try expectContains(src, "Gemma MoE top-k capped at {d} via ZINC_GEMMA_MOE_TOPK (approximate output");
 }
 
 test "Vulkan prefillBatched uses all batched primitives in the per-layer loop" {

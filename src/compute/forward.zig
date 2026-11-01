@@ -1608,9 +1608,9 @@ pub const InferenceEngine = struct {
     // Experimental Intel Gemma path: route medium/large Q8_0 projections
     // through the existing four-row DMMV shader.
     use_gemma_q8_wide4_dmmv: bool = false,
-    // Default-on for Intel Gemma MoE: quantize f32 activations to Q8_1 and run
+    // Opt-in for Gemma MoE: quantize f32 activations to Q8_1 and run
     // Q8_0 x Q8_1 integer-dot DMMV for medium/large overwrite projections.
-    // Disable with ZINC_GEMMA_Q8_1_DMMV=0.
+    // Enable with ZINC_GEMMA_Q8_1_DMMV=1 (approximate output).
     use_gemma_q8_1_dmmv: bool = false,
     // Intel Qwen A3B SSM-out Q8_0 prefill path through the existing four-row
     // DMMV shader. Normal decode stays on generic Q8 unless the env flag is
@@ -2865,7 +2865,10 @@ pub const InferenceEngine = struct {
             log.info("Qwen 3.6 MoE top-k cap disabled via ZINC_QWEN36_MOE_TOPK={s}", .{qwen36_topk_env.?});
         }
         const gemma_topk_env = host_io.getenv("ZINC_GEMMA_MOE_TOPK");
-        const gemma_topk_default: u32 = if (config.architecture == .gemma and isIntelGpuVendor(gpu_config.vendor)) 2 else 0;
+        // Preserve the GGUF expert count on every GPU. The old Intel top-2
+        // default changed Gemma 26B continuations despite correct tokenization.
+        // A speed/quality tradeoff must be an explicit, logged override.
+        const gemma_topk_default: u32 = 0;
         const gemma_topk_limit: u32 = if (config.architecture == .gemma) blk: {
             const requested = if (gemma_topk_env) |raw|
                 std.fmt.parseInt(u32, raw, 10) catch gemma_topk_default
@@ -2875,10 +2878,17 @@ pub const InferenceEngine = struct {
             break :blk @max(@as(u32, 1), requested);
         } else 0;
         if (gemma_topk_limit > 0) {
-            log.info("Gemma MoE top-k capped at {d} (set ZINC_GEMMA_MOE_TOPK=0 to restore metadata top-k={d})", .{
+            log.warn("Gemma MoE top-k capped at {d} via ZINC_GEMMA_MOE_TOPK (approximate output; unset it or use {d} for the metadata top-k)", .{
                 gemma_topk_limit,
                 config.n_experts_used,
             });
+        }
+        if (config.architecture == .gemma and config.n_experts > 0 and isIntelGpuVendor(gpu_config.vendor)) {
+            if (gemmaGroupedMoePrefillEnvEnabled(gpu_config.vendor)) {
+                log.warn("Intel Gemma grouped MoE prefill requested via ZINC_GEMMA_MOE_GROUPED_PREFILL (experimental; native-reference gate is not qualified)", .{});
+            } else {
+                log.info("Intel Gemma MoE uses serial prefill for reference correctness; ZINC_GEMMA_MOE_GROUPED_PREFILL=1 is an experimental override", .{});
+            }
         }
         const qwen36_prefill_topk_env = host_io.getenv("ZINC_QWEN36_MOE_PREFILL_TOPK");
         // Exact prefill by default: capping routed experts and skipping the
@@ -3446,12 +3456,10 @@ pub const InferenceEngine = struct {
             std.mem.eql(u8, gemma_q8_1_dmmv_env.?, "0");
         const gemma_q8_1_dmmv_forced_on = gemma_q8_1_dmmv_env != null and
             !gemma_q8_1_dmmv_explicitly_off;
-        const gemma_q8_1_dmmv_default_on =
-            config.architecture == .gemma and
-            config.n_experts > 0 and
-            isIntelGpuVendor(gpu_config.vendor);
-        const gemma_q8_1_dmmv_requested = !gemma_q8_1_dmmv_explicitly_off and
-            (gemma_q8_1_dmmv_forced_on or gemma_q8_1_dmmv_default_on);
+        // Additional activation quantization changes Intel Gemma 26B's greedy
+        // continuation beyond the native-reference near-tie budget. Keep the
+        // F32 activation path unless the user opts into this approximation.
+        const gemma_q8_1_dmmv_requested = gemma_q8_1_dmmv_forced_on;
         const gemma_q8_1_dmmv_enabled =
             gemma_q8_1_dmmv_requested and
             config.architecture == .gemma and
@@ -3461,11 +3469,7 @@ pub const InferenceEngine = struct {
             instance.push_descriptor_fn != null and
             (config.hidden_dim & 31) == 0;
         if (gemma_q8_1_dmmv_enabled) {
-            if (gemma_q8_1_dmmv_forced_on) {
-                log.info("Gemma Q8_0 x Q8_1 DMMV path ENABLED via ZINC_GEMMA_Q8_1_DMMV", .{});
-            } else {
-                log.info("Gemma Q8_0 x Q8_1 DMMV path ENABLED by default on Intel (set ZINC_GEMMA_Q8_1_DMMV=0 to disable)", .{});
-            }
+            log.warn("Gemma Q8_0 x Q8_1 DMMV path ENABLED via ZINC_GEMMA_Q8_1_DMMV (approximate output)", .{});
         } else if (gemma_q8_1_dmmv_requested) {
             log.info("Gemma Q8_0 x Q8_1 DMMV requested but prerequisites are missing; using default Q8_0 DMMV paths", .{});
         } else if (gemma_q8_1_dmmv_explicitly_off) {
@@ -14072,7 +14076,7 @@ pub const InferenceEngine = struct {
         if (self.instance.push_descriptor_fn == null) return false;
         const cfg = self.model.config;
         if (cfg.architecture != .gemma or cfg.ssm_d_inner != 0) return false;
-        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
+        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)) return false;
         const padded_tokens = self.gemmaDensePrefillPaddedTokenCount(n_tokens);
         if (padded_tokens < 64 or padded_tokens > self.gemmaPrefillDp4aMaxTokens()) return false;
         return self.dmmv.pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a != null and
@@ -14086,7 +14090,7 @@ pub const InferenceEngine = struct {
         if (self.instance.push_descriptor_fn == null) return false;
         const cfg = self.model.config;
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return false;
-        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
+        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)) return false;
         const padded_tokens = self.gemmaDensePrefillPaddedTokenCount(n_tokens);
         if (padded_tokens < 64 or padded_tokens > self.gemmaPrefillDp4aMaxTokens()) return false;
         const q6_path =
@@ -14130,7 +14134,7 @@ pub const InferenceEngine = struct {
         if (self.instance.push_descriptor_fn == null) return false;
         const cfg = self.model.config;
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return false;
-        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return false;
+        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)) return false;
         const padded_tokens = self.gemmaProjectionPrefillPaddedTokenCount(n_tokens);
         return padded_tokens >= 64 and padded_tokens <= self.gemmaPrefillDp4aMaxTokens();
     }
@@ -19255,7 +19259,7 @@ pub const InferenceEngine = struct {
     fn gemmaDensePrefillPaddedTokenCount(self: *const InferenceEngine, n_tokens: u32) u32 {
         const cfg = self.model.config;
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return n_tokens;
-        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return n_tokens;
+        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)) return n_tokens;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return n_tokens;
         if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > self.gemmaPrefillDp4aMaxTokens()) return n_tokens;
         // Muse Glimmer rounds to 64: its FFN and projection GEMMs have no
@@ -19270,7 +19274,7 @@ pub const InferenceEngine = struct {
     fn gemmaProjectionPrefillPaddedTokenCount(self: *const InferenceEngine, n_tokens: u32) u32 {
         const cfg = self.model.config;
         if (!isGemmaStyleDenseArch(cfg.architecture) or cfg.ssm_d_inner != 0) return n_tokens;
-        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled()) return n_tokens;
+        if (cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)) return n_tokens;
         if (!self.isAmdRdna() and !isIntelGpuVendor(self.gpu_config.vendor)) return n_tokens;
         if (n_tokens < gemma_prefill_long_draft_prompt_min_tokens or n_tokens > self.gemmaPrefillDp4aMaxTokens()) return n_tokens;
         // Muse Glimmer rounds to 64: its FFN and projection GEMMs have no
@@ -27087,8 +27091,11 @@ pub const InferenceEngine = struct {
         return true;
     }
 
-    fn gemmaGroupedMoePrefillEnvEnabled() bool {
-        const env = host_io.getenv("ZINC_GEMMA_MOE_GROUPED_PREFILL") orelse return true;
+    fn gemmaGroupedMoePrefillEnvEnabled(vendor: GpuVendor) bool {
+        // Intel grouped MoE prefill still differs from the pinned serial native
+        // reference beyond the near-tie allowance. Use the exact serial path
+        // until this optimization passes the full continuation gate.
+        const env = host_io.getenv("ZINC_GEMMA_MOE_GROUPED_PREFILL") orelse return !isIntelGpuVendor(vendor);
         if (std.mem.eql(u8, env, "0")) return false;
         if (std.ascii.eqlIgnoreCase(env, "false")) return false;
         if (std.ascii.eqlIgnoreCase(env, "off")) return false;
@@ -27096,7 +27103,7 @@ pub const InferenceEngine = struct {
     }
 
     fn gemmaGroupedMoePrefillEnabled(self: *const InferenceEngine, prompt_len: usize) bool {
-        if (!gemmaGroupedMoePrefillEnvEnabled()) return false;
+        if (!gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)) return false;
         if (prompt_len < 2) return false;
         const cfg = self.model.config;
         if (cfg.architecture != .gemma or cfg.n_experts == 0 or cfg.n_experts_used == 0) return false;
@@ -29046,7 +29053,7 @@ pub const InferenceEngine = struct {
             cfg.n_experts > 0 and
             cfg.n_experts_used > 0 and
             cfg.ssm_d_inner == 0 and
-            gemmaGroupedMoePrefillEnvEnabled();
+            gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor);
         const intel_gemma_chunk_default = intel_dense_gemma_default or intel_gemma_moe_default;
         const intel_batched_explicitly_on = intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "1");
         const intel_batched_explicitly_off = intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "0");
