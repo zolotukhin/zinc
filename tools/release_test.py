@@ -27,6 +27,7 @@ from release_lib import (
 )
 
 COMMIT = "1" * 40
+PREFLIGHT_MAIN = "2" * 40
 NATIVE = "macos-aarch64-metal" if sys.platform == "darwin" else "linux-x86_64-vulkan"
 
 
@@ -34,6 +35,7 @@ class PreflightGitHub(release_preflight.GitHub):
     """Exercise real parsing/matching with synthetic, deliberately private data."""
     def __init__(self):
         self.commands = []
+        self.requests = []
         self.responses = {}
         variables, runners = [], []
         roles = list(dict.fromkeys(row["runner_variable"] for row in policy()["gpu_profiles"]))
@@ -51,16 +53,26 @@ class PreflightGitHub(release_preflight.GitHub):
             }
             self.rows(f"environments/{name}/deployment-branch-policies", "branch_policies", [{"id": 1, "name": "main", "type": "branch"}])
         self.rows("environments/release-signing/secrets", "secrets", [{"name": name} for name in release_sign.SIGNING_SECRETS])
+        self.responses["git/ref/heads/main"] = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": PREFLIGHT_MAIN}}
+        self.responses["commits/" + COMMIT] = {"sha": COMMIT}
+        self.responses[f"compare/{COMMIT}...{PREFLIGHT_MAIN}"] = {
+            "status": "ahead", "behind_by": 0, "base_commit": {"sha": COMMIT}, "merge_base_commit": {"sha": COMMIT},
+        }
+        self.responses["actions/workflows/release-candidate.yml/dispatches"] = {
+            "workflow_run_id": 42, "html_url": "<private-response-url>", "run_url": "<private-api-url>",
+        }
 
     def rows(self, path, key, rows):
         self.responses[path] = [{"total_count": len(rows), key: rows}]
 
-    def run(self, args):
+    def run(self, args, body=None):
         self.commands.append(args)
-        if args[0] == "workflow":
-            return ""
         path = args[-1].removeprefix("repos/owner/repo/").split("?")[0]
-        return json.dumps(self.responses[path])
+        self.requests.append((path, body))
+        value = self.responses[path]
+        if isinstance(value, Exception):
+            raise value
+        return json.dumps(value)
 
 
 class ReleasePreflightTest(unittest.TestCase):
@@ -204,28 +216,89 @@ class ReleasePreflightTest(unittest.TestCase):
         report = self.run_preflight(github, expected_status=1, dispatch="0.1.0-rc.1")
         self.assertFalse(report["dispatch_attempted"])
         self.assertFalse(report["dispatch_confirmed"])
-        self.assertFalse(any(command[0] == "workflow" for command in github.commands))
+        self.assertFalse(any(body is not None for _, body in github.requests))
 
     def test_dispatch_uses_trusted_main_workflow_and_explicit_frozen_source(self):
         github = PreflightGitHub()
         report = self.run_preflight(github, dispatch="0.1.0-rc.1", source=COMMIT)
         self.assertTrue(report["dispatch_confirmed"])
-        self.assertEqual(github.commands[-1], ["workflow", "run", "release-candidate.yml", "--repo", "owner/repo", "--ref", "main",
-                                              "-f", "version=0.1.0-rc.1", "-f", "source=" + COMMIT])
+        self.assertEqual(report["source_commit"], COMMIT)
+        self.assertEqual(report["candidate_run_id"], 42)
+        self.assertEqual(github.requests[-1], ("actions/workflows/release-candidate.yml/dispatches", {
+            "ref": "main", "inputs": {"version": "0.1.0-rc.1", "source": COMMIT}, "return_run_details": True,
+        }))
+        self.assertNotIn("<private-", json.dumps(report) + release_preflight.render(report))
+        self.assertIn("execution and validation are still pending", release_preflight.render(report))
+
+    def test_main_is_frozen_before_dispatch_instead_of_passing_a_moving_branch(self):
+        github = PreflightGitHub()
+        report = self.run_preflight(github, dispatch="0.1.0-rc.1")
+        self.assertEqual(report["source_commit"], PREFLIGHT_MAIN)
+        self.assertEqual(github.requests[-1][1]["inputs"]["source"], PREFLIGHT_MAIN)
+        self.assertFalse(any(path.startswith(("commits/", "compare/")) for path, _ in github.requests))
+
+    def test_nonexistent_or_unrelated_sources_never_dispatch(self):
+        for endpoint, value in (
+                ("git/ref/heads/main", {}),
+                ("commits/" + COMMIT, release_preflight.InspectionError("Commit unavailable")),
+                ("commits/" + COMMIT, {"sha": PREFLIGHT_MAIN}),
+                (f"compare/{COMMIT}...{PREFLIGHT_MAIN}", {"status": "behind", "behind_by": 1}),
+                (f"compare/{COMMIT}...{PREFLIGHT_MAIN}", {"status": "diverged", "behind_by": 1}),
+                (f"compare/{COMMIT}...{PREFLIGHT_MAIN}", {"status": "ahead", "behind_by": 0, "base_commit": {"sha": COMMIT}, "merge_base_commit": {"sha": PREFLIGHT_MAIN}})):
+            github = PreflightGitHub()
+            github.responses[endpoint] = value
+            with self.subTest(endpoint=endpoint, value=value):
+                report = self.run_preflight(github, expected_status=1, dispatch="0.1.0-rc.1", source=COMMIT)
+                self.assertTrue(report["configuration_ready"])
+                self.assertFalse(report["dispatch_attempted"])
+                self.assertFalse(report["dispatch_confirmed"])
+                self.assertFalse(any(body is not None for _, body in github.requests))
+
+    def test_missing_or_invalid_run_id_is_not_a_confirmed_dispatch_and_is_not_retried(self):
+        for response in (None, {}, {"workflow_run_id": True}, {"workflow_run_id": "42"}, {"workflow_run_id": 0}):
+            github = PreflightGitHub()
+            github.responses["actions/workflows/release-candidate.yml/dispatches"] = response
+            with self.subTest(response=response):
+                report = self.run_preflight(github, expected_status=1, dispatch="0.1.0-rc.1")
+                self.assertTrue(report["dispatch_attempted"])
+                self.assertFalse(report["dispatch_confirmed"])
+                self.assertNotIn("candidate_run_id", report)
+                self.assertEqual(sum(body is not None for _, body in github.requests), 1)
 
     def test_failed_dispatch_is_reported_without_retrying(self):
-        class FailedDispatch(PreflightGitHub):
-            def run(self, args):
-                result = super().run(args)
-                if args[0] == "workflow":
-                    raise release_preflight.InspectionError("GitHub request failed")
-                return result
-        github = FailedDispatch()
+        github = PreflightGitHub()
+        github.responses["actions/workflows/release-candidate.yml/dispatches"] = release_preflight.InspectionError("GitHub request failed")
         report = self.run_preflight(github, expected_status=1, dispatch="0.1.0-rc.1")
         self.assertTrue(report["configuration_ready"])
         self.assertTrue(report["dispatch_attempted"])
         self.assertFalse(report["dispatch_confirmed"])
-        self.assertEqual(sum(command[0] == "workflow" for command in github.commands), 1)
+        self.assertEqual(sum(body is not None for _, body in github.requests), 1)
+
+    def test_unreadable_environment_does_not_create_duplicate_derived_failures(self):
+        for value in ({}, [], release_preflight.InspectionError("Environment unavailable")):
+            github = PreflightGitHub()
+            github.responses["environments/release"] = value
+            with self.subTest(value=value):
+                report = self.audit(github)
+                failures = [row["name"] for row in report["checks"] if not row["passed"]]
+                self.assertEqual(failures, ["release environment API"])
+                self.assertFalse(any(path == "environments/release/deployment-branch-policies" for path, _ in github.requests))
+        github = PreflightGitHub()
+        github.responses["environments/release/deployment-branch-policies"] = release_preflight.InspectionError("Branch policies unavailable")
+        failures = [row["name"] for row in self.audit(github)["checks"] if not row["passed"]]
+        self.assertEqual(failures, ["release branch policies API"])
+
+    def test_dispatch_body_uses_json_stdin_and_requests_correlated_run_details(self):
+        github = release_preflight.GitHub()
+        response = SimpleNamespace(returncode=0, stdout='{"workflow_run_id":42}', stderr="")
+        with patch.object(release_preflight.subprocess, "run", return_value=response) as command:
+            self.assertEqual(release_preflight.dispatch_candidate(github, "owner/repo", "0.1.0-rc.1", COMMIT), 42)
+        args, kwargs = command.call_args
+        self.assertIn("--input", args[0])
+        self.assertIn("X-GitHub-Api-Version: 2022-11-28", args[0])
+        self.assertEqual(json.loads(kwargs["input"]), {
+            "ref": "main", "inputs": {"version": "0.1.0-rc.1", "source": COMMIT}, "return_run_details": True,
+        })
 
     def test_invalid_dispatch_inputs_are_rejected_before_api_or_workflow_calls(self):
         for args in ({"dispatch": "../0.1.0"}, {"dispatch": "0.1.0", "source": "feature-branch"},

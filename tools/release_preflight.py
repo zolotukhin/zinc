@@ -15,9 +15,10 @@ class InspectionError(ValueError):
 
 
 class GitHub:
-    def run(self, args):
+    def run(self, args, body=None):
         try:
-            result = subprocess.run(["gh", *args], cwd=ROOT, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(["gh", *args], cwd=ROOT, input=None if body is None else json.dumps(body),
+                                    capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             raise InspectionError("GitHub CLI unavailable or timed out; check gh authentication and retry") from None
         # CLI stderr, URLs and exception argv can expose private runner details
@@ -26,13 +27,15 @@ class GitHub:
             raise InspectionError("GitHub request failed; check gh authentication and repository read/admin permissions")
         return result.stdout
 
-    def request(self, path, paginate=False):
-        args = ["api", "-H", "Accept: application/vnd.github+json"]
+    def request(self, path, paginate=False, body=None):
+        args = ["api", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"]
+        if body is not None:
+            args += ["--method", "POST", "--input", "-"]
         if paginate:
             args += ["--paginate", "--slurp"]
             path += "?per_page=30"
         try:
-            return json.loads(self.run([*args, path]))
+            return json.loads(self.run([*args, path], body=body))
         except (TypeError, ValueError) as error:
             if isinstance(error, InspectionError):
                 raise
@@ -48,8 +51,9 @@ class GitHub:
                 break
             rows.extend(page[key])
             totals.append(page["total_count"])
-        # Do not turn a missing page, malformed response or changing inventory
-        # into a successful snapshot. --paginate follows GitHub's Link headers.
+        # Reject detectable missing pages, inconsistent counts and duplicates.
+        # GitHub pagination is not atomic: same-count replacements can escape
+        # these checks. Hardware jobs must still validate the selected worker.
         if (not valid or any(total != len(rows) for total in totals) or
                 not all(isinstance(row, dict) and type(row.get(identity)) is (int if identity == "id" else str) for row in rows) or
                 len({row[identity] for row in rows}) != len(rows)):
@@ -70,15 +74,16 @@ def check(name, passed, message, **fields):
 
 
 def runner_checks(profiles, variables, runners):
+    # The API error already blocks the audit. Avoid eight duplicate failures
+    # or claiming assignments are missing when their metadata is unreadable.
+    if variables is None or runners is None:
+        return []
     roles = {}
     for profile in profiles:
         roles.setdefault(profile["runner_variable"], []).append(profile["id"])
     checks = []
     for name, assigned in roles.items():
         fields = {"profiles": assigned}
-        if variables is None or runners is None:
-            checks.append(check(name, False, "Runner configuration could not be inspected.", **fields))
-            continue
         raw = variables.get(name)
         if not raw:
             checks.append(check(name, False, "Configure this repository variable as a JSON label array.", **fields))
@@ -128,18 +133,28 @@ def audit(github, repo, data):
                 raise InspectionError("Runner inventory could not be inspected; retry the audit")
         return rows
 
+    def read_environment(name):
+        value = github.request(base + "environments/" + name)
+        if (not isinstance(value, dict) or "deployment_branch_policy" not in value or
+                not isinstance(value.get("protection_rules"), list)):
+            raise InspectionError("Environment metadata was invalid; retry the configuration audit")
+        return value
+
     assignments = inspect("runner variables API", variables)
     inventory = inspect("runner inventory API", runners)
     checks.extend(runner_checks(data["gpu_profiles"], assignments, inventory))
     for name in ("release-signing", "release"):
-        environment = inspect(name + " environment API", lambda: github.request(base + "environments/" + name))
+        environment = inspect(name + " environment API", lambda: read_environment(name))
+        if environment is None:
+            continue
         branches = inspect(name + " branch policies API", lambda: github.collection(base + "environments/" + name + "/deployment-branch-policies", "branch_policies", "id"))
-        restriction = environment.get("deployment_branch_policy") if isinstance(environment, dict) else None
-        main_only = (isinstance(restriction, dict) and restriction.get("custom_branch_policies") is True and
-                     restriction.get("protected_branches") is False and branches is not None and len(branches) == 1 and
-                     branches[0].get("name") == "main" and branches[0].get("type") == "branch")
-        checks.append(check(name + " branches", main_only, "Restricted to the main branch." if main_only else
-                            "Restrict this environment to one custom branch policy: main (branch, not tag)."))
+        if branches is not None:
+            restriction = environment["deployment_branch_policy"]
+            main_only = (isinstance(restriction, dict) and restriction.get("custom_branch_policies") is True and
+                         restriction.get("protected_branches") is False and len(branches) == 1 and
+                         branches[0].get("name") == "main" and branches[0].get("type") == "branch")
+            checks.append(check(name + " branches", main_only, "Restricted to the main branch." if main_only else
+                                "Restrict this environment to one custom branch policy: main (branch, not tag)."))
         if name == "release":
             rules = environment.get("protection_rules", []) if isinstance(environment, dict) else []
             reviewers = isinstance(rules, list) and any(isinstance(rule, dict) and rule.get("type") == "required_reviewers" and
@@ -152,16 +167,53 @@ def audit(github, repo, data):
 
     secrets = inspect("Apple signing secrets API", lambda: github.collection(base + "environments/release-signing/secrets", "secrets"))
     missing = sorted(set(SIGNING_SECRETS) - {row["name"] for row in secrets}) if secrets is not None else None
-    checks.append(check("Apple signing secrets", missing == [],
-                        "Could not inspect environment secret names; check access before changing credentials." if missing is None else
-                        "Configure the missing secrets in the release-signing environment." if missing else
-                        "All required secret names are present; validity is checked by the signing job.", missing=missing))
+    if missing is not None:
+        checks.append(check("Apple signing secrets", missing == [],
+                            "Configure the missing secrets in the release-signing environment." if missing else
+                            "All required secret names are present; validity is checked by the signing job.", missing=missing))
     inventory_counts = None if inventory is None else {"registered": len(inventory),
         "online": sum(row["status"] == "online" for row in inventory),
         "idle": sum(row["status"] == "online" and not row["busy"] for row in inventory)}
     return {"schema_version": 1, "checked_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "configuration_ready": all(row["passed"] for row in checks), "runner_inventory": inventory_counts, "checks": checks,
             "qualification": "Configuration snapshot only; signing, private worker setup and all nine packaged hardware profiles still require candidate qualification."}
+
+
+def resolve_candidate_source(github, repo, requested):
+    """Freeze main once, then prove the selected commit belongs to its history."""
+    base = f"repos/{repo}/"
+    main = github.request(base + "git/ref/heads/main")
+    obj = main.get("object") if isinstance(main, dict) else None
+    if (not isinstance(main, dict) or main.get("ref") != "refs/heads/main" or
+            not isinstance(obj, dict) or obj.get("type") != "commit" or
+            not isinstance(obj.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", obj["sha"])):
+        raise InspectionError("Could not resolve the main branch to a source commit")
+    frozen_main = obj["sha"]
+    if requested == "main" or requested == frozen_main:
+        return frozen_main
+    source_sha(requested)
+    commit = github.request(base + "commits/" + requested)
+    if not isinstance(commit, dict) or commit.get("sha") != requested:
+        raise InspectionError("Candidate source did not resolve to the requested commit")
+    comparison = github.request(base + "compare/" + requested + "..." + frozen_main + "?per_page=1")
+    if (not isinstance(comparison, dict) or comparison.get("status") not in ("ahead", "identical") or
+            type(comparison.get("behind_by")) is not int or comparison["behind_by"] != 0 or
+            not isinstance(comparison.get("base_commit"), dict) or comparison["base_commit"].get("sha") != requested or
+            not isinstance(comparison.get("merge_base_commit"), dict) or comparison["merge_base_commit"].get("sha") != requested):
+        raise InspectionError("Candidate source must be a verified ancestor of main; no workflow was dispatched")
+    return requested
+
+
+def dispatch_candidate(github, repo, release_version, commit):
+    # Request the ID from THIS dispatch. Searching recent runs can accidentally
+    # associate another maintainer's concurrent run with our request.
+    result = github.request(f"repos/{repo}/actions/workflows/release-candidate.yml/dispatches", body={
+        "ref": "main", "inputs": {"version": release_version, "source": commit}, "return_run_details": True,
+    })
+    if not isinstance(result, dict) or type(result.get("workflow_run_id")) is not int or result["workflow_run_id"] <= 0:
+        raise InspectionError("Dispatch response did not identify a workflow run; inspect Actions before retrying")
+    # Ignore all response URLs and other metadata at the redaction boundary.
+    return result["workflow_run_id"]
 
 
 def render(report):
@@ -178,9 +230,9 @@ def render(report):
         lines.append(line)
     lines.append(report["qualification"])
     if "dispatch_confirmed" in report:
-        lines.append("Candidate workflow dispatch confirmed." if report["dispatch_confirmed"] else
+        lines.append(f"Candidate run {report['candidate_run_id']} created; execution and validation are still pending." if report["dispatch_confirmed"] else
                      "Dispatch was not confirmed; inspect Actions runs before retrying." if report["dispatch_attempted"] else
-                     "Candidate workflow was not dispatched because configuration is blocked.")
+                     "Candidate workflow was not dispatched because a preflight check failed.")
     return "\n".join(lines)
 
 
@@ -198,15 +250,18 @@ def run(args):
         report["dispatch_attempted"] = False
         report["dispatch_confirmed"] = False
         if report["configuration_ready"]:
-            report["dispatch_attempted"] = True
             try:
-                # Keep trusted execution on main, even when selecting an older
-                # full source SHA. The workflow verifies its ancestry again.
-                github.run(["workflow", "run", "release-candidate.yml", "--repo", repo, "--ref", "main",
-                            "-f", "version=" + args.dispatch, "-f", "source=" + args.source])
-                report["dispatch_confirmed"] = True
+                report["source_commit"] = resolve_candidate_source(github, repo, args.source)
             except InspectionError as error:
-                report["checks"].append(check("candidate dispatch", False, str(error)))
+                report["checks"].append(check("candidate source", False, str(error)))
+            else:
+                report["checks"].append(check("candidate source", True, "Frozen source commit verified on main."))
+                report["dispatch_attempted"] = True
+                try:
+                    report["candidate_run_id"] = dispatch_candidate(github, repo, args.dispatch, report["source_commit"])
+                    report["dispatch_confirmed"] = True
+                except InspectionError as error:
+                    report["checks"].append(check("candidate dispatch", False, str(error)))
     print(json.dumps(report, indent=2) if args.json else render(report))
     if not report["configuration_ready"] or (args.dispatch and not report["dispatch_confirmed"]):
         raise SystemExit(1)

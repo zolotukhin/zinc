@@ -118,7 +118,9 @@ profiles, requires an online worker matching every assigned label, checks the
 six signing secret names in `release-signing`, and verifies both environments
 allow only the main branch. Publication must also have a required reviewer.
 Busy online workers count as eligible and can queue normally. Missing pages,
-unreadable APIs and malformed responses fail the check. Reports contain public
+inconsistent counts, duplicate entries, unreadable APIs and malformed responses
+fail the check. Paginated inventories are not atomic: same-count replacements
+can evade these checks, and workers can change after the audit. Reports contain public
 role names and counts, with runner names, label values, unrelated secret names,
 reviewer identities and raw CLI errors excluded.
 
@@ -131,8 +133,10 @@ and [environment API](https://docs.github.com/en/rest/deployments/environments).
 Only secret names are requested; their values cannot be read through this API.
 
 To dispatch only after this snapshot passes, add `--dispatch` (also requires
-Actions write access). The workflow always runs from main. `--source` optionally
-selects a full source SHA; the candidate job verifies that it is already on main.
+Actions write access). The workflow always runs from main. The helper resolves
+main once to a full SHA. `--source` optionally selects an older full source SHA;
+the helper verifies that it exists and is an ancestor of that frozen main commit
+before dispatch. The candidate job rechecks ancestry against main.
 
 ```bash
 python3 tools/release.py preflight --repo zolotukhin/zinc --dispatch 0.1.0-rc.1
@@ -140,9 +144,12 @@ python3 tools/release.py preflight --repo zolotukhin/zinc --dispatch 0.1.0-rc.1
 
 Passing configuration does not certify the hardware, private worker files,
 model/reference pins or Apple credentials. The protected candidate jobs still
-check these and qualify the actual signed archives. Runner availability can
-change after the audit. A dispatch failure is not retried automatically; inspect
-Actions runs before retrying to avoid duplicate candidates.
+check these and qualify the actual signed archives. Dispatch uses GitHub's
+[run-details response](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event)
+to retain the exact `candidate_run_id`, without matching unrelated concurrent
+runs. Confirmation means GitHub created that run; execution and input validation
+can still fail. Empty/malformed responses and dispatch failures are not retried
+automatically; inspect Actions runs before retrying to avoid duplicate candidates.
 
 ## Qualify, freeze and publish
 
