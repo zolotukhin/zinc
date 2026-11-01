@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from release import aggregate, verify_candidate
-from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, release_policy, require, sha256, source_sha, write_json
+from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, release_policy, require, sha256, source_sha, write_json, frozen_checkout, git_revision, git_inspection, verify_release_sources
 
 REPOSITORY = "zolotukhin/zinc"
 WORKFLOW = ".github/workflows/release-candidate.yml"
@@ -118,11 +118,24 @@ def verify_remote_assets(directory, tag):
         require(all(sha256(Path(temporary) / name) == sha256(directory / name) for name in files), "uploaded bytes differ; release is not modified")
 
 
+def verify_publication_sources(data, workflow_sha, refresh=False):
+    if refresh:
+        git_inspection(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+                       "release main refresh failed", ROOT, timeout=60)
+    publisher = frozen_checkout(ROOT)
+    verify_release_sources(data["commit"], workflow_sha, ROOT)
+    verify_release_sources(workflow_sha, publisher, ROOT)
+    # Approval can wait while main advances. A changed qualification contract
+    # requires a new candidate even when the older bytes remain attested.
+    verify_release_sources(publisher, git_revision("origin/main", ROOT), ROOT)
+
+
 def verify_bundle(directory, run_id, run):
     directory = Path(directory)
     workflow_sha = validate_run(run, run_id)
     data = verify_candidate(directory)
     require(data.get("candidate_run") == str(run_id) and data.get("workflow_sha") == workflow_sha, "candidate belongs to a different workflow invocation")
+    verify_publication_sources(data, workflow_sha)
     expected = PUBLIC_FILES | {a["filename"] for a in data["artifacts"]}
     require({p.name for p in directory.iterdir()} == expected and all(p.is_file() and not p.is_symlink() for p in directory.iterdir()), "unexpected candidate assets")
     require(sha256(directory / "release-policy.json") == data["policy_sha256"], "published policy differs from validated policy")
@@ -229,6 +242,9 @@ def main():
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
             stream.write(summary)
     if args.publish:
+        # Refresh main after attestation/download work and immediately before
+        # the first tag or release mutation. A read failure fails closed too.
+        verify_publication_sources(data, data["workflow_sha"], refresh=True)
         publish(directory, data, args.run)
     if args.public_download:
         download_public(args.public_download, data)

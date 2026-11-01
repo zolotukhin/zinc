@@ -28,6 +28,10 @@ MAX_MEMBERS = 4096
 GPU_PROFILE_TIMEOUT_MINUTES = 150
 GPU_GROUP_OVERHEAD_MINUTES = 15
 REFERENCE_LIBRARY_NAME = re.compile(r"lib(?:ggml|llama)[A-Za-z0-9_.+-]*\.(?:so(?:\.[0-9]+)*|dylib|a)")
+# Explicit engine/docs ancestry is reusable. Everything else is a release
+# input by default, including new tooling/workflow names and driver setup.
+# Catalog status/pins remain part of qualification despite living in src/.
+REUSABLE_SOURCE_PREFIXES = ("src/", "docs/", "site/", "writing/", "research/", "assets/", "benchmarks/")
 
 
 def install_signal_handlers():
@@ -80,6 +84,45 @@ def version(value):
 def source_sha(value):
     require(isinstance(value, str) and SHA.fullmatch(value), "source commit must be a full lowercase SHA")
     return value
+
+
+def git_inspection(args, message, root=None, timeout=30):
+    try:
+        result = subprocess.run(["git", *args], cwd=root or ROOT, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError(message + " timed out") from None
+    require(result.returncode == 0, message)
+    return result.stdout
+
+
+def git_revision(ref, root=None):
+    return source_sha(git_inspection(["rev-parse", "--verify", ref + "^{commit}"],
+                                    "release source revision is unavailable", root).strip())
+
+
+def frozen_checkout(root=None):
+    """The dispatched workflow SHA, never a later tip of the main branch."""
+    commit = git_revision("HEAD", root)
+    dispatched = os.environ.get("GITHUB_SHA")
+    if dispatched:
+        require(commit == source_sha(dispatched), "release checkout differs from the dispatched workflow SHA")
+    return commit
+
+
+def require_source_ancestor(older, newer, root=None):
+    git_inspection(["merge-base", "--is-ancestor", source_sha(older), source_sha(newer)],
+                   "release source must be an ancestor of the frozen workflow", root)
+
+
+def verify_release_sources(older, newer, root=None):
+    """Fail before build/publication if the selected source uses other gates."""
+    require_source_ancestor(older, newer, root)
+    changed = git_inspection(["diff", "--name-only", "--no-renames", "-z", older, newer], "release input comparison failed", root)
+    paths = [path for path in changed.split("\0") if path]
+    reusable = lambda path: path != "src/model/catalog.zig" and (path.startswith(REUSABLE_SOURCE_PREFIXES) or
+                                                                ("/" not in path and path.endswith(".md")))
+    require(all(reusable(path) for path in paths),
+            "release qualification inputs changed; prepare a fresh candidate from the current workflow")
 
 
 def comparison_proves_ancestor(comparison, commit):
