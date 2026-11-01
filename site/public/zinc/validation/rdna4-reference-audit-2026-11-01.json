@@ -1346,9 +1346,18 @@
   "host_checks": {
     "full_cpu_unit_suite_passed": true,
     "bun_tests_passed": 750,
-    "release_contract_tests_passed": 81,
+    "release_contract_tests_passed": 82,
     "gpu_activity": "none in host checks",
-    "model_smokes": "not run on the workstation"
+    "model_smokes": "not run on the workstation",
+    "negative_controls_detected": [
+      "omitted candidate stability check",
+      "omitted readiness stability check",
+      "omitted server version check",
+      "omitted native backend check",
+      "candidate snapshot after version probe",
+      "readiness snapshot after version probe",
+      "retained loader injection variables"
+    ]
   },
   "remaining": "Fresh exact-preview R9700 worker runs with current gates; other required hardware roles, Apple signing and complete signed-candidate qualification."
 }

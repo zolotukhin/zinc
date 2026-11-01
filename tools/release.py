@@ -310,7 +310,8 @@ def aggregate(args):
         require(reference.get("device_backend") == target(spec["target"])["backend"], "reference GPU backend differs from tested target")
         libraries = reference.get("library_sha256")
         require(isinstance(libraries, dict) and all(isinstance(name, str) and REFERENCE_LIBRARY_NAME.fullmatch(name) and
-                isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) for name, digest in libraries.items()),
+                isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) for name, digest in libraries.items()) and
+                any(name.startswith("libggml") for name in libraries),
                 "missing or invalid reference library evidence")
         require(all(report.get("hardware", {}).get(key) for key in ("gpu", "os", "driver")), "missing public hardware/driver evidence")
         reports.append(report)

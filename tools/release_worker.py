@@ -122,9 +122,9 @@ def check(args):
             expected = policy()["reference"]["commit"]
             require(gpu.output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == expected, "reference source is not pinned")
             require(not gpu.output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference source is dirty")
-            require(expected[:7] in gpu.output([str(reference / "llama-server"), "--version"], gpu.reference_environment(reference, env)), "reference executable differs from policy")
             reference_snapshot = gpu.reference_artifacts(reference)
-            report["reference"] = {"commit": expected, "backend": reference_backend, "device_backend": reference_backend,
+            require(expected[:7] in gpu.output([str(reference / "llama-server"), "--version"], gpu.reference_environment(reference, env)), "reference executable differs from policy")
+            report["reference"] = {"commit": expected, "device_backend": reference_backend,
                                    "generation": policy()["reference"]["generation"], **reference_snapshot}
             stage = "model_pins"
             report["models"] = model_pins(profile, config)

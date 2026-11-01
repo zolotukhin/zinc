@@ -38,7 +38,7 @@ def output(command, env=None, timeout=180):
 def packaged_environment():
     """Probe installed bytes without interactive model/library overrides."""
     return {key: value for key, value in os.environ.items() if not key.startswith("ZINC_") and
-            key not in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")}
+            key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH")}
 
 
 def reference_environment(reference, env):
@@ -490,10 +490,12 @@ def reference_device_backend(args, backend):
 def reference_artifacts(reference):
     # The server can remain byte-identical while a tool build replaces its
     # ggml/llama libraries. Record their identities, not private loader paths.
+    libraries = {path.name: sha256(path) for path in sorted(reference.iterdir())
+                 if path.is_file() and REFERENCE_LIBRARY_NAME.fullmatch(path.name)}
+    require(any(name.startswith("libggml") for name in libraries), "reference must include its ggml libraries beside the tools")
     return {"server_sha256": sha256(reference / "llama-server"),
             "tokenizer_sha256": sha256(reference / "llama-tokenize"),
-            "library_sha256": {path.name: sha256(path) for path in sorted(reference.iterdir())
-                               if path.is_file() and REFERENCE_LIBRARY_NAME.fullmatch(path.name)}}
+            "library_sha256": libraries}
 
 
 def main():
@@ -524,7 +526,6 @@ def main():
     commit = policy()["reference"]["commit"]
     require(output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == commit, "reference checkout is not pinned")
     require(not output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference checkout is dirty")
-    require(commit[:7] in output([str(reference / "llama-server"), "--version"], reference_environment(reference, env)), "reference executable does not match pinned source")
     lock = Path(config["lock_directory"]).expanduser().resolve()
     require(lock.parent.is_dir(), "worker lock parent must exist")
     try:
@@ -535,6 +536,9 @@ def main():
         processes = output(["ps", "-eo", "comm="])
         require(not any(Path(line.strip()).name in ("zinc", "llama-server", "llama-cli") for line in processes.splitlines()), "GPU worker is busy")
         reference_snapshot = reference_artifacts(reference)
+        # Include the version probe in the frozen-artifact window. A clean
+        # checkout does not prove the executable was rebuilt at that revision.
+        require(commit[:7] in output([str(reference / "llama-server"), "--version"], reference_environment(reference, env)), "reference executable does not match pinned source")
         with tempfile.TemporaryDirectory(prefix="zinc-packaged-gpu-") as directory:
             work = Path(directory)
             tree = extract_archive(Path(args.directory) / artifact["filename"], work / "unpack", data["version"], profile["target"], data["commit"])

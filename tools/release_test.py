@@ -376,7 +376,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_packaged_environment_removes_inherited_model_and_library_overrides(self):
         inherited = {"PATH": "<system-tools>", "ZINC_PREFILL_CHUNK": "16", "ZINC_FORCE_CPU_ARGMAX": "1",
-                     "LD_LIBRARY_PATH": "<other-build>", "DYLD_LIBRARY_PATH": "<other-build>"}
+                     **{key: "<other-build>" for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH")}}
         with patch.dict(os.environ, inherited, clear=True):
             self.assertEqual(release_gpu.packaged_environment(), {"PATH": "<system-tools>"})
             self.assertEqual(dict(os.environ), inherited)
@@ -776,6 +776,8 @@ class ReleaseTest(unittest.TestCase):
                    lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver"),
                    lambda d: d["reference"].pop("device_backend"), lambda d: d["reference"].update(device_backend="rocm"),
                    lambda d: d["reference"].pop("library_sha256"),
+                   lambda d: d["reference"].update(library_sha256={}),
+                   lambda d: d["reference"].update(library_sha256={"libllama.so": "d" * 64}),
                    lambda d: d["reference"].update(library_sha256={"libggml-base.so": "not-a-digest"}),
                    lambda d: d["reference"].update(library_sha256={"<private-path>/libggml-base.so": "d" * 64})]
         for index, change in enumerate(changes):
@@ -988,9 +990,18 @@ class ReleaseTest(unittest.TestCase):
         probe.assert_not_called()
         launch.assert_not_called()
 
+    def test_reference_inventory_requires_adjacent_ggml_artifacts(self):
+        (self.root / "llama-server").write_bytes(b"server")
+        (self.root / "llama-tokenize").write_bytes(b"tokenizer")
+        (self.root / "libllama.so").write_bytes(b"llama")
+        with self.assertRaisesRegex(ValueError, "ggml libraries beside"):
+            release_gpu.reference_artifacts(self.root)
+        (self.root / "libggml-base.so").write_bytes(b"ggml")
+        self.assertEqual(set(release_gpu.reference_artifacts(self.root)["library_sha256"]), {"libllama.so", "libggml-base.so"})
+
     def test_candidate_and_readiness_reject_stale_cross_backend_or_changed_references(self):
         for entrypoint in ("candidate", "readiness"):
-            for failure in (None, "library", "stale_server", "wrong_backend"):
+            for failure in (None, "library", "during_version_probe", "stale_server", "wrong_backend"):
                 folder = self.root / (entrypoint + "-" + str(failure))
                 reference, tree = folder / "reference", folder / "package"
                 reference.mkdir(parents=True)
@@ -1014,7 +1025,9 @@ class ReleaseTest(unittest.TestCase):
                              "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
                 def output(command, *args, **kwargs):
                     if command[-1] == "HEAD": return real["reference"]["commit"]
-                    if command[-1] == "--version": return "b96806d96" if failure == "stale_server" else real["reference"]["commit"][:7]
+                    if command[-1] == "--version":
+                        if failure == "during_version_probe": (reference / "libggml-hip.so").write_bytes(b"changed during version probe")
+                        return "b96806d96" if failure == "stale_server" else real["reference"]["commit"][:7]
                     return ""
                 def requests(*args):
                     self.assertNotIn("LD_LIBRARY_PATH", args[5])
@@ -1042,7 +1055,8 @@ class ReleaseTest(unittest.TestCase):
                         if entrypoint == "candidate": release_gpu.main()
                         else: release_worker.check(args)
                     if failure:
-                        reason = {"library": "reference artifacts changed", "stale_server": "reference executable", "wrong_backend": "native GPU backend"}[failure]
+                        reason = {"library": "reference artifacts changed", "during_version_probe": "reference artifacts changed",
+                                  "stale_server": "reference executable", "wrong_backend": "native GPU backend"}[failure]
                         with self.assertRaisesRegex(ValueError, reason): run()
                         if entrypoint == "candidate": report.assert_not_called()
                         else: self.assertFalse(report.call_args.args[1]["passed"])

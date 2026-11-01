@@ -26,8 +26,8 @@ post-build hashes are retained; the rebuilt tools require fresh model checks.
 The candidate and worker-readiness harnesses now snapshot both executables and
 all sibling ggml/llama libraries before model checks. They refuse success if any
 of these files changes. Published reports contain only library basenames and
-hashes. Candidate aggregation requires that inventory. Static builds may have
-an empty library inventory.
+hashes. Candidate aggregation requires at least one ggml library in that
+inventory. Reference builds must include their ggml libraries beside the tools.
 
 Installed ZINC runs with inherited model and library overrides removed.
 Reference processes explicitly select their own sibling libraries. The

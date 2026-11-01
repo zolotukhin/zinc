@@ -93,8 +93,10 @@ a cross-backend disagreement is a separate diagnostic, not a reason to loosen
 the native reference agreement policy.
 
 Reports also inventory the reference's ggml/llama libraries. Their hashes and
-both executable hashes must remain unchanged through validation; rebuilding a
-tool can replace shared libraries without changing the server executable.
+both executable hashes must remain unchanged from the version probe through
+validation; rebuilding a tool can replace shared libraries without changing
+the server executable. Keep the reference's ggml libraries beside its tools;
+empty inventories and inventories without ggml entries fail validation.
 Only library basenames and digests are published. Library search overrides from
 the worker's shell are excluded from packaged execution. Reference processes
 select their own sibling libraries; that explicit search path is never passed
