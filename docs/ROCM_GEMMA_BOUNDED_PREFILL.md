@@ -1,5 +1,11 @@
 # Dense Gemma ROCm bounded prefill
 
+Reference provenance correction: the [RDNA4 audit](RDNA4_REFERENCE_VALIDATION.md)
+found that the recorded HIP executable reports an older revision than its
+checkout. HIP comparisons below retain their exact-byte diagnostic results;
+their intended reference-revision claim is withdrawn. Gemma's Vulkan reference
+and the recorded OpenCode fixture outcomes remain separately identified.
+
 Dense Gemma can load its 8K KV cache on the 32 GB R9700 while leaving too little
 memory for whole-prompt prefill scratch. The previous allocation failure selected
 serial prefill. A captured 5,037-token OpenCode request spent about 199 seconds in

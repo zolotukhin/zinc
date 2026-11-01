@@ -35,6 +35,21 @@ def output(command, env=None, timeout=180):
     return result.stdout + result.stderr
 
 
+def packaged_environment():
+    """Probe installed bytes without interactive model/library overrides."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("ZINC_") and
+            key not in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")}
+
+
+def reference_environment(reference, env):
+    """Use the selected reference's sibling libraries, even with multiple builds."""
+    result = dict(env)
+    if sys.platform.startswith("linux"):
+        previous = result.get("LD_LIBRARY_PATH", "")
+        result["LD_LIBRARY_PATH"] = str(reference) + (os.pathsep + previous if previous else "")
+    return result
+
+
 def free_port():
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -148,7 +163,7 @@ def kernel_reference(tree, reference, checkout, device, work, env):
             "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
             "-lggml-base", "-lvulkan", "-lm", "-o", str(executable)])
     log = work / "kernel-reference.log"
-    with process([str(executable)], log, work, {**env, "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
+    with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged kernel reference validation failed")
     require("PASS: 84 cache-boundary/reference/offset/stride/guard cases" in log.read_text(), "kernel reference suite was incomplete")
 
@@ -159,7 +174,7 @@ def tokenizer_parity(tree, reference, model, work, env):
         prompt.write_text(text)
         zinc = token_ids(output([str(tree / "bin/zinc-tokenize"), str(model), str(prompt)], env))
         llama = token_ids(output([str(reference / "llama-tokenize"), "-m", str(model), "-f", str(prompt),
-                                 "--ids", "--no-escape", "--log-disable"], env))
+                                 "--ids", "--no-escape", "--log-disable"], reference_environment(reference, env)))
         require(zinc == llama, f"tokenizer parity failed on corpus case {index}")
 
 
@@ -244,7 +259,7 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
                "--cache-type-v", generation["kv_cache"], "--flash-attn", "on" if generation["flash_attention"] else "off",
                "--host", "127.0.0.1", "--port", str(port), "-c", str(context)]
     limit = policy()["reference"]["agreement"]["tokens_per_case"]
-    with process(reference_command(port), work / "reference.log", work, env) as child:
+    with process(reference_command(port), work / "reference.log", work, reference_environment(reference, env)) as child:
         ready(child, port)
         for prompt in PROMPTS:
             rendered = json_request(port, "/apply-template", {"messages": [{"role": "user", "content": prompt}],
@@ -273,7 +288,7 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
     reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(PROMPTS))
     if pending:
         port = free_port()
-        with process(reference_command(port), work / "reference-near-ties.log", work, env) as child:
+        with process(reference_command(port), work / "reference-near-ties.log", work, reference_environment(reference, env)) as child:
             ready(child, port)
             for prompt, expected, actual, text, tie in pending:
                 qualify_reference_branch(port, tree, model, prompt, expected, actual, text, tie, work, env)
@@ -295,6 +310,9 @@ def reference_http_parity(port, body, samples, work=None):
             accepted.append(expected["validated_content"])
         require(choices and choices[0].get("text") and choices[0]["text"] in accepted,
                 "full HTTP reference continuation differed")
+        expected_finish = {"limit": "length", "eos": "stop", "word": "stop"}.get(expected.get("stop_type"))
+        if expected_finish and choices[0]["text"] == expected.get("content"):
+            require(choices[0].get("finish_reason") == expected_finish, "HTTP reference finish reason differed")
 
 
 def bounded_prefill_parity(tree, model, context, device, work, env, samples):
@@ -319,7 +337,12 @@ def bounded_prefill_parity(tree, model, context, device, work, env, samples):
 def unicode_chat_checks(port, model_id):
     """Require real UTF-8 and matching JSON/SSE, including split code points."""
     for budget in (1, 2, 3, 32):
-        body = {"model": model_id, "messages": [{"role": "user", "content": "Reply exactly with café 東京 🚀."}],
+        # The small starter translates this request under a generic assistant
+        # system prompt in both engines. Give this transport probe an explicit
+        # copy task so its required non-ASCII output is actually exercised.
+        body = {"model": model_id, "messages": [
+                    {"role": "system", "content": "Repeat the requested text exactly, preserving every character."},
+                    {"role": "user", "content": "Reply exactly with café 東京 🚀."}],
                 "max_tokens": budget, "temperature": 0, "enable_thinking": False}
         result = json_request(port, "/v1/chat/completions", {**body, "stream": False})
         content = result["choices"][0]["message"].get("content") or ""
@@ -336,10 +359,28 @@ def unicode_chat_checks(port, model_id):
         require(finishes == [result["choices"][0]["finish_reason"]], "Unicode JSON/SSE finish differed")
         require(any(event.get("usage", {}).get("prompt_tokens", 0) > 0 for event in events), "Unicode stream usage is missing")
         if budget == 32:
-            # Small models can translate/rephrase this instruction, including
-            # in llama.cpp. Exercise four-byte UTF-8 without grading wording;
-            # exact reference continuations are checked separately above.
-            require(any(ord(char) > 0xffff for char in content), "Unicode response did not exercise a four-byte code point")
+            require(all(word in content for word in ("café", "東京", "🚀")), "Unicode echo was incomplete")
+
+
+def cancel_chat_stream(port, body):
+    # Raw completions need not support SSE. Disconnect the advertised streaming
+    # chat route after generated content, rather than accepting any JSON line.
+    with request(port, "/v1/chat/completions", {**body, "stream": True}) as response:
+        require("text/event-stream" in response.headers.get("Content-Type", ""), "cancellation did not open a chat event stream")
+        for _ in range(1024):
+            raw = response.readline()
+            require(raw, "chat stream ended before cancellation")
+            line = raw.decode("utf-8", errors="strict").strip()
+            require(line != "data: [DONE]", "chat completed before cancellation")
+            if not line.startswith("data: "):
+                continue
+            event = json.loads(line[6:])
+            require(not event.get("error"), "chat failed before cancellation")
+            for choice in event.get("choices", []):
+                if choice.get("delta", {}).get("content"):
+                    require(not choice.get("finish_reason"), "chat completed before cancellation")
+                    return
+        raise ValueError("chat generated no content before cancellation")
 
 
 def api_checks(tree, model, context, device, work, env, browser_chat, reference_samples):
@@ -365,8 +406,7 @@ def api_checks(tree, model, context, device, work, env, browser_chat, reference_
         require(payloads and payloads[-1] == "[DONE]" and any(json.loads(p).get("choices") for p in payloads[:-1]), "chat SSE contract failed")
         unicode_chat_checks(port, model_id)
         # Disconnect an active stream; then prove the single-slot server recovers.
-        with request(port, "/v1/completions", {**body, "stream": True, "max_tokens": 256}) as response:
-            require(response.readline(), "stream did not start")
+        cancel_chat_stream(port, {**chat, "messages": [{"role": "user", "content": PROMPTS[0]}], "max_tokens": 256})
         require(json_request(port, "/v1/completions", body).get("choices"), "server did not recover after stream cancellation")
         # A healthy slot can still retain the wrong SSM reduction/state. Recheck
         # complete frozen continuations, not just a nonempty recovery response.
@@ -464,7 +504,7 @@ def main():
     args = parser.parse_args()
     # Installed archives and pinned references must work through their own
     # runtime paths, independent of an interactive shell's library overrides.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("ZINC_") and k not in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")}
+    env = packaged_environment()
     data = verify_candidate(args.directory)
     config_path = os.environ.get("ZINC_RELEASE_WORKER_CONFIG")
     require(config_path, "worker must set ZINC_RELEASE_WORKER_CONFIG to its private configuration file")
@@ -484,7 +524,7 @@ def main():
     commit = policy()["reference"]["commit"]
     require(output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == commit, "reference checkout is not pinned")
     require(not output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference checkout is dirty")
-    require(commit[:7] in output([str(reference / "llama-server"), "--version"], env), "reference executable does not match pinned source")
+    require(commit[:7] in output([str(reference / "llama-server"), "--version"], reference_environment(reference, env)), "reference executable does not match pinned source")
     lock = Path(config["lock_directory"]).expanduser().resolve()
     require(lock.parent.is_dir(), "worker lock parent must exist")
     try:

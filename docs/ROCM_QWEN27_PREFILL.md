@@ -1,5 +1,10 @@
 # ROCm Qwen short-prompt prefill agreement
 
+Reference provenance correction: the [RDNA4 audit](RDNA4_REFERENCE_VALIDATION.md)
+found that the recorded HIP executable reports an older revision than its
+checkout. The observations below remain diagnostics against their recorded
+bytes; the intended HIP reference-revision claim is withdrawn.
+
 The subsequent [single-slot consistency follow-up](ROCM_SINGLE_SLOT_CORRECTNESS.md)
 fixes the MoE HTTP mismatch and a request-reuse issue found by stronger checks.
 The original report below retains its failed MoE row and exact package identity.

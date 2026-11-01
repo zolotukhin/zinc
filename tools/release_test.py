@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import importlib.util
 import json
 import os
 import re
@@ -21,6 +22,8 @@ import release_lib
 import release_publish
 import release_preflight
 import release_sign
+import release_worker
+import release_worker_guard
 from release_lib import (
     ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
     read_json, sha256, target, version, write_json,
@@ -29,6 +32,9 @@ from release_lib import (
 COMMIT = "1" * 40
 PREFLIGHT_MAIN = "2" * 40
 NATIVE = "macos-aarch64-metal" if sys.platform == "darwin" else "linux-x86_64-vulkan"
+_launcher_spec = importlib.util.spec_from_file_location("release_worker_launcher", ROOT / "scripts/release_worker/launch.py")
+worker_launcher = importlib.util.module_from_spec(_launcher_spec)
+_launcher_spec.loader.exec_module(worker_launcher)
 
 
 class PreflightGitHub(release_preflight.GitHub):
@@ -46,7 +52,7 @@ class PreflightGitHub(release_preflight.GitHub):
                             "labels": [{"name": label.upper()} for label in labels]})
         self.rows("actions/variables", "variables", variables)
         self.rows("actions/runners", "runners", runners)
-        for name in ("release", "release-signing"):
+        for name in ("release", "release-signing", "release-workers"):
             self.responses[f"environments/{name}"] = {
                 "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False},
                 "protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User", "reviewer": {"id": 1, "login": "<private-reviewer>"}}]}],
@@ -141,7 +147,7 @@ class ReleasePreflightTest(unittest.TestCase):
                 self.assertNotIn("<private-invalid-json>", json.dumps(report))
 
     def test_environment_requires_only_main_branch_and_publication_reviewer(self):
-        for name in ("release", "release-signing"):
+        for name in ("release", "release-signing", "release-workers"):
             for branch_rows in ([], [{"id": 1, "name": "*", "type": "branch"}],
                                 [{"id": 1, "name": "main", "type": "tag"}],
                                 [{"id": 1, "name": "main", "type": "branch"}, {"id": 2, "name": "v*", "type": "tag"}]):
@@ -336,6 +342,99 @@ class ReleasePreflightTest(unittest.TestCase):
 
 
 class ReleaseTest(unittest.TestCase):
+    def test_worker_launcher_limits_host_access_and_keeps_inputs_read_only(self):
+        config = {"name": "zinc-release-fixture", "uid": 10001, "gid": 10001, "image": "sha256:" + "a" * 64,
+                  "gpu_devices": ["/dev/dri"], "gpu_groups": [100], "repository": "example/zinc", "labels": "zinc-fixture",
+                  "mounts": [{"source": str(self.root / "model"), "target": "/models/qwen3-0.6b-q8-0/model.gguf"},
+                             {"source": str(self.root / "work"), "target": "/runner"}]}
+        args = worker_launcher.container_args(config)
+        self.assertIn("--cap-drop=ALL", args)
+        self.assertIn("--security-opt=no-new-privileges", args)
+        self.assertIn("--read-only", args)
+        # Package probes and the numerical reference execute from private /tmp.
+        self.assertIn("exec", args[args.index("--tmpfs") + 1].split(":", 1)[1].split(","))
+        mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "--mount"]
+        self.assertTrue(mounts[0].endswith(",readonly"))
+        self.assertFalse(mounts[1].endswith(",readonly"))
+        for changed in ({"uid": 0}, {"gid": 0}, {"image": "ubuntu:latest"},
+                        {"gpu_devices": ["/dev"]},
+                        {"mounts": [{"source": "/", "target": "/runner"}]},
+                        {"mounts": [{"source": "/var/run/docker.sock", "target": "/runner"}]},
+                        {"mounts": [{"source": str(self.root), "target": "/etc"}]}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                worker_launcher.container_args({**config, **changed})
+
+    def test_reference_loader_uses_selected_build_without_changing_parent_environment(self):
+        env = {"LD_LIBRARY_PATH": "/other-reference:/toolkit", "FIXTURE": "kept"}
+        with patch.object(release_gpu.sys, "platform", "linux"):
+            selected = release_gpu.reference_environment(Path("/selected-reference"), env)
+        self.assertEqual(selected["LD_LIBRARY_PATH"], "/selected-reference:/other-reference:/toolkit")
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/other-reference:/toolkit")
+        self.assertEqual(selected["FIXTURE"], "kept")
+        with patch.object(release_gpu.sys, "platform", "darwin"):
+            self.assertEqual(release_gpu.reference_environment(Path("/selected-reference"), env), env)
+
+    def test_packaged_environment_removes_inherited_model_and_library_overrides(self):
+        inherited = {"PATH": "<system-tools>", "ZINC_PREFILL_CHUNK": "16", "ZINC_FORCE_CPU_ARGMAX": "1",
+                     "LD_LIBRARY_PATH": "<other-build>", "DYLD_LIBRARY_PATH": "<other-build>"}
+        with patch.dict(os.environ, inherited, clear=True):
+            self.assertEqual(release_gpu.packaged_environment(), {"PATH": "<system-tools>"})
+            self.assertEqual(dict(os.environ), inherited)
+
+    def test_worker_guard_accepts_only_the_admin_selected_main_workflow_job(self):
+        workflow = "example/zinc/.github/workflows/release-worker-check.yml@refs/heads/main"
+        config = {"repository": "example/zinc", "actors": ["maintainer"],
+                  "workflows": {workflow: {"events": ["workflow_dispatch"], "jobs": ["check"]}}}
+        env = {"GITHUB_REPOSITORY": "example/zinc", "GITHUB_REF": "refs/heads/main", "GITHUB_ACTOR": "maintainer",
+               "GITHUB_SHA": COMMIT, "GITHUB_RUN_ID": "123", "GITHUB_WORKFLOW_REF": workflow,
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_JOB": "check"}
+        release_worker_guard.validate_context(config, env)
+        for key in env:
+            for value in ("", "<untrusted>"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    release_worker_guard.validate_context(config, {**env, key: value})
+        with self.assertRaisesRegex(ValueError, "event"):
+            release_worker_guard.validate_context(config, {**env, "GITHUB_EVENT_NAME": "pull_request_target"})
+
+    def test_worker_preview_resolution_rejects_pr_failed_and_stale_bytes(self):
+        profile = release_worker.profile_for("vulkan-rdna4")
+        run = {"id": 123, "repository": {"full_name": "zolotukhin/zinc"}, "path": ".github/workflows/release-preview.yml",
+               "event": "push", "head_branch": "main", "status": "completed", "conclusion": "success", "head_sha": COMMIT}
+        variables = {profile["runner_variable"]: '["self-hosted","linux","x64","zinc-rdna4"]'}
+        result = release_worker.resolve_preview(profile, run, variables, COMMIT)
+        self.assertEqual(result["version"], "0.1.0-dev.123")
+        self.assertEqual(result["runner_variable"], "ZINC_RUNNER_RDNA4")
+        for changed in ({"event": "pull_request"}, {"head_branch": "feature"}, {"conclusion": "failure"},
+                        {"head_sha": "2" * 40}, {"path": ".github/workflows/other.yml"}, {"id": True}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                release_worker.resolve_preview(profile, {**run, **changed}, variables, COMMIT)
+        for labels in (None, "null", "[]", '["<private-selector>"]'):
+            with self.subTest(labels=labels), self.assertRaises((ValueError, TypeError)):
+                release_worker.resolve_preview(profile, run, {profile["runner_variable"]: labels}, COMMIT)
+
+    def test_worker_reservation_never_removes_an_occupied_reservation(self):
+        path = self.root / "reservation"
+        path.mkdir()
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            with release_worker.reservation(path):
+                self.fail("occupied reservation was entered")
+        self.assertTrue(path.is_dir())
+        path.rmdir()
+        with patch.object(release_worker, "idle"), self.assertRaisesRegex(ValueError, "fixture"):
+            with release_worker.reservation(path):
+                raise ValueError("fixture")
+        self.assertFalse(path.exists())
+
+    def test_worker_readiness_schema_cannot_be_aggregated_as_release_evidence(self):
+        reports = self.root / "reports"
+        reports.mkdir()
+        write_json(reports / "worker.json", {"schema_version": release_worker.SCHEMA, "passed": True,
+                                            "release_qualification": False})
+        with patch.object(release, "verify_candidate", return_value={"artifacts": [], "required_profiles": []}), \
+             self.assertRaisesRegex(ValueError, "unsupported GPU report schema"):
+            release.aggregate(SimpleNamespace(directory=self.root, results=reports, version="9.8.7", commit=COMMIT))
+        self.assertFalse((self.root / "validation.json").exists())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="zinc release test ")
         self.addCleanup(self.temporary.cleanup)
@@ -889,59 +988,73 @@ class ReleaseTest(unittest.TestCase):
         probe.assert_not_called()
         launch.assert_not_called()
 
-    def test_reference_library_changes_abort_certification_even_when_executables_are_unchanged(self):
-        for changed in (False, True):
-            folder = self.root / ("changed-reference" if changed else "stable-reference")
-            reference, tree = folder / "reference", folder / "package"
-            reference.mkdir(parents=True)
-            (tree / "bin").mkdir(parents=True)
-            for path, content in ((reference / "llama-server", b"server"), (reference / "llama-tokenize", b"tokenizer"),
-                                  (reference / "libggml-hip.so", b"original library"), (reference / "notes.txt", b"private notes"),
-                                  (tree / "bin/zinc", b"packaged binary"), (folder / "model.gguf", b"pinned model"),
-                                  (folder / "candidate.tar.gz", b"archive")):
-                path.write_bytes(content)
-            before = release_gpu.reference_artifacts(reference)
-            model = folder / "model.gguf"
-            real = policy()
-            data = {"reference": real["reference"], "gpu_profiles": [{"id": "rocm-rdna4", "target": "linux-x86_64-rocm", "family": "gfx1201", "models": ["fixture"]}],
-                    "targets": [{"id": "linux-x86_64-rocm", "backend": "rocm", "interfaces": {"browser_chat": False}}],
-                    "models": [{"id": "fixture", "context": 32, "size_bytes": model.stat().st_size, "sha256": sha256(model)}]}
-            config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "ROCm7"], "reference_bin": str(reference),
-                      "reference_source": str(folder), "lock_directory": str(folder / "reservation"), "models": {"fixture": str(model)}}
-            write_json(folder / "worker.json", config)
-            candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
-                         "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
-            def output(command, *args, **kwargs):
-                if command[-1] == "HEAD": return real["reference"]["commit"]
-                if command[-1] == "--version": return real["reference"]["commit"][:7]
-                return ""
-            def requests(*args):
-                self.assertNotIn("LD_LIBRARY_PATH", args[5])
-                if changed: (reference / "libggml-hip.so").write_bytes(b"rebuilt library")
-            samples = [("prompt", {"comparison": {"tokens": 16, "near_ties": []}}) for _ in range(3)]
-            argv = ["release_gpu.py", "--directory", str(folder), "--profile", "rocm-rdna4", "--output", str(folder / "report.json")]
-            with self.subTest(changed=changed), contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
-                stack.enter_context(patch.object(sys, "argv", argv))
-                stack.enter_context(patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(folder / "worker.json"), "LD_LIBRARY_PATH": "<private-library-override>"}))
-                for name, replacement in (("verify_candidate", candidate), ("policy", data), ("extract_archive", tree),
-                                          ("probe_binary", None), ("tokenizer_parity", None), ("inference_parity", samples),
-                                          ("hardware_evidence", {"gpu": "CPU fixture", "os": "fixture", "driver": "fixture"})):
-                    stack.enter_context(patch.object(release_gpu, name, return_value=replacement))
-                stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
-                stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
-                report = stack.enter_context(patch.object(release_gpu, "write_json"))
-                if changed:
-                    with self.assertRaisesRegex(ValueError, "reference artifacts changed"):
-                        release_gpu.main()
-                    report.assert_not_called()
-                    after = release_gpu.reference_artifacts(reference)
-                    self.assertEqual(before["server_sha256"], after["server_sha256"])
-                    self.assertEqual(before["tokenizer_sha256"], after["tokenizer_sha256"])
-                else:
-                    release_gpu.main()
-                    self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
-                    self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
-            self.assertFalse((folder / "reservation").exists())
+    def test_candidate_and_readiness_reject_stale_cross_backend_or_changed_references(self):
+        for entrypoint in ("candidate", "readiness"):
+            for failure in (None, "library", "stale_server", "wrong_backend"):
+                folder = self.root / (entrypoint + "-" + str(failure))
+                reference, tree = folder / "reference", folder / "package"
+                reference.mkdir(parents=True)
+                (tree / "bin").mkdir(parents=True)
+                for path, content in ((reference / "llama-server", b"server"), (reference / "llama-tokenize", b"tokenizer"),
+                                      (reference / "libggml-hip.so", b"original library"), (reference / "notes.txt", b"private notes"),
+                                      (tree / "bin/zinc", b"packaged binary"), (folder / "model.gguf", b"pinned model"),
+                                      (folder / "candidate.tar.gz", b"archive"),
+                                      (folder / archive_name("9.8.7", "linux-x86_64-rocm"), b"archive")):
+                    path.write_bytes(content)
+                before = release_gpu.reference_artifacts(reference)
+                model = folder / "model.gguf"
+                real = policy()
+                data = {"reference": real["reference"], "gpu_profiles": [{"id": "rocm-rdna4", "target": "linux-x86_64-rocm", "family": "gfx1201", "models": ["fixture"]}],
+                        "targets": [{"id": "linux-x86_64-rocm", "backend": "rocm", "interfaces": {"browser_chat": False}}],
+                        "models": [{"id": "fixture", "context": 32, "size_bytes": model.stat().st_size, "sha256": sha256(model)}]}
+                config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "Vulkan7" if failure == "wrong_backend" else "ROCm7"],
+                          "reference_bin": str(reference), "reference_source": str(folder), "lock_directory": str(folder / "reservation"), "models": {"fixture": str(model)}}
+                write_json(folder / "worker.json", config)
+                candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
+                             "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
+                def output(command, *args, **kwargs):
+                    if command[-1] == "HEAD": return real["reference"]["commit"]
+                    if command[-1] == "--version": return "b96806d96" if failure == "stale_server" else real["reference"]["commit"][:7]
+                    return ""
+                def requests(*args):
+                    self.assertNotIn("LD_LIBRARY_PATH", args[5])
+                    self.assertNotIn("DYLD_LIBRARY_PATH", args[5])
+                    if failure == "library": (reference / "libggml-hip.so").write_bytes(b"rebuilt library")
+                samples = [("prompt", {"comparison": {"tokens": 16, "near_ties": []}}) for _ in range(3)]
+                argv = ["release_gpu.py", "--directory", str(folder), "--profile", "rocm-rdna4", "--output", str(folder / "report.json")]
+                args = SimpleNamespace(profile="rocm-rdna4", directory=folder, version="9.8.7", commit=COMMIT, output=folder / "report.json", exercise_models=True)
+                with self.subTest(entrypoint=entrypoint, failure=failure), contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+                    stack.enter_context(patch.object(sys, "argv", argv))
+                    stack.enter_context(patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(folder / "worker.json"),
+                                                              "LD_LIBRARY_PATH": "<private-library-override>", "DYLD_LIBRARY_PATH": "<private-library-override>"}))
+                    for name, value in (("verify_candidate", candidate), ("policy", data), ("extract_archive", tree),
+                                        ("probe_binary", None), ("tokenizer_parity", None), ("inference_parity", samples),
+                                        ("hardware_evidence", {"gpu": "CPU fixture", "os": "fixture", "driver": "fixture"})):
+                        stack.enter_context(patch.object(release_gpu, name, return_value=value))
+                    for name, value in (("policy", data), ("extract_archive", tree), ("probe_binary", None), ("idle", None)):
+                        stack.enter_context(patch.object(release_worker, name, return_value=value))
+                    stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
+                    stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
+                    launch = stack.enter_context(patch.object(release_gpu, "process"))
+                    module = release_gpu if entrypoint == "candidate" else release_worker
+                    report = stack.enter_context(patch.object(module, "write_json"))
+                    def run():
+                        if entrypoint == "candidate": release_gpu.main()
+                        else: release_worker.check(args)
+                    if failure:
+                        reason = {"library": "reference artifacts changed", "stale_server": "reference executable", "wrong_backend": "native GPU backend"}[failure]
+                        with self.assertRaisesRegex(ValueError, reason): run()
+                        if entrypoint == "candidate": report.assert_not_called()
+                        else: self.assertFalse(report.call_args.args[1]["passed"])
+                    else:
+                        run()
+                        self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
+                        self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
+                    launch.assert_not_called()  # Every inference boundary is mocked: these are CPU lifecycle tests.
+                after = release_gpu.reference_artifacts(reference)
+                self.assertEqual(before["server_sha256"], after["server_sha256"])
+                self.assertEqual(before["tokenizer_sha256"], after["tokenizer_sha256"])
+                self.assertFalse((folder / "reservation").exists())
 
     def test_release_unicode_gate_rejects_invalid_bytes_missing_usage_and_lost_text(self):
         def nonstream(port, path, body):
@@ -958,37 +1071,27 @@ class ReleaseTest(unittest.TestCase):
                 payload = b"data: \xff\n\ndata: [DONE]\n\n"
             return contextlib.nullcontext(io.BytesIO(payload))
 
-        with patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body)) as request:
+        with patch.object(release_gpu, "json_request", side_effect=nonstream) as json_request, patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body)) as request:
             release_gpu.unicode_chat_checks(123, "loaded")
             self.assertEqual(request.call_count, 4)
+            for call in json_request.call_args_list:
+                self.assertEqual(call.args[2]["messages"][0], {
+                    "role": "system", "content": "Repeat the requested text exactly, preserving every character."})
         for damage in ("utf8", "usage", "done", "text"):
             with self.subTest(damage=damage), patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body, damage)):
                 with self.assertRaises(ValueError):
                     release_gpu.unicode_chat_checks(123, "loaded")
 
-    def test_unicode_gate_checks_transport_for_rephrased_and_normalized_responses(self):
-        def nonstream(port, path, body):
-            text = final_content if body["max_tokens"] == 32 else ""
-            return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
-
-        def streaming(port, path, body):
-            content = nonstream(port, path, body)["choices"][0]["message"]["content"]
-            event = {"choices": [{"delta": {"content": content}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 42}}
-            payload = "data: " + json.dumps(event, ensure_ascii=False) + "\n\ndata: [DONE]\n\n"
-            return contextlib.nullcontext(io.BytesIO(payload.encode("utf-8")))
-
-        # The first response is the real 0.6B model's reply. Rephrasing and
-        # Unicode normalization are independent of JSON/SSE byte integrity.
-        for final_content in ("☕ 东京咖啡 🚀", "☕️ **カフェ・東京** 🚀", "cafe\u0301 東京 🚀"):
-            with self.subTest(content=final_content), patch.object(release_gpu, "json_request", side_effect=nonstream), \
-                    patch.object(release_gpu, "request", side_effect=streaming):
-                release_gpu.unicode_chat_checks(123, "loaded")
-        # Matching ASCII/BMP-only output cannot exercise a split four-byte
-        # code point; a surrogate is never valid UTF-8, even in both responses.
-        for final_content in ("ASCII only", "café 東京", "\ud83d"):
-            with self.subTest(content=repr(final_content)), patch.object(release_gpu, "json_request", side_effect=nonstream), \
-                    patch.object(release_gpu, "request", side_effect=streaming), self.assertRaises(ValueError):
-                release_gpu.unicode_chat_checks(123, "loaded")
+        # Valid, identical JSON/SSE is insufficient if the model translates
+        # away the required bytes: preserve the original Unicode coverage.
+        def translated(port, path, body):
+            return {"choices": [{"message": {"content": "☕ 东京咖啡 🚀"}, "finish_reason": "stop"}]}
+        event = {"choices": [{"delta": {"content": "☕ 东京咖啡 🚀"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20}}
+        payload = ("data: " + json.dumps(event, ensure_ascii=False) + "\n\ndata: [DONE]\n\n").encode()
+        with patch.object(release_gpu, "json_request", side_effect=translated), \
+             patch.object(release_gpu, "request", side_effect=lambda *args: contextlib.nullcontext(io.BytesIO(payload))), \
+             self.assertRaisesRegex(ValueError, "Unicode echo was incomplete"):
+            release_gpu.unicode_chat_checks(123, "loaded")
 
     def test_http_reference_gate_rejects_early_stops_and_uses_the_exact_reference_prompt(self):
         samples = [("<rendered reference prompt>", {"content": "The complete reference continuation.\nSecond line."})]
@@ -1010,6 +1113,47 @@ class ReleaseTest(unittest.TestCase):
         samples[0][1].pop("comparison")
         with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "A qualified alternate."}]}), self.assertRaises(ValueError):
             release_gpu.reference_http_parity(1, body, samples)
+
+    def test_http_reference_gate_distinguishes_eos_from_a_token_limit(self):
+        for stop_type, finish in (("eos", "stop"), ("limit", "length")):
+            samples = [("prompt", {"content": "complete", "stop_type": stop_type})]
+            with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "complete", "finish_reason": finish}]}):
+                release_gpu.reference_http_parity(1, {}, samples)
+            with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "complete", "finish_reason": "length" if finish == "stop" else "stop"}]}), \
+                 self.assertRaisesRegex(ValueError, "finish reason"):
+                release_gpu.reference_http_parity(1, {}, samples)
+
+    def test_cancellation_closes_an_active_chat_stream_before_draining_it(self):
+        class Stream(io.BytesIO):
+            headers = {"Content-Type": "text/event-stream"}
+            consumed = 0
+
+            def close(self):
+                if not self.closed:
+                    self.consumed = self.tell()
+                    super().close()
+
+        payload = (b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+                   b'data: {"choices":[{"delta":{"content":"first"},"finish_reason":null}]}\n\n'
+                   b'data: {"choices":[{"delta":{"content":"still generating"}}]}\n\ndata: [DONE]\n\n')
+        response = Stream(payload)
+        with patch.object(release_gpu, "request", return_value=response) as request:
+            release_gpu.cancel_chat_stream(1, {"max_tokens": 256})
+        self.assertTrue(response.closed)
+        self.assertLess(response.consumed, len(payload))
+        self.assertEqual(request.call_args.args[1], "/v1/chat/completions")
+        self.assertTrue(request.call_args.args[2]["stream"])
+        for content_type, data in (("application/json", b'{"choices":[{}]}'),
+                                   ("text/event-stream", b''),
+                                   ("text/event-stream", b'data: \xff\n\n'),
+                                   ("text/event-stream", b'data: [DONE]\n\n'),
+                                   ("text/event-stream", b'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n'),
+                                   ("text/event-stream", b'data: {"error":"failed"}\n\n')):
+            response = Stream(data)
+            response.headers = {"Content-Type": content_type}
+            with self.subTest(content_type=content_type, data=data), \
+                 patch.object(release_gpu, "request", return_value=response), self.assertRaises(ValueError):
+                release_gpu.cancel_chat_stream(1, {})
 
     def test_cli_reference_gate_checks_all_backend_token_formats_and_complete_text(self):
         expected = {"content": "First line.\n  Second line. ",
@@ -1087,6 +1231,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("--debug", commands[1])
         self.assertNotIn("ZINC_LOG_TOPK", environments[1])
         self.assertNotIn("ZINC_FORCE_CPU_ARGMAX", environments[1])
+        self.assertNotIn("LD_LIBRARY_PATH", environments[1])
+        if sys.platform.startswith("linux"):
+            self.assertEqual(environments[0]["LD_LIBRARY_PATH"], str(self.root / "reference"))
 
     def test_reference_agreement_records_a_bounded_tie_without_counting_it_exact(self):
         cases = [{"tokens": 16, "near_ties": []} for _ in range(3)]

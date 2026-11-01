@@ -1,0 +1,93 @@
+name: Release worker readiness
+run-name: Worker ${{ inputs.profile }} / preview ${{ inputs.preview_run }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Configured hardware profile; this is not release qualification.'
+        required: true
+        type: choice
+        options:
+          - vulkan-rdna4
+          - rocm-rdna4
+          - vulkan-rdna3
+          - vulkan-strix-halo
+          - vulkan-intel-xe2
+          - metal-apple7
+          - metal-apple8
+          - metal-apple9
+          - metal-apple10
+      preview_run:
+        description: 'Successful packaging preview run for this exact main commit'
+        required: true
+        type: string
+      exercise_models:
+        description: 'Exercise every required model, tokenizer, reference and API case'
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  prepare:
+    if: github.repository == 'zolotukhin/zinc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      runner: ${{ steps.resolve.outputs.runner }}
+      target: ${{ steps.resolve.outputs.target }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      version: ${{ steps.resolve.outputs.version }}
+      runner_variable: ${{ steps.resolve.outputs.runner_variable }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Resolve one configured worker and verify trusted preview identity
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VARIABLES: ${{ toJSON(vars) }}
+          WORKER_PROFILE: ${{ inputs.profile }}
+          PREVIEW_RUN: ${{ inputs.preview_run }}
+        run: python3 tools/release_worker.py resolve --profile "$WORKER_PROFILE" --preview-run "$PREVIEW_RUN"
+
+  check:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
+    environment: release-workers
+    concurrency:
+      group: zinc-gpu-${{ needs.prepare.outputs.runner_variable }}
+      cancel-in-progress: false
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+          clean: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: preview-${{ needs.prepare.outputs.target }}
+          run-id: ${{ inputs.preview_run }}
+          github-token: ${{ github.token }}
+          path: preview
+      - name: Check package, actual hardware, pinned reference, models and cleanup
+        env:
+          WORKER_PROFILE: ${{ inputs.profile }}
+          PREVIEW_VERSION: ${{ needs.prepare.outputs.version }}
+          PREVIEW_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXERCISE_MODELS: ${{ inputs.exercise_models }}
+        run: |
+          extra=()
+          if [ "$EXERCISE_MODELS" = true ]; then extra+=(--exercise-models); fi
+          python3 tools/release_worker.py check --profile "$WORKER_PROFILE" --directory preview --version "$PREVIEW_VERSION" --commit "$PREVIEW_COMMIT" --output worker-readiness.json "${extra[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: worker-readiness-${{ inputs.profile }}
+          path: worker-readiness.json
+          if-no-files-found: warn
+          retention-days: 14

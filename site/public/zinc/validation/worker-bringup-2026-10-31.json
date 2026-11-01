@@ -1,0 +1,483 @@
+{
+  "schema_version": "zinc-worker-bringup-v1",
+  "release_qualification": false,
+  "source_commit": "e7b3f755d8004a2d22611bdf5f3f818f6be8e286",
+  "preview_run": 41264675300,
+  "rocm": {
+    "readiness_run": 41266342219,
+    "report": {
+      "archive_sha256": "0154d2a4c520962c4042425011f084dbff8f0b0a0c066b55630586db3ad31a88",
+      "cleanup": "no GPU process remains",
+      "hardware": {
+        "driver": "ROCm 7.2.4",
+        "gpu": "AMD Radeon Graphics",
+        "os": "Linux 7.2.2-070202-generic"
+      },
+      "models": [
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen38-27b-q4k-m",
+          "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 36337,
+                    "logprob_gap": 0.032131314277648926,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 3618
+                  }
+                ],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen36-27b-q4k-m",
+          "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen35-9b-q4k-m",
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "bounded_prefill": {
+            "cases": 3,
+            "chunk_tokens": 16,
+            "passed": true,
+            "tokens": 48
+          },
+          "context": 4096,
+          "id": "gemma4-31b-q4k-m",
+          "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84"
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "gemma4-26b-a4b-q4k-m",
+          "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c"
+        }
+      ],
+      "models_exercised": true,
+      "passed": true,
+      "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+      "preview_version": "0.1.0-dev.41264675300",
+      "profile": "rocm-rdna4",
+      "reference": {
+        "backend": "rocm",
+        "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+        "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+      },
+      "release_qualification": false,
+      "schema_version": "zinc-worker-readiness-v1",
+      "source_commit": "e7b3f755d8004a2d22611bdf5f3f818f6be8e286"
+    },
+    "limitations": [
+      "Unsigned preview, not a signed release candidate.",
+      "This harness predates the stricter active chat SSE cancellation probe."
+    ]
+  },
+  "intel": {
+    "report": {
+      "archive_sha256": "d25c7bcf9afb716ce31ebd3a21a4f8d2935b9bb74ae273e6fd68d5fcfbc14467",
+      "complete_required_matrix": false,
+      "error": "Unicode echo was incomplete",
+      "failed_stage": "qwen36-27b-q4k-m",
+      "hardware": {
+        "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+        "gpu": "Intel(R) Graphics (BMG G31)",
+        "os": "Linux 7.2.7-arch1-1"
+      },
+      "kernel_reference": {
+        "cases": 84,
+        "passed": true
+      },
+      "missing_models": [
+        "gemma4-31b-q4k-m",
+        "gemma4-26b-a4b-q4k-m"
+      ],
+      "models": [
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 2048,
+          "id": "qwen3-0.6b-q8-0",
+          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+          "tokenizer_passed": true
+        },
+        {
+          "agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 3618,
+                    "logprob_gap": 0.015493392944335938,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 36337
+                  }
+                ],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "api_passed": true,
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+          "tokenizer_passed": true
+        }
+      ],
+      "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+      "preview_version": "0.1.0-dev.41264675300",
+      "profile": "vulkan-intel-xe2",
+      "reference": {
+        "backend": "vulkan",
+        "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+        "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+      },
+      "release_qualification": false,
+      "required_models": [
+        "qwen3-0.6b-q8-0",
+        "qwen36-35b-a3b-q4k-xl",
+        "qwen36-27b-q4k-m",
+        "qwen35-9b-q4k-m",
+        "gemma4-31b-q4k-m",
+        "gemma4-26b-a4b-q4k-m"
+      ],
+      "schema_version": "zinc-intel-preview-diagnostic-v1",
+      "selected_models": [
+        "qwen3-0.6b-q8-0",
+        "qwen36-35b-a3b-q4k-xl",
+        "qwen36-27b-q4k-m",
+        "qwen35-9b-q4k-m"
+      ],
+      "source_commit": "e7b3f755d8004a2d22611bdf5f3f818f6be8e286",
+      "subset_passed": false
+    },
+    "gpu_process_counts_after_diagnostics": {
+      "zinc": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0
+    },
+    "harness_override": {
+      "unicode_system_message": "Repeat the requested text exactly, preserving every character."
+    },
+    "subgroup_properties": {
+      "default": 32,
+      "minimum": 16,
+      "maximum": 32
+    },
+    "prefill_isolation": {
+      "model_id": "qwen36-27b-q4k-m",
+      "reference_text": "café 東京 🚀",
+      "cases": [
+        {
+          "variant": "default",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "default",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "serial",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "serial",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "prefix-one",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "prefix-one",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "segments-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "segments-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "delta-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "delta-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "attention-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "attention-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "rms-quant-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "rms-quant-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "fused-gate-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "fused-gate-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "down-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "down-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "tile-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "tile-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": false
+        },
+        {
+          "variant": "wave64-kernels-off",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "wave64-kernels-off",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "generic-prefill",
+          "case": "zinc-default",
+          "prompt_tokens": 41,
+          "matched_reference_excluding_known_eog": true
+        },
+        {
+          "variant": "generic-prefill",
+          "case": "copy-system",
+          "prompt_tokens": 37,
+          "matched_reference_excluding_known_eog": true
+        }
+      ],
+      "raw_output_comparison": "Remove only the known trailing <|im_end|> leak in this diagnostic; the native API fix still needs packaged retesting.",
+      "release_qualification": false
+    }
+  },
+  "pending": [
+    "Packaged retesting of the native completion and subgroup dispatch fixes.",
+    "Remaining Intel Gemma model pins and full Intel matrix.",
+    "Other release worker roles, Apple signing, and all nine signed-candidate profiles."
+  ]
+}

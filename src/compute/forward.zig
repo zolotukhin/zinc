@@ -13264,13 +13264,18 @@ pub const InferenceEngine = struct {
         // Register-tiled kernel: one wave per 4 (query, head) rows x 32 key
         // columns, head dim split across lanes, per-lane online softmax. The
         // shape the comparison runtime uses; the three earlier kernels were not.
-        const use_tile = (n_queries >= qt_min_queries or kv_dtype.isQ8()) and
+        // These two shaders reduce/shuffle across a complete 64-lane wave.
+        // Pipeline creation treats the subgroup request as optional, so a
+        // loaded pipeline alone does not prove that this contract is met.
+        // On Xe2, silently running them at 16/32 lanes corrupts 27B prefill.
+        const wave64_available = self.wave64BatchedAttentionAvailable();
+        const use_tile = wave64_available and (n_queries >= qt_min_queries or kv_dtype.isQ8()) and
             head_dim == attn_mod.flash_attn_gqa_head_dim and
             n_kv_heads > 0 and
             n_heads % n_kv_heads == 0 and
             self.attention.pipeline_batched_tile != null and
             envFlagEnabled("ZINC_FA_TILE", true);
-        const use_gqa = !use_tile and n_queries >= qt_min_queries and
+        const use_gqa = wave64_available and !use_tile and n_queries >= qt_min_queries and
             head_dim == attn_mod.flash_attn_gqa_head_dim and
             n_kv_heads > 0 and
             n_heads == n_kv_heads * attn_mod.flash_attn_gqa_heads and
@@ -13371,7 +13376,13 @@ pub const InferenceEngine = struct {
     /// is the only prefill reader a q8 cache has.
     fn batchedAttentionAvailable(self: *const InferenceEngine) bool {
         if (self.attention.pipeline_batched != null) return true;
-        return self.attention.pipeline_batched_tile != null and self.model.config.head_dim == attn_mod.flash_attn_gqa_head_dim;
+        return self.wave64BatchedAttentionAvailable() and self.attention.pipeline_batched_tile != null and
+            self.model.config.head_dim == attn_mod.flash_attn_gqa_head_dim;
+    }
+
+    fn wave64BatchedAttentionAvailable(self: *const InferenceEngine) bool {
+        return self.instance.caps.supportsRequiredSubgroupSize(64) or
+            self.instance.caps.default_subgroup_size == 64;
     }
 
     /// Batched projection: weight × [N_tokens columns of x] → [N_tokens columns of y].

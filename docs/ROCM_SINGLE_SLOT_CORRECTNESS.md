@@ -1,5 +1,10 @@
 # ROCm single-slot continuation consistency
 
+Reference provenance correction: the [RDNA4 audit](RDNA4_REFERENCE_VALIDATION.md)
+found a stale HIP executable behind the intended checkout revision. Comparisons
+below retain their recorded reference hashes and observed behavior, but do not
+verify that HIP executable against the intended policy revision.
+
 This follow-up fixes two request-path differences in F32, single-slot ROCm
 serving: short MoE prefill differed from CLI, and dense-model continuations could
 change after a previous request allocated batch scratch. Numerical kernels,

@@ -1335,5 +1335,14 @@
     "The 16K OpenCode task scope is separate from the required 4K release model checks. Three small core fixtures do not establish complete large-repository delivery.",
     "No model catalog promotion, NVIDIA hardware validation or local workstation GPU inference was performed."
   ],
-  "cleanup": true
+  "cleanup": true,
+  "reference_provenance_correction": {
+    "recorded_utc": "2026-11-01T03:17:14.833782+00:00",
+    "affected_reference_server_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+    "intended_reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reported_reference_revision": "b96806d96",
+    "policy_reference_revision_verified": false,
+    "scope": "Recorded comparisons remain diagnostics against the identified executable bytes; the intended HIP revision claim is withdrawn. ZINC before/after behavior and OpenCode fixture outcomes retain their separate recorded scope.",
+    "audit": "/zinc/validation/rdna4-reference-audit-2026-11-01.json"
+  }
 }

@@ -143,7 +143,7 @@ def audit(github, repo, data):
     assignments = inspect("runner variables API", variables)
     inventory = inspect("runner inventory API", runners)
     checks.extend(runner_checks(data["gpu_profiles"], assignments, inventory))
-    for name in ("release-signing", "release"):
+    for name in ("release-workers", "release-signing", "release"):
         environment = inspect(name + " environment API", lambda: read_environment(name))
         if environment is None:
             continue

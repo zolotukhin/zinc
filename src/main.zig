@@ -2407,6 +2407,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var sent_structured_len: usize = 0;
     var write_failed = false;
     var generation_failed = false;
+    var ended_on_eog = false;
     var detector = tool_format_mod.StreamingDetector{ .allocator = allocator, .tools = tool_definitions, .native_gemma = tool_format_mod.forTokenizer(ctx.tokenizer).native_gemma };
     defer detector.deinit();
     var any_tool_call_emitted = false;
@@ -2434,7 +2435,10 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             if (write_failed) continue; // keep draining the engine, stop writing
             // The worker counts EOS for scheduling/usage; it is a control token,
             // not visible assistant text or a tool-result history fragment.
-            if (!ctx.debug_ids and ctx.tokenizer.isEndOfGeneration(tok)) continue;
+            if (ctx.tokenizer.isEndOfGeneration(tok)) {
+                ended_on_eog = true;
+                if (!ctx.debug_ids) continue;
+            }
             if (!stream_response) {
                 if (ctx.debug_ids) {
                     if (output.items.len != 0) output.append(allocator, ',') catch {
@@ -2523,6 +2527,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         }
         return;
     }
+    const finish_reason = @tagName(routes_mod.completionFinishReason(max_tokens, max_tokens, generated_tokens, ended_on_eog));
     if (stream_response) {
         if (!write_failed) {
             if (tools_active) {
@@ -2541,7 +2546,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             // Agent clients need a terminal finish reason to decide whether to
             // execute tools or finish their turn. Include usage for compaction.
             var finish_buf: [512]u8 = undefined;
-            const reason: []const u8 = if (any_tool_call_emitted) "tool_calls" else if (generated_tokens >= max_tokens) "length" else "stop";
+            const reason: []const u8 = if (any_tool_call_emitted) "tool_calls" else finish_reason;
             const finish = try std.fmt.bufPrint(&finish_buf, "{{\"id\":\"chatcmpl-zinc\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"zinc\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}", .{ reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens });
             try conn.writeSseEvent(finish);
             try conn.writeSseDone();
@@ -2565,7 +2570,6 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     defer allocator.free(escaped);
     var response: std.ArrayList(u8) = .empty;
     defer response.deinit(allocator);
-    const finish_reason: []const u8 = if (generated_tokens >= @as(usize, max_tokens)) "length" else "stop";
     if (tools_active) {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
