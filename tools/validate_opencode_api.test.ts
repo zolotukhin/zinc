@@ -5,8 +5,8 @@ import {
   validatePrefillCancellation,
 } from './validate_opencode_api.mjs';
 
-for (const mode of ['prefill', 'decode-only', 'queued']) {
-  test(`prefill cancellation ${mode === 'prefill' ? 'proves recovery after active work' : 'rejects ' + mode}`, async () => {
+for (const mode of ['prefill', 'fragmented', 'decode-only', 'queued']) {
+  test(`prefill cancellation ${mode === 'prefill' || mode === 'fragmented' ? 'proves recovery after ' + mode : 'rejects ' + mode}`, async () => {
     const requests: any[] = [];
     const server = Bun.serve({
       hostname: '127.0.0.1',
@@ -21,6 +21,17 @@ for (const mode of ['prefill', 'decode-only', 'queued']) {
         return new Response(
           new ReadableStream({
             start(controller) {
+              if (mode === 'fragmented') {
+                controller.enqueue(new TextEncoder().encode('data: {"choices":['));
+                setTimeout(
+                  () =>
+                    controller.enqueue(
+                      new TextEncoder().encode('{"delta":{"role":"assistant"}}]}\n\n: prefill\n\n'),
+                    ),
+                  5,
+                );
+                return;
+              }
               const text =
                 mode === 'decode-only'
                   ? 'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
@@ -38,7 +49,7 @@ for (const mode of ['prefill', 'decode-only', 'queued']) {
         env: { ZINC_API_BASE_URL: `http://127.0.0.1:${server.port}/v1` },
         timeoutMs: 200,
       });
-      if (mode === 'prefill') {
+      if (mode === 'prefill' || mode === 'fragmented') {
         expect((await result).prefill_keepalive_observed).toBe(true);
         expect(requests).toHaveLength(2);
         expect(requests[0].messages[0].content.length).toBeGreaterThan(20000);

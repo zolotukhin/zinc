@@ -8,6 +8,7 @@ pub fn ConnectionProgress(comptime Connection: type) type {
     return struct {
         const Self = @This();
         conn: *Connection,
+        streaming: bool = true,
         last_keepalive_ns: i128,
         cancelled: bool = false,
 
@@ -22,7 +23,7 @@ pub fn ConnectionProgress(comptime Connection: type) type {
                 self.cancelled = true;
                 return false;
             }
-            if (now_ns - self.last_keepalive_ns >= std.time.ns_per_s) {
+            if (self.streaming and now_ns - self.last_keepalive_ns >= std.time.ns_per_s) {
                 self.conn.writeSseComment("prefill") catch {
                     self.cancelled = true;
                     return false;
@@ -63,4 +64,15 @@ test "prefill keepalive tolerates half-close and stops on reset or failed write"
     var stopped = ConnectionProgress(FakeConnection){ .conn = &reset, .last_keepalive_ns = 0 };
     try std.testing.expect(!stopped.pollAt(std.time.ns_per_s));
     try std.testing.expectEqual(@as(usize, 0), reset.writes);
+    var json_conn = FakeConnection{};
+    var json_progress = ConnectionProgress(FakeConnection){
+        .conn = &json_conn,
+        .streaming = false,
+        .last_keepalive_ns = 0,
+    };
+    try std.testing.expect(json_progress.pollAt(2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(usize, 0), json_conn.writes);
+    json_conn.reset = true;
+    try std.testing.expect(!json_progress.pollAt(3 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(usize, 0), json_conn.writes);
 }

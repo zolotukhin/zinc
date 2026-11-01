@@ -41,6 +41,9 @@ periodic SSE comments. A failed write or hard disconnect cancels the request.
 It drains submitted GPU work before releasing request buffers, clears reuse
 state and removes the callback when the handler exits. HTTP upload half-closes
 remain valid while the client continues reading.
+JSON requests use hard-disconnect detection without writing SSE bytes. A
+graceful upload half-close alone cannot distinguish a disconnected JSON reader
+from a client still waiting for its response.
 
 The [portable cancellation evidence](/zinc/validation/intel-prefill-cancellation-2026-11-01.json)
 records the original failures and a separate controlled comparison. The old

@@ -3053,9 +3053,10 @@ fn handleChatCompletions(
 
     var prefill_progress = @import("prefill_progress.zig").ConnectionProgress(http.Connection){
         .conn = conn,
+        .streaming = parsed.stream,
         .last_keepalive_ns = host_io.nanoTimestamp(),
     };
-    if (parsed.stream) runtime.setPrefillControl(engine, .{
+    runtime.setPrefillControl(engine, .{
         .context = &prefill_progress,
         .poll = @TypeOf(prefill_progress).poll,
     });

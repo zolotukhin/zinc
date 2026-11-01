@@ -30,10 +30,14 @@ pub const InferenceEngine = forward_mod.InferenceEngine;
 pub const DecodeState = forward_mod.DecodeState;
 pub const RequestControl = @import("../gpu/request_control.zig").RequestControl;
 
-/// Vulkan checks streaming-client liveness between prefill tokens/submissions.
+/// Vulkan checks client liveness between prefill tokens/submissions.
 /// The Metal preview retains its existing decode-time cancellation behavior.
 pub fn setPrefillControl(engine: *InferenceEngine, control: ?RequestControl) void {
-    if (comptime gpu.is_vulkan) engine.prefill_control = control;
+    if (comptime gpu.is_vulkan) {
+        // Only the synchronous, serialized handler owns this stack callback.
+        if (control != null) std.debug.assert(engine.prefill_control == null);
+        engine.prefill_control = control;
+    }
 }
 /// Loaded model handle (weights, hyperparams, GGUF metadata).
 pub const Model = loader_mod.Model;

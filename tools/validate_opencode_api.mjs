@@ -141,19 +141,23 @@ export async function validatePrefillCancellation({ model, env = process.env, ti
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let text = '';
+  let inspected = 0;
   try {
     while (!text.includes(': prefill\n')) {
       const part = await reader.read();
       assert.ok(!part.done, 'Stream finished without exercising active prefill');
       text += decoder.decode(part.value, { stream: true });
       assert.ok(text.length < 8192, 'Prefill keepalive missing');
-      for (const line of text.split('\n').slice(0, -1)) {
+      const end = text.lastIndexOf('\n');
+      if (end < inspected) continue;
+      for (const line of text.slice(inspected, end).split('\n')) {
         if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
         // The first content token would make this a decode cancellation test.
         const event = JSON.parse(line.slice(6));
         assert.ok(!event.error);
         assert.ok(!event.choices?.[0]?.delta?.content, 'Generation started before cancellation');
       }
+      inspected = end + 1;
     }
   } finally {
     controller.abort();

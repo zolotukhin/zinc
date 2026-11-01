@@ -30130,6 +30130,8 @@ pub const InferenceEngine = struct {
         const profile_was_enabled = self.profile_enabled;
         const enable_gpu_phase_timing = had_profile_pool and want_gpu_phases;
         if (enable_gpu_phase_timing) self.profile_enabled = true;
+        // Cancellation must restore profiling intent just like normal return.
+        defer self.profile_enabled = profile_was_enabled;
 
         // Pipelined prefill: two-deep ping-pong between decode_cmd and
         // prefill_cmd_alt (plus their paired embed staging buffers). While the
