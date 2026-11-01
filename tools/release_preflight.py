@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 
-from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, require, source_sha, version
+from release_lib import ROOT, comparison_proves_ancestor, environment_main_only, environment_requires_reviewers, policy, require, source_sha, version
 from release_sign import SIGNING_SECRETS
 
 
@@ -190,10 +190,7 @@ def resolve_candidate_source(github, repo, requested):
     if not isinstance(commit, dict) or commit.get("sha") != requested:
         raise InspectionError("Candidate source did not resolve to the requested commit")
     comparison = github.request(base + "compare/" + requested + "..." + frozen_main + "?per_page=1")
-    if (not isinstance(comparison, dict) or comparison.get("status") not in ("ahead", "identical") or
-            type(comparison.get("behind_by")) is not int or comparison["behind_by"] != 0 or
-            not isinstance(comparison.get("base_commit"), dict) or comparison["base_commit"].get("sha") != requested or
-            not isinstance(comparison.get("merge_base_commit"), dict) or comparison["merge_base_commit"].get("sha") != requested):
+    if not comparison_proves_ancestor(comparison, requested):
         raise InspectionError("Candidate source must be a verified ancestor of main; no workflow was dispatched")
     return requested
 

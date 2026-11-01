@@ -2,7 +2,9 @@
 """Check a configured worker using preview bytes. Never certifies a release."""
 
 import argparse
+import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -13,7 +15,7 @@ from pathlib import Path
 
 import release_gpu as gpu
 from release_lib import (
-    ROOT, archive_name, extract_archive, install_signal_handlers, policy,
+    ROOT, archive_name, comparison_proves_ancestor, extract_archive, install_signal_handlers, policy,
     probe_binary, read_json, reference_agreement, require, sha256, source_sha,
     write_json,
 )
@@ -27,30 +29,62 @@ def profile_for(identifier):
     return profiles[0]
 
 
-def resolve_preview(profile, run, variables, expected_sha):
-    require(run.get("repository", {}).get("full_name") == "zolotukhin/zinc", "preview repository differs")
-    require(run.get("path", "").split("@")[0] == ".github/workflows/release-preview.yml", "not a packaging preview")
+def preview_source(run):
+    require(isinstance(run, dict), "preview run metadata is invalid")
+    require(isinstance(run.get("repository"), dict) and run["repository"].get("full_name") == "zolotukhin/zinc", "preview repository differs")
+    require(isinstance(run.get("path"), str) and run["path"].split("@")[0] == ".github/workflows/release-preview.yml", "not a packaging preview")
     require(run.get("event") in ("push", "workflow_dispatch") and run.get("head_branch") == "main", "preview is not trusted main")
     require(run.get("status") == "completed" and run.get("conclusion") == "success", "preview did not pass")
-    require(run.get("head_sha") == source_sha(expected_sha), "preview must match this workflow's frozen main commit")
     require(type(run.get("id")) is int and run["id"] > 0, "preview run identity is missing")
+    return source_sha(run.get("head_sha"))
+
+
+def resolve_preview(profile, run, variables, expected_sha, comparison=None, preview_policy_digest=None):
+    commit, validation_commit = preview_source(run), source_sha(expected_sha)
+    if commit != validation_commit:
+        # Documentation can advance main while expensive packages build. Keep
+        # testing the original bytes with current checks, under the same policy.
+        require(comparison_proves_ancestor(comparison, commit), "preview source must be a verified ancestor of this workflow's main commit")
+        require(preview_policy_digest == sha256(ROOT / "config/release/targets.json"), "preview policy differs; build a new packaging preview")
     labels = json.loads(variables.get(profile["runner_variable"], "null"))
     require(isinstance(labels, list) and labels and all(isinstance(label, str) and
             re.fullmatch(r"self-hosted|linux|x64|macos|arm64|zinc-[a-z0-9-]{1,60}", label, re.I) for label in labels),
             "worker assignment must use generic role labels")
-    return {"commit": run["head_sha"], "version": f"0.1.0-dev.{run['id']}", "runner": labels,
+    return {"commit": commit, "validation_commit": validation_commit, "version": f"0.1.0-dev.{run['id']}", "runner": labels,
             "target": profile["target"], "profile": profile["id"], "preview_run": str(run["id"]),
             "runner_variable": profile["runner_variable"]}
 
 
-def resolve(args):
-    require(re.fullmatch(r"[1-9][0-9]*", args.preview_run), "preview run must be a numeric ID")
-    request = urllib.request.Request("https://api.github.com/repos/zolotukhin/zinc/actions/runs/" + args.preview_run,
+def github_json(path):
+    request = urllib.request.Request("https://api.github.com/repos/zolotukhin/zinc/" + path,
                                      headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(request, timeout=45) as response:
-        run = json.load(response)
+        return json.load(response)
+
+
+def policy_digest_from_response(response):
+    require(isinstance(response, dict) and response.get("type") == "file" and
+            response.get("path") == "config/release/targets.json" and response.get("encoding") == "base64" and
+            isinstance(response.get("content"), str), "could not read the preview's frozen policy")
+    try:
+        data = base64.b64decode("".join(response["content"].split()), validate=True)
+    except ValueError:
+        raise ValueError("could not decode the preview's frozen policy") from None
+    return hashlib.sha256(data).hexdigest()
+
+
+def resolve(args):
+    require(re.fullmatch(r"[1-9][0-9]*", args.preview_run), "preview run must be a numeric ID")
+    profile = profile_for(args.profile)
+    run = github_json("actions/runs/" + args.preview_run)
+    commit, validation_commit = preview_source(run), source_sha(os.environ["GITHUB_SHA"])
     require(str(run.get("id")) == args.preview_run, "preview run identity differs")
-    result = resolve_preview(profile_for(args.profile), run, json.loads(os.environ.get("RELEASE_VARIABLES", "{}")), os.environ["GITHUB_SHA"])
+    comparison, digest = None, None
+    if commit != validation_commit:
+        comparison = github_json("compare/" + commit + "..." + validation_commit + "?per_page=1")
+        require(comparison_proves_ancestor(comparison, commit), "preview source must be a verified ancestor of this workflow's main commit")
+        digest = policy_digest_from_response(github_json("contents/config/release/targets.json?ref=" + commit))
+    result = resolve_preview(profile, run, json.loads(os.environ.get("RELEASE_VARIABLES", "{}")), validation_commit, comparison, digest)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
         for key, value in result.items():
             stream.write(key + "=" + (json.dumps(value, separators=(",", ":")) if isinstance(value, list) else value) + "\n")
@@ -101,8 +135,15 @@ def check(args):
     report = {"schema_version": SCHEMA, "release_qualification": False, "profile": profile["id"],
               "source_commit": source_sha(args.commit), "preview_version": args.version,
               "policy_sha256": sha256(ROOT / "config/release/targets.json"), "passed": False}
-    stage = "reservation"
+    stage = "validation identity"
     try:
+        actual = source_sha(gpu.output(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip())
+        require(actual == source_sha(getattr(args, "validation_commit", None) or actual), "validation checkout differs from the frozen workflow commit")
+        require(not gpu.output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"]).strip(), "validation checkout is dirty")
+        report["validation_source_commit"] = actual
+        report["validation_helpers_sha256"] = {name: sha256(ROOT / "tools" / name)
+                                                for name in ("release_worker.py", "release_gpu.py", "release_lib.py", "release.py")}
+        stage = "reservation"
         with reservation(Path(config["lock_directory"]).expanduser().resolve()), tempfile.TemporaryDirectory(prefix="zinc-worker-check-") as temporary:
             work = Path(temporary)
             stage = "package"
@@ -152,9 +193,9 @@ def check(args):
             stage = "cleanup"
             idle()
             require(gpu.reference_artifacts(reference) == reference_snapshot, "reference artifacts changed during GPU validation")
-            report.update(passed=True, models_exercised=args.exercise_models, cleanup="no GPU process remains")
+        report.update(passed=True, models_exercised=args.exercise_models, cleanup="no GPU process remains")
     except BaseException as error:
-        report.update(failed_stage=stage, error=str(error) if type(error) is ValueError else type(error).__name__)
+        report.update(passed=False, failed_stage=stage, error=str(error) if type(error) is ValueError else type(error).__name__)
         raise
     finally:
         write_json(args.output, report)
@@ -172,6 +213,7 @@ def main():
     for name in ("profile", "directory", "version", "commit", "output"):
         run.add_argument("--" + name, required=True)
     run.add_argument("--exercise-models", action="store_true")
+    run.add_argument("--validation-commit")
     args = parser.parse_args()
     try:
         (resolve if args.command == "resolve" else check)(args)

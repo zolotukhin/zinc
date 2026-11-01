@@ -83,4 +83,17 @@ test('worker readiness is main-only, protected, and separate from candidate cert
   expect(JSON.stringify(check)).not.toContain('secrets.');
   expect(JSON.stringify(check)).not.toContain('release.py aggregate');
   expect(check.permissions).toEqual({ contents: 'read', actions: 'read' });
+  expect(check.jobs.prepare.outputs.validation_commit).toBe(
+    '${{ steps.resolve.outputs.validation_commit }}',
+  );
+  const checkout = check.jobs.check.steps.find((step: any) =>
+    step.uses?.startsWith('actions/checkout@'),
+  );
+  expect(checkout.with.ref).toBe('${{ needs.prepare.outputs.validation_commit }}');
+  const validation = check.jobs.check.steps.find((step: any) => step.env?.PREVIEW_COMMIT);
+  expect(validation.env.PREVIEW_COMMIT).toBe('${{ needs.prepare.outputs.commit }}');
+  expect(validation.env.VALIDATION_COMMIT).toBe('${{ needs.prepare.outputs.validation_commit }}');
+  expect(validation.run).toContain(
+    '--commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT"',
+  );
 });

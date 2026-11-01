@@ -56,7 +56,13 @@ dispatching readiness or candidate hardware jobs. Keep private configuration,
 registration credentials and host mount sources outside Git.
 
 Once a role is configured, dispatch `release-worker-check.yml` on main with its
-profile and a successful `release-preview.yml` run ID for that exact main commit.
+profile and a successful `release-preview.yml` run ID from main. An older preview
+must be a verified ancestor of the workflow's frozen main commit and contain the
+same release policy bytes. Workers check out the frozen workflow commit for
+validation, test the original archive's version/source, and record both commits
+plus validation-helper hashes. Advancing documentation on main therefore does
+not require rebuilding an otherwise usable preview. A changed policy requires
+a new preview.
 Keep `exercise_models=true` for actual tokenizer, reference, API and cleanup
 checks. Set it to false only to diagnose package/hardware/configuration startup.
 Its artifact uses a separate schema and is rejected by candidate aggregation;
