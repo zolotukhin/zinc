@@ -963,7 +963,8 @@ class ReleaseTest(unittest.TestCase):
         data = read_json(directory / "release-manifest.json")
         for failure in ("changed_asset", "other_candidate", "orphan_tag"):
             with self.subTest(failure=failure), self.interrupted_publication(directory) as remote:
-                with self.assertRaises(RuntimeError): release_publish.publish(directory, data, "123")
+                with self.assertRaises(RuntimeError):
+                    release_publish.publish(directory, data, "123")
                 if failure == "changed_asset":
                     remote.assets[next(iter(remote.assets))] = b"changed uploaded bytes"
                 elif failure == "orphan_tag":
@@ -972,7 +973,10 @@ class ReleaseTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, {"changed_asset": "uploaded bytes differ", "other_candidate": "existing/published", "orphan_tag": "tag already exists"}[failure]):
                     release_publish.publish(directory, data, "456" if failure == "other_candidate" else "123")
                 self.assertEqual(remote.edits, 0)
-                if failure != "changed_asset": self.assertEqual(remote.uploads, uploads)
+                # A matching draft can upload missing assets before the final
+                # byte audit; existing assets must never be replaced.
+                if failure != "changed_asset":
+                    self.assertEqual(remote.uploads, uploads)
 
     def test_stable_catalog_requires_reviewed_starter_qualification(self):
         catalog = (ROOT / "src/model/catalog.zig").read_text()
