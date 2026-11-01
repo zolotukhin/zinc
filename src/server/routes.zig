@@ -1061,11 +1061,19 @@ fn logGeneratedTiming(token_count: usize, start_ns: i128, end_ns: i128) void {
     });
 }
 
-fn completionFinishReason(requested_max_tokens: u32, effective_max_tokens: u32, produced_tokens: usize) FinishReason {
-    if (requested_max_tokens > effective_max_tokens and produced_tokens >= @as(usize, effective_max_tokens)) {
+fn completionFinishReason(requested_max_tokens: u32, effective_max_tokens: u32, produced_tokens: usize, ended_on_eog: bool) FinishReason {
+    if (ended_on_eog) return .stop;
+    if (requested_max_tokens > 0 and produced_tokens >= @as(usize, effective_max_tokens)) {
         return .length;
     }
     return .stop;
+}
+
+fn completionVisibleTokens(tokenizer: *const tokenizer_mod.Tokenizer, tokens: []const u32) []const u32 {
+    for (tokens, 0..) |token, index| {
+        if (tokenizer.isEndOfGeneration(token)) return tokens[0..index];
+    }
+    return tokens;
 }
 
 /// One block inside an OpenAI-style content array, e.g. `{type: "text", text: "..."}`.
@@ -3716,7 +3724,8 @@ fn handleCompletions(
     var text_buf: std.ArrayList(u8) = .empty;
     defer text_buf.deinit(allocator);
     var decode_buf: [512]u8 = undefined;
-    for (output_tokens) |tid| {
+    const visible_tokens = completionVisibleTokens(tokenizer, output_tokens);
+    for (visible_tokens) |tid| {
         // decodeToken reverses the GPT-2 byte-level remapping (e.g. `Ġ` → ' ').
         // Appending the raw vocab string directly leaked those marker characters
         // into /v1/completions responses.
@@ -3724,7 +3733,7 @@ fn handleCompletions(
         text_buf.appendSlice(allocator, t) catch break;
     }
 
-    const finish_reason = completionFinishReason(parsed.max_tokens, max_tokens, output_tokens.len);
+    const finish_reason = completionFinishReason(parsed.max_tokens, max_tokens, output_tokens.len, visible_tokens.len < output_tokens.len);
 
     const escaped_text = try jsonEscapeAlloc(allocator, completeUtf8Prefix(text_buf.items));
     defer allocator.free(escaped_text);
@@ -4033,11 +4042,27 @@ test "normalizeRole falls back to user" {
     try std.testing.expectEqualStrings("assistant", normalizeRole("assistant"));
 }
 
-test "completionFinishReason reports clamped generations as length" {
-    try std.testing.expectEqual(FinishReason.length, completionFinishReason(256, 64, 64));
-    try std.testing.expectEqual(FinishReason.length, completionFinishReason(32, 0, 0));
-    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(256, 64, 12));
-    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(64, 64, 64));
+test "raw completions distinguish token limits from end-of-generation" {
+    try std.testing.expectEqual(FinishReason.length, completionFinishReason(256, 64, 64, false));
+    try std.testing.expectEqual(FinishReason.length, completionFinishReason(32, 0, 0, false));
+    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(256, 64, 12, true));
+    try std.testing.expectEqual(FinishReason.length, completionFinishReason(64, 64, 64, false));
+    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(64, 64, 64, true));
+    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(0, 0, 0, false));
+}
+
+test "raw completion text excludes EOS, end-of-turn and other EOG tokens" {
+    var tokenizer = makeTestTokenizer("<atem:tool_call><|eot|>");
+    defer tokenizer.token_to_id.deinit();
+    tokenizer.eot_id = 3;
+    tokenizer.eog_ids = &.{4};
+    for ([_]u32{ 2, 3, 4 }) |stop| {
+        const generated = [_]u32{ 10, 11, stop, 12 };
+        try std.testing.expectEqualSlices(u32, &.{ 10, 11 }, completionVisibleTokens(&tokenizer, &generated));
+    }
+    try std.testing.expectEqualSlices(u32, &.{ 10, 11 }, completionVisibleTokens(&tokenizer, &.{ 10, 11 }));
+    try std.testing.expectEqual(@as(usize, 0), completionVisibleTokens(&tokenizer, &.{2}).len);
+    try std.testing.expectEqual(@as(usize, 0), completionVisibleTokens(&tokenizer, &.{}).len);
 }
 
 test "timingStats handles normal and empty decode windows" {

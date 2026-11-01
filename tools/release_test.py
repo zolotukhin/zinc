@@ -966,13 +966,27 @@ class ReleaseTest(unittest.TestCase):
                 payload = b"data: \xff\n\ndata: [DONE]\n\n"
             return contextlib.nullcontext(io.BytesIO(payload))
 
-        with patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body)) as request:
+        with patch.object(release_gpu, "json_request", side_effect=nonstream) as json_request, patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body)) as request:
             release_gpu.unicode_chat_checks(123, "loaded")
             self.assertEqual(request.call_count, 4)
+            for call in json_request.call_args_list:
+                self.assertEqual(call.args[2]["messages"][0], {
+                    "role": "system", "content": "Repeat the requested text exactly, preserving every character."})
         for damage in ("utf8", "usage", "done", "text"):
             with self.subTest(damage=damage), patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body, damage)):
                 with self.assertRaises(ValueError):
                     release_gpu.unicode_chat_checks(123, "loaded")
+
+        # Valid, identical JSON/SSE is insufficient if the model translates
+        # away the required bytes: preserve the original Unicode coverage.
+        def translated(port, path, body):
+            return {"choices": [{"message": {"content": "☕ 东京咖啡 🚀"}, "finish_reason": "stop"}]}
+        event = {"choices": [{"delta": {"content": "☕ 东京咖啡 🚀"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20}}
+        payload = ("data: " + json.dumps(event, ensure_ascii=False) + "\n\ndata: [DONE]\n\n").encode()
+        with patch.object(release_gpu, "json_request", side_effect=translated), \
+             patch.object(release_gpu, "request", side_effect=lambda *args: contextlib.nullcontext(io.BytesIO(payload))), \
+             self.assertRaisesRegex(ValueError, "Unicode echo was incomplete"):
+            release_gpu.unicode_chat_checks(123, "loaded")
 
     def test_http_reference_gate_rejects_early_stops_and_uses_the_exact_reference_prompt(self):
         samples = [("<rendered reference prompt>", {"content": "The complete reference continuation.\nSecond line."})]
@@ -994,6 +1008,47 @@ class ReleaseTest(unittest.TestCase):
         samples[0][1].pop("comparison")
         with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "A qualified alternate."}]}), self.assertRaises(ValueError):
             release_gpu.reference_http_parity(1, body, samples)
+
+    def test_http_reference_gate_distinguishes_eos_from_a_token_limit(self):
+        for stop_type, finish in (("eos", "stop"), ("limit", "length")):
+            samples = [("prompt", {"content": "complete", "stop_type": stop_type})]
+            with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "complete", "finish_reason": finish}]}):
+                release_gpu.reference_http_parity(1, {}, samples)
+            with patch.object(release_gpu, "json_request", return_value={"choices": [{"text": "complete", "finish_reason": "length" if finish == "stop" else "stop"}]}), \
+                 self.assertRaisesRegex(ValueError, "finish reason"):
+                release_gpu.reference_http_parity(1, {}, samples)
+
+    def test_cancellation_closes_an_active_chat_stream_before_draining_it(self):
+        class Stream(io.BytesIO):
+            headers = {"Content-Type": "text/event-stream"}
+            consumed = 0
+
+            def close(self):
+                if not self.closed:
+                    self.consumed = self.tell()
+                    super().close()
+
+        payload = (b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+                   b'data: {"choices":[{"delta":{"content":"first"},"finish_reason":null}]}\n\n'
+                   b'data: {"choices":[{"delta":{"content":"still generating"}}]}\n\ndata: [DONE]\n\n')
+        response = Stream(payload)
+        with patch.object(release_gpu, "request", return_value=response) as request:
+            release_gpu.cancel_chat_stream(1, {"max_tokens": 256})
+        self.assertTrue(response.closed)
+        self.assertLess(response.consumed, len(payload))
+        self.assertEqual(request.call_args.args[1], "/v1/chat/completions")
+        self.assertTrue(request.call_args.args[2]["stream"])
+        for content_type, data in (("application/json", b'{"choices":[{}]}'),
+                                   ("text/event-stream", b''),
+                                   ("text/event-stream", b'data: \xff\n\n'),
+                                   ("text/event-stream", b'data: [DONE]\n\n'),
+                                   ("text/event-stream", b'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n'),
+                                   ("text/event-stream", b'data: {"error":"failed"}\n\n')):
+            response = Stream(data)
+            response.headers = {"Content-Type": content_type}
+            with self.subTest(content_type=content_type, data=data), \
+                 patch.object(release_gpu, "request", return_value=response), self.assertRaises(ValueError):
+                release_gpu.cancel_chat_stream(1, {})
 
     def test_cli_reference_gate_checks_all_backend_token_formats_and_complete_text(self):
         expected = {"content": "First line.\n  Second line. ",
