@@ -2883,6 +2883,13 @@ pub const InferenceEngine = struct {
                 config.n_experts_used,
             });
         }
+        if (config.architecture == .gemma and config.n_experts > 0 and isIntelGpuVendor(gpu_config.vendor)) {
+            if (gemmaGroupedMoePrefillEnvEnabled(gpu_config.vendor)) {
+                log.warn("Intel Gemma grouped MoE prefill requested via ZINC_GEMMA_MOE_GROUPED_PREFILL (experimental; native-reference gate is not qualified)", .{});
+            } else {
+                log.info("Intel Gemma MoE uses serial prefill for reference correctness; ZINC_GEMMA_MOE_GROUPED_PREFILL=1 is an experimental override", .{});
+            }
+        }
         const qwen36_prefill_topk_env = host_io.getenv("ZINC_QWEN36_MOE_PREFILL_TOPK");
         // Exact prefill by default: capping routed experts and skipping the
         // shared expert on early prompt tokens changes the prompt's KV/SSM

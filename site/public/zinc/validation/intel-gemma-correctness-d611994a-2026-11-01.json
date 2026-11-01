@@ -1098,13 +1098,6 @@
     "Grouped prefill still fails the unchanged near-tie policy.",
     "OpenCode model coding tests are a separate validation track."
   ],
-  "fix_sources_sha256": {
-    "src/compute/forward.zig": "a82ff23784edfc3e77542f7f3aa9312b1865bc35814dbc4b2e4b8f5e6a8a23f9",
-    "src/shaders/rms_norm_scale_dmmv_f32.comp": "07374570411daa30f3710263535feef8fb2154d61754d3c20786cb7f8def960f",
-    "src/shaders/rms_norm_scale_dmmv_f32_batch.comp": "f9ab24ce3e7b6e855ece0fe04b9e516d46d7849d1c4ce86d49273d8b4a076c66",
-    "src/shaders/rms_norm_scale_dmmv_f32_topk.comp": "fd8fb134b80deda64458368fd20f08df1a292ba1cf139719a785324a2ad92902",
-    "tools/validate_gemma_router.c": "7c43c600a1e2d2ae74dadf7b2df26d9eab329b4dcc1d66412da01366b35b872b"
-  },
   "rdna4_router_regression": {
     "gpu_family": "rdna4",
     "passed": true,
@@ -1120,5 +1113,12 @@
     ],
     "qualification": false,
     "cleanup": "no GPU process remains"
+  },
+  "proposed_fix_sources_sha256": {
+    "src/compute/forward.zig": "357440fe4f234f061e38dd20912299d459a17096f96e4db753057cda4460e1cb",
+    "src/shaders/rms_norm_scale_dmmv_f32.comp": "07374570411daa30f3710263535feef8fb2154d61754d3c20786cb7f8def960f",
+    "src/shaders/rms_norm_scale_dmmv_f32_batch.comp": "f9ab24ce3e7b6e855ece0fe04b9e516d46d7849d1c4ce86d49273d8b4a076c66",
+    "src/shaders/rms_norm_scale_dmmv_f32_topk.comp": "fd8fb134b80deda64458368fd20f08df1a292ba1cf139719a785324a2ad92902",
+    "tools/validate_gemma_router.c": "7c43c600a1e2d2ae74dadf7b2df26d9eab329b4dcc1d66412da01366b35b872b"
   }
 }
