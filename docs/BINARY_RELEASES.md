@@ -7,13 +7,21 @@ on [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
 
 ## Choose an archive
 
-| Hardware                                         | Archive suffix        | Requirements                                                                                                                                                  |
-| ------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Apple Silicon M1–M5                              | `macos-aarch64-metal` | Native ARM64 shell, macOS 15+, sufficient unified memory. Newer Macs retain their factory minimum OS.                                                         |
-| Linux AMD RDNA3/RDNA4, Strix Halo, Intel Arc Xe2 | `linux-x86_64-vulkan` | x86_64 glibc 2.35+, Vulkan 1.3 loader and a compatible GPU driver.                                                                                            |
-| Linux AMD `gfx1201`                              | `linux-x86_64-rocm`   | x86_64 glibc 2.39+, ROCm 7.2.4 with HIP, hipRTC, hipBLAS and the HIP/rocWMMA headers needed for runtime compilation. Ubuntu 24.04 is the reference userspace. |
+| Hardware                                | Archive suffix        | Requirements                                                                                                                                                  |
+| --------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux R9700 and Intel Arc Pro B70 / Xe2 | `linux-x86_64-vulkan` | x86_64 glibc 2.35+, Vulkan 1.3 loader and a compatible GPU driver.                                                                                            |
+| Linux AMD R9700 (`gfx1201`)             | `linux-x86_64-rocm`   | x86_64 glibc 2.39+, ROCm 7.2.4 with HIP, hipRTC, hipBLAS and the HIP/rocWMMA headers needed for runtime compilation. Ubuntu 24.04 is the reference userspace. |
 
-Vulkan and ROCm are separate downloads. Strix Halo (`gfx1151`) is RDNA 3.5 and uses Vulkan. CUDA remains experimental and source-only. There is no 0.1.0 binary for Intel Macs, Linux ARM64, musl/Alpine or native Windows.
+Vulkan and ROCm are separate downloads. This is a Linux-first release; RDNA3,
+Strix Halo and other GPUs remain outside its qualified launch matrix. CUDA
+remains experimental and source-only. There is no stable 0.1.0 binary for Macs,
+Linux ARM64, musl/Alpine or native Windows.
+
+Metal remains an unsigned preview. Its CPU-built archives are available from
+[packaging workflow artifacts](https://github.com/zolotukhin/zinc/actions/workflows/release-preview.yml),
+alongside [source builds](/zinc/docs/getting-started/). They require native ARM64,
+macOS 15+ and each Mac's factory OS minimum, and have no notarization or stable
+hardware qualification claim. They are separate from the Linux release assets.
 
 An OS/ABI floor describes the executable's compatibility. Read each release's `validation.json` for the GPU, driver, model and context combinations actually tested. It does not promise that every driver shipped with an older distribution works.
 
@@ -38,7 +46,7 @@ On Linux this selects Vulkan. Choose ROCm explicitly:
 ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
 ```
 
-The installer checks the archive and every file, verifies architecture/runtime compatibility, and runs `--version` before activating the new installation. It needs Bash, curl, tar and standard system utilities; it does not need Zig, Python or a source checkout. Install GPU drivers first. Vulkan archives contain compiled SPIR-V; users do not need `glslc`. Metal archives contain signed/notarized executables and their MSL sources.
+The installer checks the available archive list and every file, verifies architecture/runtime compatibility, and runs `--version` before activating the new installation. It needs Bash, curl, tar and standard system utilities; it does not need Zig, Python or a source checkout. Install GPU drivers first. Vulkan archives contain compiled SPIR-V; users do not need `glslc`. A Linux-only release cleanly rejects a Mac installation request before downloading an archive.
 
 The default command is `~/.local/bin/zinc`, pointing to the active version under `~/.local/share/zinc`. Add `~/.local/bin` to PATH if needed. `ZINC_INSTALL_DIR` and `ZINC_BIN_DIR` override those locations. Reinstalling identical bytes is safe; different bytes cannot replace an existing version directory.
 
@@ -55,7 +63,7 @@ zinc --check
 zinc model list --all
 ```
 
-Follow the model/context table in that release's notes. The qualification policy includes a 639 MB Qwen3 0.6B Q8_0 starter for Metal/Vulkan and Qwen3.5 9B for ROCm. The small starter is experimental until hardware qualification is reviewed; stable publication is blocked until its catalog status is promoted in a new candidate. Larger Qwen and Gemma models need substantially more GPU/unified memory.
+Follow the model/context table in that release's notes. The qualification policy includes a 639 MB Qwen3 0.6B Q8_0 starter for Vulkan and Qwen3.5 9B for ROCm. The small starter is experimental until hardware qualification is reviewed; stable publication is blocked until its catalog status is promoted in a new candidate. Larger Qwen and Gemma models need substantially more GPU memory.
 
 Managed downloads use immutable upstream revisions and SHA256 pins. Models are downloaded separately. On Metal, use `zinc model pull <id>` and `--model-id <id>` so models stay in the managed cache.
 

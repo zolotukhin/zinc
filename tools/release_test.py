@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 
 import release
 import release_gpu
+import release_gpu_group
 import release_lib
 import release_publish
 import release_preflight
@@ -83,8 +85,15 @@ class PreflightGitHub(release_preflight.GitHub):
 
 
 class ReleasePreflightTest(unittest.TestCase):
+    def full_policy(self):
+        # Retain coverage of signing and future expanded matrices separately
+        # from today's Linux-only launch policy.
+        data = policy()
+        data.pop("release", None)
+        return data
+
     def audit(self, github):
-        return release_preflight.audit(github, "owner/repo", policy())
+        return release_preflight.audit(github, "owner/repo", self.full_policy())
 
     def role(self, report, name="ZINC_RUNNER_METAL_APPLE7"):
         return next(row for row in report["checks"] if row["name"] == name)
@@ -94,7 +103,8 @@ class ReleasePreflightTest(unittest.TestCase):
 
     def run_preflight(self, github, expected_status=0, **overrides):
         output = io.StringIO()
-        with patch.object(release_preflight, "GitHub", return_value=github), contextlib.redirect_stdout(output):
+        with patch.object(release_preflight, "GitHub", return_value=github), \
+                patch.object(release_preflight, "policy", return_value=self.full_policy()), contextlib.redirect_stdout(output):
             if expected_status:
                 with self.assertRaises(SystemExit) as error:
                     release_preflight.run(self.args(**overrides))
@@ -114,6 +124,22 @@ class ReleasePreflightTest(unittest.TestCase):
         self.assertEqual(self.role(report, "ZINC_RUNNER_RDNA4")["profiles"], ["vulkan-rdna4", "rocm-rdna4"])
         self.assertTrue(all(command[0] == "api" and "--method" not in command for command in github.commands))
         self.assertIn("candidate qualification", report["qualification"])
+
+    def test_linux_launch_requires_only_two_roles_and_never_reads_apple_configuration(self):
+        github = PreflightGitHub()
+        variables = github.responses["actions/variables"][0]["variables"]
+        allowed = [row for row in variables if row["name"] in ("ZINC_RUNNER_RDNA4", "ZINC_RUNNER_INTEL_XE2")]
+        labels = [set(json.loads(row["value"])) for row in allowed]
+        runners = github.responses["actions/runners"][0]["runners"]
+        github.rows("actions/variables", "variables", allowed)
+        github.rows("actions/runners", "runners", [r for r in runners if any(label <= {l["name"].lower() for l in r["labels"]} for label in labels)])
+        report = release_preflight.audit(github, "owner/repo", policy())
+        self.assertTrue(report["configuration_ready"])
+        self.assertEqual(report["runner_inventory"]["registered"], 2)
+        self.assertEqual(sum(len(row["profiles"]) for row in report["checks"] if "profiles" in row), 3)
+        self.assertTrue(all("release-signing" not in path for path, _ in github.requests))
+        github.rows("actions/variables", "variables", [row for row in allowed if row["name"] != "ZINC_RUNNER_INTEL_XE2"])
+        self.assertFalse(release_preflight.audit(github, "owner/repo", policy())["configuration_ready"])
 
     def test_label_matching_is_case_insensitive_and_requires_every_label(self):
         github = PreflightGitHub()
@@ -508,6 +534,84 @@ class ReleaseTest(unittest.TestCase):
                 raise ValueError("fixture")
         self.assertFalse(path.exists())
 
+    def test_readiness_idle_checks_include_benchmarks_and_never_interrupt_processes(self):
+        def status(command, **kwargs):
+            self.assertEqual(command[:2], ["pgrep", "-x"])
+            return SimpleNamespace(returncode=0 if command[2] == "llama-bench" else 1)
+        with patch.object(release_worker.subprocess, "run", side_effect=status) as process, self.assertRaisesRegex(ValueError, "busy"):
+            release_worker.idle()
+        self.assertEqual({call.args[0][2] for call in process.call_args_list}, {"zinc", "llama-server", "llama-cli", "llama-bench"})
+
+    def test_worker_reservation_refuses_a_live_owner_and_unknown_marked_contents(self):
+        path = self.root / "reservation"
+        with release_lib.worker_reservation(path):
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                with release_lib.worker_reservation(path):
+                    self.fail("live owner's reservation was entered")
+            self.assertTrue(path.is_dir())
+        self.assertFalse(path.exists())
+        self.assertTrue((self.root / ".reservation.flock").is_file())
+        path.mkdir()
+        marker = path / ".zinc-flock-reservation-v1"
+        marker.write_text("zinc-flock-reservation-v1\n")
+        (path / "unrecognized").write_text("another owner's data")
+        with self.assertRaisesRegex(ValueError, "legacy reservation"):
+            with release_lib.worker_reservation(path):
+                self.fail("unknown reservation contents were accepted")
+        self.assertEqual((path / "unrecognized").read_text(), "another owner's data")
+
+    def test_worker_reservation_recovers_a_hard_killed_marked_owner_without_interrupting_a_process(self):
+        path = self.root / "hard-kill-reservation"
+        code = ("import sys,time\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\n"
+                "from release_lib import worker_reservation\n"
+                "with worker_reservation(Path(sys.argv[2])):\n print('ready',flush=True)\n time.sleep(60)\n")
+        child = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "tools"), str(path)],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            self.assertTrue(select.select([child.stdout], [], [], 10)[0], "CPU reservation fixture did not start")
+            self.assertEqual(child.stdout.readline(), b"ready\n")
+            child.kill()
+            child.wait(timeout=5)
+            self.assertTrue(path.is_dir())
+            with release_lib.worker_reservation(path):
+                self.assertTrue(path.is_dir())
+            self.assertFalse(path.exists())
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            child.stdout.close()
+            child.stderr.close()
+
+    def test_reservation_atomic_publish_never_replaces_an_empty_legacy_owner(self):
+        source, occupied = self.root / "prepared", self.root / "occupied"
+        source.mkdir()
+        occupied.mkdir()
+        (source / "marker").write_text("prepared marker")
+        with self.assertRaises(FileExistsError):
+            release_lib.rename_worker_directory(source, occupied)
+        self.assertEqual(list(occupied.iterdir()), [])
+        self.assertTrue((source / "marker").is_file())
+
+    def test_reservation_survives_hard_kills_during_preparation_and_retirement(self):
+        for boundary in ("before_publish", "after_retire"):
+            path = self.root / boundary
+            code = ("import os,signal,sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\n"
+                    "import release_lib as lib\noriginal=lib.rename_worker_directory\ncalls=0\n"
+                    "def crash(source,target):\n global calls\n calls+=1\n"
+                    " if calls==1 and sys.argv[3]=='before_publish':os.kill(os.getpid(),signal.SIGKILL)\n"
+                    " original(source,target)\n"
+                    " if calls==2 and sys.argv[3]=='after_retire':os.kill(os.getpid(),signal.SIGKILL)\n"
+                    "lib.rename_worker_directory=crash\n"
+                    "with lib.worker_reservation(Path(sys.argv[2])):pass\n")
+            result = subprocess.run([sys.executable, "-c", code, str(ROOT / "tools"), str(path), boundary],
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, -9, boundary)
+            self.assertFalse(path.exists(), boundary)
+            with release_lib.worker_reservation(path):
+                self.assertTrue(path.is_dir())
+            self.assertFalse(path.exists())
+
     def test_worker_readiness_schema_cannot_be_aggregated_as_release_evidence(self):
         reports = self.root / "reports"
         reports.mkdir()
@@ -587,10 +691,91 @@ class ReleaseTest(unittest.TestCase):
         for value in ["0.1.0", "0.1.0-rc.1", "0.1.0+build-01", "1.2.3-0"]:
             self.assertEqual(version(value), value)
 
-    def test_policy_has_three_backends_and_nine_required_hardware_profiles(self):
+    def test_policy_keeps_preview_backends_but_requires_only_the_linux_launch_matrix(self):
         data = policy()
         self.assertEqual({x["backend"] for x in data["targets"]}, {"metal", "vulkan", "rocm"})
         self.assertEqual(len(data["gpu_profiles"]), 9)
+        scoped = release_lib.release_policy(data)
+        self.assertEqual([t["id"] for t in scoped["targets"]], ["linux-x86_64-vulkan", "linux-x86_64-rocm"])
+        self.assertEqual([p["id"] for p in scoped["gpu_profiles"]], ["vulkan-rdna4", "vulkan-intel-xe2", "rocm-rdna4"])
+        self.assertFalse(any(t["signing_required"] for t in scoped["targets"]))
+
+    def test_release_scope_rejects_unknown_duplicate_empty_or_uncovered_entries(self):
+        data = policy()
+        for scope in (None, [], {}, {"targets": [], "gpu_profiles": []},
+                      {"targets": ["unknown"], "gpu_profiles": ["vulkan-rdna4"]},
+                      {"targets": ["linux-x86_64-vulkan"], "gpu_profiles": ["vulkan-rdna4", "vulkan-rdna4"]},
+                      {"targets": ["linux-x86_64-vulkan"], "gpu_profiles": [None]},
+                      {"targets": ["linux-x86_64-vulkan"], "gpu_profiles": ["rocm-rdna4"]},
+                      {"targets": ["linux-x86_64-vulkan", "linux-x86_64-rocm"], "gpu_profiles": ["vulkan-rdna4"]}):
+            write_json(self.root / "policy.json", {**data, "release": scope})
+            with self.subTest(scope=scope), self.assertRaises(ValueError):
+                release_lib.policy(self.root / "policy.json")
+
+    def test_resolution_freezes_the_selected_matrix_and_only_requires_signing_for_selected_targets(self):
+        for include_metal in (False, True):
+            data = policy()
+            if include_metal:
+                data.pop("release")
+            variables = {p["runner_variable"]: '["self-hosted","zinc-fixture"]' for p in release_lib.release_policy(data)["gpu_profiles"]}
+            output = self.root / (str(include_metal) + ".outputs")
+            with self.subTest(include_metal=include_metal), patch.object(release, "policy", return_value=data), \
+                    patch.object(release, "command_output", side_effect=[COMMIT, "", "1234567"]), patch.object(release.subprocess, "run"), \
+                    patch.dict(os.environ, {"RELEASE_VARIABLES": json.dumps(variables), "GITHUB_OUTPUT": str(output)}), contextlib.redirect_stdout(io.StringIO()):
+                release.resolve(SimpleNamespace(version="0.1.0-rc.1", ref="main"))
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(values["signing_required"], str(include_metal).lower())
+            self.assertEqual(len(json.loads(values["build_matrix"])["include"]), 3 if include_metal else 2)
+            groups = json.loads(values["gpu_matrix"])["include"]
+            self.assertEqual(len(groups), 8 if include_metal else 2)
+            self.assertEqual(sum(len(group["profiles"]) for group in groups), 9 if include_metal else 3)
+            self.assertEqual(next(group for group in groups if group["id"] == "rdna4")["profiles"], ["vulkan-rdna4", "rocm-rdna4"])
+        with contextlib.redirect_stdout(io.StringIO()) as preview:
+            release.matrix(SimpleNamespace(kind="build"))
+        self.assertEqual(len(json.loads(preview.getvalue())["include"]), 3)
+
+    def test_shared_worker_profiles_run_sequentially_and_failure_stops_the_group(self):
+        for fail_at in (None, 0, 1, "interrupt", "timeout"):
+            launched, active, workdirs = [], [], []
+            @contextlib.contextmanager
+            def child(command, log, work, env):
+                self.assertFalse(active)
+                profile = command[command.index("--profile") + 1]
+                self.assertTrue(Path(command[command.index("--directory") + 1]).is_absolute())
+                self.assertEqual(Path(command[command.index("--output") + 1]).name, profile + ".json")
+                self.assertTrue(Path(work).is_dir())
+                workdirs.append(Path(work))
+                index = len(launched)
+                launched.append(profile)
+                active.append(profile)
+                def wait(timeout):
+                    if fail_at == "interrupt":
+                        raise KeyboardInterrupt()
+                    if fail_at == "timeout":
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    return int(index == fail_at)
+                try:
+                    yield SimpleNamespace(wait=wait)
+                finally:
+                    active.remove(profile)
+            with self.subTest(fail_at=fail_at), patch.object(release_gpu_group.gpu, "process", side_effect=child), contextlib.redirect_stdout(io.StringIO()):
+                if fail_at is None:
+                    release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / "passed")
+                elif fail_at == "interrupt":
+                    with self.assertRaises(KeyboardInterrupt):
+                        release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / "interrupted")
+                elif fail_at == "timeout":
+                    with self.assertRaisesRegex(ValueError, "timed out after 150 minutes: vulkan-rdna4"):
+                        release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / "timed-out")
+                else:
+                    with self.assertRaisesRegex(ValueError, "packaged GPU profile failed"):
+                        release_gpu_group.check_group("ZINC_RUNNER_RDNA4", self.root, self.root / ("failed-" + str(fail_at)))
+            self.assertFalse(active)
+            self.assertTrue(all(not path.exists() for path in workdirs))
+            self.assertEqual(launched, ["vulkan-rdna4"] if fail_at in (0, "interrupt", "timeout") else ["vulkan-rdna4", "rocm-rdna4"])
+        with patch.object(release_gpu_group.gpu, "process") as process, self.assertRaisesRegex(ValueError, "unknown release worker role"):
+            release_gpu_group.check_group("ZINC_RUNNER_METAL_APPLE7", self.root, self.root / "preview-only")
+        process.assert_not_called()
 
     def test_rocm_archive_resolves_the_standard_runtime_without_shell_setup(self):
         binary = self.root / "fixture-elf"
@@ -726,6 +911,17 @@ class ReleaseTest(unittest.TestCase):
         self.assertNotEqual(corrupt.returncode, 0)
         self.assertIn("checksum mismatch", corrupt.stderr)
 
+    def test_installer_rejects_an_unavailable_target_before_requesting_its_archive(self):
+        folder = self.root / "release/v9.8.7"
+        folder.mkdir(parents=True)
+        (folder / "SHA256SUMS.txt").write_text("a" * 64 + "  zinc-v9.8.7-other-target.tar.gz\n")
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not include " + NATIVE, result.stderr)
+        self.assertNotIn("release download failed", result.stderr)
+        self.assertFalse((self.root / "installation/current").exists())
+        self.assertFalse((self.root / "installation/.install.lock").exists())
+
     def test_installer_rejects_archive_links_traversal_and_duplicate_members(self):
         tree = self.tree()
         for name, kind in [("../escape", tarfile.REGTYPE), (tree.name + "/share/link", tarfile.SYMTYPE),
@@ -771,12 +967,13 @@ class ReleaseTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "marker").exists())
 
-    def candidate(self):
+    def candidate(self, all_targets=False):
         directory, reports = self.root / "candidate", self.root / "reports"
         directory.mkdir()
         reports.mkdir()
         artifacts = []
-        for spec in policy()["targets"]:
+        scoped = policy() if all_targets else release_lib.release_policy()
+        for spec in scoped["targets"]:
             archive = directory / archive_name("9.8.7", spec["id"])
             archive.write_bytes(("CPU-only gate fixture: " + spec["id"]).encode())
             artifacts.append({"target": spec["id"], "filename": archive.name, "size_bytes": archive.stat().st_size,
@@ -784,10 +981,10 @@ class ReleaseTest(unittest.TestCase):
                               "signing": {"status": "notarized" if spec["backend"] == "metal" else "unsigned"}})
         data = {"schema_version": 1, "version": "9.8.7", "commit": COMMIT, "candidate_run": "123", "workflow_sha": COMMIT,
                 "policy_sha256": sha256(ROOT / "config/release/targets.json"), "artifacts": artifacts,
-                "required_profiles": [{k: p[k] for k in ("id", "target", "family")} for p in policy()["gpu_profiles"]]}
+                "required_profiles": [{k: p[k] for k in ("id", "target", "family")} for p in scoped["gpu_profiles"]]}
         write_json(directory / "release-manifest.json", data)
         (directory / "SHA256SUMS.txt").write_text("".join(a["sha256"] + "  " + a["filename"] + "\n" for a in artifacts))
-        for profile in policy()["gpu_profiles"]:
+        for profile in scoped["gpu_profiles"]:
             artifact = next(a for a in artifacts if a["target"] == profile["target"])
             models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True,
                            reference_agreement=release_lib.reference_agreement([{"tokens": 16, "near_ties": []} for _ in range(3)]))
@@ -819,16 +1016,37 @@ class ReleaseTest(unittest.TestCase):
                 self.assertIn('.sha256 = "' + model["sha256"] + '"', entry.group(1))
                 self.assertIn('.size_bytes = ' + format(model["size_bytes"], '_') + ',', entry.group(1))
 
-    def test_complete_nine_profile_evidence_is_accepted(self):
+    def test_complete_linux_release_profile_evidence_is_accepted(self):
         directory, reports = self.candidate()
         self.aggregate(directory, reports)
         data = read_json(directory / "validation.json")
         self.assertEqual(data["status"], "passed")
-        self.assertEqual(len(data["profiles"]), 9)
+        self.assertEqual(len(data["profiles"]), 3)
+        self.assertEqual(len(read_json(directory / "release-manifest.json")["artifacts"]), 2)
+
+    def test_preview_targets_and_hardware_cannot_replace_or_join_the_release_scope(self):
+        directory, reports = self.candidate()
+        manifest = directory / "release-manifest.json"
+        saved = manifest.read_text()
+        data = json.loads(saved)
+        extra = directory / archive_name("9.8.7", "macos-aarch64-metal")
+        extra.write_bytes(b"CPU-only preview archive fixture")
+        data["artifacts"].append({"target": "macos-aarch64-metal", "filename": extra.name,
+                                  "size_bytes": extra.stat().st_size, "sha256": sha256(extra),
+                                  "binary_sha256": "a" * 64, "signing": {"status": "notarized"}})
+        write_json(manifest, data)
+        with self.assertRaisesRegex(ValueError, "release-scope targets"):
+            release.verify_candidate(directory)
+        manifest.write_text(saved)
+        preview = read_json(reports / "vulkan-rdna4.json")
+        preview.update(profile="metal-apple7", target="macos-aarch64-metal", family="apple7")
+        write_json(reports / "metal-apple7.json", preview)
+        with self.assertRaisesRegex(ValueError, "unexpected GPU report"):
+            self.aggregate(directory, reports)
 
     def test_missing_duplicate_or_skipped_gpu_reports_block_a_candidate(self):
         directory, reports = self.candidate()
-        report = reports / "metal-apple7.json"
+        report = reports / "vulkan-rdna4.json"
         saved = report.read_text()
         report.unlink()
         with self.assertRaisesRegex(ValueError, "missing"):
@@ -871,17 +1089,19 @@ class ReleaseTest(unittest.TestCase):
                 self.aggregate(directory, reports)
 
     def test_unsigned_metal_or_changed_archive_cannot_be_promoted(self):
-        directory, _ = self.candidate()
+        directory, _ = self.candidate(all_targets=True)
         path = directory / "release-manifest.json"
         data = read_json(path)
         data["artifacts"][0]["signing"]["status"] = "unsigned"
         write_json(path, data)
-        with self.assertRaisesRegex(ValueError, "not notarized"):
+        expanded = policy()
+        expanded.pop("release")
+        with patch.object(release, "policy", return_value=expanded), self.assertRaisesRegex(ValueError, "not notarized"):
             release.verify_candidate(directory)
         data["artifacts"][0]["signing"]["status"] = "notarized"
         write_json(path, data)
         (directory / data["artifacts"][1]["filename"]).write_bytes(b"different archive")
-        with self.assertRaisesRegex(ValueError, "digest"):
+        with patch.object(release, "policy", return_value=expanded), self.assertRaisesRegex(ValueError, "digest"):
             release.verify_candidate(directory)
 
     def test_publisher_accepts_only_successful_manual_main_runs(self):
@@ -1099,10 +1319,15 @@ class ReleaseTest(unittest.TestCase):
                "head_repository": {"full_name": release_publish.REPOSITORY}, "status": "completed", "conclusion": "success", "head_sha": COMMIT}
         with patch.object(release_publish, "gh", return_value="") as gh, patch.object(release_publish.subprocess, "run"), contextlib.redirect_stdout(io.StringIO()):
             release_publish.verify_bundle(directory, "123", run)
-            self.assertEqual(gh.call_count, 9)
+            expected = {p.name for p in directory.iterdir()} - {"provenance.jsonl"}
+            self.assertEqual({Path(call.args[0][2]).name for call in gh.call_args_list}, expected)
             for call in gh.call_args_list:
                 self.assertIn("--deny-self-hosted-runners", call.args[0])
                 self.assertIn("--source-digest", call.args[0])
+        notes = (directory / "release-notes.md").read_text()
+        self.assertIn("Vulkan and ROCm binaries", notes)
+        self.assertIn("Metal remains an unsigned preview", notes)
+        self.assertNotIn("Metal, Vulkan and ROCm binaries", notes)
         validation = read_json(directory / "validation.json")
         validation["profiles"][0]["models"][0]["context"] = 1
         write_json(directory / "validation.json", validation)
@@ -1167,8 +1392,9 @@ class ReleaseTest(unittest.TestCase):
 
     def test_candidate_and_readiness_reject_stale_cross_backend_or_changed_references(self):
         for entrypoint in ("candidate", "readiness"):
-            failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend"]
-            if entrypoint == "readiness": failures += ["wrong_validation", "dirty_validation", "late_cleanup"]
+            failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend", "late_cleanup"]
+            if entrypoint == "readiness": failures += ["wrong_validation", "dirty_validation"]
+            else: failures.append("busy_bench")
             for failure in failures:
                 folder = self.root / (entrypoint + "-" + str(failure))
                 reference, tree = folder / "reference", folder / "package"
@@ -1192,6 +1418,7 @@ class ReleaseTest(unittest.TestCase):
                 candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
                              "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
                 def output(command, *args, **kwargs):
+                    if command[0] == "ps" and failure == "busy_bench": return "llama-bench\n"
                     if command[-1] == "HEAD": return COMMIT if command[2] == str(release_worker.ROOT) else real["reference"]["commit"]
                     if "status" in command and command[2] == str(release_worker.ROOT) and failure == "dirty_validation": return " M tools/release_worker.py"
                     if command[-1] == "--version":
@@ -1220,12 +1447,13 @@ class ReleaseTest(unittest.TestCase):
                     stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
                     stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
                     if failure == "late_cleanup":
-                        original_reservation = release_worker.reservation
+                        original_reservation = release_worker.reservation if entrypoint == "readiness" else release_gpu.worker_reservation
                         @contextlib.contextmanager
                         def cleanup_failure(path):
                             with original_reservation(path): yield
                             raise ValueError("fixture cleanup failed")
-                        stack.enter_context(patch.object(release_worker, "reservation", side_effect=cleanup_failure))
+                        stack.enter_context(patch.object(release_worker if entrypoint == "readiness" else release_gpu,
+                                                        "reservation" if entrypoint == "readiness" else "worker_reservation", side_effect=cleanup_failure))
                     launch = stack.enter_context(patch.object(release_gpu, "process"))
                     module = release_gpu if entrypoint == "candidate" else release_worker
                     report = stack.enter_context(patch.object(module, "write_json"))
@@ -1236,7 +1464,7 @@ class ReleaseTest(unittest.TestCase):
                         reason = {"library": "reference artifacts changed", "during_version_probe": "reference artifacts changed",
                                   "stale_server": "reference executable", "wrong_backend": "native GPU backend",
                                   "wrong_validation": "validation checkout differs", "dirty_validation": "validation checkout is dirty",
-                                  "late_cleanup": "fixture cleanup failed"}[failure]
+                                  "late_cleanup": "fixture cleanup failed", "busy_bench": "GPU worker is busy"}[failure]
                         with self.assertRaisesRegex(ValueError, reason): run()
                         if entrypoint == "candidate": report.assert_not_called()
                         else: self.assertFalse(report.call_args.args[1]["passed"])

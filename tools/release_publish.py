@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from release import aggregate, verify_candidate
-from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, require, sha256, source_sha, write_json
+from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, release_policy, require, sha256, source_sha, write_json
 
 REPOSITORY = "zolotukhin/zinc"
 WORKFLOW = ".github/workflows/release-candidate.yml"
@@ -182,7 +182,7 @@ def main():
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
             stream.write("version=" + data["version"] + "\ncommit=" + data["commit"] + "\n")
-            stream.write("matrix=" + json.dumps({"include": policy()["targets"]}, separators=(",", ":")) + "\n")
+            stream.write("matrix=" + json.dumps({"include": release_policy(policy())["targets"]}, separators=(",", ":")) + "\n")
     summary = f"Candidate [{args.run}](https://github.com/{REPOSITORY}/actions/runs/{args.run}): **v{data['version']}**, source `{data['commit']}`. All {len(data['required_profiles'])} GPU profiles passed.\n\n"
     summary += "\n".join("- `" + a["filename"] + "` — `" + a["sha256"] + "`" for a in data["artifacts"]) + "\n"
     if os.environ.get("GITHUB_STEP_SUMMARY"):

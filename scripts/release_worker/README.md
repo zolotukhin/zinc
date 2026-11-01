@@ -136,7 +136,9 @@ The pre-job hook checks the repository, main ref, actor, workflow, event and job
 before checkout. The post-job hook stops only GPU processes owned by this UID
 and this run, checking PID start times before signalling. The harness itself
 always stops and reaps its servers. Neither mechanism interrupts another user's
-workload. Inspect any reservation left by a hard crash before clearing it.
+workload. The harness automatically recovers a marked reservation after its
+kernel lock is released by a hard crash. Unknown legacy reservations still
+require inspection. Keep the persistent `.flock` file in place.
 
 Obtain a short-lived registration token on the administrator's machine through
 GitHub's runner registration API, transfer it privately to the token mount and

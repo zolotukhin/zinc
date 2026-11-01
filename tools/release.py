@@ -19,7 +19,7 @@ from pathlib import Path
 
 from release_lib import (
     ROOT, REFERENCE_LIBRARY_NAME, archive_name, check_metadata, extract_archive, inventory, policy,
-    probe_binary, read_json, require, sha256, source_sha, target, verify_reference_agreement, version, write_json,
+    probe_binary, read_json, release_policy, require, sha256, source_sha, target, verify_reference_agreement, version, write_json,
 )
 
 
@@ -180,19 +180,24 @@ def verify(args):
 
 
 def matrix(args):
-    data = policy()
+    data = policy() if args.kind == "build" else release_policy(policy())
     if args.kind == "build":
         result = {"include": data["targets"]}
     else:
         variables = json.loads(os.environ.get("RELEASE_VARIABLES", "{}"))
         missing = [p["runner_variable"] for p in data["gpu_profiles"] if not variables.get(p["runner_variable"])]
         require(not missing, "GPU runner configuration missing: " + ", ".join(sorted(set(missing))))
-        rows = []
+        rows = {}
         for profile in data["gpu_profiles"]:
             labels = json.loads(variables[profile["runner_variable"]])
             require(isinstance(labels, list) and labels and all(isinstance(s, str) and s for s in labels), "runner variable must be a JSON label array")
-            rows.append({**profile, "runner": labels})
-        result = {"include": rows}
+            role = profile["runner_variable"]
+            # Actions keeps at most one pending job in a concurrency group.
+            # Queue the shared card once, then check its backends sequentially.
+            row = rows.setdefault(role, {"id": role.removeprefix("ZINC_RUNNER_").lower().replace("_", "-"),
+                                         "runner_variable": role, "runner": labels, "profiles": []})
+            row["profiles"].append(profile["id"])
+        result = {"include": list(rows.values())}
     print(json.dumps(result, separators=(",", ":")))
 
 
@@ -209,7 +214,8 @@ def resolve(args):
     values = {
         "version": release_version, "commit": commit,
         "epoch": command_output(["git", "show", "-s", "--format=%ct", commit]).strip(),
-        "build_matrix": json.dumps({"include": policy()["targets"]}, separators=(",", ":")),
+        "build_matrix": json.dumps({"include": release_policy(policy())["targets"]}, separators=(",", ":")),
+        "signing_required": str(any(t["signing_required"] for t in release_policy(policy())["targets"])).lower(),
         "gpu_matrix": gpu_matrix,
     }
     require(values["epoch"].isdigit(), "invalid source timestamp")
@@ -224,7 +230,7 @@ def resolve(args):
 def manifest(args):
     release_version, commit = version(args.version), source_sha(args.commit)
     directory = Path(args.directory)
-    data = policy()
+    data = release_policy(policy())
     artifacts = []
     for spec in data["targets"]:
         archive = directory / archive_name(release_version, spec["id"])
@@ -257,11 +263,12 @@ def verify_candidate(directory, expected_version=None, expected_commit=None):
     require(expected_version is None or data["version"] == expected_version, "candidate version mismatch")
     require(expected_commit is None or data["commit"] == expected_commit, "candidate source mismatch")
     require(data.get("policy_sha256") == sha256(ROOT / "config/release/targets.json"), "release policy differs from candidate")
-    expected_profiles = [{k: p[k] for k in ("id", "target", "family")} for p in policy()["gpu_profiles"]]
+    required = release_policy(policy())
+    expected_profiles = [{k: p[k] for k in ("id", "target", "family")} for p in required["gpu_profiles"]]
     require(data.get("required_profiles") == expected_profiles, "candidate hardware policy mismatch")
     artifacts = data.get("artifacts", [])
-    require({a.get("target") for a in artifacts} == {t["id"] for t in policy()["targets"]} and len(artifacts) == 3,
-            "candidate must contain exactly three targets")
+    require({a.get("target") for a in artifacts} == {t["id"] for t in required["targets"]} and len(artifacts) == len(required["targets"]),
+            "candidate must contain exactly the release-scope targets")
     for artifact in artifacts:
         spec = target(artifact["target"])
         require(artifact.get("filename") == archive_name(data["version"], spec["id"]), "candidate archive name mismatch")
@@ -354,7 +361,10 @@ def finalize(args):
     require(validation.get("status") == "passed" and validation.get("manifest_sha256") == sha256(directory / "release-manifest.json"), "candidate is not validated")
     shutil.copyfile(ROOT / "scripts/install.sh", directory / "install.sh")
     shutil.copyfile(ROOT / "config/release/targets.json", directory / "release-policy.json")
-    notes = [f"# ZINC v{data['version']}", "", "Metal, Vulkan and ROCm binaries built from [" + data["commit"] + "](https://github.com/zolotukhin/zinc/commit/" + data["commit"] + ").", "",
+    backends = [target(a["target"])["backend"].capitalize() if target(a["target"])["backend"] != "rocm" else "ROCm" for a in data["artifacts"]]
+    label = " and ".join(backends)
+    metal = any(a["target"] == "macos-aarch64-metal" for a in data["artifacts"])
+    notes = [f"# ZINC v{data['version']}", "", label + " binaries built from [" + data["commit"] + "](https://github.com/zolotukhin/zinc/commit/" + data["commit"] + ").", "",
              "Download the backend for your hardware. Models and GPU drivers are installed separately. CUDA remains experimental and source-only.", "",
              "| Archive | Runtime |", "| --- | --- |"]
     for artifact in data["artifacts"]:
@@ -362,17 +372,18 @@ def finalize(args):
         notes.append(f"| [{artifact['filename']}]({url}) | {target(artifact['target'])['runtime']} |")
     notes.extend(["", "Verify archive hashes with `SHA256SUMS.txt`. The signed provenance in `provenance.jsonl` covers the archives, installer and validation report.", "",
                   "```bash", "# Download and inspect install.sh from this release, then:", f"ZINC_VERSION=v{data['version']} bash install.sh", "# Linux ROCm: ZINC_BACKEND=rocm ZINC_VERSION=v" + data["version"] + " bash install.sh", "zinc --check", "zinc model list --all", "```", "",
-                  "Installer defaults: Metal on ARM64 macOS 15+, Vulkan on glibc Linux x86_64 (2.35+); ROCm is explicit (glibc 2.39+, ROCm 7.2.4). Intel Macs, musl, Linux ARM64 and native Windows have no 0.1.0 archive.", "",
+                  ("Installer defaults: Metal on ARM64 macOS 15+, Vulkan on glibc Linux x86_64 (2.35+); ROCm is explicit (glibc 2.39+, ROCm 7.2.4)." if metal else
+                   "This release is Linux x86_64 only: Vulkan on glibc 2.35+, or explicit ROCm on glibc 2.39+ with ROCm 7.2.4. Metal remains an unsigned preview, available through CPU packaging artifacts or source builds. RDNA3 and Strix Halo remain outside the qualified launch matrix."), "",
                   "The installer verifies and executes the new binary before atomic activation. To restore the previous install: `bash install.sh --rollback`. Models remain in their existing cache.", "",
-                  "For a first Metal/Vulkan run:", "", "```bash", "zinc model pull qwen3-0.6b-q8-0", 'zinc --model-id qwen3-0.6b-q8-0 --chat --prompt "Explain a ring buffer."', "```", "",
-                  "For ROCm, use `qwen35-9b-q4k-m` in both commands. Metal/Vulkan can also launch the browser UI with `zinc chat --model-id qwen3-0.6b-q8-0`.", "",
+                  "For a first Vulkan run:", "", "```bash", "zinc model pull qwen3-0.6b-q8-0", 'zinc --model-id qwen3-0.6b-q8-0 --chat --prompt "Explain a ring buffer."', "```", "",
+                  "For ROCm, use `qwen35-9b-q4k-m` in both commands. Vulkan can also launch the browser UI with `zinc chat --model-id qwen3-0.6b-q8-0`.", "",
                   "## Validated hardware and models", "", "Each row ran the exact archive bytes against the pinned llama.cpp reference, including tokenization, generation, streaming/cancellation, and the listed context limit.", "",
                   "| Profile | Hardware | Models (context tokens) |", "| --- | --- | --- |"])
     for report in validation["profiles"]:
         models = ", ".join("`" + m["id"] + "` (" + str(m["context"]) + ")" for m in report["models"])
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
-    notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Metal/Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU/unified memory. Apple chip variants still require their factory minimum macOS version.", "",
-                  "Metal/Vulkan include the browser chat UI. ROCm exposes CLI/HTTP chat and completion routes; its standalone server has no built-in browser UI or hot model switching.", "",
+    notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU memory. Intel Macs, musl, Linux ARM64 and native Windows have no 0.1.0 archive.", "",
+                  "Vulkan includes the browser chat UI. ROCm exposes CLI/HTTP chat and completion routes; its standalone server has no built-in browser UI or hot model switching.", "",
                   "Release checks use greedy decoding, one slot, f32 KV and each backend's default MTP setting. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
                   "Source-only experimental backends and development features are outside this binary support promise. See `release-policy.json` for model revisions, hashes, the pinned reference commit and mandatory profiles.", ""])
     (directory / "release-notes.md").write_text("\n".join(notes))

@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from release import verify_candidate
-from release_lib import ROOT, REFERENCE_LIBRARY_NAME, extract_archive, install_signal_handlers, policy, probe_binary, read_json, reference_agreement, require, sha256, write_json
+from release_lib import ROOT, REFERENCE_LIBRARY_NAME, extract_archive, install_signal_handlers, policy, probe_binary, read_json, reference_agreement, require, sha256, worker_reservation, write_json
 
 CORPUS = [
     "The quick brown fox jumps over the lazy dog.", "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
@@ -528,13 +528,9 @@ def main():
     require(not output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference checkout is dirty")
     lock = Path(config["lock_directory"]).expanduser().resolve()
     require(lock.parent.is_dir(), "worker lock parent must exist")
-    try:
-        lock.mkdir()
-    except FileExistsError:
-        raise ValueError("GPU worker is reserved; refusing to interrupt another run")
-    try:
+    with worker_reservation(lock):
         processes = output(["ps", "-eo", "comm="])
-        require(not any(Path(line.strip()).name in ("zinc", "llama-server", "llama-cli") for line in processes.splitlines()), "GPU worker is busy")
+        require(not any(Path(line.strip()).name in ("zinc", "llama-server", "llama-cli", "llama-bench") for line in processes.splitlines()), "GPU worker is busy")
         reference_snapshot = reference_artifacts(reference)
         # Include the version probe in the frozen-artifact window. A clean
         # checkout does not prove the executable was rebuilt at that revision.
@@ -590,10 +586,9 @@ def main():
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup")}}
             if profile["target"].endswith("vulkan"):
                 report["checks"]["kernel_reference"] = True
-        # Reports contain no machine identifiers, private paths, ports or URLs.
-        write_json(args.output, report)
-    finally:
-        lock.rmdir()
+    # Release the reservation before recording successful cleanup.
+    # Reports contain no machine identifiers, private paths, ports or URLs.
+    write_json(args.output, report)
 
 
 if __name__ == "__main__":

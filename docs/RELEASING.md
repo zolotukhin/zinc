@@ -1,6 +1,6 @@
 # Releasing ZINC
 
-The release implementation builds three archives, certifies those exact archives on configured GPU workers, and promotes them after one protected publication approval. It does not publish on a tag push. The target, model, ABI and hardware policy is [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
+The 0.1.0 launch is Linux first: Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. It builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
 The first release is not published yet. Track the concrete remaining gates in
 [0.1.0 readiness](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md).
@@ -13,14 +13,14 @@ Land implementation changes through ordinary reviewed PRs. A later release prepa
 
 ## Workflows
 
-| Workflow                   | Trigger                           | Result                                                                                                                                                                   |
-| -------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `release-preview.yml`      | Relevant PRs/main changes, manual | Unsigned CPU-only packages for Metal, Vulkan and ROCm, with ABI/dependency audits and actual archive installation outside the checkout. No GPU coverage or publication.  |
-| `release-worker-check.yml` | Manual from main                  | Readiness of one configured worker against a successful preview from the same main commit. Optional full model/API exercise; cannot certify or publish a release.        |
-| `release-candidate.yml`    | Manual from main; opt-in nightly  | Frozen full SHA/version, host tests, baseline builds, Developer ID/notarization, mandatory GPU reports, generated notes, attestation and a `release-candidate` artifact. |
-| `release.yml`              | Manual candidate run ID from main | Read-only preflight summary, protected approval, re-verification, final tag, draft/upload/read-back/publish, then public-download and clean-install checks. No rebuild.  |
+| Workflow                   | Trigger                           | Result                                                                                                                                                                     |
+| -------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `release-preview.yml`      | Relevant PRs/main changes, manual | Unsigned CPU-only packages for Metal, Vulkan and ROCm, with ABI/dependency audits and actual archive installation outside the checkout. No GPU coverage or publication.    |
+| `release-worker-check.yml` | Manual from main                  | Readiness of one configured worker against a successful trusted main preview under the same policy. Optional full model/API exercise; cannot certify or publish a release. |
+| `release-candidate.yml`    | Manual from main; opt-in nightly  | Frozen full SHA/version, host tests, baseline builds, signing when selected, mandatory GPU reports, generated notes, attestation and a `release-candidate` artifact.       |
+| `release.yml`              | Manual candidate run ID from main | Read-only preflight summary, protected approval, re-verification, final tag, draft/upload/read-back/publish, then public-download and clean-install checks. No rebuild.    |
 
-PR code never runs on GPU/signing workers. Actions use commit pins, checkout credentials are not retained, and only the publisher has release-write permission. Nightly runs cannot be promoted. Enable them with repository variable `ZINC_ENABLE_RELEASE_NIGHTLY=true` after provisioning workers and signing configuration.
+PR code never runs on GPU/signing workers. Actions use commit pins, checkout credentials are not retained, and only the publisher has release-write permission. Nightly runs cannot be promoted. Enable them with repository variable `ZINC_ENABLE_RELEASE_NIGHTLY=true` after provisioning the selected workers. Signing configuration is required only when a selected release target requires it.
 
 The nightly schedule runs the full correctness/model matrix. Performance baselines and broader optional-feature qualifications remain separate work; this pipeline makes no TPS claims. Current checks use greedy decoding, one slot, f32 KV and the backend's default MTP setting at the policy's context limits. Metal/Vulkan include browser chat; ROCm exposes CLI/HTTP routes without the built-in UI or hot model switching. Add checks before expanding that contract.
 
@@ -35,6 +35,18 @@ Archives contain `bin/zinc`, CPU-only `bin/zinc-tokenize`, matching runtime asse
 ## Provision GPU workers
 
 Use dedicated workers with generic role labels. Set these repository variables to JSON arrays of labels, without hostnames, addresses, serials or private machine names:
+
+Only `ZINC_RUNNER_RDNA4` and `ZINC_RUNNER_INTEL_XE2` block this launch. The
+RDNA4 role serves both Vulkan and ROCm with one shared reservation. The other
+roles below remain available for preview readiness checks; adding them to the
+release scope requires their complete packaged qualification. Missing preview
+roles and Apple signing credentials do not block a Linux-only candidate.
+
+Candidates queue one job per worker role. The R9700 job checks Vulkan and ROCm
+sequentially and uploads an individual report for each profile. This avoids
+losing one backend's pending job to GitHub's concurrency-group queue limit.
+Each child owns its GPU processes and reservation; a failed profile stops the
+group and prevents certification.
 
 | Variable                    | Required role                | Practical allocation for this matrix               |
 | --------------------------- | ---------------------------- | -------------------------------------------------- |
@@ -65,11 +77,11 @@ not require rebuilding an otherwise usable preview. A changed policy requires
 a new preview.
 This permits diagnostics on older engine code with newer checks; the recorded
 archive source identifies the tested build. Qualification of a final candidate
-still requires that candidate's own complete signed-artifact matrix.
+still requires that candidate's own complete selected-artifact matrix.
 Keep `exercise_models=true` for actual tokenizer, reference, API and cleanup
 checks. Set it to false only to diagnose package/hardware/configuration startup.
 Its artifact uses a separate schema and is rejected by candidate aggregation;
-even a full readiness pass does not qualify signed candidate bytes.
+even a full readiness pass does not qualify release candidate bytes.
 
 Each runner service sets `ZINC_RELEASE_WORKER_CONFIG` to a private JSON file outside the checkout. Replace these placeholders locally; `device` must become an integer:
 
@@ -128,13 +140,15 @@ responses must match the original reference or that qualified continuation.
 Reports retain the original reference and record every accepted choice, gap,
 and exact-token count. Aggregation checks these measurements against policy.
 
-Vulkan/ROCm jobs share workflow concurrency and the same configured host reservation. Its parent must exist. The harness refuses an occupied reservation or visible ZINC/llama GPU process; it never stops unrelated workloads. Servers belong to owned process groups and are stopped/reaped on errors, timeouts and normal cancellation before the command returns. A hard worker crash can leave a reservation directory: inspect processes before clearing it manually.
+Vulkan/ROCm jobs share workflow concurrency and the same configured host reservation. Its parent must exist. A kernel file lock protects the reservation and is released even after a hard kill. The harness can reuse its own marked, unlocked reservation; unknown legacy directories or unexpected contents remain busy for manual inspection. Keep the persistent `.flock` file in place. Visible ZINC/llama processes still block new work; unrelated processes are never interrupted. Owned servers are stopped/reaped on errors, timeouts and normal cancellation before the command returns, and successful evidence is written after reservation cleanup.
 
 Only sanitized JSON is uploaded: source/archive/binary/model digests, public GPU/OS/driver data and results. Private paths, endpoints, process arguments, serials and UUIDs are excluded. Temporary worker logs are removed. Checks cover packaged asset discovery, diagnostics, tokenizer corpus, reference continuations, HTTP health/models/raw/chat SSE, cancellation/recovery and context boundaries. Missing, duplicate, failed or stale reports cannot certify a candidate.
 
-## Configure Apple signing and release approval
+## Configure release approval and optional Apple signing
 
-Create `release-signing`, restricted to main, with these environment secrets:
+The Linux-only launch does not use Apple signing. Before adding Metal to the
+release scope, create `release-signing`, restricted to main, with these
+environment secrets:
 
 - `ZINC_APPLE_CERTIFICATE_BASE64`: Developer ID Application certificate/private key exported as PKCS#12, base64 encoded.
 - `ZINC_APPLE_CERTIFICATE_PASSWORD`: PKCS#12 password.
@@ -162,10 +176,12 @@ python3 tools/release.py preflight --repo zolotukhin/zinc --json
 ```
 
 The default command only reads configuration and exits nonzero when blocked or
-unable to inspect it. It checks all eight runner assignments covering nine
-profiles, requires an online worker matching every assigned label, checks the
-six signing secret names in `release-signing`, and verifies both environments
-allow only the main branch. Publication must also have a required reviewer.
+unable to inspect it. It checks the selected release profiles: two runner roles
+covering three Linux profiles for 0.1.0. Each needs an online matching worker.
+It verifies the worker/publication environments allow only main, and publication
+has a required reviewer. If the release scope includes a signed target, it also
+checks the signing environment and six Apple secret names. Preview-only roles
+and signing configuration are excluded from a Linux-only audit.
 Busy online workers count as eligible and can queue normally. Missing pages,
 inconsistent counts, duplicate entries, unreadable APIs and malformed responses
 fail the check. Paginated inventories are not atomic: same-count replacements
@@ -193,7 +209,7 @@ python3 tools/release.py preflight --repo zolotukhin/zinc --dispatch 0.1.0-rc.1
 
 Passing configuration does not certify the hardware, private worker files,
 model/reference pins or Apple credentials. The protected candidate jobs still
-check these and qualify the actual signed archives. Dispatch uses GitHub's
+check these and qualify the actual selected archives. Dispatch uses GitHub's
 [run-details response](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event)
 to retain the exact `candidate_run_id`, without matching unrelated concurrent
 runs. Confirmation means GitHub created that run; execution and input validation
@@ -205,9 +221,9 @@ automatically; inspect Actions runs before retrying to avoid duplicate candidate
 After workflows merge to main and infrastructure is configured:
 
 1. Run the configuration preflight above, then dispatch `release-candidate.yml` on main with an explicit nightly/RC version first. Resolution accepts main or a full SHA already on main, freezes it once, and rejects dirty source/incomplete hardware assignments.
-2. Review all nine reports and model results. The small starter starts experimental. Promote its catalog status/tested profiles only after reviewing real Metal/Vulkan family evidence. Stable publication rejects an unqualified starter; that source change needs another candidate.
+2. Review all three Linux reports and model results. The small starter starts experimental. Promote its catalog status/tested profiles only after reviewing the R9700 and Intel Vulkan evidence. Stable publication rejects an unqualified starter; that source change needs another candidate.
 3. Dispatch the final candidate with `version=0.1.0`. An RC cannot be renamed. Every final archive already embeds `0.1.0` and the full SHA.
-4. Review the `release-candidate` artifact: three archives, policy, checksums, validation, generated notes, installer and offline provenance. Artifacts expire after 14 days; rebuild/requalify if unavailable.
+4. Review the `release-candidate` artifact: two Linux archives, policy, checksums, validation, generated notes, installer and offline provenance. Artifacts expire after 14 days; rebuild/requalify if unavailable.
 5. Dispatch `release.yml` on main with the successful manual candidate run ID. Preflight verifies workflow identity, source ancestry, provenance, complete model/report matrix and protected environment. Review its summary, then approve `release`.
 6. Publication re-verifies, creates the final tag at the tested SHA, creates/resumes only this candidate's draft, uploads missing assets without overwriting, downloads/verifies every byte, then publishes. Dependent jobs verify public downloads/installs without relying on token-created tag events to trigger another workflow.
 7. Review all public checks and backend/model/download documentation before closing issue #10.
@@ -227,9 +243,9 @@ python3 -m unittest discover -s tools -p release_test.py
 ```
 
 The same contracts run through the normal Bun/Zig CI suite. These local
-fixtures test failure handling; the signed RC still needs an actual protected
+fixtures test failure handling; the Linux RC still needs an actual protected
 publication and clean public-download/install rehearsal before 0.1.0.
 
 ## Qualification still required before 0.1.0
 
-These jobs supply gates, not hardware or an Apple account. Provision the eight worker roles/nine profiles, Apple credentials and protected environment; run the artifact matrix; review/promote the starter; rehearse a candidate/publication. Broader optional-feature, memory-rejection and performance-regression qualification remains necessary before advertising those features. Merging implementation does not create a public 0.1.0 tag, release or issue closure.
+Finish the Intel worker and complete all three selected Linux profiles on the final candidate, review/promote the starter, and rehearse protected publication/public installation. Metal stays an unsigned preview; the other hardware profiles can be qualified later. Broader optional-feature, memory-rejection and performance-regression qualification remains necessary before advertising those features. Merging implementation does not create a public 0.1.0 tag, release or issue closure.
