@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "optimize": "ReleaseFast",
+  "release": {
+    "targets": ["linux-x86_64-vulkan", "linux-x86_64-rocm"],
+    "gpu_profiles": ["vulkan-rdna4", "vulkan-intel-xe2", "rocm-rdna4"]
+  },
   "targets": [
     {
       "id": "macos-aarch64-metal",

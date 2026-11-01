@@ -77,7 +77,7 @@ pub const entries = [_]CatalogEntry{
         .default_context_length = 2048,
         .recommended_for_chat = false,
         .thinking_stable = false,
-        // Keep experimental until the packaged Metal/Vulkan family jobs pass.
+        // Keep experimental until the approved release profiles pass on packaged bytes.
         // ROCm's hybrid forward path does not implement plain Qwen3.
         .status = .experimental,
         .tested_profiles = &.{},

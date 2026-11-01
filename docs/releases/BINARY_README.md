@@ -8,6 +8,9 @@ version, source commit, backend, CPU/OS requirements, runtime dependencies,
 and signing status. Use the matching release's notes and `validation.json`
 for the GPU, driver, model, and context combinations actually tested.
 
+Stable 0.1.0 releases target Linux Vulkan/ROCm. Metal archives are unsigned
+previews and are not included in the Linux release's hardware qualification.
+
 ## Run the extracted package
 
 Install the GPU driver and backend runtime first. Keep `bin/` and `share/`

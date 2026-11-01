@@ -32,6 +32,7 @@ jobs:
       epoch: ${{ steps.resolve.outputs.epoch }}
       builds: ${{ steps.resolve.outputs.build_matrix }}
       gpus: ${{ steps.resolve.outputs.gpu_matrix }}
+      signing_required: ${{ steps.resolve.outputs.signing_required }}
     steps:
       - name: Require trusted workflow branch
         run: test "$GITHUB_REF" = refs/heads/main
@@ -102,6 +103,7 @@ jobs:
 
   sign:
     needs: [prepare, build]
+    if: needs.prepare.outputs.signing_required == 'true'
     runs-on: macos-15
     environment: release-signing
     timeout-minutes: 35
@@ -135,6 +137,12 @@ jobs:
 
   manifest:
     needs: [prepare, build, sign]
+    # A Linux-only candidate has no signing job. A failed/required signer must
+    # never turn into an unsigned candidate through skip propagation.
+    if: >-
+      ${{ !cancelled() && needs.prepare.result == 'success' && needs.build.result == 'success' &&
+          (needs.sign.result == 'success' ||
+           (needs.prepare.outputs.signing_required == 'false' && needs.sign.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -147,6 +155,7 @@ jobs:
           merge-multiple: true
           path: candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.signing_required == 'true'
         with:
           name: candidate-metal
           path: candidate
@@ -186,12 +195,12 @@ jobs:
           path: candidate
       - name: Test installed archives against pinned models and reference
         env:
-          RELEASE_PROFILE: ${{ matrix.id }}
-        run: python3 tools/release_gpu.py --directory candidate --profile "$RELEASE_PROFILE" --output "$RELEASE_PROFILE.json"
+          RELEASE_RUNNER_ROLE: ${{ matrix.runner_variable }}
+        run: python3 tools/release_gpu_group.py --directory candidate --role "$RELEASE_RUNNER_ROLE" --output reports
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: report-${{ matrix.id }}
-          path: ${{ matrix.id }}.json
+          path: reports/*.json
           if-no-files-found: error
           retention-days: 14
 

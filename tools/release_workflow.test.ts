@@ -26,6 +26,10 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
   expect(candidate.on.pull_request_target).toBeUndefined();
   expect(candidate.jobs.prepare.steps[0].run).toContain('refs/heads/main');
   expect(candidate.jobs.sign.environment).toBe('release-signing');
+  expect(candidate.jobs.sign.if).toBe("needs.prepare.outputs.signing_required == 'true'");
+  expect(candidate.jobs.prepare.outputs.signing_required).toBe(
+    '${{ steps.resolve.outputs.signing_required }}',
+  );
   expect(candidate.jobs.manifest.needs).toContain('sign');
   expect(candidate.jobs.hardware.needs).toContain('manifest');
   expect(candidate.jobs.hardware.environment).toBe('release-workers');
@@ -33,12 +37,96 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
     candidate.jobs.hardware.steps.some((step: any) => step.with?.name === 'candidate-inputs'),
   ).toBe(true);
   expect(
-    candidate.jobs.hardware.steps.some((step: any) => step.run?.includes('release_gpu.py')),
+    candidate.jobs.hardware.steps.some((step: any) => step.run?.includes('release_gpu_group.py')),
   ).toBe(true);
   expect(JSON.stringify(candidate.jobs.hardware)).not.toContain('zig.sh build');
   expect(candidate.jobs.hardware.concurrency['cancel-in-progress']).toBe(false);
   expect(candidate.jobs.certify.needs).toContain('hardware');
   expect(candidate.jobs.certify.permissions['attestations']).toBe('write');
+});
+
+test('manifest permits an unnecessary skipped signer and blocks failed or required signing', () => {
+  const candidate = workflow('release-candidate.yml');
+  const expression = candidate.jobs.manifest.if.replace(/^\s*\$\{\{|\}\}\s*$/g, '');
+  const scenarios = [
+    {
+      required: false,
+      sign: 'skipped',
+      build: 'success',
+      prepare: 'success',
+      cancelled: false,
+      runs: true,
+    },
+    {
+      required: true,
+      sign: 'success',
+      build: 'success',
+      prepare: 'success',
+      cancelled: false,
+      runs: true,
+    },
+    {
+      required: true,
+      sign: 'skipped',
+      build: 'success',
+      prepare: 'success',
+      cancelled: false,
+      runs: false,
+    },
+    {
+      required: false,
+      sign: 'failure',
+      build: 'success',
+      prepare: 'success',
+      cancelled: false,
+      runs: false,
+    },
+    {
+      required: true,
+      sign: 'failure',
+      build: 'success',
+      prepare: 'success',
+      cancelled: false,
+      runs: false,
+    },
+    {
+      required: false,
+      sign: 'skipped',
+      build: 'failure',
+      prepare: 'success',
+      cancelled: false,
+      runs: false,
+    },
+    {
+      required: false,
+      sign: 'skipped',
+      build: 'success',
+      prepare: 'failure',
+      cancelled: false,
+      runs: false,
+    },
+    {
+      required: false,
+      sign: 'skipped',
+      build: 'success',
+      prepare: 'success',
+      cancelled: true,
+      runs: false,
+    },
+  ];
+  for (const row of scenarios) {
+    const resolved = expression
+      .replaceAll('cancelled()', JSON.stringify(row.cancelled))
+      .replaceAll('needs.prepare.result', JSON.stringify(row.prepare))
+      .replaceAll('needs.build.result', JSON.stringify(row.build))
+      .replaceAll('needs.sign.result', JSON.stringify(row.sign))
+      .replaceAll('needs.prepare.outputs.signing_required', JSON.stringify(String(row.required)));
+    expect(new Function(`return (${resolved});`)()).toBe(row.runs);
+  }
+  const signedDownload = candidate.jobs.manifest.steps.find(
+    (step: any) => step.with?.name === 'candidate-metal',
+  );
+  expect(signedDownload.if).toBe("needs.prepare.outputs.signing_required == 'true'");
 });
 
 test('publication requires review of a candidate before the protected job and verifies public installs afterwards', () => {
@@ -98,7 +186,13 @@ test('worker readiness is main-only, protected, and separate from candidate cert
     '--commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT"',
   );
   expect(validation.run).toContain('--directory "$RUNNER_TEMP/zinc-worker-preview"');
-  expect(validation.run).toContain('--output "$RUNNER_TEMP/zinc-worker-readiness.json"');
+  expect(validation.run).toContain(
+    '--output "$RUNNER_TEMP/zinc-worker-preview/worker-readiness.json"',
+  );
+  const report = check.jobs.check.steps.find((step: any) =>
+    step.uses?.startsWith('actions/upload-artifact@'),
+  );
+  expect(report.with.path).toBe('${{ runner.temp }}/zinc-worker-preview/worker-readiness.json');
   expect(
     check.jobs.check.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@'))
       .with.path,

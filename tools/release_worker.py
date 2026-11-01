@@ -17,7 +17,7 @@ import release_gpu as gpu
 from release_lib import (
     ROOT, archive_name, comparison_proves_ancestor, extract_archive, install_signal_handlers, policy,
     probe_binary, read_json, reference_agreement, require, sha256, source_sha,
-    write_json,
+    worker_reservation, write_json,
 )
 
 SCHEMA = "zinc-worker-readiness-v1"
@@ -112,16 +112,9 @@ def gpu_names():
 
 @contextlib.contextmanager
 def reservation(path):
-    require(path.is_absolute() and path.parent.is_dir(), "worker reservation parent is missing")
-    try:
-        path.mkdir()
-    except FileExistsError:
-        raise ValueError("GPU worker is reserved; no process was interrupted")
-    try:
+    with worker_reservation(path):
         idle()
         yield
-    finally:
-        path.rmdir()
 
 
 def model_pins(profile, config):

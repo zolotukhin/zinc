@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 
-from release_lib import ROOT, comparison_proves_ancestor, environment_main_only, environment_requires_reviewers, policy, require, source_sha, version
+from release_lib import ROOT, comparison_proves_ancestor, environment_main_only, environment_requires_reviewers, policy, release_policy, require, source_sha, version
 from release_sign import SIGNING_SECRETS
 
 
@@ -108,6 +108,8 @@ def runner_checks(profiles, variables, runners):
 
 
 def audit(github, repo, data):
+    data = release_policy(data)
+    signing_required = any(t["signing_required"] for t in data["targets"])
     checks = []
     base = f"repos/{repo}/"
 
@@ -143,7 +145,7 @@ def audit(github, repo, data):
     assignments = inspect("runner variables API", variables)
     inventory = inspect("runner inventory API", runners)
     checks.extend(runner_checks(data["gpu_profiles"], assignments, inventory))
-    for name in ("release-workers", "release-signing", "release"):
+    for name in ("release-workers", *(("release-signing",) if signing_required else ()), "release"):
         environment = inspect(name + " environment API", lambda: read_environment(name))
         if environment is None:
             continue
@@ -159,7 +161,7 @@ def audit(github, repo, data):
             checks.append(check("release approval", reviewers, "Publication requires reviewer approval." if reviewers else
                                 "Configure at least one required reviewer on the release environment."))
 
-    secrets = inspect("Apple signing secrets API", lambda: github.collection(base + "environments/release-signing/secrets", "secrets"))
+    secrets = inspect("Apple signing secrets API", lambda: github.collection(base + "environments/release-signing/secrets", "secrets")) if signing_required else None
     missing = sorted(set(SIGNING_SECRETS) - {row["name"] for row in secrets}) if secrets is not None else None
     if missing is not None:
         checks.append(check("Apple signing secrets", missing == [],
@@ -170,7 +172,7 @@ def audit(github, repo, data):
         "idle": sum(row["status"] == "online" and not row["busy"] for row in inventory)}
     return {"schema_version": 1, "checked_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "configuration_ready": all(row["passed"] for row in checks), "runner_inventory": inventory_counts, "checks": checks,
-            "qualification": "Configuration snapshot only; signing, private worker setup and all nine packaged hardware profiles still require candidate qualification."}
+            "qualification": f"Configuration snapshot only; private worker setup and all {len(data['gpu_profiles'])} required packaged hardware profiles still require candidate qualification."}
 
 
 def resolve_candidate_source(github, repo, requested):
