@@ -186,7 +186,11 @@ def check(args):
                     if profile["target"] == "linux-x86_64-rocm" and model["id"] == "gemma4-31b-q4k-m":
                         model["bounded_prefill"] = gpu.bounded_prefill_parity(tree, path, model["context"], config["device"], model_work, env, samples)
                     browser_chat = next(t for t in policy()["targets"] if t["id"] == profile["target"])["interfaces"]["browser_chat"]
-                    gpu.api_checks(tree, path, model["context"], config["device"], model_work, env, browser_chat, samples)
+                    check_prefill = profile["target"].endswith("vulkan") and model["id"] == "qwen36-35b-a3b-q4k-xl"
+                    prefill = gpu.api_checks(tree, path, model["context"], config["device"], model_work, env, browser_chat, samples, check_prefill)
+                    if check_prefill:
+                        require(prefill and prefill.get("passed") is True, "prefill cancellation evidence is missing")
+                        model["prefill_cancellation"] = prefill
                     model["agreement"] = reference_agreement([sample["comparison"] for _, sample in samples])
                     model["api_passed"] = True
                     idle()

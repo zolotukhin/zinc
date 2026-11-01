@@ -116,11 +116,80 @@ export async function validateBufferedToolCancellation({
   return { recovery_ms: Math.round(performance.now() - started) };
 }
 
+export async function validatePrefillCancellation({ model, env = process.env, timeoutMs = 10000 }) {
+  const config = runtimeConfig(buildConfig({ model }), env);
+  const url = `${config.provider.zinc.options.baseURL}/chat/completions`;
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${env.ZINC_API_KEY || 'local'}`,
+  };
+  const controller = new AbortController();
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Summarize this text:' + ' word'.repeat(6000) }],
+      max_completion_tokens: 8,
+      temperature: 0,
+      enable_thinking: false,
+      stream: true,
+    }),
+  });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let inspected = 0;
+  try {
+    while (!text.includes(': prefill\n')) {
+      const part = await reader.read();
+      assert.ok(!part.done, 'Stream finished without exercising active prefill');
+      text += decoder.decode(part.value, { stream: true });
+      assert.ok(text.length < 8192, 'Prefill keepalive missing');
+      const end = text.lastIndexOf('\n');
+      if (end < inspected) continue;
+      for (const line of text.slice(inspected, end).split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        // The first content token would make this a decode cancellation test.
+        const event = JSON.parse(line.slice(6));
+        assert.ok(!event.error);
+        assert.ok(!event.choices?.[0]?.delta?.content, 'Generation started before cancellation');
+      }
+      inspected = end + 1;
+    }
+  } finally {
+    controller.abort();
+    await reader.cancel().catch(() => {});
+  }
+  const started = performance.now();
+  const recovery = await fetch(url, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+      max_completion_tokens: 8,
+      temperature: 0,
+      enable_thinking: false,
+      stream: false,
+    }),
+  });
+  assert.equal(recovery.status, 200);
+  const json = await recovery.json();
+  assert.ok(!json.error && json.choices?.length > 0);
+  assert.ok(performance.now() - started < timeoutMs);
+  return { prefill_keepalive_observed: true, recovery_ms: Math.round(performance.now() - started) };
+}
+
 export async function validateApi({
   model = 'qwen38-27b-q4k-m',
   context = 16384,
   env = process.env,
   bufferedToolCancellation = false,
+  prefillCancellation = false,
 } = {}) {
   const config = runtimeConfig(buildConfig({ model, context }), env);
   const baseURL = config.provider.zinc.options.baseURL;
@@ -449,6 +518,11 @@ export async function validateApi({
       validateBufferedToolCancellation({ model, env }),
     );
   }
+  if (prefillCancellation) {
+    await check('Active prefill cancellation releases the slot', () =>
+      validatePrefillCancellation({ model, env }),
+    );
+  }
   return {
     model,
     context,
@@ -463,12 +537,16 @@ if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes('--help')) {
     console.log(
-      'Usage: bun tools/validate_opencode_api.mjs [--model ID] [--context N] [--output FILE] [--buffered-tool-cancel]\nUses ZINC_API_BASE_URL and ZINC_API_KEY at runtime. Run only where GPU requests are authorized.',
+      'Usage: bun tools/validate_opencode_api.mjs [--model ID] [--context N] [--output FILE] [--buffered-tool-cancel] [--prefill-cancel]\nUses ZINC_API_BASE_URL and ZINC_API_KEY at runtime. Run only where GPU requests are authorized.',
     );
   } else {
     try {
       const options = {};
       for (let i = 0; i < args.length; i += 1) {
+        if (args[i] === '--prefill-cancel') {
+          options.prefillCancellation = true;
+          continue;
+        }
         if (args[i] === '--buffered-tool-cancel') {
           options.bufferedToolCancellation = true;
           continue;

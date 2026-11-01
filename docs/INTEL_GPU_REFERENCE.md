@@ -69,9 +69,13 @@ original Intel shaders and passes the corrected shaders on both Intel and
 R9700. With corrected routing, full expert selection and conservative serial
 prefill/F32 activations, Gemma 26B matches all 48 reference choices. Grouped
 prefill still fails the policy, so the fix defaults to the conservative Intel
-path and keeps approximations opt-in. That passing diagnostic uses a rebuilt
-shader overlay and explicit flags; a new packaged-default check and actual
-OpenCode coding checks are separate gates. Historical performance rows below
+path and keeps approximations opt-in. The first passing diagnostic used a rebuilt
+shader overlay and explicit flags. A later native build matches all 48 reference
+tokens with its defaults and no runtime overrides. Its actual OpenCode checks
+also exposed slow prefill and recovery after a client timeout; the
+[Intel coding and cancellation report](INTEL_OPENCODE_VALIDATION.md) records
+those failures and the recovery fix. A new packaged-default check and completed
+model coding checks remain separate gates. Historical performance rows below
 describe their recorded executables and settings.
 
 Intel Arc is a supported Linux Vulkan target in ZINC. The current public Intel benchmark artifact validates four managed catalog rows:

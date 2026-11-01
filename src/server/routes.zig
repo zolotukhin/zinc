@@ -3051,6 +3051,17 @@ fn handleChatCompletions(
         if (conn.isPeerClosed()) return;
     }
 
+    var prefill_progress = @import("prefill_progress.zig").ConnectionProgress(http.Connection){
+        .conn = conn,
+        .streaming = parsed.stream,
+        .last_keepalive_ns = host_io.nanoTimestamp(),
+    };
+    runtime.setPrefillControl(engine, .{
+        .context = &prefill_progress,
+        .poll = @TypeOf(prefill_progress).poll,
+    });
+    defer runtime.setPrefillControl(engine, null);
+
     // A checkpointed session matches by plain canonical prefix and continues
     // from the engine's recurrent-state checkpoint (restored below), never from
     // the end of the previous generation.
@@ -3143,6 +3154,10 @@ fn handleChatCompletions(
         state.position = @intCast(reused_prefix_len);
         if (reused_prefix_len < split_at) {
             engine.prefillBatched(&state, engine_prompt_tokens[reused_prefix_len..split_at]) catch |err| {
+                if (err == error.RequestCancelled) {
+                    server_state.clearChatReuseSession(parsed.session_id);
+                    return;
+                }
                 log.err("Chat prefill failed after cache hit: {s}", .{@errorName(err)});
                 server_state.clearChatReuseSession(parsed.session_id);
                 if (parsed.stream) {
@@ -3162,6 +3177,10 @@ fn handleChatCompletions(
         if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
         runtime.ssmCheckpointInvalidate(engine);
         engine.prefillBatched(&state, engine_prompt_tokens[0..split_at]) catch |err| {
+            if (err == error.RequestCancelled) {
+                server_state.clearChatReuseSession(parsed.session_id);
+                return;
+            }
             log.err("Chat prefill failed: {s}", .{@errorName(err)});
             if (parsed.stream) {
                 conn.writeSseDone() catch {};
@@ -3196,6 +3215,10 @@ fn handleChatCompletions(
         }
         runtime.mtpResetCapture(engine);
         engine.prefillBatched(&state, engine_prompt_tokens[split_at..]) catch |err| {
+            if (err == error.RequestCancelled) {
+                server_state.clearChatReuseSession(parsed.session_id);
+                return;
+            }
             log.err("Chat prefill failed (generation prompt): {s}", .{@errorName(err)});
             if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
             if (parsed.stream) {

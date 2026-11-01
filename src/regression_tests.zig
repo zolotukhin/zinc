@@ -379,6 +379,11 @@ test "Vulkan Gemma prefill top-k cap can be tested without decode top-k cap" {
 test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate" {
     const src = @embedFile("compute/forward.zig");
     const marker = "fn prefillGemmaGroupedMoeExact";
+    // Bound these guards by the function, not a byte window that shifts when
+    // liveness checks or comments are added within the implementation.
+    const begin = std.mem.indexOf(u8, src, marker) orelse return error.TestExpectedEqual;
+    const end = std.mem.indexOfPos(u8, src, begin, "\n    fn prefillGemmaShortMoePrefix") orelse return error.TestExpectedEqual;
+    const grouped = src[begin..end];
     try expectContains(src, "ZINC_GEMMA_MOE_GROUPED_PREFILL");
     try expectContains(src, "fn prefillGemmaRecordBatchedAttentionToFfnNorm");
     try expectContains(src, "fn prefillGemmaRunBatchedAttentionToFfnNorm");
@@ -387,11 +392,11 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnabled", "gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 200);
     try expectContainsNear(src, "fn gemmaGroupedMoePrefillEnabled", "isIntelGpuVendor(self.gpu_config.vendor)", 900);
     try expectContainsNear(src, "fn gemmaShortMoePrefixPrefillEnabled", "!self.isAmdRdna()", 900);
-    try expectContainsNear(src, marker, "try self.prefillGemmaRecordBatchedAttentionToFfnNorm", 22500);
-    try expectContainsNear(src, marker, "try self.ensureGemmaMoePrefillDp4aScratchCapacity", 4200);
-    try expectContainsNear(src, marker, "self.moe_topk_limit > 0", 1200);
-    try expectContainsNear(src, marker, "@min(cfg.n_experts_used, self.moe_topk_limit)", 1200);
-    try expectContainsNear(src, marker, "const shared_scratch_capacity_tokens", 2600);
+    try expectContains(grouped, "try self.prefillGemmaRecordBatchedAttentionToFfnNorm");
+    try expectContains(grouped, "try self.ensureGemmaMoePrefillDp4aScratchCapacity");
+    try expectContains(grouped, "self.moe_topk_limit > 0");
+    try expectContains(grouped, "@min(cfg.n_experts_used, self.moe_topk_limit)");
+    try expectContains(grouped, "const shared_scratch_capacity_tokens");
     try expectContainsNear(src, "const shared_scratch_capacity_tokens", "const dp4a_padded_tokens = self.gemmaProjectionPrefillPaddedTokenCount(n_tokens);", 900);
     try expectContainsNear(src, "const shared_scratch_capacity_tokens", "ceilTokens(dp4a_padded_tokens, shared_scratch_inter_dim, inter_dim)", 1400);
     try expectContains(src, "const batched_scratch_tokens = @max(route_count, shared_scratch_capacity_tokens);");
@@ -409,24 +414,24 @@ test "Vulkan Gemma grouped MoE prefill keeps exact top-k route buffers separate"
     try expectContainsNear(src, "fn gemmaDenseProjectionDp4aSupported", "self.batched_scratch_norm_q8", 1500);
     try expectContainsNear(src, "fn dispatchGemmaProjectionBatchedDp4a", "recordMulMmQ8_0FullDp4a", 7000);
     try expectContainsNear(src, "fn gemmaDenseGegluDp4aEnabled", "cfg.n_experts != 0 and !gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 900);
-    try expectContainsNear(src, marker, "const scratch_route_ids = scratch_shared_up;", 4600);
-    try expectContainsNear(src, marker, "if (scratch_route_ids.size < route_pack_ids_bytes) return error.BufferTooSmall;", 16000);
-    try expectContainsNear(src, marker, "const collect_route_profile =", 18000);
-    try expectContainsNear(src, marker, "self.recordPrefillRoutePackCounts(", 48500);
-    try expectContainsNear(src, marker, "scratch_route_ids.handle", 28000);
-    try expectContainsNear(src, marker, "try self.dispatchMoeWeightedAccScaledBatch", 34000);
-    try expectContainsNear(src, marker, "const shared_proj_phase = self.beginProfilePhase();", 36000);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_proj, shared_proj_phase);", 48500);
-    try expectContainsNear(src, marker, "const shared_down_phase = self.beginProfilePhase();", 41000);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_down, shared_down_phase);", 43000);
-    try expectContainsNear(src, marker, "const shared_acc_phase = self.beginProfilePhase();", 44000);
-    try expectContainsNear(src, marker, "self.endProfilePhase(.shared_gate_acc, shared_acc_phase);", 45000);
-    try expectContainsNear(src, marker, "const layer_record_start = host_io.nanoTimestamp();", 22000);
-    try expectContainsNear(src, marker, "self.prefill_cpu_record_ns += @intCast(host_io.nanoTimestamp() - layer_record_start);", 48000);
-    try expectContainsNear(src, marker, "try self.gemmaPrepareProjectionQ8(scratch_shared_norm", 42000);
-    try expectContainsNear(src, marker, "try self.gemmaPrepareProjectionQ8(scratch_swiglu", 46000);
-    try expectContainsNear(src, marker, "const enable_gpu_phase_timing =", 16000);
-    try expectContainsNear(src, marker, "self.resetTimestamps();", 22000);
+    try expectContains(grouped, "const scratch_route_ids = scratch_shared_up;");
+    try expectContains(grouped, "if (scratch_route_ids.size < route_pack_ids_bytes) return error.BufferTooSmall;");
+    try expectContains(grouped, "const collect_route_profile =");
+    try expectContains(grouped, "self.recordPrefillRoutePackCounts(");
+    try expectContains(grouped, "scratch_route_ids.handle");
+    try expectContains(grouped, "try self.dispatchMoeWeightedAccScaledBatch");
+    try expectContains(grouped, "const shared_proj_phase = self.beginProfilePhase();");
+    try expectContains(grouped, "self.endProfilePhase(.shared_proj, shared_proj_phase);");
+    try expectContains(grouped, "const shared_down_phase = self.beginProfilePhase();");
+    try expectContains(grouped, "self.endProfilePhase(.shared_down, shared_down_phase);");
+    try expectContains(grouped, "const shared_acc_phase = self.beginProfilePhase();");
+    try expectContains(grouped, "self.endProfilePhase(.shared_gate_acc, shared_acc_phase);");
+    try expectContains(grouped, "const layer_record_start = host_io.nanoTimestamp();");
+    try expectContains(grouped, "self.prefill_cpu_record_ns += @intCast(host_io.nanoTimestamp() - layer_record_start);");
+    try expectContains(grouped, "try self.gemmaPrepareProjectionQ8(scratch_shared_norm");
+    try expectContains(grouped, "try self.gemmaPrepareProjectionQ8(scratch_swiglu");
+    try expectContains(grouped, "const enable_gpu_phase_timing =");
+    try expectContains(grouped, "self.resetTimestamps();");
     try expectContainsNear(src, "fn prefillBatchedImpl", "return self.prefillGemmaGroupedMoeExact(state, prompt_tokens);", 1800);
 }
 

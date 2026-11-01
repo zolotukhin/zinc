@@ -1017,6 +1017,10 @@ class ReleaseTest(unittest.TestCase):
             models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True,
                            reference_agreement=release_lib.reference_agreement([{"tokens": 16, "near_ties": []} for _ in range(3)]))
                       for m in policy()["models"] if m["id"] in profile["models"]]
+            if profile["target"].endswith("vulkan"):
+                for model in models:
+                    if model["id"] == "qwen36-35b-a3b-q4k-xl":
+                        model["prefill_cancellation"] = {"passed": True, "recovery_ms": 1}
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": artifact["sha256"], "binary_sha256": artifact["binary_sha256"], "models": models,
@@ -1114,6 +1118,20 @@ class ReleaseTest(unittest.TestCase):
             change(data)
             write_json(path, data)
             with self.subTest(case=index), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
+
+    def test_aggregate_requires_measured_prompt_cancellation_and_bounded_recovery(self):
+        directory, reports = self.candidate()
+        path = reports / "vulkan-intel-xe2.json"
+        saved = path.read_text()
+        for proof in (None, {}, {"passed": False, "recovery_ms": 1}, {"passed": True},
+                      {"passed": True, "recovery_ms": True}, {"passed": True, "recovery_ms": -1},
+                      {"passed": True, "recovery_ms": 10000}):
+            data = json.loads(saved)
+            model = next(m for m in data["models"] if m["id"] == "qwen36-35b-a3b-q4k-xl")
+            model["prefill_cancellation"] = proof
+            write_json(path, data)
+            with self.subTest(proof=proof), self.assertRaisesRegex(ValueError, "active-prefill cancellation"):
                 self.aggregate(directory, reports)
 
     def test_unsigned_metal_or_changed_archive_cannot_be_promoted(self):
@@ -1651,6 +1669,41 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(content_type=content_type, data=data), \
                  patch.object(release_gpu, "request", return_value=response), self.assertRaises(ValueError):
                 release_gpu.cancel_chat_stream(1, {})
+
+    def test_prefill_cancellation_requires_active_work_closes_early_and_proves_recovery(self):
+        class Stream(io.BytesIO):
+            headers = {"Content-Type": "text/event-stream"}
+            consumed = 0
+
+            def close(self):
+                if not self.closed:
+                    self.consumed = self.tell()
+                super().close()
+
+        payload = (b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n: prefill\n\n'
+                   b'data: {"choices":[{"delta":{"content":"must not drain"}}]}\n\n')
+        stream = Stream(payload)
+        recovery = io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
+        with patch.object(release_gpu, "request", side_effect=[stream, recovery]) as request:
+            result = release_gpu.prefill_cancellation_check(1, "loaded", 4096)
+        self.assertTrue(result["passed"])
+        self.assertTrue(stream.closed and recovery.closed)
+        self.assertLess(stream.consumed, len(payload))
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(request.call_args_list[0].args[2]["stream"])
+        self.assertFalse(request.call_args_list[1].args[2]["stream"])
+        self.assertEqual(request.call_args.kwargs["timeout"], 10)
+        self.assertEqual(request.call_args.args[2]["model"], "loaded")
+
+        for failure in (b'', b'data: [DONE]\n\n',
+                        b'data: {"choices":[{"delta":{"content":"already decoding"}}]}\n\n',
+                        b'data: {"error":{"message":"failed"}}\n\n'):
+            with self.subTest(failure=failure), patch.object(release_gpu, "request", return_value=Stream(failure)) as request:
+                with self.assertRaises(ValueError):
+                    release_gpu.prefill_cancellation_check(1, "loaded", 4096)
+                self.assertEqual(request.call_count, 1)
+        with patch.object(release_gpu, "request", side_effect=[Stream(payload), TimeoutError()]), self.assertRaises(TimeoutError):
+            release_gpu.prefill_cancellation_check(1, "loaded", 4096)
 
     def test_cli_reference_gate_checks_all_backend_token_formats_and_complete_text(self):
         expected = {"content": "First line.\n  Second line. ",

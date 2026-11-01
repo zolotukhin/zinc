@@ -1,5 +1,65 @@
 import { expect, test } from 'bun:test';
-import { parseCompletion, validateBufferedToolCancellation } from './validate_opencode_api.mjs';
+import {
+  parseCompletion,
+  validateBufferedToolCancellation,
+  validatePrefillCancellation,
+} from './validate_opencode_api.mjs';
+
+for (const mode of ['prefill', 'fragmented', 'decode-only', 'queued']) {
+  test(`prefill cancellation ${mode === 'prefill' || mode === 'fragmented' ? 'proves recovery after ' + mode : 'rejects ' + mode}`, async () => {
+    const requests: any[] = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(request) {
+        const body = await request.json();
+        requests.push(body);
+        if (!body.stream)
+          return mode === 'queued'
+            ? new Promise<Response>(() => {})
+            : Response.json({ choices: [{ message: { content: 'OK' } }] });
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              if (mode === 'fragmented') {
+                controller.enqueue(new TextEncoder().encode('data: {"choices":['));
+                setTimeout(
+                  () =>
+                    controller.enqueue(
+                      new TextEncoder().encode('{"delta":{"role":"assistant"}}]}\n\n: prefill\n\n'),
+                    ),
+                  5,
+                );
+                return;
+              }
+              const text =
+                mode === 'decode-only'
+                  ? 'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+                  : ': prefill\n\n';
+              controller.enqueue(new TextEncoder().encode(text));
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      },
+    });
+    try {
+      const result = validatePrefillCancellation({
+        model: 'probe',
+        env: { ZINC_API_BASE_URL: `http://127.0.0.1:${server.port}/v1` },
+        timeoutMs: 200,
+      });
+      if (mode === 'prefill' || mode === 'fragmented') {
+        expect((await result).prefill_keepalive_observed).toBe(true);
+        expect(requests).toHaveLength(2);
+        expect(requests[0].messages[0].content.length).toBeGreaterThan(20000);
+        expect(requests[1].stream).toBe(false);
+      } else await expect(result).rejects.toThrow();
+    } finally {
+      await server.stop(true);
+    }
+  });
+}
 
 test('buffered cancellation does not wait for the tool response body before proving recovery', async () => {
   const requests: any[] = [];

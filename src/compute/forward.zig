@@ -77,6 +77,7 @@ const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 const memory_plan = @import("../gpu/memory_plan.zig");
 const kv_cache_mod = @import("../scheduler/kv_cache.zig");
+const RequestControl = @import("../gpu/request_control.zig").RequestControl;
 
 const log = std.log.scoped(.forward);
 const kv_page_size_tokens: u32 = 16;
@@ -1193,6 +1194,8 @@ fn moePrefixSharedExactRequested() bool {
 /// KV-cache page pool, SSM recurrent state, and per-request profiling counters.
 /// One engine instance maps to one GPU device; it is not thread-safe.
 pub const InferenceEngine = struct {
+    /// Scoped by the HTTP handler; CLI and reference runs leave this unset.
+    prefill_control: ?RequestControl = null,
     /// Loaded model.
     model: *Model,
     /// GPU capabilities.
@@ -21297,6 +21300,7 @@ pub const InferenceEngine = struct {
         var alt_pending: bool = false;
         var tok_idx: u32 = 0;
         while (tok_idx < n_tokens) : (tok_idx += 1) {
+            try self.pollPrefill();
             const collect_output = allow_final_tail_last and tok_idx + 1 == n_tokens;
             const pipeline_this = pipeline_enabled and !collect_output;
             if (pipeline_this) {
@@ -23450,6 +23454,7 @@ pub const InferenceEngine = struct {
         var alt_pending: bool = false;
         var tok_idx: u32 = grouped_prefix_tokens;
         while (tok_idx < n_tokens) : (tok_idx += 1) {
+            try self.pollPrefill();
             const pipeline_this = pipeline_enabled;
             if (pipeline_this) {
                 std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
@@ -24293,6 +24298,7 @@ pub const InferenceEngine = struct {
             } else {
                 const gnorm_pip = &(self.elementwise.pipeline_ssm_gated_norm orelse return error.ShaderNotLoaded);
                 while (tok_idx < n_tokens) : (tok_idx += 1) {
+                    try self.pollPrefill();
                     const z_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
                     const infos = [4]vk.c.VkDescriptorBufferInfo{
                         .{ .buffer = scratch_attn_out.handle, .offset = z_off, .range = z_bytes },
@@ -24412,6 +24418,7 @@ pub const InferenceEngine = struct {
                 const ssm_out_proj_phase = self.beginProfilePhase();
                 tok_idx = 0;
                 while (tok_idx < n_tokens) : (tok_idx += 1) {
+                    try self.pollPrefill();
                     const x_offset = tok_idx * d_inner * @sizeOf(f32);
                     const y_offset = tok_idx * hidden_dim * @sizeOf(f32);
                     try self.dispatchDmmvInner(
@@ -24461,6 +24468,7 @@ pub const InferenceEngine = struct {
             var alt_pending: bool = false;
             var tok_idx: u32 = 0;
             while (tok_idx < n_tokens) : (tok_idx += 1) {
+                try self.pollPrefill();
                 const pipeline_this = pipeline_enabled;
                 if (pipeline_this) {
                     std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
@@ -24633,6 +24641,7 @@ pub const InferenceEngine = struct {
                 const gnorm_pip = &(self.elementwise.pipeline_ssm_gated_norm orelse return error.ShaderNotLoaded);
                 tok_idx = 0;
                 while (tok_idx < n_tokens) : (tok_idx += 1) {
+                    try self.pollPrefill();
                     const z_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
                     const infos = [4]vk.c.VkDescriptorBufferInfo{
                         .{ .buffer = scratch_attn_out.handle, .offset = z_off, .range = z_bytes },
@@ -24752,6 +24761,7 @@ pub const InferenceEngine = struct {
                 const ssm_out_proj_phase = self.beginProfilePhase();
                 tok_idx = 0;
                 while (tok_idx < n_tokens) : (tok_idx += 1) {
+                    try self.pollPrefill();
                     const x_offset = tok_idx * d_inner * @sizeOf(f32);
                     const y_offset = tok_idx * hidden_dim * @sizeOf(f32);
                     try self.dispatchDmmvInner(
@@ -24799,6 +24809,7 @@ pub const InferenceEngine = struct {
         var alt_pending: bool = false;
         var tok_idx: u32 = 0;
         while (tok_idx < n_tokens) : (tok_idx += 1) {
+            try self.pollPrefill();
             const pipeline_this = pipeline_enabled;
             if (pipeline_this) {
                 std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
@@ -26247,6 +26258,7 @@ pub const InferenceEngine = struct {
             const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
             const vocab_last = cfg.vocab_size -| 1;
             for (prompt_tokens, 0..) |tok, i| {
+                try self.pollPrefill();
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
@@ -26364,6 +26376,7 @@ pub const InferenceEngine = struct {
         const pipeline_tail = self.qwen36DensePrefillTailPipelineEnabled(n_tokens);
         var layer: u32 = 0;
         while (layer < cfg.n_layers) : (layer += 1) {
+            try self.pollPrefill();
             const is_final_layer = layer + 1 == cfg.n_layers;
             const is_full_attn = ((layer + 1) % full_attn_interval) == 0;
             if (is_final_layer) {
@@ -26558,6 +26571,7 @@ pub const InferenceEngine = struct {
             const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
             const vocab_last = cfg.vocab_size -| 1;
             for (prompt_tokens, 0..) |tok, i| {
+                try self.pollPrefill();
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
@@ -26692,6 +26706,7 @@ pub const InferenceEngine = struct {
         const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
         var layer: u32 = 0;
         while (layer < prefix_layers) : (layer += 1) {
+            try self.pollPrefill();
             self.partial_ssm_preproj_layer = std.math.maxInt(u32);
             self.partial_ssm_preproj_token_idx = 0;
             self.partial_ssm_preproj_qkv = null;
@@ -26791,6 +26806,7 @@ pub const InferenceEngine = struct {
             } else {
                 var tok_idx: u32 = 0;
                 while (tok_idx < n_tokens) : (tok_idx += 1) {
+                    try self.pollPrefill();
                     const hidden_offset: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * hidden_size;
                     self.prefill_current_token_idx = tok_idx;
                     self.partial_ssm_preproj_token_idx = tok_idx;
@@ -26831,6 +26847,7 @@ pub const InferenceEngine = struct {
         var segment_layers: [qwen36_dense_prefill_max_segments]u32 = undefined;
         const n_segment_layers = self.qwen36DensePrefillSegmentLayers(prompt_tokens.len, prefix_layers, &segment_layers);
         for (segment_layers[0..n_segment_layers]) |segment_layer| {
+            try self.pollPrefill();
             if (segment_layer < tail_start_layer) continue;
             log.debug("Qwen dense-hybrid layer-major prefill segment ENABLED at layer {d} after tail_start_layer={d} (set ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT=0 to disable)", .{
                 segment_layer,
@@ -27017,6 +27034,7 @@ pub const InferenceEngine = struct {
         var alt_pending: bool = false;
         var tok_idx: u32 = 0;
         while (tok_idx < n_tokens) : (tok_idx += 1) {
+            try self.pollPrefill();
             const collect_output = tok_idx + 1 == n_tokens;
             const pipeline_this = pipeline_tail and !collect_output;
             if (pipeline_this) {
@@ -27690,6 +27708,7 @@ pub const InferenceEngine = struct {
             const vocab_last = cfg.vocab_size -| 1;
             const gemma_scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
             for (prompt_tokens, 0..) |tok, i| {
+                try self.pollPrefill();
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
@@ -27878,6 +27897,7 @@ pub const InferenceEngine = struct {
         var open_layers: u32 = 0;
         var layer: u32 = 0;
         while (layer < batched_layers) : (layer += 1) {
+            try self.pollPrefill();
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             const layer_record_start = host_io.nanoTimestamp();
             if (open_layers == 0) {
@@ -28534,6 +28554,7 @@ pub const InferenceEngine = struct {
             const vocab_last = cfg.vocab_size -| 1;
             const gemma_scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
             for (prompt_tokens, 0..) |tok, i| {
+                try self.pollPrefill();
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
@@ -28648,6 +28669,7 @@ pub const InferenceEngine = struct {
 
         var layer: u32 = 0;
         while (layer + 1 < cfg.n_layers) : (layer += 1) {
+            try self.pollPrefill();
             try self.prefillQwen36RunPartialTokenLoop(
                 state,
                 prompt_tokens,
@@ -28871,6 +28893,7 @@ pub const InferenceEngine = struct {
                     var tok_idx = prefix_tokens;
                     var guard_idx: u32 = 0;
                     while (tok_idx < n_tokens) : ({
+                        try self.pollPrefill();
                         tok_idx += 1;
                         guard_idx += 1;
                     }) {
@@ -28925,6 +28948,7 @@ pub const InferenceEngine = struct {
                     var alt_pending: bool = false;
                     var tok_idx = prefix_tokens;
                     while (tok_idx < n_tokens) : (tok_idx += 1) {
+                        try self.pollPrefill();
                         std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
                         std.mem.swap(bool, &primary_pending, &alt_pending);
                         if (primary_pending) {
@@ -28971,6 +28995,7 @@ pub const InferenceEngine = struct {
 
                 var tok_idx = prefix_tokens;
                 while (tok_idx < n_tokens) : (tok_idx += 1) {
+                    try self.pollPrefill();
                     const hidden_offset: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * hidden_size;
                     self.prefill_current_token_idx = tok_idx;
                     state.position = base_token + tok_idx;
@@ -29019,6 +29044,21 @@ pub const InferenceEngine = struct {
         state.position = base_token + n_tokens;
     }
 
+    fn pollPrefill(self: *InferenceEngine) !void {
+        if (self.prefill_control) |control| {
+            if (!control.alive()) {
+                // Token-major prefill can have two command buffers in flight.
+                // Drain the owned compute queue before caller defers can free
+                // request buffers or a subsequent request resets descriptors.
+                try self.chainDrain();
+                const result = vk.c.vkQueueWaitIdle(self.instance.compute_queue);
+                self.prefill_pipeline_mode = false;
+                if (result != vk.c.VK_SUCCESS) return error.QueueWaitFailed;
+                return error.RequestCancelled;
+            }
+        }
+    }
+
     /// Experimental batched prompt prefill for the RDNA/Vulkan backend.
     /// Gated by `ZINC_BATCHED_PREFILL=1`. This is the Vulkan analogue of
     /// `forward_metal.InferenceEngine.prefillBatched`.
@@ -29034,6 +29074,7 @@ pub const InferenceEngine = struct {
     /// @param state Decode state for the current request.
     /// @param prompt_tokens Tokenized prompt sequence to prefill.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        try self.pollPrefill();
         try self.chainDrain();
         try self.mtpFlushPending(state);
         // Rebuilding the context from scratch leaves the NextN cache describing a
@@ -29070,6 +29111,7 @@ pub const InferenceEngine = struct {
             log.info("Intel batched prefill chunking ENABLED: chunk={d} tokens (set ZINC_INTEL_BATCHED_PREFILL_CHUNK=0 to force monolithic)", .{chunk_limit});
             var offset: usize = 0;
             while (offset < prompt_tokens.len) {
+                try self.pollPrefill();
                 const end = @min(offset + chunk_limit, prompt_tokens.len);
                 try self.prefillBatchedImpl(state, prompt_tokens[offset..end]);
                 offset = end;
@@ -29100,6 +29142,7 @@ pub const InferenceEngine = struct {
             var prime_chunks = self.mtp_prime_during_prefill and self.mtpEnabled() and (self.mtpPrepare() catch false);
             var offset: usize = 0;
             while (offset < prompt_tokens.len) {
+                try self.pollPrefill();
                 if (prime_chunks) self.mtpResetCapture();
                 const chunk_base: u32 = state.position;
                 // A chunk's attention layer is one GPU job whose work grows
@@ -29287,6 +29330,7 @@ pub const InferenceEngine = struct {
             const use_tmp_row = (is_gemma or is_muse) and hidden_dim <= embed_row_tmp_max;
             var tmp_storage: [embed_row_tmp_max]f32 = undefined;
             for (prompt_tokens, 0..) |tok, i| {
+                try self.pollPrefill();
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 if (use_tmp_row) {
@@ -29379,6 +29423,7 @@ pub const InferenceEngine = struct {
         else
             0;
         for (0..cfg.n_layers) |layer_idx| {
+            try self.pollPrefill();
             // ZINC_MUSE_DIAG=1: dump token 0's residual entering layers 1..3
             // (outputs of layers 0..2) in the batched path, for comparison
             // with the reference eval-callback `l_out-N` rows and the per-token path.
@@ -30058,6 +30103,7 @@ pub const InferenceEngine = struct {
             else
                 1.0;
             for (prompt_tokens, 0..) |tok, i| {
+                try self.pollPrefill();
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
@@ -30084,6 +30130,8 @@ pub const InferenceEngine = struct {
         const profile_was_enabled = self.profile_enabled;
         const enable_gpu_phase_timing = had_profile_pool and want_gpu_phases;
         if (enable_gpu_phase_timing) self.profile_enabled = true;
+        // Cancellation must restore profiling intent just like normal return.
+        defer self.profile_enabled = profile_was_enabled;
 
         // Pipelined prefill: two-deep ping-pong between decode_cmd and
         // prefill_cmd_alt (plus their paired embed staging buffers). While the
@@ -30108,6 +30156,7 @@ pub const InferenceEngine = struct {
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
         for (prompt_tokens, 0..) |token_id, i| {
+            try self.pollPrefill();
             const collect_output = i + 1 == prompt_tokens.len;
             const pipeline_this = can_pipeline and !collect_output;
             // decodeStep's layer-0 copy reads prefill_embed_big at offset
@@ -30192,6 +30241,7 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.transferToComputeBarrier();
                 var layer: u32 = 0;
                 while (layer < cfg.n_layers) : (layer += 1) {
+                    try self.pollPrefill();
                     const d_off: vk.c.VkDeviceSize =
                         @as(vk.c.VkDeviceSize, layer) *
                         @as(vk.c.VkDeviceSize, cfg.n_experts) *
