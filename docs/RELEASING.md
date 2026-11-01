@@ -83,6 +83,25 @@ For a worker serving multiple profiles, an optional `profiles` object maps profi
 
 Build the exact llama.cpp commit in the policy. The harness checks clean Git source, executable version and hashes. Workers need Python 3, Git and the supported backend runtime. Vulkan workers also need `cc`, Vulkan headers, `vulkaninfo`, and matching shared `libggml-base` beside the reference tools for the 84-case numerical shader check.
 
+Use a reference build matching the tested backend: Metal for Metal, Vulkan for
+Vulkan, and HIP/ROCm for ROCm. Set one explicit `--device` selector in
+`reference_args`: `Metal`, `Vulkan<N>`, or `ROCm<N>`. The gate rejects a different
+backend before probing the reference or starting model work, and aggregation
+requires the recorded `reference.device_backend` to match the target. Quantized
+backends can make different greedy choices even with identical GGUFs and F32 KV;
+a cross-backend disagreement is a separate diagnostic, not a reason to loosen
+the native reference agreement policy.
+
+Reports also inventory the reference's ggml/llama libraries. Their hashes and
+both executable hashes must remain unchanged from the version probe through
+validation; rebuilding a tool can replace shared libraries without changing
+the server executable. Keep the reference's ggml libraries beside its tools;
+empty inventories and inventories without ggml entries fail validation.
+Only library basenames and digests are published. Library search overrides from
+the worker's shell are excluded from packaged execution. Reference processes
+select their own sibling libraries; that explicit search path is never passed
+to ZINC. The readiness workflow applies these same reference checks.
+
 The policy also freezes reference generation: one slot, a 512-token logical
 batch, one-token microbatches, F32 K/V, and flash attention disabled. The harness
 applies these settings after worker arguments and records them in the report;

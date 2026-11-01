@@ -1,0 +1,1363 @@
+{
+  "schema_version": "zinc-rdna4-reference-audit-v1",
+  "exported_utc": "2026-11-01T03:17:14.839290+00:00",
+  "release_qualified": false,
+  "fresh_current_worker_validation_complete": false,
+  "scope": "Remote R9700 diagnostics and reference provenance correction. Unsigned developer previews; no signed candidate or nine-profile qualification.",
+  "reference_provenance_correction": {
+    "recorded_utc": "2026-11-01T03:17:14.833782+00:00",
+    "affected_reference_server_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+    "intended_reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reported_reference_revision": "b96806d96",
+    "policy_reference_revision_verified": false,
+    "scope": "Recorded comparisons remain diagnostics against the identified executable bytes; the intended HIP revision claim is withdrawn. ZINC before/after behavior and OpenCode fixture outcomes retain their separate recorded scope.",
+    "audit": "/zinc/validation/rdna4-reference-audit-2026-11-01.json"
+  },
+  "observations": [
+    "The initial main preview used the policy-pinned Vulkan reference for both backends. It completed with ten passing model/backend rows and two failures. Failures remain recorded.",
+    "The native HIP diagnostic used the recorded older executable. It matched six CLI model rows, but is not evidence for the intended policy revision.",
+    "Building the missing HIP tokenizer replaced shared libraries without changing the server executable. The rebuild inventory below starts after that tokenizer build, not at the earlier diagnostic.",
+    "The frozen-version gate then rejected the stale HIP server before model loading. CMake reconfiguration plus server/tokenizer rebuild produced the intended reported revision.",
+    "Current main adds an explicit Unicode copy task, active chat SSE cancellation and EOS checks. Fresh worker runs must use the current executable and these stronger gates.",
+    "Native GPU backend selectors, before/after reference executable/library identities, and isolated package/reference environments are enforced by both candidate and readiness paths. Token and near-tie policy limits are unchanged."
+  ],
+  "initial_canonical_vulkan_campaign": {
+    "schema_version": 1,
+    "scope": "Unsigned main-package developer checks on one R9700; not final signed candidate or nine-profile qualification",
+    "tested_at_utc": "2026-11-01T02:04:16.234363+00:00",
+    "source_commit": "9eb380e029f762df4039d577bc2ea4d17f5dffc3",
+    "packaging_run": 41262289303,
+    "policy_sha256": "33e1b9782cc61f3435a8ff3e200d89595a5850ce8d3e28b42a3b4f52e555ca2d",
+    "options": {
+      "parallel": 1,
+      "kv_cache": "f32",
+      "mtp": "backend-default",
+      "greedy": true,
+      "runtime_overrides": {}
+    },
+    "reference": {
+      "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "backend": "vulkan",
+      "source_clean": true,
+      "server_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f",
+      "generation": {
+        "batch_size": 512,
+        "micro_batch": 1,
+        "parallel": 1,
+        "kv_cache": "f32",
+        "flash_attention": false
+      },
+      "agreement": {
+        "cases": 3,
+        "tokens_per_case": 16,
+        "min_exact_fraction": 0.975,
+        "max_logprob_gap": 0.05,
+        "max_near_ties_per_case": 1
+      }
+    },
+    "validation_helpers_sha256": {
+      "release_gpu.py": "79b26e396d55b33eee1f45fad4b8761be0f3d3a58898ea1c101c8eef3d12fb59",
+      "release_lib.py": "7d5aa61cd8952a4bf8fc6e83d6628de26f98c1a2c3ef4436125eca563fb762d1"
+    },
+    "harness_sha256": "2a6c4e89978408c4df799d560b13a4b44b9e52a1e2d6a8c49f0ffab5643f39d8",
+    "completed": true,
+    "profiles": [
+      {
+        "profile": "rocm-rdna4",
+        "target": "linux-x86_64-rocm",
+        "version": "0.1.0-dev.41262289303",
+        "archive": "zinc-v0.1.0-dev.41262289303-linux-x86_64-rocm.tar.gz",
+        "archive_sha256": "e9281545ed5bacf80775831330391d6b6b465fa948f42b14e25c9a55a4cc4048",
+        "binary_sha256": "fec18a822590dca4ea640be5974c9979c6969f5a8e3251edb1a319b9dc03cf30",
+        "hardware": {
+          "gpu": "AMD Radeon AI PRO R9700",
+          "os": "Linux 7.2.2-070202-generic",
+          "driver": "ROCm 7.2.4"
+        },
+        "models": [
+          {
+            "id": "qwen38-27b-q4k-m",
+            "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              },
+              {
+                "name": "mtp-default-observed-active",
+                "passed": true
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "b707a01d62cf5fdf49284a79db9ebc29db629d8a63812ee57d553d9ee22f1b63",
+            "passed": true,
+            "wall_seconds": 55.321
+          },
+          {
+            "id": "qwen36-35b-a3b-q4k-xl",
+            "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              }
+            ],
+            "stage": "cli-reference",
+            "passed": false,
+            "failure": "reference choice exceeds near-tie policy",
+            "wall_seconds": 29.314
+          },
+          {
+            "id": "qwen36-27b-q4k-m",
+            "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "2650af4899613d65da7e3465d4de6af9ae3699b4c7143a38f88d5c7bfee09fa1",
+            "passed": true,
+            "wall_seconds": 64.018
+          },
+          {
+            "id": "qwen35-9b-q4k-m",
+            "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "4e80f2b15761fd4b9874334c23f377c60b0c6acca455e7d807574210e8a41417",
+            "passed": true,
+            "wall_seconds": 31.933
+          },
+          {
+            "id": "gemma4-31b-q4k-m",
+            "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              },
+              {
+                "name": "forced-small-chunk-reference",
+                "passed": true,
+                "cases": 3,
+                "tokens": 48
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "8046ea897ed9f747ff7643df63df618e55953be71aa307079a3b235a33ffc686",
+            "bounded_prefill": {
+              "passed": true,
+              "chunk_tokens": 16,
+              "cases": 3,
+              "tokens": 48
+            },
+            "passed": true,
+            "wall_seconds": 117.103
+          },
+          {
+            "id": "gemma4-26b-a4b-q4k-m",
+            "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "86fec2cf2a66c6fc7525563f2a498f4443d0646c32adfe3caeccdb158eab220d",
+            "passed": true,
+            "wall_seconds": 53.27
+          }
+        ],
+        "passed": false
+      },
+      {
+        "profile": "vulkan-rdna4",
+        "target": "linux-x86_64-vulkan",
+        "version": "0.1.0-dev.41262289303",
+        "archive": "zinc-v0.1.0-dev.41262289303-linux-x86_64-vulkan.tar.gz",
+        "archive_sha256": "ec359d27e2de7d48038755b87ab11fdc67022a62b9490c4824d1765d71cb4329",
+        "binary_sha256": "dc81643dc6f3136b59af8f83b6fc93ac6063394f839849d982573f5a54bb821e",
+        "hardware": {
+          "gpu": "AMD Radeon AI PRO R9700 (RADV GFX1201)",
+          "os": "Linux 7.2.2-070202-generic",
+          "driver": "1.4.305 / radv / Mesa 25.0.7-0ubuntu0.24.04.2"
+        },
+        "models": [
+          {
+            "id": "qwen3-0.6b-q8-0",
+            "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+            "context": 2048,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              }
+            ],
+            "stage": "api-reference",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "9555464313320678813e1c9929ceb34e698ec088f1f3674a75885c359a386ad9",
+            "passed": false,
+            "failure": "Unicode echo was incomplete",
+            "wall_seconds": 15.702
+          },
+          {
+            "id": "qwen36-35b-a3b-q4k-xl",
+            "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "8ba780e66526a075676970bce0e56b8bf7cacf071554b53287f967c3c8869675",
+            "passed": true,
+            "wall_seconds": 77.314
+          },
+          {
+            "id": "qwen36-27b-q4k-m",
+            "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "7e39a9ee881a6c306c390fd6d8fc63311bb117287f9be4612cc8a62f69f2cd74",
+            "passed": true,
+            "wall_seconds": 78.44
+          },
+          {
+            "id": "qwen35-9b-q4k-m",
+            "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "b051c4f8536d35f74892d249de0f76fc91cd0657f83ab93e0d6dd82b5be557bb",
+            "passed": true,
+            "wall_seconds": 36.477
+          },
+          {
+            "id": "gemma4-31b-q4k-m",
+            "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "1e99a9b4cb3195b17b43b5026226ae76f92d117f3ae9e23e347b3482fbb04d86",
+            "passed": true,
+            "wall_seconds": 123.994
+          },
+          {
+            "id": "gemma4-26b-a4b-q4k-m",
+            "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+            "context": 4096,
+            "checks": [
+              {
+                "name": "model-pin",
+                "passed": true
+              },
+              {
+                "name": "tokenizer",
+                "passed": true,
+                "cases": 12
+              },
+              {
+                "name": "cli-reference",
+                "passed": true,
+                "cases": [
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  },
+                  {
+                    "tokens": 16,
+                    "near_ties": []
+                  }
+                ],
+                "total_tokens": 48,
+                "exact_tokens": 48,
+                "near_tie_tokens": 0
+              },
+              {
+                "name": "http-sse-unicode-cancellation-context-recovery",
+                "passed": true,
+                "reference_replay_cases": {
+                  "initial": 3,
+                  "after_cancellation": 3,
+                  "after_context": 3
+                }
+              }
+            ],
+            "stage": "complete",
+            "reference_agreement": {
+              "cases": [
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                },
+                {
+                  "tokens": 16,
+                  "near_ties": []
+                }
+              ],
+              "total_tokens": 48,
+              "exact_tokens": 48,
+              "near_tie_tokens": 0
+            },
+            "reference_samples_sha256": "7f495f9d2f26448b349a669e55e4547090fde0831e0b1b4d6acb6cf72f1e81bf",
+            "passed": true,
+            "wall_seconds": 71.264
+          }
+        ],
+        "kernel_reference": {
+          "passed": true,
+          "cases": 84
+        },
+        "passed": false
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true,
+    "passed": false
+  },
+  "unicode_and_cpu_diagnostics": {
+    "moe_cpu_reference": {
+      "token_ids": [
+        32,
+        43447,
+        4138,
+        539,
+        6992,
+        8364,
+        494,
+        279,
+        4613,
+        314,
+        279,
+        3618,
+        310,
+        279,
+        4732,
+        4424
+      ],
+      "top_choices_at_difference": [
+        {
+          "id": 3618,
+          "token": " box",
+          "bytes": [
+            32,
+            98,
+            111,
+            120
+          ],
+          "logprob": -0.8241243958473206
+        },
+        {
+          "id": 36337,
+          "token": " fridge",
+          "bytes": [
+            32,
+            102,
+            114,
+            105,
+            100,
+            103,
+            101
+          ],
+          "logprob": -1.1619806289672852
+        }
+      ],
+      "vulkan_top_choices": [
+        {
+          "bytes": [
+            32,
+            98,
+            111,
+            120
+          ],
+          "id": 3618,
+          "logprob": -0.9829157590866089,
+          "token": " box"
+        },
+        {
+          "bytes": [
+            32,
+            102,
+            114,
+            105,
+            100,
+            103,
+            101
+          ],
+          "id": 36337,
+          "logprob": -1.0738486051559448,
+          "token": " fridge"
+        }
+      ]
+    },
+    "starter_http": [
+      {
+        "budget": 32,
+        "message": {
+          "role": "assistant",
+          "content": "☕ 东京咖啡 🚀"
+        },
+        "finish_reason": "stop",
+        "usage": {
+          "prompt_tokens": 42,
+          "completion_tokens": 7,
+          "total_tokens": 49
+        }
+      },
+      {
+        "budget": 96,
+        "message": {
+          "role": "assistant",
+          "content": "☕ 东京咖啡 🚀"
+        },
+        "finish_reason": "stop",
+        "usage": {
+          "prompt_tokens": 42,
+          "completion_tokens": 7,
+          "total_tokens": 49
+        }
+      }
+    ],
+    "starter_vulkan_reference": {
+      "content": "☕️ **カフェ・東京** 🚀",
+      "token_ids": [
+        145314,
+        30543,
+        3070,
+        140470,
+        9274,
+        102356,
+        46553,
+        334,
+        222,
+        151645
+      ],
+      "rendered_prompt": "<|im_start|>user\nReply exactly with café 東京 🚀.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
+  },
+  "stale_native_hip_diagnostic": {
+    "source_commit": "9eb380e029f762df4039d577bc2ea4d17f5dffc3",
+    "archive_sha256": "e9281545ed5bacf80775831330391d6b6b465fa948f42b14e25c9a55a4cc4048",
+    "reference_backend": "hip",
+    "reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "reference_server_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+    "reference_generation": {
+      "batch_size": 512,
+      "micro_batch": 1,
+      "parallel": 1,
+      "kv_cache": "f32",
+      "flash_attention": false
+    },
+    "completed": true,
+    "models": [
+      {
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "stage": "complete",
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "same_prompts_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "same_choices_as_vulkan_reference": [
+          true,
+          false,
+          true
+        ],
+        "reference_replay_cases": {
+          "initial": 3,
+          "after_cancellation": 3,
+          "after_context": 3
+        },
+        "passed": true,
+        "wall_seconds": 15.169
+      },
+      {
+        "id": "gemma4-31b-q4k-m",
+        "stage": "complete",
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "same_prompts_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "same_choices_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "passed": true,
+        "wall_seconds": 47.846
+      },
+      {
+        "id": "qwen38-27b-q4k-m",
+        "stage": "complete",
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "same_prompts_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "same_choices_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "passed": true,
+        "wall_seconds": 12.794
+      },
+      {
+        "id": "qwen36-27b-q4k-m",
+        "stage": "complete",
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "same_prompts_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "same_choices_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "passed": true,
+        "wall_seconds": 14.297
+      },
+      {
+        "id": "qwen35-9b-q4k-m",
+        "stage": "complete",
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "same_prompts_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "same_choices_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "passed": true,
+        "wall_seconds": 5.81
+      },
+      {
+        "id": "gemma4-26b-a4b-q4k-m",
+        "stage": "complete",
+        "reference_agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "same_prompts_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "same_choices_as_vulkan_reference": [
+          true,
+          true,
+          true
+        ],
+        "passed": true,
+        "wall_seconds": 19.501
+      }
+    ],
+    "remaining_processes": {
+      "zinc": 0,
+      "rocm-dbg": 0,
+      "llama-server": 0,
+      "llama-cli": 0,
+      "llama-bench": 0,
+      "opencode": 0
+    },
+    "cleanup": true
+  },
+  "frozen_reference_startup_rejection": {
+    "source_commit": "9eb380e029f762df4039d577bc2ea4d17f5dffc3",
+    "validation_source_commit": "bfdf629b91261bdc0c39fe7c4c22752959008e53",
+    "failed_stage": "reference executable version before package GPU diagnostics or model loading",
+    "completed": false,
+    "passed": false,
+    "cleanup": true
+  },
+  "reference_rebuild": {
+    "expected_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "before": {
+      "reported_hex_tokens": [
+        "b96806d96"
+      ],
+      "version_matches_policy": false,
+      "server_sha256": "5bc83033fc32c0752f8b00469de7b9d1ad4acb8da132fbe52ee1607e52986bbc",
+      "tokenizer_sha256": "8483aee00d4c584a1f22ebea95572a8937808f07275ebda191163e75ed160381",
+      "library_sha256": {
+        "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0.22.0": "84c4aba07d23ffe2b410dad21c6a213b2af96bcc6404a6ba1e026c0aae0a26ec",
+        "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-cpu.so": "ff84a1423ed1d44aaf12f5ebff934281129c1226e333fbac5460090178634f21",
+        "libggml-cpu.so.0": "ff84a1423ed1d44aaf12f5ebff934281129c1226e333fbac5460090178634f21",
+        "libggml-cpu.so.0.22.0": "6ba85e687d4ec6345c2ae879f3a687f2b3c5ac917e86c0c1a0f644f181dffa3f",
+        "libggml-cpu.so.0.23.0": "ff84a1423ed1d44aaf12f5ebff934281129c1226e333fbac5460090178634f21",
+        "libggml-hip.so": "251ac5ab222a7a2e669d0bbcdb695fe19515b072fd0f263ff0a57b27a1d3f7b4",
+        "libggml-hip.so.0": "251ac5ab222a7a2e669d0bbcdb695fe19515b072fd0f263ff0a57b27a1d3f7b4",
+        "libggml-hip.so.0.22.0": "b80783a35d67654da93a3dbc59a3750c4c83627ece33b99b2bace310d00444ad",
+        "libggml-hip.so.0.23.0": "251ac5ab222a7a2e669d0bbcdb695fe19515b072fd0f263ff0a57b27a1d3f7b4",
+        "libggml.so": "3bea6427725d016db5ff14ebe931bfb8446e0e10e52ede347f401ca7a47364c0",
+        "libggml.so.0": "3bea6427725d016db5ff14ebe931bfb8446e0e10e52ede347f401ca7a47364c0",
+        "libggml.so.0.22.0": "16ed94b20a4a925cbe1502b5309f1be943e3ed9009ae0d5edb3b48f709472358",
+        "libggml.so.0.23.0": "3bea6427725d016db5ff14ebe931bfb8446e0e10e52ede347f401ca7a47364c0",
+        "libllama-cli-impl.so": "0226dbefb10f939f5d220f0936f2fe97b5de3b531c61d205ecee44574de38455",
+        "libllama-common.so": "7c318266f9a265758809bcd885a8b0e622b6d5d0c37b6eab96158602e57a6a35",
+        "libllama-common.so.0": "7c318266f9a265758809bcd885a8b0e622b6d5d0c37b6eab96158602e57a6a35",
+        "libllama-common.so.0.3.0": "147d20e0a04522a7754fab2d6e89e39ba1d378925c1c79f856c35022d7b22ed6",
+        "libllama-common.so.0.4.0": "7c318266f9a265758809bcd885a8b0e622b6d5d0c37b6eab96158602e57a6a35",
+        "libllama-server-impl.so": "a64ef2c2540f878a94e1e0ef44dd1182bcd102b9c5ffe03ce5a75eaeb50ac232",
+        "libllama.so": "1537ef64dea9a2e5cacce94878f9e83a7085e7d7d9bb7c1eb7a904c14c808af8",
+        "libllama.so.0": "1537ef64dea9a2e5cacce94878f9e83a7085e7d7d9bb7c1eb7a904c14c808af8",
+        "libllama.so.0.3.0": "a8aecb425f6063c7644f58a2f05477621df4fd6e872cd84cfacf81e7a7dc6298",
+        "libllama.so.0.4.0": "1537ef64dea9a2e5cacce94878f9e83a7085e7d7d9bb7c1eb7a904c14c808af8"
+      }
+    },
+    "after": {
+      "reported_hex_tokens": [
+        "5f436dddb"
+      ],
+      "version_matches_policy": true,
+      "server_sha256": "2ff1a488972ef5738c3b9b060d25fbd26b4e64efb4ba7d770b967f74987b8543",
+      "tokenizer_sha256": "8483aee00d4c584a1f22ebea95572a8937808f07275ebda191163e75ed160381",
+      "library_sha256": {
+        "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0.22.0": "84c4aba07d23ffe2b410dad21c6a213b2af96bcc6404a6ba1e026c0aae0a26ec",
+        "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-cpu.so": "ff84a1423ed1d44aaf12f5ebff934281129c1226e333fbac5460090178634f21",
+        "libggml-cpu.so.0": "ff84a1423ed1d44aaf12f5ebff934281129c1226e333fbac5460090178634f21",
+        "libggml-cpu.so.0.22.0": "6ba85e687d4ec6345c2ae879f3a687f2b3c5ac917e86c0c1a0f644f181dffa3f",
+        "libggml-cpu.so.0.23.0": "ff84a1423ed1d44aaf12f5ebff934281129c1226e333fbac5460090178634f21",
+        "libggml-hip.so": "251ac5ab222a7a2e669d0bbcdb695fe19515b072fd0f263ff0a57b27a1d3f7b4",
+        "libggml-hip.so.0": "251ac5ab222a7a2e669d0bbcdb695fe19515b072fd0f263ff0a57b27a1d3f7b4",
+        "libggml-hip.so.0.22.0": "b80783a35d67654da93a3dbc59a3750c4c83627ece33b99b2bace310d00444ad",
+        "libggml-hip.so.0.23.0": "251ac5ab222a7a2e669d0bbcdb695fe19515b072fd0f263ff0a57b27a1d3f7b4",
+        "libggml.so": "3bea6427725d016db5ff14ebe931bfb8446e0e10e52ede347f401ca7a47364c0",
+        "libggml.so.0": "3bea6427725d016db5ff14ebe931bfb8446e0e10e52ede347f401ca7a47364c0",
+        "libggml.so.0.22.0": "16ed94b20a4a925cbe1502b5309f1be943e3ed9009ae0d5edb3b48f709472358",
+        "libggml.so.0.23.0": "3bea6427725d016db5ff14ebe931bfb8446e0e10e52ede347f401ca7a47364c0",
+        "libllama-cli-impl.so": "0226dbefb10f939f5d220f0936f2fe97b5de3b531c61d205ecee44574de38455",
+        "libllama-common.so": "7c318266f9a265758809bcd885a8b0e622b6d5d0c37b6eab96158602e57a6a35",
+        "libllama-common.so.0": "7c318266f9a265758809bcd885a8b0e622b6d5d0c37b6eab96158602e57a6a35",
+        "libllama-common.so.0.3.0": "147d20e0a04522a7754fab2d6e89e39ba1d378925c1c79f856c35022d7b22ed6",
+        "libllama-common.so.0.4.0": "7c318266f9a265758809bcd885a8b0e622b6d5d0c37b6eab96158602e57a6a35",
+        "libllama-server-impl.so": "f12de2bf725517add74495e721f28669e716d98ca1b277d396f2cf3737da80f5",
+        "libllama.so": "1537ef64dea9a2e5cacce94878f9e83a7085e7d7d9bb7c1eb7a904c14c808af8",
+        "libllama.so.0": "1537ef64dea9a2e5cacce94878f9e83a7085e7d7d9bb7c1eb7a904c14c808af8",
+        "libllama.so.0.3.0": "a8aecb425f6063c7644f58a2f05477621df4fd6e872cd84cfacf81e7a7dc6298",
+        "libllama.so.0.4.0": "1537ef64dea9a2e5cacce94878f9e83a7085e7d7d9bb7c1eb7a904c14c808af8"
+      }
+    },
+    "server_changed": true
+  },
+  "host_checks": {
+    "full_cpu_unit_suite_passed": true,
+    "bun_tests_passed": 750,
+    "release_contract_tests_passed": 82,
+    "gpu_activity": "none in host checks",
+    "model_smokes": "not run on the workstation",
+    "negative_controls_detected": [
+      "omitted candidate stability check",
+      "omitted readiness stability check",
+      "omitted server version check",
+      "omitted native backend check",
+      "candidate snapshot after version probe",
+      "readiness snapshot after version probe",
+      "retained loader injection variables"
+    ]
+  },
+  "remaining": "Fresh exact-preview R9700 worker runs with current gates; other required hardware roles, Apple signing and complete signed-candidate qualification."
+}

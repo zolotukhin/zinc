@@ -374,6 +374,13 @@ class ReleaseTest(unittest.TestCase):
         with patch.object(release_gpu.sys, "platform", "darwin"):
             self.assertEqual(release_gpu.reference_environment(Path("/selected-reference"), env), env)
 
+    def test_packaged_environment_removes_inherited_model_and_library_overrides(self):
+        inherited = {"PATH": "<system-tools>", "ZINC_PREFILL_CHUNK": "16", "ZINC_FORCE_CPU_ARGMAX": "1",
+                     **{key: "<other-build>" for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH")}}
+        with patch.dict(os.environ, inherited, clear=True):
+            self.assertEqual(release_gpu.packaged_environment(), {"PATH": "<system-tools>"})
+            self.assertEqual(dict(os.environ), inherited)
+
     def test_worker_guard_accepts_only_the_admin_selected_main_workflow_job(self):
         workflow = "example/zinc/.github/workflows/release-worker-check.yml@refs/heads/main"
         config = {"repository": "example/zinc", "actors": ["maintainer"],
@@ -708,6 +715,8 @@ class ReleaseTest(unittest.TestCase):
                       "hardware": {"gpu": "CPU fixture, no GPU was executed", "os": "fixture", "driver": "fixture"},
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": policy()["reference"]["commit"], "generation": policy()["reference"]["generation"],
+                                    "device_backend": target(profile["target"])["backend"],
+                                    "library_sha256": {"libggml-base.so": "d" * 64},
                                     "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup", "kernel_reference")}}
             write_json(reports / (profile["id"] + ".json"), report)
@@ -764,7 +773,13 @@ class ReleaseTest(unittest.TestCase):
                    lambda d: d["models"][0].pop("reference_agreement"),
                    lambda d: d["models"][0]["reference_agreement"].update(exact_tokens=1),
                    lambda d: d["reference"].pop("generation"), lambda d: d["reference"]["generation"].update(micro_batch=2),
-                   lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver")]
+                   lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver"),
+                   lambda d: d["reference"].pop("device_backend"), lambda d: d["reference"].update(device_backend="rocm"),
+                   lambda d: d["reference"].pop("library_sha256"),
+                   lambda d: d["reference"].update(library_sha256={}),
+                   lambda d: d["reference"].update(library_sha256={"libllama.so": "d" * 64}),
+                   lambda d: d["reference"].update(library_sha256={"libggml-base.so": "not-a-digest"}),
+                   lambda d: d["reference"].update(library_sha256={"<private-path>/libggml-base.so": "d" * 64})]
         for index, change in enumerate(changes):
             data = json.loads(saved)
             change(data)
@@ -951,6 +966,110 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release_gpu.active_model_id(data)
 
+    def test_reference_device_backend_accepts_explicit_native_selectors(self):
+        for backend, selector in (("metal", "Metal"), ("metal", "Metal7"), ("vulkan", "Vulkan7"), ("rocm", "ROCm9")):
+            for args in (["-ngl", "99", "--device", selector], ["-dev", selector], ["--device=" + selector]):
+                with self.subTest(backend=backend, args=args):
+                    self.assertEqual(release_gpu.reference_device_backend(args, backend), backend)
+
+    def test_reference_device_backend_rejects_cross_backend_missing_and_ambiguous_selectors(self):
+        for args in (None, [], [None], ["-ngl", "99"], ["--device"], ["--device", "Vulkan7"],
+                     ["--device", "none"], ["--device", "ROCm"], ["--device", "ROCm7,ROCm9"],
+                     ["--device", "ROCm7", "-dev=Vulkan9"], ["--device", "ROCm7", "--device=ROCm7"]):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                release_gpu.reference_device_backend(args, "rocm")
+
+    def test_wrong_reference_backend_is_rejected_before_probing_or_starting_gpu_processes(self):
+        config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "Vulkan7"]}
+        argv = ["release_gpu.py", "--directory", str(self.root), "--profile", "rocm-rdna4", "--output", str(self.root / "report.json")]
+        with patch.object(sys, "argv", argv), patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(self.root / "worker.json")}), \
+                patch.object(release_gpu, "verify_candidate", return_value={"artifacts": [{"target": "linux-x86_64-rocm"}]}), \
+                patch.object(release_gpu, "read_json", return_value=config), patch.object(release_gpu, "output") as probe, \
+                patch.object(release_gpu, "process") as launch, self.assertRaisesRegex(ValueError, "native GPU backend"):
+            release_gpu.main()
+        probe.assert_not_called()
+        launch.assert_not_called()
+
+    def test_reference_inventory_requires_adjacent_ggml_artifacts(self):
+        (self.root / "llama-server").write_bytes(b"server")
+        (self.root / "llama-tokenize").write_bytes(b"tokenizer")
+        (self.root / "libllama.so").write_bytes(b"llama")
+        with self.assertRaisesRegex(ValueError, "ggml libraries beside"):
+            release_gpu.reference_artifacts(self.root)
+        (self.root / "libggml-base.so").write_bytes(b"ggml")
+        self.assertEqual(set(release_gpu.reference_artifacts(self.root)["library_sha256"]), {"libllama.so", "libggml-base.so"})
+
+    def test_candidate_and_readiness_reject_stale_cross_backend_or_changed_references(self):
+        for entrypoint in ("candidate", "readiness"):
+            for failure in (None, "library", "during_version_probe", "stale_server", "wrong_backend"):
+                folder = self.root / (entrypoint + "-" + str(failure))
+                reference, tree = folder / "reference", folder / "package"
+                reference.mkdir(parents=True)
+                (tree / "bin").mkdir(parents=True)
+                for path, content in ((reference / "llama-server", b"server"), (reference / "llama-tokenize", b"tokenizer"),
+                                      (reference / "libggml-hip.so", b"original library"), (reference / "notes.txt", b"private notes"),
+                                      (tree / "bin/zinc", b"packaged binary"), (folder / "model.gguf", b"pinned model"),
+                                      (folder / "candidate.tar.gz", b"archive"),
+                                      (folder / archive_name("9.8.7", "linux-x86_64-rocm"), b"archive")):
+                    path.write_bytes(content)
+                before = release_gpu.reference_artifacts(reference)
+                model = folder / "model.gguf"
+                real = policy()
+                data = {"reference": real["reference"], "gpu_profiles": [{"id": "rocm-rdna4", "target": "linux-x86_64-rocm", "family": "gfx1201", "models": ["fixture"]}],
+                        "targets": [{"id": "linux-x86_64-rocm", "backend": "rocm", "interfaces": {"browser_chat": False}}],
+                        "models": [{"id": "fixture", "context": 32, "size_bytes": model.stat().st_size, "sha256": sha256(model)}]}
+                config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "Vulkan7" if failure == "wrong_backend" else "ROCm7"],
+                          "reference_bin": str(reference), "reference_source": str(folder), "lock_directory": str(folder / "reservation"), "models": {"fixture": str(model)}}
+                write_json(folder / "worker.json", config)
+                candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
+                             "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
+                def output(command, *args, **kwargs):
+                    if command[-1] == "HEAD": return real["reference"]["commit"]
+                    if command[-1] == "--version":
+                        if failure == "during_version_probe": (reference / "libggml-hip.so").write_bytes(b"changed during version probe")
+                        return "b96806d96" if failure == "stale_server" else real["reference"]["commit"][:7]
+                    return ""
+                def requests(*args):
+                    self.assertNotIn("LD_LIBRARY_PATH", args[5])
+                    self.assertNotIn("DYLD_LIBRARY_PATH", args[5])
+                    if failure == "library": (reference / "libggml-hip.so").write_bytes(b"rebuilt library")
+                samples = [("prompt", {"comparison": {"tokens": 16, "near_ties": []}}) for _ in range(3)]
+                argv = ["release_gpu.py", "--directory", str(folder), "--profile", "rocm-rdna4", "--output", str(folder / "report.json")]
+                args = SimpleNamespace(profile="rocm-rdna4", directory=folder, version="9.8.7", commit=COMMIT, output=folder / "report.json", exercise_models=True)
+                with self.subTest(entrypoint=entrypoint, failure=failure), contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+                    stack.enter_context(patch.object(sys, "argv", argv))
+                    stack.enter_context(patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(folder / "worker.json"),
+                                                              "LD_LIBRARY_PATH": "<private-library-override>", "DYLD_LIBRARY_PATH": "<private-library-override>"}))
+                    for name, value in (("verify_candidate", candidate), ("policy", data), ("extract_archive", tree),
+                                        ("probe_binary", None), ("tokenizer_parity", None), ("inference_parity", samples),
+                                        ("hardware_evidence", {"gpu": "CPU fixture", "os": "fixture", "driver": "fixture"})):
+                        stack.enter_context(patch.object(release_gpu, name, return_value=value))
+                    for name, value in (("policy", data), ("extract_archive", tree), ("probe_binary", None), ("idle", None)):
+                        stack.enter_context(patch.object(release_worker, name, return_value=value))
+                    stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
+                    stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
+                    launch = stack.enter_context(patch.object(release_gpu, "process"))
+                    module = release_gpu if entrypoint == "candidate" else release_worker
+                    report = stack.enter_context(patch.object(module, "write_json"))
+                    def run():
+                        if entrypoint == "candidate": release_gpu.main()
+                        else: release_worker.check(args)
+                    if failure:
+                        reason = {"library": "reference artifacts changed", "during_version_probe": "reference artifacts changed",
+                                  "stale_server": "reference executable", "wrong_backend": "native GPU backend"}[failure]
+                        with self.assertRaisesRegex(ValueError, reason): run()
+                        if entrypoint == "candidate": report.assert_not_called()
+                        else: self.assertFalse(report.call_args.args[1]["passed"])
+                    else:
+                        run()
+                        self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
+                        self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
+                    launch.assert_not_called()  # Every inference boundary is mocked: these are CPU lifecycle tests.
+                after = release_gpu.reference_artifacts(reference)
+                self.assertEqual(before["server_sha256"], after["server_sha256"])
+                self.assertEqual(before["tokenizer_sha256"], after["tokenizer_sha256"])
+                self.assertFalse((folder / "reservation").exists())
+
     def test_release_unicode_gate_rejects_invalid_bytes_missing_usage_and_lost_text(self):
         def nonstream(port, path, body):
             text = "café 東京 🚀" if body["max_tokens"] == 32 else ""
@@ -1126,6 +1245,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("--debug", commands[1])
         self.assertNotIn("ZINC_LOG_TOPK", environments[1])
         self.assertNotIn("ZINC_FORCE_CPU_ARGMAX", environments[1])
+        self.assertNotIn("LD_LIBRARY_PATH", environments[1])
+        if sys.platform.startswith("linux"):
+            self.assertEqual(environments[0]["LD_LIBRARY_PATH"], str(self.root / "reference"))
 
     def test_reference_agreement_records_a_bounded_tie_without_counting_it_exact(self):
         cases = [{"tokens": 16, "near_ties": []} for _ in range(3)]

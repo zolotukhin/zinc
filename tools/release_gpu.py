@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from release import verify_candidate
-from release_lib import ROOT, extract_archive, install_signal_handlers, policy, probe_binary, read_json, reference_agreement, require, sha256, write_json
+from release_lib import ROOT, REFERENCE_LIBRARY_NAME, extract_archive, install_signal_handlers, policy, probe_binary, read_json, reference_agreement, require, sha256, write_json
 
 CORPUS = [
     "The quick brown fox jumps over the lazy dog.", "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
@@ -33,6 +33,12 @@ def output(command, env=None, timeout=180):
     result = subprocess.run(command, cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=timeout, env=env)
     require(result.returncode == 0, "validation command failed: " + Path(command[0]).name)
     return result.stdout + result.stderr
+
+
+def packaged_environment():
+    """Probe installed bytes without interactive model/library overrides."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("ZINC_") and
+            key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH")}
 
 
 def reference_environment(reference, env):
@@ -157,7 +163,7 @@ def kernel_reference(tree, reference, checkout, device, work, env):
             "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
             "-lggml-base", "-lvulkan", "-lm", "-o", str(executable)])
     log = work / "kernel-reference.log"
-    with process([str(executable)], log, work, {**env, "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
+    with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged kernel reference validation failed")
     require("PASS: 84 cache-boundary/reference/offset/stride/guard cases" in log.read_text(), "kernel reference suite was incomplete")
 
@@ -168,7 +174,7 @@ def tokenizer_parity(tree, reference, model, work, env):
         prompt.write_text(text)
         zinc = token_ids(output([str(tree / "bin/zinc-tokenize"), str(model), str(prompt)], env))
         llama = token_ids(output([str(reference / "llama-tokenize"), "-m", str(model), "-f", str(prompt),
-                                 "--ids", "--no-escape", "--log-disable"], env))
+                                 "--ids", "--no-escape", "--log-disable"], reference_environment(reference, env)))
         require(zinc == llama, f"tokenizer parity failed on corpus case {index}")
 
 
@@ -253,7 +259,7 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
                "--cache-type-v", generation["kv_cache"], "--flash-attn", "on" if generation["flash_attention"] else "off",
                "--host", "127.0.0.1", "--port", str(port), "-c", str(context)]
     limit = policy()["reference"]["agreement"]["tokens_per_case"]
-    with process(reference_command(port), work / "reference.log", work, env) as child:
+    with process(reference_command(port), work / "reference.log", work, reference_environment(reference, env)) as child:
         ready(child, port)
         for prompt in PROMPTS:
             rendered = json_request(port, "/apply-template", {"messages": [{"role": "user", "content": prompt}],
@@ -282,7 +288,7 @@ def inference_parity(tree, reference, model, context, device, llama_args, work, 
     reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(PROMPTS))
     if pending:
         port = free_port()
-        with process(reference_command(port), work / "reference-near-ties.log", work, env) as child:
+        with process(reference_command(port), work / "reference-near-ties.log", work, reference_environment(reference, env)) as child:
             ready(child, port)
             for prompt, expected, actual, text, tie in pending:
                 qualify_reference_branch(port, tree, model, prompt, expected, actual, text, tie, work, env)
@@ -463,12 +469,44 @@ def worker_for_profile(base, identifier):
     return result
 
 
+def reference_device_backend(args, backend):
+    """Select a native oracle; quantized backends can choose different tokens."""
+    prefixes = {"metal": "Metal", "vulkan": "Vulkan", "rocm": "ROCm"}
+    require(isinstance(backend, str) and backend in prefixes and isinstance(args, list) and args and all(isinstance(arg, str) for arg in args),
+            "worker must explicitly configure reference GPU flags")
+    devices = []
+    for index, arg in enumerate(args):
+        if arg in ("--device", "-dev"):
+            require(index + 1 < len(args), "reference GPU device is missing")
+            devices.append(args[index + 1])
+        elif arg.startswith(("--device=", "-dev=")):
+            devices.append(arg.split("=", 1)[1])
+    suffix = r"\d*" if backend == "metal" else r"\d+"
+    require(len(devices) == 1 and re.fullmatch(prefixes[backend] + suffix, devices[0]),
+            "reference must select the target's native GPU backend exactly once")
+    return backend
+
+
+def reference_artifacts(reference):
+    # The server can remain byte-identical while a tool build replaces its
+    # ggml/llama libraries. Record their identities, not private loader paths.
+    libraries = {path.name: sha256(path) for path in sorted(reference.iterdir())
+                 if path.is_file() and REFERENCE_LIBRARY_NAME.fullmatch(path.name)}
+    require(any(name.startswith("libggml") for name in libraries), "reference must include its ggml libraries beside the tools")
+    return {"server_sha256": sha256(reference / "llama-server"),
+            "tokenizer_sha256": sha256(reference / "llama-tokenize"),
+            "library_sha256": libraries}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    # Installed archives and pinned references must work through their own
+    # runtime paths, independent of an interactive shell's library overrides.
+    env = packaged_environment()
     data = verify_candidate(args.directory)
     config_path = os.environ.get("ZINC_RELEASE_WORKER_CONFIG")
     require(config_path, "worker must set ZINC_RELEASE_WORKER_CONFIG to its private configuration file")
@@ -481,13 +519,13 @@ def main():
     artifact = next(a for a in data["artifacts"] if a["target"] == profile["target"])
     device = config.get("device")
     require(type(device) is int and device >= 0, "worker must configure a device index")
+    llama_args = config.get("reference_args")
+    backend = next(t["backend"] for t in policy()["targets"] if t["id"] == profile["target"])
+    reference_backend = reference_device_backend(llama_args, backend)
     reference, checkout = Path(config["reference_bin"]).resolve(), Path(config["reference_source"]).resolve()
     commit = policy()["reference"]["commit"]
     require(output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == commit, "reference checkout is not pinned")
     require(not output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference checkout is dirty")
-    require(commit[:7] in output([str(reference / "llama-server"), "--version"], reference_environment(reference, os.environ)), "reference executable does not match pinned source")
-    llama_args = config.get("reference_args")
-    require(isinstance(llama_args, list) and llama_args and all(isinstance(a, str) for a in llama_args), "worker must explicitly configure reference GPU flags")
     lock = Path(config["lock_directory"]).expanduser().resolve()
     require(lock.parent.is_dir(), "worker lock parent must exist")
     try:
@@ -497,16 +535,18 @@ def main():
     try:
         processes = output(["ps", "-eo", "comm="])
         require(not any(Path(line.strip()).name in ("zinc", "llama-server", "llama-cli") for line in processes.splitlines()), "GPU worker is busy")
+        reference_snapshot = reference_artifacts(reference)
+        # Include the version probe in the frozen-artifact window. A clean
+        # checkout does not prove the executable was rebuilt at that revision.
+        require(commit[:7] in output([str(reference / "llama-server"), "--version"], reference_environment(reference, env)), "reference executable does not match pinned source")
         with tempfile.TemporaryDirectory(prefix="zinc-packaged-gpu-") as directory:
             work = Path(directory)
             tree = extract_archive(Path(args.directory) / artifact["filename"], work / "unpack", data["version"], profile["target"], data["commit"])
             print("Checking packaged identity, selected GPU and runtime", flush=True)
             probe_binary(tree, data["version"], profile["target"], data["commit"])
-            env = {k: v for k, v in os.environ.items() if not k.startswith("ZINC_")}
             # Runtime assets must resolve from the installed archive itself.
             diagnostics = output([str(tree / "bin/zinc"), "--check", "-d", str(device)], env, timeout=360)
             hardware = hardware_evidence(diagnostics, profile["family"], device)
-            env = reference_environment(reference, env)
             if profile["family"].startswith("apple"):
                 for executable in (tree / "bin/zinc", tree / "bin/zinc-tokenize"):
                     output(["codesign", "--verify", "--strict", str(executable)])
@@ -538,13 +578,15 @@ def main():
                 if bounded is not None:
                     models[-1]["bounded_prefill"] = bounded
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
+            require(reference_artifacts(reference) == reference_snapshot, "reference artifacts changed during GPU validation")
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
                       "archive_sha256": sha256(Path(args.directory) / artifact["filename"]), "binary_sha256": sha256(tree / "bin/zinc"),
                       "hardware": hardware, "models": models,
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": commit, "generation": policy()["reference"]["generation"],
-                                    "server_sha256": sha256(reference / "llama-server"), "tokenizer_sha256": sha256(reference / "llama-tokenize")},
+                                    "device_backend": reference_backend,
+                                    **reference_snapshot},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup")}}
             if profile["target"].endswith("vulkan"):
                 report["checks"]["kernel_reference"] = True

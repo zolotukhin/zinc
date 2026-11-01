@@ -110,22 +110,22 @@ def check(args):
             tree = extract_archive(archive, work / "unpack", args.version, profile["target"], args.commit)
             report["archive_sha256"] = sha256(archive)
             probe_binary(tree, args.version, profile["target"], args.commit)
-            env = {key: value for key, value in os.environ.items() if not key.startswith("ZINC_")}
+            env = gpu.packaged_environment()
             stage = "hardware"
             idle()
             report["hardware"] = gpu.hardware_evidence(gpu.output([str(tree / "bin/zinc"), "--check", "-d", str(config["device"])], env, timeout=360), profile["family"], config["device"])
             idle()
             stage = "reference"
             reference, checkout = Path(config["reference_bin"]), Path(config["reference_source"])
-            env = gpu.reference_environment(reference, env)
+            backend = next(t["backend"] for t in policy()["targets"] if t["id"] == profile["target"])
+            reference_backend = gpu.reference_device_backend(config.get("reference_args"), backend)
             expected = policy()["reference"]["commit"]
             require(gpu.output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == expected, "reference source is not pinned")
             require(not gpu.output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference source is dirty")
-            require(expected[:7] in gpu.output([str(reference / "llama-server"), "--version"], env), "reference executable differs from policy")
-            selectors = [config["reference_args"][i + 1] for i, arg in enumerate(config["reference_args"][:-1]) if arg == "--device"]
-            reference_backend = next((name for name in ("Vulkan", "ROCm", "HIP", "Metal") if any(value.startswith(name) for value in selectors)), "unspecified")
-            report["reference"] = {"commit": expected, "backend": reference_backend.lower(),
-                                   "server_sha256": sha256(reference / "llama-server"), "tokenizer_sha256": sha256(reference / "llama-tokenize")}
+            reference_snapshot = gpu.reference_artifacts(reference)
+            require(expected[:7] in gpu.output([str(reference / "llama-server"), "--version"], gpu.reference_environment(reference, env)), "reference executable differs from policy")
+            report["reference"] = {"commit": expected, "device_backend": reference_backend,
+                                   "generation": policy()["reference"]["generation"], **reference_snapshot}
             stage = "model_pins"
             report["models"] = model_pins(profile, config)
             if args.exercise_models:
@@ -151,6 +151,7 @@ def check(args):
                     idle()
             stage = "cleanup"
             idle()
+            require(gpu.reference_artifacts(reference) == reference_snapshot, "reference artifacts changed during GPU validation")
             report.update(passed=True, models_exercised=args.exercise_models, cleanup="no GPU process remains")
     except BaseException as error:
         report.update(failed_stage=stage, error=str(error) if type(error) is ValueError else type(error).__name__)
