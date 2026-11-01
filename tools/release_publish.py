@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from release import aggregate, verify_candidate
-from release_lib import ROOT, policy, read_json, require, sha256, source_sha, write_json
+from release_lib import ROOT, environment_main_only, environment_requires_reviewers, policy, read_json, require, sha256, source_sha, write_json
 
 REPOSITORY = "zolotukhin/zinc"
 WORKFLOW = ".github/workflows/release-candidate.yml"
@@ -45,10 +45,14 @@ def validate_run(run, run_id):
     return source_sha(run.get("head_sha"))
 
 
-def validate_environment(environment):
-    rules = environment.get("protection_rules", []) if environment else []
-    require(any(rule.get("type") == "required_reviewers" and rule.get("reviewers") for rule in rules),
+def validate_environment(environment, branch_response):
+    require(environment_requires_reviewers(environment),
             "configure required reviewers on the release environment before publishing; an unprotected/missing environment cannot approve a release")
+    # Only one rule can be valid, so an exact count also rejects truncated
+    # first pages. Recheck live metadata after approval, before any writes.
+    require(isinstance(branch_response, dict) and type(branch_response.get("total_count")) is int and
+            branch_response["total_count"] == 1 and environment_main_only(environment, branch_response.get("branch_policies")),
+            "restrict the release environment to only the main branch before publishing")
 
 
 def validate_catalog(catalog, release_version):
@@ -164,7 +168,9 @@ def main():
             "publisher must run from the project's main workflow")
     run = api("actions/runs/" + args.run)
     validate_run(run, args.run)
-    validate_environment(api("environments/release", optional=True))
+    environment = api("environments/release", optional=True)
+    branches = api("environments/release/deployment-branch-policies", optional=True) if environment else None
+    validate_environment(environment, branches)
     directory = Path(args.directory)
     if not directory.exists():
         gh(["run", "download", args.run, "--repo", REPOSITORY, "--name", "release-candidate", "--dir", str(directory)])

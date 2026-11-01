@@ -103,6 +103,13 @@ The disposable macOS job imports into a temporary keychain, signs both executabl
 
 Create `release` with at least one required reviewer, restricted to main. The publisher reads its configuration and refuses a missing/unprotected environment; naming an environment in YAML is insufficient. Decide whether self-review is permitted for the maintainer setup. Preflight presents the candidate run, full source SHA and archive hashes before approval.
 
+Publication rechecks the live reviewer configuration and the complete main-only
+branch policy both before approval and in the protected publishing job. Wildcard
+rules, tag rules, broader protected-branch access, incomplete policy responses
+and malformed reviewer identities fail before candidate downloads or release
+writes. A candidate's earlier configuration snapshot cannot substitute for
+these checks after an environment change.
+
 ## Check configuration before dispatch
 
 From a current main checkout, use the maintainer's authenticated GitHub CLI:

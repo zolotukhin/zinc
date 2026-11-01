@@ -689,10 +689,62 @@ class ReleaseTest(unittest.TestCase):
 
     def test_unprotected_environment_is_not_an_approval(self):
         for environment in [None, {}, {"protection_rules": []}, {"protection_rules": [{"type": "wait_timer"}]},
-                            {"protection_rules": [{"type": "required_reviewers", "reviewers": []}]}]:
+                            {"protection_rules": [{"type": "required_reviewers", "reviewers": []}]},
+                            {"protection_rules": [{"type": "required_reviewers", "reviewers": [None]}]},
+                            {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}]}]:
             with self.subTest(environment=environment), self.assertRaisesRegex(ValueError, "required reviewers"):
-                release_publish.validate_environment(environment)
-        release_publish.validate_environment({"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}]})
+                release_publish.validate_environment(environment, None)
+        github = PreflightGitHub()
+        environment = github.responses["environments/release"]
+        branches = github.responses["environments/release/deployment-branch-policies"][0]
+        release_publish.validate_environment(environment, branches)
+        environment["protection_rules"][0]["reviewers"][0]["type"] = "Team"
+        release_publish.validate_environment(environment, branches)
+
+    def test_publication_rejects_broad_branch_access_and_incomplete_rule_inventories(self):
+        github = PreflightGitHub()
+        environment = github.responses["environments/release"]
+        correct = github.responses["environments/release/deployment-branch-policies"][0]
+        for branches in (None, {}, {"total_count": 0, "branch_policies": []},
+                         {"total_count": True, "branch_policies": correct["branch_policies"]},
+                         {"total_count": 2, "branch_policies": correct["branch_policies"]},
+                         {"total_count": 1, "branch_policies": [{"name": "main", "type": "tag"}]},
+                         {"total_count": 1, "branch_policies": [{"name": "*", "type": "branch"}]},
+                         {"total_count": 1, "branch_policies": [None]},
+                         {"total_count": 1, "branch_policies": [*correct["branch_policies"], {"name": "v*", "type": "tag"}]}):
+            with self.subTest(branches=branches), self.assertRaisesRegex(ValueError, "only the main branch"):
+                release_publish.validate_environment(environment, branches)
+        for restriction in (None, {}, {"protected_branches": True, "custom_branch_policies": False}):
+            with self.subTest(restriction=restriction), self.assertRaisesRegex(ValueError, "only the main branch"):
+                release_publish.validate_environment({**environment, "deployment_branch_policy": restriction}, correct)
+
+    def test_publication_checks_current_protections_before_downloading_or_writing_a_release(self):
+        github = PreflightGitHub()
+        environment = github.responses["environments/release"]
+        # A candidate can pass preflight and then wait for approval while the
+        # environment changes. Its former configuration must not authorize it.
+        release_publish.validate_environment(environment, github.responses["environments/release/deployment-branch-policies"][0])
+        environment["deployment_branch_policy"] = None
+        run = {"id": 123, "path": release_publish.WORKFLOW, "event": "workflow_dispatch", "head_branch": "main",
+               "head_repository": {"full_name": release_publish.REPOSITORY}, "status": "completed", "conclusion": "success", "head_sha": COMMIT}
+        responses = {
+            "actions/runs/123": run,
+            "environments/release": environment,
+            "environments/release/deployment-branch-policies": github.responses["environments/release/deployment-branch-policies"][0],
+        }
+        for publish in (False, True):
+            argv = ["release_publish.py", "--run", "123", "--directory", str(self.root / "not-downloaded")]
+            if publish:
+                argv.append("--publish")
+            with self.subTest(publish=publish), patch.object(sys, "argv", argv), \
+                    patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": release_publish.REPOSITORY}), \
+                    patch.object(release_publish, "api", side_effect=lambda path, **kwargs: responses[path]) as api, \
+                    patch.object(release_publish, "gh") as cli, patch.object(release_publish, "publish") as write, \
+                    self.assertRaisesRegex(ValueError, "only the main branch"):
+                release_publish.main()
+            cli.assert_not_called()
+            write.assert_not_called()
+            self.assertTrue(all(call.args and len(call.args) == 1 for call in api.call_args_list))
 
     def test_publisher_never_replaces_an_existing_published_release(self):
         directory, _ = self.candidate()
