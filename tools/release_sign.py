@@ -13,6 +13,9 @@ from pathlib import Path
 
 from release_lib import extract_archive, install_signal_handlers, require, sha256, version, source_sha, write_json
 
+SIGNING_SECRETS = ("ZINC_APPLE_CERTIFICATE_BASE64", "ZINC_APPLE_CERTIFICATE_PASSWORD", "ZINC_APPLE_SIGNING_IDENTITY",
+                   "ZINC_APPLE_API_KEY_BASE64", "ZINC_APPLE_API_KEY_ID", "ZINC_APPLE_API_ISSUER")
+
 
 def run(command, timeout=120):
     try:
@@ -34,8 +37,7 @@ def main():
     version(args.version)
     source_sha(args.commit)
     require(sys.platform == "darwin" and os.environ.get("GITHUB_ACTIONS") == "true", "sign only on a disposable macOS Actions worker")
-    names = ("ZINC_APPLE_CERTIFICATE_BASE64", "ZINC_APPLE_CERTIFICATE_PASSWORD", "ZINC_APPLE_SIGNING_IDENTITY",
-             "ZINC_APPLE_API_KEY_BASE64", "ZINC_APPLE_API_KEY_ID", "ZINC_APPLE_API_ISSUER")
+    names = SIGNING_SECRETS
     require(all(os.environ.get(name) for name in names), "Apple signing/notarization secrets are missing")
     old_keychains = shlex.split(run(["security", "list-keychains", "-d", "user"]))
     with tempfile.TemporaryDirectory(prefix="zinc-sign-") as directory:

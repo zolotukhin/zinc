@@ -103,11 +103,52 @@ The disposable macOS job imports into a temporary keychain, signs both executabl
 
 Create `release` with at least one required reviewer, restricted to main. The publisher reads its configuration and refuses a missing/unprotected environment; naming an environment in YAML is insufficient. Decide whether self-review is permitted for the maintainer setup. Preflight presents the candidate run, full source SHA and archive hashes before approval.
 
+## Check configuration before dispatch
+
+From a current main checkout, use the maintainer's authenticated GitHub CLI:
+
+```bash
+python3 tools/release.py preflight --repo zolotukhin/zinc
+python3 tools/release.py preflight --repo zolotukhin/zinc --json
+```
+
+The default command only reads configuration and exits nonzero when blocked or
+unable to inspect it. It checks all eight runner assignments covering nine
+profiles, requires an online worker matching every assigned label, checks the
+six signing secret names in `release-signing`, and verifies both environments
+allow only the main branch. Publication must also have a required reviewer.
+Busy online workers count as eligible and can queue normally. Missing pages,
+unreadable APIs and malformed responses fail the check. Reports contain public
+role names and counts, with runner names, label values, unrelated secret names,
+reviewer identities and raw CLI errors excluded.
+
+This uses local `gh` authentication with repository administration read access
+for runner inventory, variables read access, and environment/secret metadata
+read access. It adds no administrator token to CI. See GitHub's
+[runner API permissions](https://docs.github.com/en/rest/actions/self-hosted-runners#list-self-hosted-runners-for-a-repository),
+[label matching](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/apply-labels),
+and [environment API](https://docs.github.com/en/rest/deployments/environments).
+Only secret names are requested; their values cannot be read through this API.
+
+To dispatch only after this snapshot passes, add `--dispatch` (also requires
+Actions write access). The workflow always runs from main. `--source` optionally
+selects a full source SHA; the candidate job verifies that it is already on main.
+
+```bash
+python3 tools/release.py preflight --repo zolotukhin/zinc --dispatch 0.1.0-rc.1
+```
+
+Passing configuration does not certify the hardware, private worker files,
+model/reference pins or Apple credentials. The protected candidate jobs still
+check these and qualify the actual signed archives. Runner availability can
+change after the audit. A dispatch failure is not retried automatically; inspect
+Actions runs before retrying to avoid duplicate candidates.
+
 ## Qualify, freeze and publish
 
 After workflows merge to main and infrastructure is configured:
 
-1. Dispatch `release-candidate.yml` on main with an explicit nightly/RC version first. Resolution accepts main or a full SHA already on main, freezes it once, and rejects dirty source/incomplete hardware assignments.
+1. Run the configuration preflight above, then dispatch `release-candidate.yml` on main with an explicit nightly/RC version first. Resolution accepts main or a full SHA already on main, freezes it once, and rejects dirty source/incomplete hardware assignments.
 2. Review all nine reports and model results. The small starter starts experimental. Promote its catalog status/tested profiles only after reviewing real Metal/Vulkan family evidence. Stable publication rejects an unqualified starter; that source change needs another candidate.
 3. Dispatch the final candidate with `version=0.1.0`. An RC cannot be renamed. Every final archive already embeds `0.1.0` and the full SHA.
 4. Review the `release-candidate` artifact: three archives, policy, checksums, validation, generated notes, installer and offline provenance. Artifacts expire after 14 days; rebuild/requalify if unavailable.

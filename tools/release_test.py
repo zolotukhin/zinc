@@ -19,6 +19,7 @@ import release
 import release_gpu
 import release_lib
 import release_publish
+import release_preflight
 import release_sign
 from release_lib import (
     ROOT, archive_name, check_metadata, extract_archive, inventory, policy,
@@ -27,6 +28,222 @@ from release_lib import (
 
 COMMIT = "1" * 40
 NATIVE = "macos-aarch64-metal" if sys.platform == "darwin" else "linux-x86_64-vulkan"
+
+
+class PreflightGitHub(release_preflight.GitHub):
+    """Exercise real parsing/matching with synthetic, deliberately private data."""
+    def __init__(self):
+        self.commands = []
+        self.responses = {}
+        variables, runners = [], []
+        roles = list(dict.fromkeys(row["runner_variable"] for row in policy()["gpu_profiles"]))
+        for index, role in enumerate(roles):
+            labels = ["self-hosted", f"<private-label-{index}>"]
+            variables.append({"name": role, "value": json.dumps(labels)})
+            runners.append({"id": index + 1, "name": "<private-runner>", "status": "online", "busy": False,
+                            "labels": [{"name": label.upper()} for label in labels]})
+        self.rows("actions/variables", "variables", variables)
+        self.rows("actions/runners", "runners", runners)
+        for name in ("release", "release-signing"):
+            self.responses[f"environments/{name}"] = {
+                "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False},
+                "protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User", "reviewer": {"id": 1, "login": "<private-reviewer>"}}]}],
+            }
+            self.rows(f"environments/{name}/deployment-branch-policies", "branch_policies", [{"id": 1, "name": "main", "type": "branch"}])
+        self.rows("environments/release-signing/secrets", "secrets", [{"name": name} for name in release_sign.SIGNING_SECRETS])
+
+    def rows(self, path, key, rows):
+        self.responses[path] = [{"total_count": len(rows), key: rows}]
+
+    def run(self, args):
+        self.commands.append(args)
+        if args[0] == "workflow":
+            return ""
+        path = args[-1].removeprefix("repos/owner/repo/").split("?")[0]
+        return json.dumps(self.responses[path])
+
+
+class ReleasePreflightTest(unittest.TestCase):
+    def audit(self, github):
+        return release_preflight.audit(github, "owner/repo", policy())
+
+    def role(self, report, name="ZINC_RUNNER_METAL_APPLE7"):
+        return next(row for row in report["checks"] if row["name"] == name)
+
+    def args(self, **overrides):
+        return SimpleNamespace(**{"repo": "owner/repo", "json": True, "dispatch": None, "source": "main", **overrides})
+
+    def run_preflight(self, github, expected_status=0, **overrides):
+        output = io.StringIO()
+        with patch.object(release_preflight, "GitHub", return_value=github), contextlib.redirect_stdout(output):
+            if expected_status:
+                with self.assertRaises(SystemExit) as error:
+                    release_preflight.run(self.args(**overrides))
+                self.assertEqual(error.exception.code, expected_status)
+            else:
+                release_preflight.run(self.args(**overrides))
+        return json.loads(output.getvalue())
+
+    def test_ready_is_read_only_and_keeps_all_nine_profiles_in_eight_roles(self):
+        github = PreflightGitHub()
+        report = self.run_preflight(github)
+        self.assertTrue(report["configuration_ready"])
+        self.assertEqual(report["runner_inventory"], {"registered": 8, "online": 8, "idle": 8})
+        roles = [row for row in report["checks"] if "profiles" in row]
+        self.assertEqual(len(roles), 8)
+        self.assertEqual(sum(len(row["profiles"]) for row in roles), 9)
+        self.assertEqual(self.role(report, "ZINC_RUNNER_RDNA4")["profiles"], ["vulkan-rdna4", "rocm-rdna4"])
+        self.assertTrue(all(command[0] == "api" and "--method" not in command for command in github.commands))
+        self.assertIn("candidate qualification", report["qualification"])
+
+    def test_label_matching_is_case_insensitive_and_requires_every_label(self):
+        github = PreflightGitHub()
+        self.assertTrue(self.audit(github)["configuration_ready"])
+        github.responses["actions/runners"][0]["runners"][0]["labels"].pop()
+        report = self.audit(github)
+        self.assertFalse(report["configuration_ready"])
+        self.assertEqual(self.role(report)["matching"], 0)
+
+    def test_offline_workers_block_but_busy_online_workers_are_eligible(self):
+        github = PreflightGitHub()
+        runner = github.responses["actions/runners"][0]["runners"][0]
+        runner["status"] = "offline"
+        report = self.audit(github)
+        self.assertFalse(report["configuration_ready"])
+        self.assertEqual(self.role(report)["matching"], 1)
+        self.assertEqual(self.role(report)["online"], 0)
+        runner.update(status="online", busy=True)
+        report = self.audit(github)
+        self.assertTrue(report["configuration_ready"])
+        self.assertEqual(self.role(report)["idle"], 0)
+
+    def test_missing_or_invalid_runner_assignments_never_qualify(self):
+        github = PreflightGitHub()
+        for raw in (None, "", "[]", "{}", "[null]", '[" "]', "<private-invalid-json>"):
+            rows = [] if raw is None else [{"name": "ZINC_RUNNER_METAL_APPLE7", "value": raw}]
+            github.rows("actions/variables", "variables", rows)
+            with self.subTest(raw=raw):
+                report = self.audit(github)
+                self.assertFalse(report["configuration_ready"])
+                self.assertFalse(self.role(report)["passed"])
+                self.assertNotIn("<private-invalid-json>", json.dumps(report))
+
+    def test_environment_requires_only_main_branch_and_publication_reviewer(self):
+        for name in ("release", "release-signing"):
+            for branch_rows in ([], [{"id": 1, "name": "*", "type": "branch"}],
+                                [{"id": 1, "name": "main", "type": "tag"}],
+                                [{"id": 1, "name": "main", "type": "branch"}, {"id": 2, "name": "v*", "type": "tag"}]):
+                github = PreflightGitHub()
+                github.rows(f"environments/{name}/deployment-branch-policies", "branch_policies", branch_rows)
+                with self.subTest(name=name, branches=branch_rows):
+                    self.assertFalse(self.audit(github)["configuration_ready"])
+            for restriction in (None, {}, {"protected_branches": True, "custom_branch_policies": False}):
+                github = PreflightGitHub()
+                github.responses[f"environments/{name}"]["deployment_branch_policy"] = restriction
+                with self.subTest(name=name, restriction=restriction):
+                    self.assertFalse(self.audit(github)["configuration_ready"])
+        for reviewers in ([], [None], [{}], [{"type": "User", "reviewer": {"id": None}}]):
+            github = PreflightGitHub()
+            github.responses["environments/release"]["protection_rules"] = [{"type": "required_reviewers", "reviewers": reviewers}]
+            with self.subTest(reviewers=reviewers):
+                self.assertFalse(self.audit(github)["configuration_ready"])
+
+    def test_signing_requires_all_six_names_in_the_environment(self):
+        github = PreflightGitHub()
+        github.rows("environments/release-signing/secrets", "secrets", [{"name": release_sign.SIGNING_SECRETS[0]}])
+        report = self.audit(github)
+        signing = self.role(report, "Apple signing secrets")
+        self.assertFalse(report["configuration_ready"])
+        self.assertEqual(set(signing["missing"]), set(release_sign.SIGNING_SECRETS[1:]))
+        # Repository-level credentials do not satisfy the protected environment contract.
+        self.assertFalse(any(command[-1].startswith("repos/owner/repo/actions/secrets") for command in github.commands))
+
+    def test_human_and_json_reports_never_disclose_private_api_fields(self):
+        github = PreflightGitHub()
+        github.responses["environments/release-signing/secrets"][0]["secrets"].append({"name": "<unrelated-secret>", "value": "<secret-value>"})
+        github.responses["environments/release-signing/secrets"][0]["total_count"] += 1
+        report = self.audit(github)
+        output = (json.dumps(report) + release_preflight.render(report)).casefold()
+        for marker in ("<private-", "<unrelated-secret>", "<secret-value>"):
+            self.assertNotIn(marker, output)
+
+    def test_pagination_collects_all_pages_and_rejects_incomplete_or_duplicate_data(self):
+        github = PreflightGitHub()
+        github.responses["fixture"] = [{"total_count": 2, "runners": [{"id": 1}]}, {"total_count": 2, "runners": [{"id": 2}]}]
+        self.assertEqual(github.collection("repos/owner/repo/fixture", "runners", "id"), [{"id": 1}, {"id": 2}])
+        self.assertIn("--paginate", github.commands[-1])
+        self.assertIn("--slurp", github.commands[-1])
+        self.assertTrue(github.commands[-1][-1].endswith("?per_page=30"))
+        for payload in ([], {}, [{"total_count": 2, "runners": [{"id": 1}]}],
+                        [{"total_count": 2, "runners": [{"id": 1}, {"id": 1}]}],
+                        [{"total_count": 1, "runners": [{"id": 1}]}, {"total_count": 2, "runners": [{"id": 2}]}]):
+            github.responses["fixture"] = payload
+            with self.subTest(payload=payload), self.assertRaises(release_preflight.InspectionError):
+                github.collection("repos/owner/repo/fixture", "runners", "id")
+
+    def test_unreadable_and_malformed_api_data_fail_closed_and_redact_errors(self):
+        for outcome in (SimpleNamespace(returncode=1, stdout="<private-response>", stderr="<private-stderr>"),
+                        SimpleNamespace(returncode=0, stdout="<invalid-private-json>", stderr=""),
+                        OSError("<private-path>"), subprocess.TimeoutExpired(["gh", "<private-argv>"], 60)):
+            kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+            with self.subTest(outcome=type(outcome)), patch.object(release_preflight.subprocess, "run", **kwargs):
+                report = self.audit(release_preflight.GitHub())
+                self.assertFalse(report["configuration_ready"])
+                output = (json.dumps(report) + release_preflight.render(report)).casefold()
+                for marker in ("<private", "<invalid-private-json>"):
+                    self.assertNotIn(marker, output)
+        for key, value in (("labels", None), ("labels", [{"name": None}]), ("status", "unknown"), ("busy", None)):
+            github = PreflightGitHub()
+            github.responses["actions/runners"][0]["runners"][0][key] = value
+            with self.subTest(key=key, value=value):
+                self.assertFalse(self.audit(github)["configuration_ready"])
+
+    def test_blocked_configuration_never_dispatches(self):
+        github = PreflightGitHub()
+        github.rows("actions/runners", "runners", [])
+        report = self.run_preflight(github, expected_status=1, dispatch="0.1.0-rc.1")
+        self.assertFalse(report["dispatch_attempted"])
+        self.assertFalse(report["dispatch_confirmed"])
+        self.assertFalse(any(command[0] == "workflow" for command in github.commands))
+
+    def test_dispatch_uses_trusted_main_workflow_and_explicit_frozen_source(self):
+        github = PreflightGitHub()
+        report = self.run_preflight(github, dispatch="0.1.0-rc.1", source=COMMIT)
+        self.assertTrue(report["dispatch_confirmed"])
+        self.assertEqual(github.commands[-1], ["workflow", "run", "release-candidate.yml", "--repo", "owner/repo", "--ref", "main",
+                                              "-f", "version=0.1.0-rc.1", "-f", "source=" + COMMIT])
+
+    def test_failed_dispatch_is_reported_without_retrying(self):
+        class FailedDispatch(PreflightGitHub):
+            def run(self, args):
+                result = super().run(args)
+                if args[0] == "workflow":
+                    raise release_preflight.InspectionError("GitHub request failed")
+                return result
+        github = FailedDispatch()
+        report = self.run_preflight(github, expected_status=1, dispatch="0.1.0-rc.1")
+        self.assertTrue(report["configuration_ready"])
+        self.assertTrue(report["dispatch_attempted"])
+        self.assertFalse(report["dispatch_confirmed"])
+        self.assertEqual(sum(command[0] == "workflow" for command in github.commands), 1)
+
+    def test_invalid_dispatch_inputs_are_rejected_before_api_or_workflow_calls(self):
+        for args in ({"dispatch": "../0.1.0"}, {"dispatch": "0.1.0", "source": "feature-branch"},
+                     {"source": COMMIT}, {"repo": "owner/../repo"}):
+            github = PreflightGitHub()
+            with self.subTest(args=args), patch.object(release_preflight, "GitHub", return_value=github), self.assertRaises(ValueError):
+                release_preflight.run(self.args(**args))
+            self.assertFalse(github.commands)
+
+    def test_repository_uses_explicit_selection_then_actions_context_then_current_gh_repo(self):
+        github = release_preflight.GitHub()
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "context/repo"}), patch.object(github, "run") as cli:
+            self.assertEqual(release_preflight.repository("explicit/repo", github), "explicit/repo")
+            self.assertEqual(release_preflight.repository(None, github), "context/repo")
+            cli.assert_not_called()
+        with patch.dict(os.environ, {}, clear=True), patch.object(github, "run", return_value="owner/repo\n") as cli:
+            self.assertEqual(release_preflight.repository(None, github), "owner/repo")
+            cli.assert_called_once_with(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
 
 
 class ReleaseTest(unittest.TestCase):
