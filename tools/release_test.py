@@ -616,6 +616,7 @@ class ReleaseTest(unittest.TestCase):
                       "hardware": {"gpu": "CPU fixture, no GPU was executed", "os": "fixture", "driver": "fixture"},
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": policy()["reference"]["commit"], "generation": policy()["reference"]["generation"],
+                                    "device_backend": target(profile["target"])["backend"],
                                     "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup", "kernel_reference")}}
             write_json(reports / (profile["id"] + ".json"), report)
@@ -672,7 +673,8 @@ class ReleaseTest(unittest.TestCase):
                    lambda d: d["models"][0].pop("reference_agreement"),
                    lambda d: d["models"][0]["reference_agreement"].update(exact_tokens=1),
                    lambda d: d["reference"].pop("generation"), lambda d: d["reference"]["generation"].update(micro_batch=2),
-                   lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver")]
+                   lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver"),
+                   lambda d: d["reference"].pop("device_backend"), lambda d: d["reference"].update(device_backend="rocm")]
         for index, change in enumerate(changes):
             data = json.loads(saved)
             change(data)
@@ -859,6 +861,30 @@ class ReleaseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release_gpu.active_model_id(data)
 
+    def test_reference_device_backend_accepts_explicit_native_selectors(self):
+        for backend, selector in (("metal", "Metal"), ("metal", "Metal7"), ("vulkan", "Vulkan7"), ("rocm", "ROCm9")):
+            for args in (["-ngl", "99", "--device", selector], ["-dev", selector], ["--device=" + selector]):
+                with self.subTest(backend=backend, args=args):
+                    self.assertEqual(release_gpu.reference_device_backend(args, backend), backend)
+
+    def test_reference_device_backend_rejects_cross_backend_missing_and_ambiguous_selectors(self):
+        for args in (None, [], [None], ["-ngl", "99"], ["--device"], ["--device", "Vulkan7"],
+                     ["--device", "none"], ["--device", "ROCm"], ["--device", "ROCm7,ROCm9"],
+                     ["--device", "ROCm7", "-dev=Vulkan9"], ["--device", "ROCm7", "--device=ROCm7"]):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                release_gpu.reference_device_backend(args, "rocm")
+
+    def test_wrong_reference_backend_is_rejected_before_probing_or_starting_gpu_processes(self):
+        config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "Vulkan7"]}
+        argv = ["release_gpu.py", "--directory", str(self.root), "--profile", "rocm-rdna4", "--output", str(self.root / "report.json")]
+        with patch.object(sys, "argv", argv), patch.dict(os.environ, {"ZINC_RELEASE_WORKER_CONFIG": str(self.root / "worker.json")}), \
+                patch.object(release_gpu, "verify_candidate", return_value={"artifacts": [{"target": "linux-x86_64-rocm"}]}), \
+                patch.object(release_gpu, "read_json", return_value=config), patch.object(release_gpu, "output") as probe, \
+                patch.object(release_gpu, "process") as launch, self.assertRaisesRegex(ValueError, "native GPU backend"):
+            release_gpu.main()
+        probe.assert_not_called()
+        launch.assert_not_called()
+
     def test_release_unicode_gate_rejects_invalid_bytes_missing_usage_and_lost_text(self):
         def nonstream(port, path, body):
             text = "café 東京 🚀" if body["max_tokens"] == 32 else ""
@@ -881,6 +907,30 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(damage=damage), patch.object(release_gpu, "json_request", side_effect=nonstream), patch.object(release_gpu, "request", side_effect=lambda port, path, body: streaming(body, damage)):
                 with self.assertRaises(ValueError):
                     release_gpu.unicode_chat_checks(123, "loaded")
+
+    def test_unicode_gate_checks_transport_for_rephrased_and_normalized_responses(self):
+        def nonstream(port, path, body):
+            text = final_content if body["max_tokens"] == 32 else ""
+            return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+
+        def streaming(port, path, body):
+            content = nonstream(port, path, body)["choices"][0]["message"]["content"]
+            event = {"choices": [{"delta": {"content": content}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 42}}
+            payload = "data: " + json.dumps(event, ensure_ascii=False) + "\n\ndata: [DONE]\n\n"
+            return contextlib.nullcontext(io.BytesIO(payload.encode("utf-8")))
+
+        # The first response is the real 0.6B model's reply. Rephrasing and
+        # Unicode normalization are independent of JSON/SSE byte integrity.
+        for final_content in ("☕ 东京咖啡 🚀", "☕️ **カフェ・東京** 🚀", "cafe\u0301 東京 🚀"):
+            with self.subTest(content=final_content), patch.object(release_gpu, "json_request", side_effect=nonstream), \
+                    patch.object(release_gpu, "request", side_effect=streaming):
+                release_gpu.unicode_chat_checks(123, "loaded")
+        # Matching ASCII/BMP-only output cannot exercise a split four-byte
+        # code point; a surrogate is never valid UTF-8, even in both responses.
+        for final_content in ("ASCII only", "café 東京", "\ud83d"):
+            with self.subTest(content=repr(final_content)), patch.object(release_gpu, "json_request", side_effect=nonstream), \
+                    patch.object(release_gpu, "request", side_effect=streaming), self.assertRaises(ValueError):
+                release_gpu.unicode_chat_checks(123, "loaded")
 
     def test_http_reference_gate_rejects_early_stops_and_uses_the_exact_reference_prompt(self):
         samples = [("<rendered reference prompt>", {"content": "The complete reference continuation.\nSecond line."})]

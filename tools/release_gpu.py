@@ -336,7 +336,10 @@ def unicode_chat_checks(port, model_id):
         require(finishes == [result["choices"][0]["finish_reason"]], "Unicode JSON/SSE finish differed")
         require(any(event.get("usage", {}).get("prompt_tokens", 0) > 0 for event in events), "Unicode stream usage is missing")
         if budget == 32:
-            require(all(word in content for word in ("café", "東京", "🚀")), "Unicode echo was incomplete")
+            # Small models can translate/rephrase this instruction, including
+            # in llama.cpp. Exercise four-byte UTF-8 without grading wording;
+            # exact reference continuations are checked separately above.
+            require(any(ord(char) > 0xffff for char in content), "Unicode response did not exercise a four-byte code point")
 
 
 def api_checks(tree, model, context, device, work, env, browser_chat, reference_samples):
@@ -426,6 +429,24 @@ def worker_for_profile(base, identifier):
     return result
 
 
+def reference_device_backend(args, backend):
+    """Select a native oracle; quantized backends can choose different tokens."""
+    prefixes = {"metal": "Metal", "vulkan": "Vulkan", "rocm": "ROCm"}
+    require(isinstance(backend, str) and backend in prefixes and isinstance(args, list) and args and all(isinstance(arg, str) for arg in args),
+            "worker must explicitly configure reference GPU flags")
+    devices = []
+    for index, arg in enumerate(args):
+        if arg in ("--device", "-dev"):
+            require(index + 1 < len(args), "reference GPU device is missing")
+            devices.append(args[index + 1])
+        elif arg.startswith(("--device=", "-dev=")):
+            devices.append(arg.split("=", 1)[1])
+    suffix = r"\d*" if backend == "metal" else r"\d+"
+    require(len(devices) == 1 and re.fullmatch(prefixes[backend] + suffix, devices[0]),
+            "reference must select the target's native GPU backend exactly once")
+    return backend
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True)
@@ -444,13 +465,14 @@ def main():
     artifact = next(a for a in data["artifacts"] if a["target"] == profile["target"])
     device = config.get("device")
     require(type(device) is int and device >= 0, "worker must configure a device index")
+    llama_args = config.get("reference_args")
+    backend = next(t["backend"] for t in policy()["targets"] if t["id"] == profile["target"])
+    reference_backend = reference_device_backend(llama_args, backend)
     reference, checkout = Path(config["reference_bin"]).resolve(), Path(config["reference_source"]).resolve()
     commit = policy()["reference"]["commit"]
     require(output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() == commit, "reference checkout is not pinned")
     require(not output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip(), "reference checkout is dirty")
     require(commit[:7] in output([str(reference / "llama-server"), "--version"]), "reference executable does not match pinned source")
-    llama_args = config.get("reference_args")
-    require(isinstance(llama_args, list) and llama_args and all(isinstance(a, str) for a in llama_args), "worker must explicitly configure reference GPU flags")
     lock = Path(config["lock_directory"]).expanduser().resolve()
     require(lock.parent.is_dir(), "worker lock parent must exist")
     try:
@@ -506,6 +528,7 @@ def main():
                       "hardware": hardware, "models": models,
                       "options": {"parallel": 1, "kv_cache": "f32", "mtp": "backend-default", "greedy": True},
                       "reference": {"commit": commit, "generation": policy()["reference"]["generation"],
+                                    "device_backend": reference_backend,
                                     "server_sha256": sha256(reference / "llama-server"), "tokenizer_sha256": sha256(reference / "llama-tokenize")},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup")}}
             if profile["target"].endswith("vulkan"):

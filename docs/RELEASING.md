@@ -69,6 +69,15 @@ For a worker serving multiple profiles, an optional `profiles` object maps profi
 
 Build the exact llama.cpp commit in the policy. The harness checks clean Git source, executable version and hashes. Workers need Python 3, Git and the supported backend runtime. Vulkan workers also need `cc`, Vulkan headers, `vulkaninfo`, and matching shared `libggml-base` beside the reference tools for the 84-case numerical shader check.
 
+Use a reference build matching the tested backend: Metal for Metal, Vulkan for
+Vulkan, and HIP/ROCm for ROCm. Set one explicit `--device` selector in
+`reference_args`: `Metal`, `Vulkan<N>`, or `ROCm<N>`. The gate rejects a different
+backend before probing the reference or starting model work, and aggregation
+requires the recorded `reference.device_backend` to match the target. Quantized
+backends can make different greedy choices even with identical GGUFs and F32 KV;
+a cross-backend disagreement is a separate diagnostic, not a reason to loosen
+the native reference agreement policy.
+
 The policy also freezes reference generation: one slot, a 512-token logical
 batch, one-token microbatches, F32 K/V, and flash attention disabled. The harness
 applies these settings after worker arguments and records them in the report;

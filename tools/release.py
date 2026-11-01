@@ -307,6 +307,7 @@ def aggregate(args):
         require(reference.get("commit") == policy()["reference"]["commit"] and all(re.fullmatch(r"[0-9a-f]{64}", reference.get(key, "")) for key in ("server_sha256", "tokenizer_sha256")),
                 "missing pinned reference evidence")
         require(reference.get("generation") == policy()["reference"]["generation"], "reference generation settings differ from policy")
+        require(reference.get("device_backend") == target(spec["target"])["backend"], "reference GPU backend differs from tested target")
         require(all(report.get("hardware", {}).get(key) for key in ("gpu", "os", "driver")), "missing public hardware/driver evidence")
         reports.append(report)
     require(seen == {p["id"] for p in data["required_profiles"]}, "required GPU reports are missing")
