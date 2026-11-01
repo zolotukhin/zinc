@@ -214,6 +214,22 @@ After workflows merge to main and infrastructure is configured:
 
 The same published candidate can be rechecked without writes. Different bytes or another candidate under an existing version fail. A partially uploaded draft for this candidate can resume. An orphan tag without its candidate draft requires manual inspection. Failed public checks remain visible; the workflow does not delete or silently replace a release.
 
+The CPU release contracts rehearse an upload accepted by GitHub whose reply is
+lost. Retrying skips accepted assets, verifies the complete downloaded inventory
+and bytes before publishing, and makes no writes when retried after publication.
+Changed uploaded bytes, another candidate under the same version and orphan
+tags fail. Installer fixtures also exercise upgrade and explicit rollback while
+preserving the model cache; configuration/report fixtures reject unavailable
+workers and failed or missing hardware results. Run these without a model/GPU:
+
+```bash
+python3 -m unittest discover -s tools -p release_test.py
+```
+
+The same contracts run through the normal Bun/Zig CI suite. These local
+fixtures test failure handling; the signed RC still needs an actual protected
+publication and clean public-download/install rehearsal before 0.1.0.
+
 ## Qualification still required before 0.1.0
 
 These jobs supply gates, not hardware or an Apple account. Provision the eight worker roles/nine profiles, Apple credentials and protected environment; run the artifact matrix; review/promote the starter; rehearse a candidate/publication. Broader optional-feature, memory-rejection and performance-regression qualification remains necessary before advertising those features. Merging implementation does not create a public 0.1.0 tag, release or issue closure.
