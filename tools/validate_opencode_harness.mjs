@@ -8,6 +8,9 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import {
   buildConfig,
+  openCodeRunFlags,
+  parseOpenCodeVersion,
+  configForOpenCode,
   runVerification,
   runVerifiedOpenCode,
   writeConfig,
@@ -27,6 +30,7 @@ function parseArgs(args) {
       '--opencode': 'opencode',
       '--output': 'output',
       '--round-timeout-ms': 'roundTimeoutMs',
+      '--expect-version': 'expectedVersion',
     }[args[i]];
     if (!key || !args[i + 1] || args[i + 1].startsWith('--'))
       throw new Error('Invalid validation arguments');
@@ -97,7 +101,10 @@ async function fixture(name, root, opts, env) {
   await mkdir(dir, { mode: 0o700 });
   const project = path.join(dir, 'project');
   await mkdir(project, { mode: 0o700 });
-  const config = buildConfig({ context: 16384, output: 1024, steps: 8 });
+  const config = configForOpenCode(
+    buildConfig({ context: 16384, output: 1024, steps: 8 }),
+    opts.runFlags,
+  );
   await writeConfig(project, config);
   const configFile = path.join(project, 'opencode.zinc.json');
   const originalConfig = await readFile(configFile);
@@ -125,7 +132,8 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     stderr = capture();
   const sessions = new Set(),
     checks = [],
-    controllers = new Set();
+    controllers = new Set(),
+    heartbeats = new Set();
   let firstWrite = false,
     repaired = false,
     stalled = 0,
@@ -135,6 +143,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     boundedStage = 0,
     boundedRead = false,
     boundedOutput = false;
+  let requestSettings;
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -161,7 +170,26 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
           { status: 400 },
         );
       const body = await req.json();
+      if (body.tools?.length && !requestSettings)
+        requestSettings = {
+          keys: Object.keys(body),
+          max_tokens: body.max_tokens,
+          max_completion_tokens: body.max_completion_tokens,
+          temperature: body.temperature,
+          top_p: body.top_p,
+          enable_thinking: body.enable_thinking,
+        };
       if (!body.tools?.length) return reply(body, { content: 'Protocol fixture' }, 'stop');
+      // Use the real client's schemas: OpenCode 2 calls bash "shell" and
+      // uses "path" instead of "filePath" for read/write arguments.
+      const fileArgs = (name, target) => {
+        const properties = body.tools.find((tool) => tool.function?.name === name)?.function
+          ?.parameters?.properties;
+        if (!properties || (!properties.path && !properties.filePath))
+          throw new Error('Missing advertised file tool schema');
+        return { [properties.path ? 'path' : 'filePath']: target };
+      };
+      const shell = body.tools.some((tool) => tool.function?.name === 'shell') ? 'shell' : 'bash';
       if (name === 'bounded-tools') {
         const toolReply = (tool, args, id) =>
           reply(
@@ -183,13 +211,13 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
         if (boundedStage++ === 0)
           return toolReply(
             'read',
-            { filePath: path.join(project, 'large-source.txt') },
+            fileArgs('read', path.join(project, 'large-source.txt')),
             'call_bounded_read',
           );
         if (boundedStage === 2) {
           boundedRead = last.includes('READ_LINE_0079') && !last.includes('READ_LINE_0080');
           return toolReply(
-            'bash',
+            shell,
             {
               command: `bun -e 'console.log("BASH_HEAD" + "x".repeat(12000) + "BASH_TAIL")'`,
               description: 'Exercise bounded command output',
@@ -205,7 +233,10 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
             last.includes('ZINC context limit');
           return toolReply(
             'write',
-            { filePath: path.join(project, 'feature.mjs'), content: 'export const answer = 42;\n' },
+            {
+              ...fileArgs('write', path.join(project, 'feature.mjs')),
+              content: 'export const answer = 42;\n',
+            },
             'call_bounded_write',
           );
         }
@@ -232,7 +263,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
                 function: {
                   name: 'write',
                   arguments: JSON.stringify({
-                    filePath: path.join(project, 'feature.mjs'),
+                    ...fileArgs('write', path.join(project, 'feature.mjs')),
                     content: `export const answer = ${repair ? 42 : 0};\n`,
                   }),
                 },
@@ -249,10 +280,21 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
           'stop',
         );
       stalled++;
+      // Keep transport alive so the editing deadline, rather than OpenCode
+      // 2's socket-idle timeout, triggers cancellation and verification.
       return new Response(
         new ReadableStream({
           start(controller) {
             controllers.add(controller);
+            const timer = setInterval(() => {
+              try {
+                controller.enqueue(new TextEncoder().encode(': fixture heartbeat\n\n'));
+              } catch {
+                clearInterval(timer);
+                heartbeats.delete(timer);
+              }
+            }, 1000);
+            heartbeats.add(timer);
             controller.enqueue(
               new TextEncoder().encode(
                 'data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
@@ -286,9 +328,9 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
         },
         stdout,
         stderr,
-        onEvent(event) {
+        onEvent(event, details) {
           if (event.sessionID) sessions.add(event.sessionID);
-          if (event.type === 'error') errors++;
+          if (event.type === 'error' && !details?.expectedTimeoutShutdown) errors++;
           if (event.type === 'tool_use') tools++;
         },
         async runCheck(command, checkOpts, deps) {
@@ -303,13 +345,20 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     const answerCorrect =
       (await readFile(path.join(project, 'feature.mjs'), 'utf8')).trim() ===
       'export const answer = 42;';
+    const settingsMatch =
+      requestSettings &&
+      (requestSettings.max_completion_tokens ?? requestSettings.max_tokens) === 1024 &&
+      (requestSettings.temperature ?? 0) === 0 &&
+      (requestSettings.top_p ?? 1) === 1 &&
+      requestSettings.enable_thinking === false;
     const passed =
       configUnchanged &&
       protectedTestUnchanged &&
       (name === 'api-error'
         ? code === 1 && errors > 0 && checks.length === 0
         : name === 'bounded-tools'
-          ? code === 0 &&
+          ? settingsMatch &&
+            code === 0 &&
             errors === 0 &&
             boundedRead &&
             boundedOutput &&
@@ -317,7 +366,8 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
             checks.length === 1 &&
             checks[0] === 0 &&
             answerCorrect
-          : code === 0 &&
+          : settingsMatch &&
+            code === 0 &&
             errors === 0 &&
             stalled > 0 &&
             repaired &&
@@ -333,6 +383,8 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       run_exit_code: code,
       elapsed_ms: Math.round(performance.now() - started),
       requests,
+      request_settings: requestSettings,
+      ...(name === 'api-error' ? {} : { request_settings_valid: !!settingsMatch }),
       error_events: errors,
       tool_events: tools,
       unique_sessions: sessions.size,
@@ -350,6 +402,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     await writeFile(path.join(dir, 'exception.log'), String(error.stack || error), { mode: 0o600 });
   } finally {
     server.stop(true);
+    for (const timer of heartbeats) clearInterval(timer);
     for (const controller of controllers) {
       try {
         controller.close();
@@ -370,6 +423,7 @@ async function main() {
     console.log(`Usage: bun tools/validate_opencode_harness.mjs --output FRESH_DIR [options]
 
   --opencode FILE       OpenCode executable (default: OPENCODE_BIN or opencode)
+  --expect-version N    Require this exact OpenCode version
   --round-timeout-ms N  Editing round budget (default: 15000; range: 1000..60000)
 
 Runs actual OpenCode against scripted local HTTP responses, without model
@@ -397,11 +451,12 @@ new output directory; result.json contains no paths, endpoints, or credentials.`
     XDG_STATE_HOME: path.join(root, 'state'),
     XDG_CACHE_HOME: path.join(root, 'cache'),
   };
-  const version = (await exec(opts.opencode, ['--version'], { env, timeout: 10000 })).stdout
-    .trim()
-    .replace(/^v/, '');
-  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version))
-    throw new Error('OpenCode returned an invalid version');
+  const version = parseOpenCodeVersion(
+    (await exec(opts.opencode, ['--version'], { env, timeout: 10000 })).stdout,
+  );
+  if (opts.expectedVersion && version !== opts.expectedVersion)
+    throw new Error('OpenCode returned a different version than requested');
+  opts.runFlags = openCodeRunFlags({ env: { ...env, OPENCODE_BIN: opts.opencode } });
   const cases = [];
   for (const name of ['timeout-repair', 'api-error', 'bounded-tools']) {
     const result = await fixture(name, root, opts, env);

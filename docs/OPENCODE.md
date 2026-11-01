@@ -3,8 +3,9 @@
 Use OpenCode with a model served by ZINC. The
 [setup script](https://github.com/zolotukhin/zinc/blob/main/tools/setup_opencode.mjs)
 creates a project configuration, checks the API, and runs tasks headlessly.
-It requires **Bun 1.4.4 or newer**. This workflow is tested with
-**OpenCode 1.19.4**.
+It requires **Bun 1.4.4 or newer**. The client protocol is tested with
+**OpenCode 1.19.4 and 2.0.21**. Model coding results retain their actual client
+version in the [validation report](OPENCODE_RELEASE_VALIDATION.md).
 
 [Download the standalone script](/zinc/harnesses/setup-opencode.mjs), or use
 `tools/setup_opencode.mjs` from a ZINC checkout. The downloaded script has no
@@ -58,6 +59,15 @@ bun tools/setup_opencode.mjs \
 
 bun tools/setup_opencode.mjs check --project ../my-project
 ```
+
+For OpenCode 2, install `bun add --global --trust @opencode/cli@2.0.21`
+instead. The scoped package's postinstall installs its platform executable.
+The helper detects `--standalone`, runs in the project directory, and selects
+that client's plugin format. Both versions keep their generated setup portable.
+OpenCode 2 needs a ZINC build supporting `max_completion_tokens`; older servers
+silently used a 256-token default and truncated tool calls. The
+[compatibility evidence](/zinc/validation/opencode-client-compatibility-2026-11-01.json)
+records the reproduced failure and corrected one-token limits on Intel.
 
 To configure a project without cloning ZINC, download the same script and run it
 with Bun:
@@ -143,6 +153,9 @@ The command requires a nonempty task after `--`, including when using
 An OpenCode JSON error event stops the child and fails the run, even when the
 CLI exits zero; independent verification cannot mask that error. The default
 timeout is 15 minutes; `--timeout-ms` changes it, and a timeout exits with status 124.
+When the helper stops OpenCode 2 at its own deadline, that client's private
+transport may report its shutdown as an error. Only that specific shutdown
+event keeps the timeout result; API errors still fail the run.
 Task and round timeouts must be integer milliseconds from 1 to 2,147,483,647.
 To continue a previous session, pass `--session ID` using the `sessionID` from
 its JSON events.

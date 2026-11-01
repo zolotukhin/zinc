@@ -1,0 +1,264 @@
+{
+  "schema": "zinc-opencode-client-compatibility-v1",
+  "date": "2026-11-01",
+  "qualification": false,
+  "scope": "Actual client CPU protocol checks and Intel one-token live API checks; no all-model coding claim",
+  "client_harness": {
+    "manifest_sha256": "2a02401168a3c881ff6c274f1a535a770da232ce40d2a1966c282c41f83fa9ab",
+    "sources": {
+      "base_source": "9e6d35e57c3b76351aeab1265378f8b184da64d9",
+      "files": {
+        "tools/setup_opencode.mjs": "58d28be217c4a6cb1b0491e9ca0cc2b1c3c4f7cf94d457e98363cbdba70a7ea9",
+        "tools/opencode_eval.mjs": "58151581dc79c5941938a583e05cc71395b674296a7bb7082130641d11317d59",
+        "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+        "tools/validate_opencode_api.mjs": "c0cf6dc96e79a4abf0c6e01f41ad20b123cb51f86d6b94f64c7363ea88d1fdaa",
+        "tools/validate_opencode_harness.mjs": "3dcc958d73b146946c114f3668b91c4d711ca3358bc43026567e40e76dc4dd7f",
+        "tools/fixtures/opencode/zinc-cli-args.mjs": "cad991dd85bf47b942f20f2414efb275eb712cc319d8cb40e418df2ee7fb03ad"
+      },
+      "local_changes": true
+    }
+  },
+  "cpu_protocol": [
+    {
+      "scope": "CPU protocol fixtures with actual OpenCode and scripted responses",
+      "model_inference": false,
+      "performance_measurement": false,
+      "opencode_version": "1.19.4",
+      "helper_sha256": "58d28be217c4a6cb1b0491e9ca0cc2b1c3c4f7cf94d457e98363cbdba70a7ea9",
+      "validator_sha256": "3dcc958d73b146946c114f3668b91c4d711ca3358bc43026567e40e76dc4dd7f",
+      "passed": true,
+      "cases": [
+        {
+          "name": "timeout-repair",
+          "passed": true,
+          "run_exit_code": 0,
+          "elapsed_ms": 16652,
+          "requests": 5,
+          "request_settings": {
+            "keys": [
+              "model",
+              "max_tokens",
+              "top_p",
+              "enable_thinking",
+              "messages",
+              "tools",
+              "tool_choice",
+              "stream",
+              "stream_options"
+            ],
+            "max_tokens": 1024,
+            "top_p": 1,
+            "enable_thinking": false
+          },
+          "request_settings_valid": true,
+          "error_events": 0,
+          "tool_events": 2,
+          "unique_sessions": 1,
+          "verification_exit_codes": [
+            1,
+            0
+          ],
+          "stalled_requests": 1,
+          "configuration_unchanged": true,
+          "protected_test_unchanged": true,
+          "logs_truncated": false
+        },
+        {
+          "name": "api-error",
+          "passed": true,
+          "run_exit_code": 1,
+          "elapsed_ms": 1304,
+          "requests": 2,
+          "error_events": 1,
+          "tool_events": 0,
+          "unique_sessions": 1,
+          "verification_exit_codes": [],
+          "stalled_requests": 0,
+          "configuration_unchanged": true,
+          "protected_test_unchanged": true,
+          "logs_truncated": false
+        },
+        {
+          "name": "bounded-tools",
+          "passed": true,
+          "run_exit_code": 0,
+          "elapsed_ms": 1444,
+          "requests": 5,
+          "request_settings": {
+            "keys": [
+              "model",
+              "max_tokens",
+              "top_p",
+              "enable_thinking",
+              "messages",
+              "tools",
+              "tool_choice",
+              "stream",
+              "stream_options"
+            ],
+            "max_tokens": 1024,
+            "top_p": 1,
+            "enable_thinking": false
+          },
+          "request_settings_valid": true,
+          "error_events": 0,
+          "tool_events": 3,
+          "unique_sessions": 1,
+          "verification_exit_codes": [
+            0
+          ],
+          "stalled_requests": 0,
+          "configuration_unchanged": true,
+          "protected_test_unchanged": true,
+          "read_limit_enforced": true,
+          "output_limit_enforced": true,
+          "logs_truncated": false
+        }
+      ]
+    },
+    {
+      "scope": "CPU protocol fixtures with actual OpenCode and scripted responses",
+      "model_inference": false,
+      "performance_measurement": false,
+      "opencode_version": "2.0.21",
+      "helper_sha256": "58d28be217c4a6cb1b0491e9ca0cc2b1c3c4f7cf94d457e98363cbdba70a7ea9",
+      "validator_sha256": "3dcc958d73b146946c114f3668b91c4d711ca3358bc43026567e40e76dc4dd7f",
+      "passed": true,
+      "cases": [
+        {
+          "name": "timeout-repair",
+          "passed": true,
+          "run_exit_code": 0,
+          "elapsed_ms": 16010,
+          "requests": 5,
+          "request_settings": {
+            "keys": [
+              "model",
+              "messages",
+              "tools",
+              "stream",
+              "stream_options",
+              "store",
+              "max_completion_tokens",
+              "temperature",
+              "top_p",
+              "enable_thinking"
+            ],
+            "max_completion_tokens": 1024,
+            "temperature": 0,
+            "top_p": 1,
+            "enable_thinking": false
+          },
+          "request_settings_valid": true,
+          "error_events": 0,
+          "tool_events": 2,
+          "unique_sessions": 1,
+          "verification_exit_codes": [
+            1,
+            0
+          ],
+          "stalled_requests": 1,
+          "configuration_unchanged": true,
+          "protected_test_unchanged": true,
+          "logs_truncated": false
+        },
+        {
+          "name": "api-error",
+          "passed": true,
+          "run_exit_code": 1,
+          "elapsed_ms": 801,
+          "requests": 3,
+          "error_events": 2,
+          "tool_events": 0,
+          "unique_sessions": 1,
+          "verification_exit_codes": [],
+          "stalled_requests": 0,
+          "configuration_unchanged": true,
+          "protected_test_unchanged": true,
+          "logs_truncated": false
+        },
+        {
+          "name": "bounded-tools",
+          "passed": true,
+          "run_exit_code": 0,
+          "elapsed_ms": 918,
+          "requests": 5,
+          "request_settings": {
+            "keys": [
+              "model",
+              "messages",
+              "tools",
+              "stream",
+              "stream_options",
+              "store",
+              "max_completion_tokens",
+              "temperature",
+              "top_p",
+              "enable_thinking"
+            ],
+            "max_completion_tokens": 1024,
+            "temperature": 0,
+            "top_p": 1,
+            "enable_thinking": false
+          },
+          "request_settings_valid": true,
+          "error_events": 0,
+          "tool_events": 3,
+          "unique_sessions": 1,
+          "verification_exit_codes": [
+            0
+          ],
+          "stalled_requests": 0,
+          "configuration_unchanged": true,
+          "protected_test_unchanged": true,
+          "read_limit_enforced": true,
+          "output_limit_enforced": true,
+          "logs_truncated": false
+        }
+      ]
+    }
+  ],
+  "intel_chat_token_budget": {
+    "before": {
+      "archive_sha256": "3d914b42a8ece2b8b3c38b17503a9da62ddf8bb37d3b24c4c52761895140113f",
+      "cases": [
+        {
+          "actual_completion_tokens": 1,
+          "field": "max_tokens",
+          "finish_reason": "length",
+          "requested_tokens": 1
+        },
+        {
+          "actual_completion_tokens": 256,
+          "field": "max_completion_tokens",
+          "finish_reason": "length",
+          "requested_tokens": 1
+        }
+      ],
+      "cleanup": "no GPU process remains",
+      "model": "qwen3-0.6b-q8-0",
+      "qualification": false,
+      "source_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6"
+    },
+    "after": {
+      "source_snapshot_sha256": "c16bc0d523a16e7061f443ee36cefefa06c7dae8eaec679931469a8e926df7e6",
+      "binary_sha256": "95d94d083fdc20801cfe038da299c214dca9873a1f0bbe09318b69fbf85944e9",
+      "build_scope": "native combined correctness diagnostic",
+      "cases": [
+        {
+          "actual_completion_tokens": 1,
+          "field": "max_tokens",
+          "finish_reason": "length",
+          "requested_tokens": 1
+        },
+        {
+          "actual_completion_tokens": 1,
+          "field": "max_completion_tokens",
+          "finish_reason": "length",
+          "requested_tokens": 1
+        }
+      ],
+      "passed": true
+    }
+  }
+}

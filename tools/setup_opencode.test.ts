@@ -35,6 +35,7 @@ describe('portable OpenCode setup', () => {
     expect(config.provider.zinc.options).toEqual({
       baseURL: 'http://127.0.0.1:9090/v1',
       apiKey: '{env:ZINC_API_KEY}',
+      body: { temperature: 0, top_p: 1, enable_thinking: false },
     });
     expect(config.agent.zinc.steps).toBe(24);
     expect(config.provider.zinc.models['qwen38-27b-q4k-m'].limit.output).toBe(4096);
@@ -193,6 +194,7 @@ describe('portable OpenCode setup', () => {
       { project: dir, auto: true, prompt: ['Fix $(literal) `text`'] },
       {
         env: { OPENCODE_BIN: 'custom-opencode', ZINC_API_KEY: 'test-only-key' },
+        runFlags: [],
         spawnImpl: ((bin: string, args: string[], options: any) => {
           captured = { bin, args, options };
           const child = new EventEmitter();
@@ -206,6 +208,8 @@ describe('portable OpenCode setup', () => {
     expect(captured.args.at(-1)).toBe('Fix $(literal) `text`');
     expect(captured.args).toContain('--auto');
     expect(captured.args).not.toContain('--pure');
+    expect(captured.args).not.toContain('--dir');
+    expect(captured.options.cwd).toBe(dir);
     expect(captured.options.env.OPENCODE_PURE).toBe('false');
     expect(captured.options.shell).toBeUndefined();
     expect(captured.options.env.OPENCODE_CONFIG_CONTENT).not.toContain('test-only-key');
@@ -218,6 +222,7 @@ describe('portable OpenCode setup', () => {
       { project: dir, prompt: ['task'], timeoutMs: 20 },
       {
         env: {},
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.kill = (signal: string) => {
@@ -244,6 +249,7 @@ describe('portable OpenCode setup', () => {
             output += chunk.toString();
           },
         } as any,
+        runFlags: [],
         spawnImpl: ((_bin, args) => {
           expect(args).toContain('ses_example');
           const child: any = new EventEmitter();
@@ -281,6 +287,7 @@ describe('portable OpenCode setup', () => {
             stderr += chunk.toString();
           },
         } as any,
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -312,6 +319,7 @@ describe('independent verification', () => {
         runCheck: async () => {
           throw new Error('check started');
         },
+        runFlags: [],
         spawnImpl: (() => {
           throw new Error('process started');
         }) as any,
@@ -340,6 +348,7 @@ describe('independent verification', () => {
 
   test('rejects deadlines that overflow native timers before starting processes', async () => {
     const deps = {
+      runFlags: [],
       spawnImpl: (() => {
         throw new Error('process started');
       }) as any,
@@ -374,6 +383,7 @@ describe('independent verification', () => {
         env: {},
         stdout: quiet,
         stderr: quiet,
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -437,6 +447,7 @@ describe('independent verification', () => {
         fixture,
         `#!${process.execPath}
 import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--help')) { console.log('--model --format'); process.exit(0); }
 process.on('SIGTERM', () => process.exit(0));
 console.log(JSON.stringify({ type: 'error', error: { name: 'APIError' } }));
 setTimeout(() => writeFileSync('continued-after-error', 'unexpected'), 1000);
@@ -680,6 +691,7 @@ setInterval(() => {}, 1000);
         `#!${process.execPath}
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--help')) { console.log('--model --format'); process.exit(0); }
 const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'], { stdio: 'ignore' });
 writeFileSync('tool.pid', String(child.pid));
 writeFileSync('feature.mjs', 'export const answer = 42;\\n');
@@ -737,7 +749,7 @@ setInterval(() => {}, 1000);
         await runOpenCode(
           buildConfig(),
           { project: '.', prompt: ['task'], timeoutMs: 10 },
-          { spawnImpl, env: {}, stdout: quiet },
+          { runFlags: [], spawnImpl, env: {}, stdout: quiet },
         ),
       ).toBe(signal === 'SIGINT' ? 130 : 143);
       expect(
@@ -745,7 +757,7 @@ setInterval(() => {}, 1000);
           await runVerification(
             'check',
             { project: '.', timeoutMs: 10 },
-            { spawnImpl, stderr: quiet },
+            { runFlags: [], spawnImpl, stderr: quiet },
           )
         ).code,
       ).toBe(signal === 'SIGINT' ? 130 : 143);
@@ -756,6 +768,7 @@ setInterval(() => {}, 1000);
       {
         env: {},
         stdout: quiet,
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -823,6 +836,7 @@ process.exit(0);
       { project: '.', timeoutMs: 1000 },
       {
         stderr: quiet,
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -850,6 +864,7 @@ process.exit(0);
       { project: '.', timeoutMs: 10 },
       {
         stderr: quiet,
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.kill = (signal: string) => {
@@ -873,6 +888,7 @@ process.exit(0);
       { project: '.', timeoutMs: 1000 },
       {
         stderr: quiet,
+        runFlags: [],
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stderr = new EventEmitter();
@@ -911,6 +927,7 @@ process.exit(0);
         'checks',
         { project: '.', timeoutMs: 1000 },
         {
+          runFlags: [],
           spawnImpl,
           stderr: quiet,
         },
@@ -923,7 +940,7 @@ process.exit(0);
           prompt: ['task'],
           timeoutMs: 1000,
         },
-        { spawnImpl, stdout: quiet, env: {} },
+        { runFlags: [], spawnImpl, stdout: quiet, env: {} },
       );
       expect(code).toBe(expected);
     }

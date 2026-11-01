@@ -185,6 +185,29 @@ export async function validateApi({
       assert.ok(json.usage.completion_tokens <= budget);
     });
   }
+  for (const stream of [false, true]) {
+    await check(`${stream ? 'SSE' : 'JSON'} max_completion_tokens budget`, async () => {
+      const response = await request({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Write a long detailed story about a lighthouse keeper. Continue for several paragraphs.',
+          },
+        ],
+        max_completion_tokens: 1,
+        temperature: 0,
+        top_p: 1,
+        enable_thinking: false,
+        stream,
+      });
+      assert.equal(response.status, 200);
+      const result = parseCompletion(await response.text(), stream);
+      assert.equal(result.usage.completion_tokens, 1);
+      assert.equal(result.finish, 'length');
+    });
+  }
   await check('Unicode JSON/SSE parity', async () => {
     const body = {
       messages: [{ role: 'user', content: 'Repeat exactly this text: café 東京 🚀' }],
@@ -338,6 +361,14 @@ export async function validateApi({
     ['Invalid message content', { messages: [{ role: 'user', content: 42 }] }],
     ['Empty messages', { messages: [] }],
     ['Negative token budget', { messages: [{ role: 'user', content: 'Hi' }], max_tokens: -1 }],
+    [
+      'Negative modern token budget',
+      { messages: [{ role: 'user', content: 'Hi' }], max_completion_tokens: -1 },
+    ],
+    [
+      'Conflicting token budgets',
+      { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, max_completion_tokens: 2 },
+    ],
     [
       'Context overflow',
       { messages: [{ role: 'user', content: 'word '.repeat(context + 2048) }], max_tokens: 1 },

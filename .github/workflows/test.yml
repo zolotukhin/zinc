@@ -7,18 +7,43 @@ on:
   pull_request:
 
 jobs:
-  opencode-harness:
-    runs-on: ubuntu-latest
+  opencode_clients:
+    name: OpenCode protocol (${{ matrix.version }})
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '1.19.4'
+            package: 'opencode-ai@1.19.4'
+          - version: '2.0.21'
+            package: '@opencode/cli@2.0.21'
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: '.bun-version'
       - name: Install the tested OpenCode CLI
-        run: bun install --global opencode-ai@1.19.4
+        # The scoped v2 package installs its platform binary in postinstall.
+        env:
+          OPENCODE_PACKAGE: ${{ matrix.package }}
+        run: bun add --global --trust "$OPENCODE_PACKAGE"
       - name: Check actual OpenCode protocol and lifecycle without a model
-        run: bun tools/validate_opencode_harness.mjs --output "$RUNNER_TEMP/zinc harness ✓"
+        env:
+          OPENCODE_EXPECT_VERSION: ${{ matrix.version }}
+        run: bun tools/validate_opencode_harness.mjs --expect-version "$OPENCODE_EXPECT_VERSION" --output "$RUNNER_TEMP/zinc harness ✓"
+
+  # Preserve the required check name while requiring both real clients.
+  opencode-harness:
+    needs: opencode_clients
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - env:
+          CLIENT_RESULT: ${{ needs.opencode_clients.result }}
+        run: test "$CLIENT_RESULT" = success
 
   format:
     runs-on: ubuntu-latest

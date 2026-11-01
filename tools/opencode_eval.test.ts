@@ -121,17 +121,22 @@ describe('fixture projects', () => {
     expect(prompt).toContain('do not spend turns rereading files already shown');
   });
 
-  test('builds OpenCode args with fixture directory as workspace', async () => {
+  test('uses the process working directory without the removed OpenCode 2 --dir flag', async () => {
     const fixture = fixtureById('rate-limiter-single')!;
     const dir = await tempDir();
     const args = buildOpenCodeArgs('zinc', fixture, dir, {
       model: 'zinc/qwen',
     } as any);
 
-    expect(args).toContain('--dir');
-    expect(args[args.indexOf('--dir') + 1]).toBe(dir);
+    expect(args).not.toContain('--dir');
     expect(args).toContain('zinc-rate-limiter-single');
     expect(args).not.toContain('--pure');
+    const standalone = buildOpenCodeArgs('zinc', fixture, dir, {
+      model: 'zinc/qwen',
+      openCodeRunFlags: ['--standalone'],
+    } as any);
+    expect(standalone).toContain('--standalone');
+    expect(standalone.at(-2)).toBe('--');
   });
 
   test('all seeded fixtures start with failing tests', async () => {
