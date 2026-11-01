@@ -125,7 +125,7 @@ The R9700 now has an isolated non-root worker for both backends, sharing one GPU
 
 As of October 31, the fresh [ROCm worker run](https://github.com/zolotukhin/zinc/actions/runs/41268656993) and [Vulkan worker run](https://github.com/zolotukhin/zinc/actions/runs/41269120680) pass all twelve required model/backend rows on the R9700, using unsigned preview commit `dbbfff54`. Across the two runs, **575 of 576 CLI token choices match exactly**, with one policy-qualified near-tie. The complete API checks pass, including active chat-stream cancellation and recovery, and neither run leaves a GPU process behind.
 
-The model checks use 4K context, 32-bit floating-point key/value caches, one slot and each backend's default multi-token prediction setting. Each model has three frozen 16-token continuations, supplemented by the tokenizer, HTTP and boundary checks.
+The main-model checks use 4K context; the small starter uses 2K. All use 32-bit floating-point key/value caches, one slot and each backend's default multi-token prediction setting. Each model has three frozen 16-token continuations, supplemented by the tokenizer, HTTP and boundary checks.
 
 Those are useful results on one board. The remaining seven worker roles and Apple signing credentials still need provisioning, and all nine hardware profiles need qualification against the final candidate. The small starter model also needs its promotion review. The [release readiness plan](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md) tracks those remaining gates.
 
