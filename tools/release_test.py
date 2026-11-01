@@ -534,6 +534,14 @@ class ReleaseTest(unittest.TestCase):
                 raise ValueError("fixture")
         self.assertFalse(path.exists())
 
+    def test_readiness_idle_checks_include_benchmarks_and_never_interrupt_processes(self):
+        def status(command, **kwargs):
+            self.assertEqual(command[:2], ["pgrep", "-x"])
+            return SimpleNamespace(returncode=0 if command[2] == "llama-bench" else 1)
+        with patch.object(release_worker.subprocess, "run", side_effect=status) as process, self.assertRaisesRegex(ValueError, "busy"):
+            release_worker.idle()
+        self.assertEqual({call.args[0][2] for call in process.call_args_list}, {"zinc", "llama-server", "llama-cli", "llama-bench"})
+
     def test_worker_reservation_refuses_a_live_owner_and_unknown_marked_contents(self):
         path = self.root / "reservation"
         with release_lib.worker_reservation(path):
@@ -1352,6 +1360,7 @@ class ReleaseTest(unittest.TestCase):
         for entrypoint in ("candidate", "readiness"):
             failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend", "late_cleanup"]
             if entrypoint == "readiness": failures += ["wrong_validation", "dirty_validation"]
+            else: failures.append("busy_bench")
             for failure in failures:
                 folder = self.root / (entrypoint + "-" + str(failure))
                 reference, tree = folder / "reference", folder / "package"
@@ -1375,6 +1384,7 @@ class ReleaseTest(unittest.TestCase):
                 candidate = {"version": "9.8.7", "commit": COMMIT, "policy_sha256": "b" * 64,
                              "artifacts": [{"target": "linux-x86_64-rocm", "filename": "candidate.tar.gz"}]}
                 def output(command, *args, **kwargs):
+                    if command[0] == "ps" and failure == "busy_bench": return "llama-bench\n"
                     if command[-1] == "HEAD": return COMMIT if command[2] == str(release_worker.ROOT) else real["reference"]["commit"]
                     if "status" in command and command[2] == str(release_worker.ROOT) and failure == "dirty_validation": return " M tools/release_worker.py"
                     if command[-1] == "--version":
@@ -1420,7 +1430,7 @@ class ReleaseTest(unittest.TestCase):
                         reason = {"library": "reference artifacts changed", "during_version_probe": "reference artifacts changed",
                                   "stale_server": "reference executable", "wrong_backend": "native GPU backend",
                                   "wrong_validation": "validation checkout differs", "dirty_validation": "validation checkout is dirty",
-                                  "late_cleanup": "fixture cleanup failed"}[failure]
+                                  "late_cleanup": "fixture cleanup failed", "busy_bench": "GPU worker is busy"}[failure]
                         with self.assertRaisesRegex(ValueError, reason): run()
                         if entrypoint == "candidate": report.assert_not_called()
                         else: self.assertFalse(report.call_args.args[1]["passed"])

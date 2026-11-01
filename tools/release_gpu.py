@@ -530,7 +530,7 @@ def main():
     require(lock.parent.is_dir(), "worker lock parent must exist")
     with worker_reservation(lock):
         processes = output(["ps", "-eo", "comm="])
-        require(not any(Path(line.strip()).name in ("zinc", "llama-server", "llama-cli") for line in processes.splitlines()), "GPU worker is busy")
+        require(not any(Path(line.strip()).name in ("zinc", "llama-server", "llama-cli", "llama-bench") for line in processes.splitlines()), "GPU worker is busy")
         reference_snapshot = reference_artifacts(reference)
         # Include the version probe in the frozen-artifact window. A clean
         # checkout does not prove the executable was rebuilt at that revision.

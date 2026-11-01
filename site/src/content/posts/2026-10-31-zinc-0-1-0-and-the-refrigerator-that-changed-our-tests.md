@@ -107,12 +107,10 @@ The original plan included signed Metal binaries. We narrowed the first launch t
 
 ```mermaid
 flowchart TD
-    S["One source revision and version"] -.-> M["Unsigned Metal preview"]
-    S --> V["Vulkan archive"]
-    S --> R["ROCm archive"]
-    V --> Q["Three required Linux hardware profiles and model checks"]
-    R --> Q
-    Q --> P["Review and publish those exact archives"]
+    S["One source + version"] -.-> M["Unsigned Metal preview"]
+    S --> L["Vulkan + ROCm archives"]
+    L --> Q["Three Linux profile checks"]
+    Q --> P["Review + publish the same bytes"]
 ```
 
 _The Linux release flow preserves artifact identity through qualification and publication. Metal remains a separate preview. The bytes users download must be the bytes the hardware jobs tested._
