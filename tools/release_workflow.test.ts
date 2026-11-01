@@ -86,6 +86,7 @@ test('worker readiness is main-only, protected, and separate from candidate cert
   expect(check.jobs.prepare.outputs.validation_commit).toBe(
     '${{ steps.resolve.outputs.validation_commit }}',
   );
+  expect(check.jobs.prepare.steps[0].with.ref).toBe('${{ github.sha }}');
   const checkout = check.jobs.check.steps.find((step: any) =>
     step.uses?.startsWith('actions/checkout@'),
   );
@@ -96,4 +97,10 @@ test('worker readiness is main-only, protected, and separate from candidate cert
   expect(validation.run).toContain(
     '--commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT"',
   );
+  expect(validation.run).toContain('--directory "$RUNNER_TEMP/zinc-worker-preview"');
+  expect(validation.run).toContain('--output "$RUNNER_TEMP/zinc-worker-readiness.json"');
+  expect(
+    check.jobs.check.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@'))
+      .with.path,
+  ).toBe('${{ runner.temp }}/zinc-worker-preview');
 });

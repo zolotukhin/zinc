@@ -42,8 +42,9 @@ def preview_source(run):
 def resolve_preview(profile, run, variables, expected_sha, comparison=None, preview_policy_digest=None):
     commit, validation_commit = preview_source(run), source_sha(expected_sha)
     if commit != validation_commit:
-        # Documentation can advance main while expensive packages build. Keep
-        # testing the original bytes with current checks, under the same policy.
+        # Reuse diagnostic inputs under current checks and the same policy.
+        # The archive keeps its own source identity, even if engine code changed;
+        # this does not assert equivalence to a build of validation_commit.
         require(comparison_proves_ancestor(comparison, commit), "preview source must be a verified ancestor of this workflow's main commit")
         require(preview_policy_digest == sha256(ROOT / "config/release/targets.json"), "preview policy differs; build a new packaging preview")
     labels = json.loads(variables.get(profile["runner_variable"], "null"))
@@ -73,11 +74,19 @@ def policy_digest_from_response(response):
     return hashlib.sha256(data).hexdigest()
 
 
+def validation_identity(expected_sha=None):
+    actual = source_sha(gpu.output(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip())
+    require(actual == source_sha(expected_sha or actual), "validation checkout differs from the frozen workflow commit")
+    require(not gpu.output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=all"]).strip(), "validation checkout is dirty")
+    return actual
+
+
 def resolve(args):
     require(re.fullmatch(r"[1-9][0-9]*", args.preview_run), "preview run must be a numeric ID")
+    validation_commit = validation_identity(source_sha(os.environ["GITHUB_SHA"]))
     profile = profile_for(args.profile)
     run = github_json("actions/runs/" + args.preview_run)
-    commit, validation_commit = preview_source(run), source_sha(os.environ["GITHUB_SHA"])
+    commit = preview_source(run)
     require(str(run.get("id")) == args.preview_run, "preview run identity differs")
     comparison, digest = None, None
     if commit != validation_commit:
@@ -137,9 +146,7 @@ def check(args):
               "policy_sha256": sha256(ROOT / "config/release/targets.json"), "passed": False}
     stage = "validation identity"
     try:
-        actual = source_sha(gpu.output(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip())
-        require(actual == source_sha(getattr(args, "validation_commit", None) or actual), "validation checkout differs from the frozen workflow commit")
-        require(not gpu.output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"]).strip(), "validation checkout is dirty")
+        actual = validation_identity(getattr(args, "validation_commit", None))
         report["validation_source_commit"] = actual
         report["validation_helpers_sha256"] = {name: sha256(ROOT / "tools" / name)
                                                 for name in ("release_worker.py", "release_gpu.py", "release_lib.py", "release.py")}

@@ -45,6 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Resolve one configured worker and verify trusted preview identity
         id: resolve
@@ -74,7 +75,7 @@ jobs:
           name: preview-${{ needs.prepare.outputs.target }}
           run-id: ${{ inputs.preview_run }}
           github-token: ${{ github.token }}
-          path: preview
+          path: ${{ runner.temp }}/zinc-worker-preview
       - name: Check package, actual hardware, pinned reference, models and cleanup
         env:
           WORKER_PROFILE: ${{ inputs.profile }}
@@ -85,11 +86,11 @@ jobs:
         run: |
           extra=()
           if [ "$EXERCISE_MODELS" = true ]; then extra+=(--exercise-models); fi
-          python3 tools/release_worker.py check --profile "$WORKER_PROFILE" --directory preview --version "$PREVIEW_VERSION" --commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT" --output worker-readiness.json "${extra[@]}"
+          python3 tools/release_worker.py check --profile "$WORKER_PROFILE" --directory "$RUNNER_TEMP/zinc-worker-preview" --version "$PREVIEW_VERSION" --commit "$PREVIEW_COMMIT" --validation-commit "$VALIDATION_COMMIT" --output "$RUNNER_TEMP/zinc-worker-readiness.json" "${extra[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: worker-readiness-${{ inputs.profile }}
-          path: worker-readiness.json
+          path: ${{ runner.temp }}/zinc-worker-readiness.json
           if-no-files-found: warn
           retention-days: 14

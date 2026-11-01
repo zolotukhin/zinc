@@ -451,7 +451,8 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(failure=failure), patch.dict(os.environ, {
                 "GITHUB_SHA": COMMIT if failure == "same_commit" else PREFLIGHT_MAIN, "GITHUB_OUTPUT": str(destination),
                 "RELEASE_VARIABLES": json.dumps({"ZINC_RUNNER_RDNA4": '["self-hosted","linux","x64","zinc-rdna4"]'}),
-            }), patch.object(release_worker, "github_json", side_effect=[metadata, ancestry, policy_file]) as api, contextlib.redirect_stdout(io.StringIO()):
+            }), patch.object(release_gpu, "output", side_effect=[COMMIT if failure == "same_commit" else PREFLIGHT_MAIN, ""]) as git, \
+                    patch.object(release_worker, "github_json", side_effect=[metadata, ancestry, policy_file]) as api, contextlib.redirect_stdout(io.StringIO()):
                 if failure in (None, "same_commit"):
                     release_worker.resolve(args)
                     output = dict(line.split("=", 1) for line in destination.read_text().splitlines())
@@ -465,6 +466,16 @@ class ReleaseTest(unittest.TestCase):
                     expected += [f"compare/{COMMIT}...{PREFLIGHT_MAIN}?per_page=1"]
                     if failure != "diverged": expected += [f"contents/config/release/targets.json?ref={COMMIT}"]
                 self.assertEqual([call.args[0] for call in api.call_args_list], expected)
+                self.assertEqual(git.call_args_list[1].args[0], ["git", "-C", str(release_worker.ROOT), "status", "--porcelain", "--untracked-files=all"])
+
+    def test_worker_resolver_rejects_wrong_or_dirty_checkout_before_using_its_policy(self):
+        for failure in ("commit", "tracked", "untracked"):
+            output = [COMMIT] if failure == "commit" else [PREFLIGHT_MAIN, " M tools/release_worker.py" if failure == "tracked" else "?? tools/unexpected.py"]
+            with self.subTest(failure=failure), patch.dict(os.environ, {"GITHUB_SHA": PREFLIGHT_MAIN}), \
+                    patch.object(release_gpu, "output", side_effect=output), patch.object(release_worker, "github_json") as api, \
+                    self.assertRaisesRegex(ValueError, "validation checkout"):
+                release_worker.resolve(SimpleNamespace(profile="vulkan-rdna4", preview_run="123"))
+            api.assert_not_called()
 
     def test_worker_frozen_policy_rejects_non_file_and_unreadable_api_responses(self):
         response = {"type": "file", "path": "config/release/targets.json", "encoding": "base64", "content": "e30="}
