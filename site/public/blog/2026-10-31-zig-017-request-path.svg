@@ -15,7 +15,11 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line)"/>
     </marker>
   </defs>
-  <path class="arrow" d="M140 76v24 M140 168v24 M140 260v24 M140 352v24 M140 444v24"/>
+  <path class="arrow" d="M140 76v24"/>
+  <path class="arrow" d="M140 168v24"/>
+  <path class="arrow" d="M140 260v24"/>
+  <path class="arrow" d="M140 352v24"/>
+  <path class="arrow" d="M140 444v24"/>
   <rect x="28" y="12" width="224" height="64" rx="10"/>
   <text x="140" y="50">Prompt bytes</text>
   <rect x="28" y="104" width="224" height="64" rx="10"/>
