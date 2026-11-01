@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -18,6 +18,10 @@ import {
 } from './setup_opencode.mjs';
 
 const dirs: string[] = [];
+let testProject: string;
+beforeEach(async () => {
+  testProject = await temp();
+});
 afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -274,7 +278,7 @@ describe('portable OpenCode setup', () => {
       stderr = '';
     const code = await runOpenCode(
       buildConfig(),
-      { project: '.', prompt: ['task'] },
+      { project: testProject, prompt: ['task'] },
       {
         env: {},
         stdout: {
@@ -324,7 +328,7 @@ describe('independent verification', () => {
           throw new Error('process started');
         }) as any,
       };
-      const opts = { project: '.', prompt, verify: 'check' };
+      const opts = { project: testProject, prompt, verify: 'check' };
       await expect(runOpenCode(buildConfig(), opts, deps)).rejects.toThrow('Pass a task');
       await expect(runVerifiedOpenCode(buildConfig(), opts, deps)).rejects.toThrow('Pass a task');
     }
@@ -357,7 +361,7 @@ describe('independent verification', () => {
       },
     };
     for (const timeoutMs of [2147483648, Number.MAX_SAFE_INTEGER]) {
-      const opts = { project: '.', prompt: ['task'], verify: 'check', timeoutMs };
+      const opts = { project: testProject, prompt: ['task'], verify: 'check', timeoutMs };
       await expect(runOpenCode(buildConfig(), opts, deps)).rejects.toThrow('Timeout must');
       await expect(runVerification('check', opts, deps)).rejects.toThrow('Timeout must');
       await expect(runVerifiedOpenCode(buildConfig(), opts, deps)).rejects.toThrow('Timeout must');
@@ -378,7 +382,7 @@ describe('independent verification', () => {
     let stoppedDuringError = false;
     const code = await runVerifiedOpenCode(
       buildConfig(),
-      { project: '.', prompt: ['task'], verify: 'check', timeoutMs: 1000 },
+      { project: testProject, prompt: ['task'], verify: 'check', timeoutMs: 1000 },
       {
         env: {},
         stdout: quiet,
@@ -419,7 +423,7 @@ describe('independent verification', () => {
       now = 0;
       const code = await runVerifiedOpenCode(
         buildConfig(),
-        { project: '.', prompt: ['task'], verify: 'check', timeoutMs: 1000 },
+        { project: testProject, prompt: ['task'], verify: 'check', timeoutMs: 1000 },
         {
           now: () => now,
           stderr: quiet,
@@ -483,7 +487,7 @@ setInterval(() => {}, 1000);
     const code = await runVerifiedOpenCode(
       config,
       {
-        project: '.',
+        project: testProject,
         prompt: ['Implement the feature'],
         verify: 'project-tests',
         attempts: 3,
@@ -515,7 +519,7 @@ setInterval(() => {}, 1000);
   });
 
   test('never turns failed checks or model errors into success', async () => {
-    const opts = { project: '.', prompt: ['task'], verify: 'check', attempts: 2 };
+    const opts = { project: testProject, prompt: ['task'], verify: 'check', attempts: 2 };
     let checks = 0;
     const failing = await runVerifiedOpenCode(buildConfig(), opts, {
       stderr: quiet,
@@ -547,7 +551,7 @@ setInterval(() => {}, 1000);
     const code = await runVerifiedOpenCode(
       buildConfig(),
       {
-        project: '.',
+        project: testProject,
         prompt: ['Implement the feature'],
         verify: 'acceptance-check',
         timeoutMs: 10000,
@@ -594,7 +598,7 @@ setInterval(() => {}, 1000);
       const code = await runVerifiedOpenCode(
         buildConfig(),
         {
-          project: '.',
+          project: testProject,
           prompt: ['task'],
           verify: 'check',
           attempts: 1,
@@ -621,7 +625,7 @@ setInterval(() => {}, 1000);
       expect(
         await runVerifiedOpenCode(
           buildConfig(),
-          { project: '.', prompt: ['task'], verify: 'check' },
+          { project: testProject, prompt: ['task'], verify: 'check' },
           {
             stderr: quiet,
             runModel: async () => code,
@@ -640,7 +644,7 @@ setInterval(() => {}, 1000);
     ).toBe(120000);
     const code = await runVerifiedOpenCode(
       buildConfig(),
-      { project: '.', prompt: ['task'], verify: 'check', timeoutMs: 900000 },
+      { project: testProject, prompt: ['task'], verify: 'check', timeoutMs: 900000 },
       {
         stderr: quiet,
         runModel: async (_config, opts) => {
@@ -653,7 +657,7 @@ setInterval(() => {}, 1000);
     for (const roundTimeoutMs of [0, -1, NaN, 1.5, Infinity])
       await expect(
         runVerifiedOpenCode(buildConfig(), {
-          project: '.',
+          project: testProject,
           prompt: ['task'],
           verify: 'check',
           roundTimeoutMs,
@@ -748,7 +752,7 @@ setInterval(() => {}, 1000);
       expect(
         await runOpenCode(
           buildConfig(),
-          { project: '.', prompt: ['task'], timeoutMs: 10 },
+          { project: testProject, prompt: ['task'], timeoutMs: 10 },
           { runFlags: [], spawnImpl, env: {}, stdout: quiet },
         ),
       ).toBe(signal === 'SIGINT' ? 130 : 143);
@@ -756,7 +760,7 @@ setInterval(() => {}, 1000);
         (
           await runVerification(
             'check',
-            { project: '.', timeoutMs: 10 },
+            { project: testProject, timeoutMs: 10 },
             { runFlags: [], spawnImpl, stderr: quiet },
           )
         ).code,
@@ -764,7 +768,7 @@ setInterval(() => {}, 1000);
     }
     const code = await runOpenCode(
       buildConfig(),
-      { project: '.', prompt: ['task'], timeoutMs: 10 },
+      { project: testProject, prompt: ['task'], timeoutMs: 10 },
       {
         env: {},
         stdout: quiet,
@@ -833,7 +837,7 @@ process.exit(0);
   test('bounds feedback while retaining the first diagnostic and final summary', async () => {
     const checked = await runVerification(
       'literal command',
-      { project: '.', timeoutMs: 1000 },
+      { project: testProject, timeoutMs: 1000 },
       {
         stderr: quiet,
         runFlags: [],
@@ -861,7 +865,7 @@ process.exit(0);
     const signals: string[] = [];
     const checked = await runVerification(
       'checks',
-      { project: '.', timeoutMs: 10 },
+      { project: testProject, timeoutMs: 10 },
       {
         stderr: quiet,
         runFlags: [],
@@ -885,7 +889,7 @@ process.exit(0);
   test('retains a failure in the middle of a long passing-test log', async () => {
     const checked = await runVerification(
       'project-tests',
-      { project: '.', timeoutMs: 1000 },
+      { project: testProject, timeoutMs: 1000 },
       {
         stderr: quiet,
         runFlags: [],
@@ -925,7 +929,7 @@ process.exit(0);
       }) as any;
       const checked = await runVerification(
         'checks',
-        { project: '.', timeoutMs: 1000 },
+        { project: testProject, timeoutMs: 1000 },
         {
           runFlags: [],
           spawnImpl,
@@ -936,7 +940,7 @@ process.exit(0);
       const code = await runOpenCode(
         buildConfig(),
         {
-          project: '.',
+          project: testProject,
           prompt: ['task'],
           timeoutMs: 1000,
         },
