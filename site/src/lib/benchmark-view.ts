@@ -1,6 +1,6 @@
 import { outputQualityStatus } from '../../../tools/benchmark_quality.mjs';
-import { speculationPair } from '../../../tools/benchmark_speculation.mjs';
-export { speculationPair } from '../../../tools/benchmark_speculation.mjs';
+import { prefillTimingsMatch, speculationPair } from '../../../tools/benchmark_speculation.mjs';
+export { prefillTimingsMatch, speculationPair } from '../../../tools/benchmark_speculation.mjs';
 
 // Presentation helpers. Published measurements stay immutable; each view selects
 // a complete recorded run before deriving any chart, summary, or timing.
@@ -96,7 +96,11 @@ export function rowsFor(target: BenchmarkRecord, scenarioId: string, mode: MtpMo
           : null;
       const missingOff =
         mode === 'off' && original.zinc?.speculative_decoding?.enabled && !variant?.zinc;
-      const baseProvenance = { ...target.provenance, ...model.provenance };
+      const baseProvenance = {
+        ...target.provenance,
+        ...model.provenance,
+        harness: model.provenance ? (model.provenance.harness ?? null) : target.provenance?.harness,
+      };
       const variantProvenance = variant?.provenance;
       const provenance = variantProvenance
         ? {
@@ -110,6 +114,7 @@ export function rowsFor(target: BenchmarkRecord, scenarioId: string, mode: MtpMo
             ...variant,
             baseline: variant.baseline ?? original.baseline,
             output_quality: variant.output_quality,
+            correctness_review: variant.correctness_review,
           }
         : original;
       return [
@@ -167,7 +172,7 @@ export function overallRatio(row: BenchmarkRecord): number | null {
   const llamaSeconds = phaseSeconds(row.baseline);
   const generated = row.zinc?.generated_tokens;
   if (
-    !speculationPair(row.zinc, row.baseline).matched ||
+    !prefillTimingsMatch(row.zinc, row.baseline) ||
     promptParity(row) !== true ||
     qualityStatus(row).tone === 'caution' ||
     !Number.isFinite(generated) ||
@@ -184,6 +189,7 @@ export function overallRatio(row: BenchmarkRecord): number | null {
 export function rateRatio(row: BenchmarkRecord, phase: 'prefill_tps' | 'decode_tps') {
   if (qualityStatus(row).tone === 'caution' || !speculationPair(row.zinc, row.baseline).matched)
     return null;
+  if (phase === 'prefill_tps' && !prefillTimingsMatch(row.zinc, row.baseline)) return null;
   const zinc = metric(row.zinc?.[phase]);
   const llama = metric(row.baseline?.[phase]);
   return zinc != null && zinc > 0 && llama != null && llama > 0 ? zinc / llama : null;
@@ -224,6 +230,7 @@ export function qualityStatus(row: BenchmarkRecord) {
   // A later correctness finding applies to the whole recorded model run,
   // including every scenario and MTP variant; fluent previews cannot clear it.
   if (row.model?.correctness_review?.tone === 'caution') return row.model.correctness_review;
+  if (row.correctness_review?.tone === 'caution') return row.correctness_review;
   const observed = outputQualityStatus(row.zinc?.output_preview, row.zinc?.generated_tokens);
   return row.output_quality?.tone === 'caution' ? row.output_quality : observed;
 }
@@ -238,6 +245,10 @@ export function rowNotes(row: BenchmarkRecord): { text: string; href?: string }[
   const quality = qualityStatus(row);
   const pairing = speculationPair(row.zinc, row.baseline);
   if (pairing.note) notes.push({ text: pairing.note });
+  if (pairing.matched && !prefillTimingsMatch(row.zinc, row.baseline))
+    notes.push({
+      text: 'MTP prefill timers cover different or unrecorded work, including draft priming. Prefill and summed-phase ratios are excluded; compare the recorded full HTTP request latency.',
+    });
   // Missing telemetry must not hide a later correctness review of the same run.
   if (quality.tone === 'caution')
     notes.push({
@@ -248,7 +259,7 @@ export function rowNotes(row: BenchmarkRecord): { text: string; href?: string }[
     notes.push({
       text: 'Different prompt token counts. Per-token rates are indicative; excluded from the overall comparison.',
     });
-  else if (!warning && pairing.matched && overallRatio(row) == null)
+  else if (!warning && prefillTimingsMatch(row.zinc, row.baseline) && overallRatio(row) == null)
     notes.push({
       text: 'Output budgets differ, a run stopped early, or phase telemetry is incomplete. Excluded from the overall comparison.',
     });

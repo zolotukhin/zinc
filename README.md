@@ -150,9 +150,11 @@ build revisions and dates.
 
 The chart is generated from
 [`zinc-performance.json`](site/src/data/zinc-performance.json).
-[Reproduce the suite](docs/BENCHMARKING.md), or read the latest
-[27B MTP follow-up](docs/ROCM_MTP_0_17.md): 71.17 → 77.04 tok/s on its long
-coding workload compared with the previous ZINC build.
+[Reproduce the suite](docs/BENCHMARKING.md), or read the
+[matched 27B MTP comparison](docs/MATCHED_MTP_LLAMA_CPP.md) against current
+llama.cpp, including the output controls that still need investigation.
+The earlier [Zig 0.17 MTP optimization study](docs/ROCM_MTP_0_17.md) records a
+separate comparison between two ZINC builds.
 
 ## Build and contribute
 

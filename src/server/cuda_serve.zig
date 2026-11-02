@@ -382,8 +382,9 @@ pub const ServeEngine = struct {
     /// single-sequence KV and rolls it back on a rejected draft, so it needs the
     /// whole sequence to itself. With one slot that is exactly what a request
     /// has. Every published token is a target-model output — drafts are only
-    /// kept where the target agreed — so the stream matches ordinary greedy
-    /// decoding token for token.
+    /// kept where this target path agreed. Single-sequence and slot paths can
+    /// use different numerical kernels; exact output equivalence needs its own
+    /// control rather than following from draft acceptance alone.
     ///
     /// @returns false when MTP was unavailable for this request, so the caller
     /// falls back to the ordinary slot path.

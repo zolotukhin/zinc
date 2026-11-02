@@ -19,6 +19,18 @@ export function speculationPair(zinc, baseline) {
   };
 }
 
+// With MTP, some engines exclude draft priming from their prefill timer.
+// Equal mode flags alone cannot make those phase totals comparable.
+export function prefillTimingsMatch(zinc, baseline) {
+  if (!speculationPair(zinc, baseline).matched) return false;
+  if (speculationMode(zinc) === 'off') return true;
+  const scope = zinc?.prefill_timing_scope;
+  return (
+    ['target-prefill', 'target-and-draft-prefill'].includes(scope) &&
+    scope === baseline?.prefill_timing_scope
+  );
+}
+
 export function requireBenchmarkReference(observed, expected) {
   if (!observed?.commit || !expected.startsWith(observed.commit) || observed.commit.length < 7)
     throw new Error(`Benchmark llama.cpp must be built from pinned commit ${expected}.`);

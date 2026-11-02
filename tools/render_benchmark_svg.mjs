@@ -73,7 +73,7 @@ export function collectRows(data, targetId) {
     )
       continue;
     if (
-      [model, core, selected].some(
+      [model, selected].some(
         (row) =>
           row.correctness_review?.tone === 'caution' ||
           row.output_quality?.tone === 'caution' ||
@@ -97,6 +97,19 @@ export function collectRows(data, targetId) {
       basePrefill,
       baseDecode,
       comparable: true,
+      zincVersion:
+        selected.provenance?.zinc?.version ??
+        selected.provenance?.version ??
+        model.provenance?.zinc?.version ??
+        target.provenance?.zinc?.version ??
+        'unknown',
+      llamaCommit:
+        selected.provenance?.llama_cpp?.commit ??
+        model.provenance?.llama_cpp?.commit ??
+        target.provenance?.llama_cpp?.commit ??
+        'unknown',
+      measuredAt:
+        selected.measured_at ?? core.measured_at ?? model.generated_at ?? target.generated_at ?? '',
     });
   }
   // Ordered by prompt processing: it is the axis with the widest spread, and
@@ -133,21 +146,14 @@ export function renderSvg(data, targetId) {
   const pctToX = (pct) => barX + (Math.min(pct, axisMax) / axisMax) * barW;
   const hundred = pctToX(100);
 
-  // A partial re-run leaves rows from more than one ZINC build; name them all.
-  const rowVersions = [
-    ...new Set(
-      (target.models ?? [])
-        .filter((model) => rows.some((row) => row.id === model.id))
-        .map((m) => m.provenance?.zinc?.version)
-        .filter(Boolean),
-    ),
-  ];
-  const zincVersion =
-    rowVersions.length > 1
-      ? rowVersions.join(' + ')
-      : (target.provenance?.zinc?.version ?? rowVersions[0] ?? 'unknown');
-  const llamaCommit = target.provenance?.llama_cpp?.commit ?? 'unknown';
-  const measured = (target.generated_at ?? '').slice(0, 10);
+  const rowVersions = [...new Set(rows.map((row) => row.zincVersion))];
+  const llamaVersions = [...new Set(rows.map((row) => row.llamaCommit))];
+  const measuredDates = [...new Set(rows.map((row) => row.measuredAt.slice(0, 10)))];
+  const mixedSources =
+    rowVersions.length > 1 || llamaVersions.length > 1 || measuredDates.length > 1;
+  const zincVersion = rowVersions[0];
+  const llamaCommit = llamaVersions[0];
+  const measured = measuredDates[0];
   const gpu = target.machine?.gpu ?? 'GPU';
   const backend = /rocm/i.test(targetId) ? 'ROCm' : (target.methodology?.zinc_backend ?? '');
   const llamaBackend = target.methodology?.llama_backend ?? null;
@@ -219,6 +225,10 @@ export function renderSvg(data, targetId) {
       `<text x="${cardX}" y="${top + 40}" font-size="12.5" fill="${THEME.muted}">${Math.round(row.zincPrefill)} vs ${Math.round(row.basePrefill)} tok/s · ${row.zincDecode.toFixed(1)} vs ${row.baseDecode.toFixed(1)} tok/s</text>`,
     );
 
+    out.push(
+      `<text x="${cardX}" y="${top + 61}" font-size="10.5" fill="${THEME.muted}">${escapeXml(row.measuredAt.slice(0, 10))} · ZINC ${escapeXml(row.zincVersion.slice(0, 9))} / llama.cpp ${escapeXml(row.llamaCommit.slice(0, 9))}</text>`,
+    );
+
     const bars = [
       { pct: row.prefillPct, fill: THEME.zinc, y: top + 4 },
       { pct: row.decodePct, fill: THEME.zincSoft, y: top + 27 },
@@ -235,7 +245,7 @@ export function renderSvg(data, targetId) {
   // Footnotes
   let footY = headerH + rows.length * rowH + 22;
   out.push(
-    `<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">Measured ${escapeXml(measured)} · ZINC ${escapeXml(zincVersion)} · llama.cpp ${escapeXml(llamaCommit)} · medians of repeated runs after warmup</text>`,
+    `<text x="${cardX}" y="${footY}" font-size="12" fill="${THEME.muted}">${mixedSources ? 'Mixed measurement dates and revisions; see each row. Medians of repeated requests after warmup.' : `Measured ${escapeXml(measured)} · ZINC ${escapeXml(zincVersion)} · llama.cpp ${escapeXml(llamaCommit)} · medians of repeated runs after warmup`}</text>`,
   );
   footY += 20;
   out.push(

@@ -192,6 +192,20 @@ rows; llama.cpp uses its default draft vocabulary. Both verify with the full
 target model. Report these implementation choices alongside matched mode
 and draft limits rather than treating MTP-off as the competing MTP result.
 
+The [November 2026 matched campaign](MATCHED_MTP_LLAMA_CPP.md) retains the
+complete Vulkan and ROCm evidence, including failed exact-output controls.
+For MTP-on phase comparisons, record whether the prefill timer includes draft
+priming. Different or unknown coverage excludes the prefill and summed-phase
+ratios; full HTTP latency includes priming for both engines.
+
+Publish completed reports with `tools/merge_matched_mtp.mjs --report <file>`
+(repeat for both backends) and `--harness-commit <full-frozen-commit>`. The
+publisher verifies hashes against that immutable source. Failed output
+controls require explicit `--include-diagnostics` and keep their on-mode
+ratios excluded; they cannot clear valid off-mode results or historical
+model-wide cautions. This produces the site's paired engine variants and
+public raw campaign files.
+
 The legacy `merge_mtp_variant.mjs` helper accepts a freshly measured baseline
 for the off variant. Reusing an old baseline with missing or different MTP
 settings cannot create a comparison.

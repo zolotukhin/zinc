@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test';
-import { requireBenchmarkReference, speculationPair } from './benchmark_speculation.mjs';
+import {
+  prefillTimingsMatch,
+  requireBenchmarkReference,
+  speculationPair,
+} from './benchmark_speculation.mjs';
 
 test('mismatched or missing MTP settings cannot establish a comparison', () => {
   const on = { speculative_decoding: { enabled: true } };
@@ -19,4 +23,17 @@ test('a stale or unidentified reference is rejected before benchmarking', () => 
   expect(() => requireBenchmarkReference({ ...current, commit: '5f436dddb' }, expected)).toThrow();
   expect(() => requireBenchmarkReference({ ...current, commit: null }, expected)).toThrow();
   expect(() => requireBenchmarkReference({ ...current, sha256: null }, expected)).toThrow();
+});
+
+test('MTP phase ratios require equal recorded draft-priming coverage', () => {
+  const zinc = { speculative_decoding: { enabled: true }, prefill_timing_scope: 'target-prefill' };
+  const llama = {
+    speculative_decoding: { enabled: true },
+    prefill_timing_scope: 'target-and-draft-prefill',
+  };
+  expect(prefillTimingsMatch(zinc, llama)).toBe(false);
+  expect(prefillTimingsMatch(zinc, { speculative_decoding: { enabled: true } })).toBe(false);
+  expect(prefillTimingsMatch(zinc, zinc)).toBe(true);
+  const off = { speculative_decoding: { enabled: false } };
+  expect(prefillTimingsMatch(off, off)).toBe(true);
 });

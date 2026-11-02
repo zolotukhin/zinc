@@ -134,7 +134,9 @@ test('renderSvg names every ZINC build when rows come from more than one run', (
   data.targets[0].models[0].provenance = { zinc: { version: 'aaa111' } };
   data.targets[0].models[1].provenance = { zinc: { version: 'bbb222' } };
   const svg = renderSvg(data, 'rdna-rocm');
-  expect(svg).toContain('ZINC aaa111 + bbb222');
+  expect(svg).toContain('ZINC aaa111');
+  expect(svg).toContain('ZINC bbb222');
+  expect(svg).toContain('Mixed measurement dates and revisions');
 });
 
 test('unknown modes, mismatched modes, missing off variants and correctness cautions cannot become bars', () => {
@@ -149,7 +151,7 @@ test('unknown modes, mismatched modes, missing off variants and correctness caut
       core.variants.mtp_off.baseline.speculative_decoding.enabled = true;
     },
     (core: any) => {
-      core.correctness_review = { tone: 'caution' };
+      core.variants.mtp_off.correctness_review = { tone: 'caution' };
     },
   ]) {
     const data = artifact();

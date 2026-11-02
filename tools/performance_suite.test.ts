@@ -2096,3 +2096,12 @@ test('a model correctness caution removes historical ratios and summary wins for
   expect(bad.scenarios[0].variants.mtp_off.comparison).toBeNull();
   expect(bad.scenarios[0].zinc.decode_tps.median).toBe(1000);
 });
+
+test('benchmark refreshes retain earlier correctness review metadata', () => {
+  const review = { reviewed_at: '2026-11-02T00:09:14Z', affected_model_rows: 5 };
+  const updated = mergeArtifacts(
+    { schema_version: 1, targets: [], correctness_review: review },
+    [],
+  );
+  expect(updated.correctness_review).toEqual(review);
+});

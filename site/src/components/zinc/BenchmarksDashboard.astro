@@ -8,7 +8,7 @@ import benchmarkData from '../../data/zinc-performance.json';
 import {
   aggregate, backendLabel, barWidth, formatDate, formatNumber, formatRatio,
   hasMtpVariants, metric, overallRatio, phaseSeconds, platformLabel, promptParity,
-  qualityStatus, rateRatio, rowNotes, rowsFor, sampleCount, scenarioNames, scenarioOrder, speculationPair,
+  qualityStatus, rateRatio, rowNotes, rowsFor, sampleCount, scenarioNames, scenarioOrder, speculationPair, prefillTimingsMatch,
   scenarios, sourceUrl,
 } from '../../lib/benchmark-view';
 
@@ -21,6 +21,7 @@ const rank = (id: string) => order.includes(id) ? order.indexOf(id) : order.leng
 const targets = ([...benchmarkData.targets] as BenchmarkRecord[]).sort((a, b) => rank(a.id) - rank(b.id));
 const measurementDates = targets.flatMap((target) => [target.generated_at, ...target.models.flatMap((model) => [model.generated_at, ...scenarios(model).flatMap((scenario) => [scenario.measured_at, ...Object.values(scenario.variants ?? {}).map((variant: any) => variant.measured_at)])])]).filter((value) => value && Number.isFinite(Date.parse(value))).sort((a, b) => Date.parse(b) - Date.parse(a));
 const latestMeasurement = measurementDates[0];
+const modifiedAt = [benchmarkData.generated_at, benchmarkData.correctness_review?.reviewed_at].filter((value) => value && Number.isFinite(Date.parse(value))).sort((a, b) => Date.parse(b) - Date.parse(a))[0];
 const modelCount = new Set(targets.flatMap((target) => target.models.map((model) => model.id))).size;
 // Ratios use a unit scale: 1.00 means parity. Keep CSS tone selection with the view.
 function ratioTone(value: number | null) {
@@ -48,7 +49,7 @@ const jsonLd = {
     {
       '@type': 'Dataset', name: 'ZINC benchmark measurements',
       description: 'Recorded same-machine ZINC and llama.cpp prefill, decode, timing, and speculative-decoding measurements.',
-      dateModified: benchmarkData.correctness_review?.reviewed_at ?? benchmarkData.generated_at,
+      dateModified: modifiedAt,
       creator: { '@type': 'Person', name: 'Stepan Zolotukhin', url: `${siteUrl}/about/` },
       license: 'https://opensource.org/licenses/MIT', isAccessibleForFree: true,
       distribution: { '@type': 'DataDownload', encodingFormat: 'application/json', contentUrl: `${siteUrl}${dataUrl}` },
@@ -117,12 +118,12 @@ const jsonLd = {
       const machine = target.machine ?? {};
       const notes = Array.isArray(methodology.notes) ? methodology.notes : [];
       const provenance = target.provenance ?? {};
-      const zincSource = sourceUrl(provenance.zinc?.commit, 'tools/performance_suite.mjs');
+      const zincSource = sourceUrl(provenance.harness?.commit ?? provenance.zinc?.commit, provenance.harness?.path ?? 'tools/performance_suite.mjs');
       const scenarioIds = scenarioOrder.filter((id) => target.models.some((model) => scenarios(model).some((scenario) => scenario.id === id)));
       const supportsMtp = hasMtpVariants(target);
       const modes = supportsMtp ? ['off', 'on'] as const : ['off'] as const;
       const historicalCli = /ZINC CLI/i.test(methodology.runner ?? '');
-      const protocol = historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : /server/i.test(methodology.runner ?? '') ? 'Server protocol (CLI fallback allowed)' : 'Protocol not recorded';
+      const protocol = historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : /no CLI fallback/i.test(methodology.runner ?? '') ? 'Persistent server protocol (27B refresh)' : /server/i.test(methodology.runner ?? '') ? 'Server protocol (CLI fallback allowed)' : 'Protocol not recorded';
       return (
         <section id={target.id} class="target-panel" role="tabpanel" aria-labelledby={`tab-${target.id}`}
           tabindex="0" data-bench-target-panel={target.id} data-default-scenario={scenarioIds[0]}>
@@ -206,6 +207,7 @@ const jsonLd = {
                       const spec = row.zinc?.speculative_decoding;
                       const llamaSpec = row.baseline?.speculative_decoding;
                       const pairing = speculationPair(row.zinc, row.baseline);
+                      const harnessProvenance = row.provenance?.harness;
                       const zincProvenance = row.provenance?.zinc;
                       const llamaProvenance = row.provenance?.llama_cpp;
                       const evidenceNotes = rowNotes(row);
@@ -218,7 +220,7 @@ const jsonLd = {
                               const llama = metric(row.baseline?.[phase]);
                               const phaseRatio = rateRatio(row, phase);
                               return <div class="phase" data-phase={phase}>
-                                <div class="phase-title"><h5>{phase === 'prefill_tps' ? 'Prefill' : 'Decode'}</h5><span class:list={['rate-ratio', parity === false || quality.tone === 'caution' ? 'neutral' : ratioTone(phaseRatio)]}>{phaseRatio == null ? quality.tone === 'caution' || !pairing.matched || parity === false ? 'Not comparable' : 'Not recorded' : formatRatio(phaseRatio)}</span></div>
+                                <div class="phase-title"><h5>{phase === 'prefill_tps' ? 'Prefill' : 'Decode'}</h5><span class:list={['rate-ratio', parity === false || quality.tone === 'caution' ? 'neutral' : ratioTone(phaseRatio)]}>{phaseRatio == null ? quality.tone === 'caution' || !pairing.matched || parity === false || phase === 'prefill_tps' && !prefillTimingsMatch(row.zinc, row.baseline) ? 'Not comparable' : 'Not recorded' : formatRatio(phaseRatio)}</span></div>
                                 {([['zinc', zinc], ['baseline', llama]] as const).map(([engine, value]) => <div class="bar-line">
                                   <span>{engine === 'zinc' ? 'ZINC' : 'llama.cpp'}</span><div class="bar-track" aria-hidden="true"><i class:list={['bar-fill', engine === 'zinc' ? 'zinc' : 'llama']} style={`width: ${barWidth(value, phaseMax(phase))}%`}></i></div><strong data-engine={engine}>{value == null ? '—' : formatNumber(value)}</strong>
                                 </div>)}
@@ -245,7 +247,8 @@ const jsonLd = {
                               </div>
                               {[['ZINC', spec], ['llama.cpp', llamaSpec]].map(([engineName, stats]) => stats?.enabled && metric(stats.acceptance_pct) != null && <p class="config-note">{engineName} MTP median draft acceptance: {formatNumber(metric(stats.acceptance_pct))}%.</p>)}
                               <h5>Recorded user prompt</h5><pre class="prompt" tabindex="0" role="region" aria-label="Recorded user prompt"><code>{row.prompt ?? 'Not recorded'}</code></pre>
-                              <p class="config-note">Chat mode also applies the engine’s chat template and harness system message. <a href={sourceUrl(zincProvenance?.commit, 'tools/performance_suite.mjs')}>{zincProvenance?.commit ? 'Read the runner at this revision' : 'Read the current runner (historical revision not recorded)'}</a> for the full request, flags, and warmup policy. Token counts allow a one-token BOS accounting difference.</p>
+                              <p class="config-note">Chat mode also applies the engine’s chat template and harness system message. <a href={sourceUrl(harnessProvenance?.commit ?? zincProvenance?.commit, harnessProvenance?.path ?? 'tools/performance_suite.mjs')}>{zincProvenance?.commit ? 'Read the runner at this revision' : 'Read the current runner (historical revision not recorded)'}</a> for the full request, flags, and warmup policy. Token counts allow a one-token BOS accounting difference.</p>
+                              {row.model.matched_mtp_evidence?.url && <p class="config-note"><a href={row.model.matched_mtp_evidence.url}>Download the complete matched MTP campaign</a>, including output controls and binary/library hashes.</p>}
                               <details class="preview"><summary>Captured ZINC output preview</summary><pre tabindex="0" role="region" aria-label="Captured ZINC output preview"><code>{row.zinc?.output_preview ?? 'Not recorded'}</code></pre></details>
                             </div>
                           </details>

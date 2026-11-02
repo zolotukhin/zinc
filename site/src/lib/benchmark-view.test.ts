@@ -24,10 +24,12 @@ test('MTP off selects the entire measured variant without changing the artifact'
   const on = rowsFor(target, 'core', 'on').find((row) => row.model.id === 'qwen38-27b-q4k-m')!;
   expect(off.zinc).toEqual(original.variants!.mtp_off.zinc);
   expect(off.measured_at).toBe(original.variants!.mtp_off.measured_at);
-  expect(off.provenance.zinc).toEqual(original.variants!.mtp_off.provenance);
-  expect(off.baseline).toEqual(on.baseline);
-  expect(metric(off.zinc.decode_tps)).toBe(32.79);
-  expect(metric(on.zinc.decode_tps)).toBe(63.76);
+  expect(off.provenance.zinc).toEqual(
+    original.variants!.mtp_off.provenance.zinc ?? original.variants!.mtp_off.provenance,
+  );
+  expect(off.baseline).toEqual(original.variants!.mtp_off.baseline ?? on.baseline);
+  expect(metric(off.zinc.decode_tps)).toBe(metric(original.variants!.mtp_off.zinc.decode_tps));
+  expect(metric(on.zinc.decode_tps)).toBe(metric(original.zinc.decode_tps));
   expect(metric(off.zinc.prefill_tps)).not.toBe(metric(on.zinc.prefill_tps));
   expect(aggregate(rowsFor(target, 'core', 'off')).decode).not.toBe(
     aggregate(rowsFor(target, 'core', 'on')).decode,

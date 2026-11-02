@@ -1,6 +1,10 @@
 import { outputQualityStatus } from './benchmark_quality.mjs';
 import { checkBenchmarkReference } from './benchmark_reference.mjs';
-import { requireBenchmarkReference, speculationPair } from './benchmark_speculation.mjs';
+import {
+  prefillTimingsMatch,
+  requireBenchmarkReference,
+  speculationPair,
+} from './benchmark_speculation.mjs';
 import benchmarkReference from '../config/benchmark-reference.json' with { type: 'json' };
 export { outputQualityStatus } from './benchmark_quality.mjs';
 import { spawn, spawnSync } from 'node:child_process';
@@ -785,8 +789,10 @@ function matchingGeneratedBudget(zincGenerated, baselineGenerated, expectedGener
 
 function scenarioNeedsOutputReview(scenario) {
   return (
+    scenario?.correctness_review?.tone === 'caution' ||
+    scenario?.output_quality?.tone === 'caution' ||
     outputQualityStatus(scenario?.zinc?.output_preview, scenario?.zinc?.generated_tokens).tone ===
-    'caution'
+      'caution'
   );
 }
 
@@ -860,11 +866,14 @@ export function buildComparison(zincSummary, baselineSummary, options = {}) {
     baselineOverallSeconds && baselineTotalPhaseTokens > 0
       ? baselineTotalPhaseTokens / baselineOverallSeconds
       : null;
-  const overallComparable = matchingGeneratedBudget(
-    zincGeneratedTokens,
-    baselineGeneratedTokens,
-    options.expectedGeneratedTokens,
-  );
+  const phaseTimingsMatch = prefillTimingsMatch(zincSummary, baselineSummary);
+  const overallComparable =
+    phaseTimingsMatch &&
+    matchingGeneratedBudget(
+      zincGeneratedTokens,
+      baselineGeneratedTokens,
+      options.expectedGeneratedTokens,
+    );
   const overallPct =
     overallComparable && zincOverallSeconds && baselineOverallSeconds
       ? (baselineOverallSeconds / zincOverallSeconds) * 100
@@ -898,14 +907,18 @@ export function buildComparison(zincSummary, baselineSummary, options = {}) {
     overall_comparable: overallPct != null,
     overall_unavailable_reason:
       overallPct == null
-        ? 'Generated token counts did not match the scenario budget, or phase telemetry was incomplete.'
+        ? !phaseTimingsMatch
+          ? 'MTP prefill timers cover different or unrecorded work; compare full HTTP latency.'
+          : 'Generated token counts did not match the scenario budget, or phase telemetry was incomplete.'
         : null,
     pct_of_baseline: pctOfBaseline,
     delta_tps: gapTps,
     delta_pct: pctOfBaseline - 100,
     leader: gapTps >= 0 ? 'zinc' : 'baseline',
     prompt_pct_of_baseline:
-      zincPrefill && baselinePrefill ? (zincPrefill / baselinePrefill) * 100 : null,
+      phaseTimingsMatch && zincPrefill && baselinePrefill
+        ? (zincPrefill / baselinePrefill) * 100
+        : null,
     latency_pct_of_baseline:
       zincLatency && baselineLatency ? (zincLatency / baselineLatency) * 100 : null,
     latency_delta_ms:
@@ -1011,11 +1024,12 @@ function mergeTargetForPartialRun(existingTarget, incomingTarget) {
 }
 
 function recalculateScenarioComparison(scenario) {
-  const comparison = scenario?.baseline?.decode_tps
-    ? buildComparison(scenario.zinc, scenario.baseline, {
-        expectedGeneratedTokens: scenario.max_tokens,
-      })
-    : null;
+  const comparison =
+    scenario?.correctness_review?.tone !== 'caution' && scenario?.baseline?.decode_tps
+      ? buildComparison(scenario.zinc, scenario.baseline, {
+          expectedGeneratedTokens: scenario.max_tokens,
+        })
+      : null;
   return {
     ...scenario,
     comparison,
@@ -1026,9 +1040,12 @@ function recalculateScenarioComparison(scenario) {
               key,
               {
                 ...variant,
-                comparison: buildComparison(variant.zinc, variant.baseline ?? scenario.baseline, {
-                  expectedGeneratedTokens: variant.max_tokens ?? scenario.max_tokens,
-                }),
+                comparison:
+                  variant.correctness_review?.tone === 'caution'
+                    ? null
+                    : buildComparison(variant.zinc, variant.baseline ?? scenario.baseline, {
+                        expectedGeneratedTokens: variant.max_tokens ?? scenario.max_tokens,
+                      }),
               },
             ]),
           ),
@@ -1080,7 +1097,7 @@ function recalculateModelComparisons(model) {
           baseline: primary.baseline ?? model.baseline,
         }
       : {}),
-    comparison: blocked ? null : comparison,
+    comparison: blocked || primary?.correctness_review?.tone === 'caution' ? null : comparison,
     ...(scenarios ? { scenarios } : {}),
   };
 }
@@ -1140,6 +1157,7 @@ export function mergeArtifacts(existing, incomingTargets, options = {}) {
     return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
   });
   return {
+    ...existing,
     schema_version: 1,
     generated_at: new Date().toISOString(),
     targets,
