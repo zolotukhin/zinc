@@ -56,3 +56,19 @@ These checks supplement the short continuations and request-recovery checks.
 The [Intel OpenCode investigation](INTEL_OPENCODE_VALIDATION.md) records actual
 coding outcomes and their source-specific scope. Numerical agreement alone
 does not establish that a model completes a coding task.
+
+## Worker readiness follow-up
+
+The preview worker initially copied model identity and context while dropping
+the pinned window field. Its extended-check branch therefore never ran, even
+though candidate aggregation already required that evidence. Readiness now
+preserves the boundary. A CPU lifecycle regression exercises the real
+pin-to-execution wiring and rejects a long-window disagreement after otherwise
+passing short checks; restoring the old wiring fails both controls.
+
+The [fresh automatic R9700 reports](/zinc/validation/worker-readiness-window-gate-2026-11-02.json)
+include both Gemmas' measured 1,136–1,139-token prompts, CLI agreement and full
+HTTP continuations. Vulkan matches all 432 short/extended choices across seven
+models. ROCm matches 382 of 384 exactly, with two policy-qualified near-ties.
+These preview reports retain their archive and validation-source identities;
+they do not certify a final candidate or an Intel worker.

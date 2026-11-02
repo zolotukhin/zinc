@@ -22,7 +22,7 @@ Land implementation changes through ordinary reviewed PRs. A later release prepa
 
 PR code never runs on GPU/signing workers. Actions use commit pins, checkout credentials are not retained, and only the publisher has release-write permission. Nightly runs cannot be promoted. Enable them with repository variable `ZINC_ENABLE_RELEASE_NIGHTLY=true` after provisioning the selected workers. Signing configuration is required only when a selected release target requires it.
 
-The nightly schedule runs the full correctness/model matrix. Performance baselines and broader optional-feature qualifications remain separate work; this pipeline makes no TPS claims. Current checks use greedy decoding, one slot, f32 KV and the backend's default MTP setting at the policy's context limits. Metal/Vulkan include browser chat; ROCm exposes CLI/HTTP routes without the built-in UI or hot model switching. Add checks before expanding that contract.
+The nightly schedule runs the full correctness/model matrix. Performance baselines and broader optional-feature qualifications remain separate work; this pipeline makes no TPS claims. ZINC checks use greedy decoding, one slot and the backend's default KV/MTP settings at the policy's context limits; the native reference uses F32 KV. Metal/Vulkan include browser chat; ROCm exposes CLI/HTTP routes without the built-in UI or hot model switching. Add checks before expanding that contract.
 
 ## Build environments and package format
 

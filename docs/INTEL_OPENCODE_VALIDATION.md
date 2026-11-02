@@ -1,6 +1,88 @@
 # Intel OpenCode validation
 
-The November 1 checks on an Intel Arc Pro B70 exercise all seven catalog models
+The Intel Arc Pro B70 checks keep inference correctness, API behavior, client
+exit and independent acceptance tests separate. Earlier failures retain their
+source, binary and launch settings.
+
+## Latest package and corrected launcher
+
+The [complete November 2 matrix](/zinc/validation/intel-opencode-packaged-default-2026-11-02.json)
+uses one exact CI Vulkan archive and actual OpenCode 2.0.21. All seven
+models pass the default CLI/HTTP reference gates; API probes pass
+**203/203**, and coding fixtures pass **18/21**.
+The table reports completed clients with passing independent tests, protected
+files intact, a responsive server and correct post-client native replays.
+
+Gemma 31B uses 12,288 context tokens; every other row uses 16,384. Coding
+counts require all acceptance conditions above, including a successful client
+exit.
+
+| Model            |   API | Coding |
+| ---------------- | ----: | -----: |
+| Gemma 4 31B      | 29/29 |    3/3 |
+| Gemma 4 26B-A4B  | 29/29 |    3/3 |
+| Qwen 3.6 35B-A3B | 29/29 |    3/3 |
+| Qwen 3.6 27B     | 29/29 |    3/3 |
+| Qwen 3.5 9B      | 29/29 |    3/3 |
+| Qwen 3.8 27B     | 29/29 |    3/3 |
+| Qwen 3 0.6B      | 29/29 |    0/3 |
+
+All 21 same-server recovery requests pass in **158–739 ms**, and all 63
+post-client HTTP continuations pass their frozen native references. The JSON
+retains individual contexts, timings and fixture outcomes.
+
+The numerical shader suite passes **376/376** cases. The seven short native
+checks and two extended Gemma checks compare **432 choices: 431 exact and
+one policy-qualified near-tie**. The latter is Qwen 3.6 35B-A3B's second-ranked
+choice with a 0.0155 log-probability gap; the native reference independently
+qualifies its remaining suffix. No tolerance changes. Both Gemmas also pass
+complete HTTP continuations beyond their 1,024-token window. Qwen 3.8 passes
+all 48 native choices with the new Intel default and no MTP override.
+
+Each task starts a fresh single-slot server, with 16 steps, 2,048 output
+tokens and 900 seconds. Temperature is zero, top-p is one and thinking is
+disabled. The client and independent verification use the fixture directory
+for both `cwd` and `PWD`. No supervisor edits, repaired calls, synthetic model
+responses or deadline extensions enter this matrix. Cache misses use full
+prefill; automatic reuse is advertised only for attention-only models.
+
+**Qwen 3 0.6B retained failures:**
+
+- `rate-limiter-single`: acceptance conditions not met; independent tests 0 pass / 1 fail, protected-file violations 0.
+- `cart-multi-file`: acceptance conditions not met; independent tests 1 pass / 2 fail, protected-file violations 0.
+- `python-log-cli`: verification exits 5 with no tests run after a protected-file change; protected-file violations 1.
+
+Qwen 3.5 9B is the smallest successful coding model in this matrix. Its three
+tasks take 34–84 seconds. The starter exits zero without satisfying acceptance:
+its limiter implementation removes the required export after an invalid edit
+and an unavailable `report` call; its cart attempt reads repeatedly without a
+fix; its Python attempt changes a protected file. None counts as coding success.
+The [separate actual-client native control](/zinc/validation/intel-starter-native-opencode-control-2026-11-02.json)
+also fails all three tasks on the same Intel GPU and pinned GGUF. It uses the
+same frozen client, 16K context, 16 steps, 2,048 output tokens and 900-second
+limit, with native Vulkan F32 KV and reasoning disabled. Its acceptance tests
+do not improve from baseline; recovery and all nine post-client native
+continuations pass. Both engines fail these bounded tasks. Their chat templates
+are not claimed to be token-for-token equivalent, and the native control does
+not erase ZINC's failures. The starter remains a qualification model without
+a coding recommendation.
+
+Actual OpenCode history reuse is observed on both Gemmas: 31B records 12 hits,
+reusing up to 7,473 tokens, and 26B records three hits, up to 5,573 tokens. Misses
+use full prefill. The hybrid Qwens advertise no automatic reuse; their completed
+coding tasks exercise that conservative path.
+
+The package is [CI run 41382805638](https://github.com/zolotukhin/zinc/actions/runs/41382805638),
+version `0.1.0-dev.41382805638`, source
+`83b22e7b708f80bdb93d8727535ca6bd62677f6c` and archive SHA256
+`b83dd9823cc59cdd8eaf1dbb52d9fca91241cc17155655b8dec00b4645cd4629`. The JSON retains the
+binary, validation-source, frozen-client, model and native-reference identities.
+All attempts complete and cleanup leaves no GPU process. This SSH diagnostic
+does not certify a final release candidate or establish general coding ability.
+
+## Earlier client configurations
+
+The November 1–2 checks on an Intel Arc Pro B70 exercise all seven catalog models
 with actual OpenCode 2.0.21. They exposed client compatibility, request recovery,
 Gemma cache allocation, long-prompt attention and working-directory defects.
 A model that loads or answers a short prompt has not yet passed a coding task.
@@ -9,8 +91,8 @@ The earlier client runs below inherited a stale `PWD`. Their individual
 outcomes remain observations of that launch; they do not qualify the corrected
 configuration. The [actual-client working-directory control](/zinc/validation/opencode-working-directory-protocol-2026-11-02.json)
 fails with relative tools before the fix and passes on both pinned client
-versions afterward. A new seven-model matrix uses one exact CI archive, the
-corrected launcher and independent tests; its results must stand separately.
+versions afterward. The latest seven-model matrix above uses one exact CI archive, the
+corrected launcher and independent tests; its results stand separately.
 
 OpenCode 2.0.21 removed the CLI's `--dir` option and changed plugin registration.
 It also sends `max_completion_tokens`, which the old server ignored. A request
@@ -266,11 +348,13 @@ matches all 48 choices with MTP both on and off. The default correction is
 therefore scoped to Intel, preserving the passing AMD path.
 
 Qwen 3.8 was absent from the earlier six-model Vulkan qualification roles.
-Both roles now require it. The fresh default package must pass all seven model
-rows before their actual OpenCode fixtures resume. A positive overridden
-control is not a pass for the old default package. The fresh package has now
-passed all 48 Qwen 3.8 default choices and complete HTTP replays; the remaining
-model and coding matrix is still running.
+Both roles now require it. A positive overridden control is not a pass for the
+old default package. The fresh package passes all seven default CLI/HTTP model
+gates and both extended Gemma windows: 431 of 432 native choices match exactly,
+and one meets the unchanged near-tie rule. Qwen 3.8 matches all 48 exactly.
+The completed default-package matrix passes all 18 coding tasks across the
+six larger models. The starter fails its three tasks while retaining 29/29 API
+checks, recovery and native-reference replays; those failures remain explicit.
 
 ## Regression checks
 

@@ -5,34 +5,12 @@ Use OpenCode with a model served by ZINC. The
 creates a project configuration, checks the API, and runs tasks headlessly.
 It requires **Bun 1.4.4 or newer**. The client protocol is tested with
 **OpenCode 1.19.4 and 2.0.21**. Model coding results retain their actual client
-version in the [validation report](OPENCODE_RELEASE_VALIDATION.md).
+version in the [RDNA4 validation report](OPENCODE_RELEASE_VALIDATION.md) and
+[Intel model matrix](INTEL_OPENCODE_VALIDATION.md).
 
 [Download the standalone script](/zinc/harnesses/setup-opencode.mjs), or use
 `tools/setup_opencode.mjs` from a ZINC checkout. The downloaded script has no
 package dependencies and accepts the same arguments.
-
-The helper discovers `capabilities.chat_session_reuse` through `/health`
-before launching a task. When a Vulkan server advertises support for its attention-only active model, it gives
-that client run a fresh `session_id`, allowing later tool turns to reuse their
-matching prompt prefix. The key stays in the inline launch configuration;
-saved project files are unchanged. Older servers, other backends and failed
-discovery keep the ordinary full-prefill behavior. An explicit `session_id`,
-including an empty or null key to disable reuse, takes precedence.
-Auxiliary title/summary requests can evict the resident prefix; the next tool
-turn then uses full prefill. Changed prefixes, a different model or session,
-and an intervening request never justify reusing another request's GPU state.
-The evaluator only discovers this capability for its ZINC provider, leaving
-the llama.cpp comparison path unchanged.
-
-Recurrent/hybrid models currently do not advertise this automatic path. A
-R9700 Qwen control returned correct replies but its stored prefix and engine
-checkpoint positions disagreed, forcing full prefill. This negative control
-is retained; it is not a claim of successful hybrid cache reuse.
-
-The launcher also aligns `PWD` with the selected project. OpenCode can select
-its workspace from that inherited variable even when the OS working directory
-is correct. The [working-directory regression](OPENCODE_WORKING_DIRECTORY.md)
-uses actual clients and relative read/write/shell tools to guard this behavior.
 
 ## Start the model server
 
@@ -40,12 +18,15 @@ Build for [your GPU](GETTING_STARTED.md), then start a Qwen model with enough
 context for source files, tool definitions, and tool results:
 
 ```bash
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m -c 32768 -p 9090 --parallel 1
+./zig-out/bin/zinc model pull qwen35-9b-q4k-m
+./zig-out/bin/zinc --model-id qwen35-9b-q4k-m -c 16384 --port 9090 --parallel 1
 ```
 
-The model must fit your GPU. Qwen 3.5 9B is a smaller starting point; Qwen 3.8
-27B Q4_K_M is the dense model tested on a Radeon AI PRO R9700 with ROCm. For
-ROCm, follow the [backend setup](ROCM.md) and select your own device using
+The model must fit your GPU. Qwen 3.5 9B is a smaller starting point. The
+[Intel matrix](INTEL_OPENCODE_VALIDATION.md) records model-specific contexts,
+task deadlines and outcomes; do not assume every model can use 32K on a 32 GB
+card. Qwen 3.8 27B Q4_K_M is the larger dense model tested on a Radeon AI PRO
+R9700 with ROCm. Follow the [ROCm backend setup](ROCM.md) and select your own device using
 `ROCR_VISIBLE_DEVICES`. An existing GGUF can be supplied with
 `-m /path/to/model.gguf` instead of a managed ID.
 
@@ -71,25 +52,26 @@ with 27B prompts up to 30,048 tokens. Optional `ZINC_PROMPT_CACHE=1` reuses exac
 prefixes between single-slot Qwen requests. Neither a larger context nor a
 faster prefill establishes that the model will finish a coding task.
 For Qwen 3.8 27B's larger native window, see the [Q8 context guide](ROCM_NATIVE_CONTEXT.md)
-and pass the server's actual capacity to setup. The 32K example is not a model limit.
+and pass the server's actual capacity to setup. That 32K configuration is not a model limit.
 
 ## Configure OpenCode
 
 From the ZINC checkout:
 
 ```bash
-bun install --global opencode-ai@1.19.4
+bun add --global --trust @opencode/cli@2.0.21
 
 bun tools/setup_opencode.mjs \
   --project ../my-project \
-  --model qwen38-27b-q4k-m \
-  --context 32768
+  --model qwen35-9b-q4k-m \
+  --context auto --output 2048 --steps 16
 
 bun tools/setup_opencode.mjs check --project ../my-project
 ```
 
-For OpenCode 2, install `bun add --global --trust @opencode/cli@2.0.21`
-instead. The scoped package's postinstall installs its platform executable.
+For the legacy OpenCode 1 client, install
+`bun add --global --trust opencode-ai@1.19.4` instead. OpenCode 2's scoped
+package uses postinstall to install its platform executable.
 The helper detects `--standalone`, runs in the project directory, and selects
 that client's plugin format. Both versions keep their generated setup portable.
 The OpenCode 2 coding preset enables direct file and shell tools and disables
@@ -110,7 +92,8 @@ with Bun:
 
 ```bash
 curl -fsS https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
-bun setup-opencode.mjs --project ../my-project --context 32768
+bun setup-opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
+  --context auto --output 2048 --steps 16
 bun setup-opencode.mjs check --project ../my-project
 ```
 
@@ -239,6 +222,31 @@ OPENCODE_CONFIG=./opencode.zinc.json opencode
 OpenCode merges configuration sources. The script's `run` command supplies
 its provider/model configuration as a runtime override so an existing project
 model selection does not switch the task to a hosted provider.
+
+## Prompt reuse and project directory
+
+The helper discovers `capabilities.chat_session_reuse` through `/health`
+before launching a task. When a Vulkan server advertises support for its attention-only active model, it gives
+that client run a fresh `session_id`, allowing later tool turns to reuse their
+matching prompt prefix. The key stays in the inline launch configuration;
+saved project files are unchanged. Older servers, other backends and failed
+discovery keep the ordinary full-prefill behavior. An explicit `session_id`,
+including an empty or null key to disable reuse, takes precedence.
+Auxiliary title/summary requests can evict the resident prefix; the next tool
+turn then uses full prefill. Changed prefixes, a different model or session,
+and an intervening request never justify reusing another request's GPU state.
+The evaluator only discovers this capability for its ZINC provider, leaving
+the llama.cpp comparison path unchanged.
+
+Recurrent/hybrid models currently do not advertise this automatic path. A
+R9700 Qwen control returned correct replies but its stored prefix and engine
+checkpoint positions disagreed, forcing full prefill. This negative control
+is retained; it is not a claim of successful hybrid cache reuse.
+
+The launcher also aligns `PWD` with the selected project. OpenCode can select
+its workspace from that inherited variable even when the OS working directory
+is correct. The [working-directory regression](OPENCODE_WORKING_DIRECTORY.md)
+uses actual clients and relative read/write/shell tools to guard this behavior.
 
 ## Try a real task in a worktree
 

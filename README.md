@@ -100,16 +100,18 @@ Connect **OpenCode** to a running ZINC server with the
 chat and streaming tool calls, and runs headless tasks:
 
 ```bash
-bun install --global opencode-ai@1.19.4
-bun tools/setup_opencode.mjs --project ../my-project --model qwen38-27b-q4k-m --context 32768
+bun add --global --trust @opencode/cli@2.0.21
+bun tools/setup_opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
+  --context auto --output 2048 --steps 16
 bun tools/setup_opencode.mjs check --project ../my-project
 bun tools/setup_opencode.mjs run --project ../my-project --auto \
   --verify 'bun test' -- "Fix the failing tests and run them."
 ```
 
-Start ZINC with `-c 32768 --parallel 1` to match this repository-task example.
-Setup defaults to 16K; always match the actual server context. Use setup-only
-`--context auto` to discover it from a running server. Replace `bun test`
+Start Qwen 3.5 9B with `-c 16384 --parallel 1` for this example. Setup-only
+`--context auto` discovers the running server's capacity; it does not allocate
+more GPU memory. The [Intel model matrix](docs/INTEL_OPENCODE_VALIDATION.md)
+records each model's tested context, task outcomes and limits. Replace `bun test`
 with the project's acceptance command. Failed checks feed real diagnostics
 back into short editing rounds; a failed check cannot produce a successful
 harness exit. The config uses localhost; custom endpoints
@@ -122,8 +124,8 @@ trials, review findings, and incomplete deliveries. The
 [technical write-up](https://zolotukhin.ai/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/)
 explains the failures, fixes, and reviewed feature result.
 
-Qwen 3.8 27B supports a **262,144-token** window. The 32K example above is the
-tested coding-task configuration. The [native-context guide](docs/ROCM_NATIVE_CONTEXT.md)
+Qwen 3.8 27B supports a **262,144-token** window. Its separate ROCm repository
+trials use 32K context; the [native-context guide](docs/ROCM_NATIVE_CONTEXT.md)
 explains the opt-in Q8 cache, precision choices and larger-context validation
 on a 32GB ROCm card. Match the harness context to the server when changing it.
 
