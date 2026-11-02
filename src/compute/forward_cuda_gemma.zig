@@ -28,6 +28,7 @@ const gguf = @import("../model/gguf.zig");
 const loader = @import("../model/loader_cuda.zig");
 const memory_plan = @import("../gpu/memory_plan.zig");
 const bounded_prefill = @import("bounded_prefill.zig");
+const prefill_policy = @import("../gpu/prefill_policy.zig");
 
 const log = std.log.scoped(.cuda_fwd_gemma);
 const CudaBuffer = buffer.CudaBuffer;
@@ -963,6 +964,8 @@ pub const ForwardGemma = struct {
         // Gemma 26B decode by 2.3%, so ROCm Gemma MoE enables them by default while
         // retaining explicit `=0` fallbacks for diagnosis.
         const rocm_gemma_moe = is_rocm and d.n_experts > 0 and !d.is_muse;
+        if (rocm_gemma_moe and envFlag("ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL", false))
+            log.warn("Unqualified batched Gemma MoE prefill explicitly enabled", .{});
         self.fuse_norm_combine = envFlag("ZINC_MOE_NORM_COMBINE", rocm_gemma_moe);
         self.fuse_attn_moe_norm = envFlag("ZINC_ATTN_MOE_NORM", rocm_gemma_moe);
 
@@ -1181,6 +1184,17 @@ pub const ForwardGemma = struct {
     pub fn prefillBatched(self: *ForwardGemma, tokens: []const u32) !u32 {
         if (tokens.len == 0) return error.EmptyPrompt;
         if (tokens.len > self.max_ctx) return error.ContextLengthExceeded;
+        if (is_rocm and self.d.n_experts > 0 and !self.d.is_muse and
+            !envFlag("ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL", prefill_policy.rocmGemmaBatchedDefault(self.model.config)))
+        {
+            // Decide before allocating batched scratch or executing a layer.
+            // This entrypoint is shared by CLI and single-slot HTTP prefill;
+            // preserve absolute positions and produce logits only for the tail.
+            for (tokens[0 .. tokens.len - 1], 0..) |token, position| {
+                try self.prefillStep(token, @intCast(position));
+            }
+            return self.decodeStep(tokens[tokens.len - 1], @intCast(tokens.len - 1), true);
+        }
         // Keep existing CUDA/MoE/Muse routing. On memory-limited ROCm dense
         // Gemma, find scratch that fits BEFORE executing a layer. Each chunk
         // keeps absolute RoPE positions and attends to the full preceding KV.
