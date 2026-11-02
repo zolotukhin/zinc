@@ -7,12 +7,12 @@ const std = @import("std");
 const ModelConfig = @import("../model/config.zig").ModelConfig;
 
 /// Carrying a NextN block establishes model compatibility, not verifier
-/// correctness. Qwen 3.8's Vulkan MTP path changes qualified greedy choices;
-/// ordinary decode matches the native reference. Keep speculation explicit
-/// until its target verifier has independent parity evidence.
-pub fn vulkanMtpRequested(eligible: bool, override: ?[]const u8) bool {
+/// correctness. Intel Qwen 3.8 MTP changes qualified greedy choices, while
+/// ordinary decode matches the native reference. R9700 controls match with MTP
+/// both on and off; preserve that default and keep Intel speculation explicit.
+pub fn vulkanMtpRequested(eligible: bool, intel: bool, override: ?[]const u8) bool {
     if (!eligible) return false;
-    const raw = override orelse return false;
+    const raw = override orelse return !intel;
     return raw.len > 0 and
         !std.mem.eql(u8, raw, "0") and
         !std.ascii.eqlIgnoreCase(raw, "off") and
@@ -20,14 +20,18 @@ pub fn vulkanMtpRequested(eligible: bool, override: ?[]const u8) bool {
         !std.ascii.eqlIgnoreCase(raw, "no");
 }
 
-test "Vulkan NextN compatibility does not silently enable unqualified speculation" {
-    try std.testing.expect(!vulkanMtpRequested(true, null));
+test "Intel NextN compatibility does not silently enable unqualified speculation" {
+    try std.testing.expect(!vulkanMtpRequested(true, true, null));
+    try std.testing.expect(vulkanMtpRequested(true, false, null));
+    try std.testing.expect(!vulkanMtpRequested(false, false, null));
     for ([_][]const u8{ "", "0", "off", "FALSE", "No" }) |value| {
-        try std.testing.expect(!vulkanMtpRequested(true, value));
+        try std.testing.expect(!vulkanMtpRequested(true, true, value));
+        try std.testing.expect(!vulkanMtpRequested(true, false, value));
     }
     for ([_][]const u8{ "1", "true", "ON" }) |value| {
-        try std.testing.expect(vulkanMtpRequested(true, value));
-        try std.testing.expect(!vulkanMtpRequested(false, value));
+        try std.testing.expect(vulkanMtpRequested(true, true, value));
+        try std.testing.expect(vulkanMtpRequested(true, false, value));
+        try std.testing.expect(!vulkanMtpRequested(false, true, value));
     }
 }
 

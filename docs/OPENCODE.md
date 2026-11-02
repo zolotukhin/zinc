@@ -49,10 +49,10 @@ ROCm, follow the [backend setup](ROCM.md) and select your own device using
 `ROCR_VISIBLE_DEVICES`. An existing GGUF can be supplied with
 `-m /path/to/model.gguf` instead of a managed ID.
 
-Vulkan uses ordinary decode by default. Its optional `ZINC_MTP=1` verifier is
-experimental after a Qwen 3.8 native-reference disagreement; the
+Intel Vulkan uses ordinary decode by default. Its optional `ZINC_MTP=1` verifier
+is experimental after a Qwen 3.8 native-reference disagreement; the
 [MTP controls](VULKAN_MTP_CORRECTNESS.md) retain the failure and ordinary-decode
-comparison. ROCm's separately validated MTP setting is unchanged.
+comparison. The passing R9700 Vulkan and ROCm MTP settings are unchanged.
 
 Current development builds also support Gemma 4's native tool protocol. On the
 32 GB RDNA4 reference board, Gemma 26B at 16K passes the API checks and three

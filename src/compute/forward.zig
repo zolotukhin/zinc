@@ -2042,7 +2042,7 @@ pub const InferenceEngine = struct {
         const weights_bytes = tensorBytes(model);
         // NextN/MTP (Vulkan): decided up-front because the appended draft block
         // needs its own KV pair, which the context budget has to account for.
-        const mtp_candidate = prefill_policy.vulkanMtpRequested(mtpModelEligible(config.*, model), host_io.getenv("ZINC_MTP"));
+        const mtp_candidate = prefill_policy.vulkanMtpRequested(mtpModelEligible(config.*, model), isIntelGpuVendor(gpu_config.vendor), host_io.getenv("ZINC_MTP"));
         const total_kv_layers: u32 = config.n_layers + (if (mtp_candidate) config.n_nextn_layers else 0);
         var plan_config = config.*;
         // memory_plan.kvLayerCount() counts the attending layers of n_layers plus
@@ -2057,7 +2057,7 @@ pub const InferenceEngine = struct {
         const runtime_profile = memory_plan.profileWithKvDimensions(plan_config, kv_dtype.bytesPer32Elems(), kv_layer_dimensions);
         const mtp_reserved_bytes: u64 = if (mtp_candidate) mtpReservedBytes(config.*) else 0;
         if (mtp_candidate) {
-            log.warn("Vulkan MTP explicitly enabled: the target verifier has unqualified greedy divergence; ordinary decode is the stable default", .{});
+            if (isIntelGpuVendor(gpu_config.vendor)) log.warn("Intel Vulkan MTP explicitly enabled: the target verifier has unqualified greedy divergence; ordinary decode is the stable default", .{});
             log.info("NextN/MTP: Vulkan draft block enabled ({d} extra KV layer(s) budgeted; set ZINC_MTP=0 to disable)", .{config.n_nextn_layers});
         }
         const requested_ctx = config.context_length;
