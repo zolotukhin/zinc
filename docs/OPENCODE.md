@@ -29,6 +29,11 @@ R9700 Qwen control returned correct replies but its stored prefix and engine
 checkpoint positions disagreed, forcing full prefill. This negative control
 is retained; it is not a claim of successful hybrid cache reuse.
 
+The launcher also aligns `PWD` with the selected project. OpenCode can select
+its workspace from that inherited variable even when the OS working directory
+is correct. The [working-directory regression](OPENCODE_WORKING_DIRECTORY.md)
+uses actual clients and relative read/write/shell tools to guard this behavior.
+
 ## Start the model server
 
 Build for [your GPU](GETTING_STARTED.md), then start a Qwen model with enough

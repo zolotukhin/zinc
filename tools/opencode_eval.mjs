@@ -475,7 +475,9 @@ async function runProcess(
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env,
+      // OpenCode 2 consults PWD before its actual working directory. This also
+      // keeps test commands consistent with the fixture selected by the caller.
+      env: cwd ? { ...env, PWD: path.resolve(cwd) } : env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });

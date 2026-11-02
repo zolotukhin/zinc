@@ -101,6 +101,14 @@ async function fixture(name, root, opts, env) {
   await mkdir(dir, { mode: 0o700 });
   const project = path.join(dir, 'project');
   await mkdir(project, { mode: 0o700 });
+  // OpenCode 2 prefers inherited PWD over the OS working directory. Poison it
+  // with another owned directory so absolute tool paths cannot hide a mismatch.
+  const staleDirectory = path.join(dir, 'stale-working-directory');
+  await mkdir(staleDirectory, { mode: 0o700 });
+  const outsideFeature = path.join(staleDirectory, 'feature.mjs');
+  await writeFile(outsideFeature, 'export const answer = -777;\n');
+  await writeFile(path.join(staleDirectory, 'large-source.txt'), 'WRONG_WORKSPACE\n');
+  const outsideHash = hash(await readFile(outsideFeature));
   const config = configForOpenCode(
     buildConfig({ context: 16384, output: 1024, steps: 8 }),
     opts.runFlags,
@@ -224,17 +232,13 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
         const outputs = body.messages.filter((message) => message.role === 'tool');
         const last = JSON.stringify(outputs.at(-1)?.content ?? '');
         if (boundedStage++ === 0)
-          return toolReply(
-            'read',
-            fileArgs('read', path.join(project, 'large-source.txt')),
-            'call_bounded_read',
-          );
+          return toolReply('read', fileArgs('read', 'large-source.txt'), 'call_bounded_read');
         if (boundedStage === 2) {
           boundedRead = last.includes('READ_LINE_0079') && !last.includes('READ_LINE_0080');
           return toolReply(
             shell,
             {
-              command: `bun -e 'console.log("BASH_HEAD" + "x".repeat(12000) + "BASH_TAIL")'`,
+              command: `bun -e 'console.log("BASH_HEAD" + "x".repeat(12000) + "BASH_TAIL"); console.log("ZINC_WORKSPACE_OK:" + require("node:fs").existsSync("feature.test.mjs"))'`,
               description: 'Exercise bounded command output',
             },
             'call_bounded_bash',
@@ -245,11 +249,12 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
             last.length < 7000 &&
             last.includes('BASH_HEAD') &&
             last.includes('BASH_TAIL') &&
+            last.includes('ZINC_WORKSPACE_OK:true') &&
             last.includes('ZINC context limit');
           return toolReply(
             'write',
             {
-              ...fileArgs('write', path.join(project, 'feature.mjs')),
+              ...fileArgs('write', 'feature.mjs'),
               content: 'export const answer = 42;\n',
             },
             'call_bounded_write',
@@ -338,6 +343,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       {
         env: {
           ...env,
+          PWD: staleDirectory,
           OPENCODE_BIN: opts.opencode,
           ZINC_API_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
         },
@@ -357,6 +363,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     );
     const configUnchanged = hash(originalConfig) === hash(await readFile(configFile));
     const protectedTestUnchanged = testHash === hash(await readFile(testFile));
+    const outsideDirectoryUnchanged = outsideHash === hash(await readFile(outsideFeature));
     const answerCorrect =
       (await readFile(path.join(project, 'feature.mjs'), 'utf8')).trim() ===
       'export const answer = 42;';
@@ -376,6 +383,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     const passed =
       configUnchanged &&
       protectedTestUnchanged &&
+      outsideDirectoryUnchanged &&
       reuseKeys.size > 0 &&
       invalidReuseKeys === 0 &&
       (name === 'api-error'
@@ -422,8 +430,14 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       stalled_requests: stalled,
       configuration_unchanged: configUnchanged,
       protected_test_unchanged: protectedTestUnchanged,
+      outside_directory_unchanged: outsideDirectoryUnchanged,
       ...(name === 'bounded-tools'
-        ? { read_limit_enforced: boundedRead, output_limit_enforced: boundedOutput }
+        ? {
+            read_limit_enforced: boundedRead,
+            output_limit_enforced: boundedOutput,
+            relative_tools_in_project:
+              boundedRead && boundedOutput && answerCorrect && outsideDirectoryUnchanged,
+          }
         : {}),
       logs_truncated: stdout.truncated() || stderr.truncated(),
     };

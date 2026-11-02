@@ -287,7 +287,11 @@ describe('portable OpenCode setup', () => {
       buildConfig(),
       { project: dir, auto: true, prompt: ['Fix $(literal) `text`'] },
       {
-        env: { OPENCODE_BIN: 'custom-opencode', ZINC_API_KEY: 'test-only-key' },
+        env: {
+          OPENCODE_BIN: 'custom-opencode',
+          ZINC_API_KEY: 'test-only-key',
+          PWD: 'stale-directory',
+        },
         runFlags: [],
         fetchImpl: noSessionCacheFetch,
         spawnImpl: ((bin: string, args: string[], options: any) => {
@@ -305,6 +309,7 @@ describe('portable OpenCode setup', () => {
     expect(captured.args).not.toContain('--pure');
     expect(captured.args).not.toContain('--dir');
     expect(captured.options.cwd).toBe(dir);
+    expect(captured.options.env.PWD).toBe(dir);
     expect(captured.options.env.OPENCODE_PURE).toBe('false');
     expect(captured.options.shell).toBeUndefined();
     expect(captured.options.env.OPENCODE_CONFIG_CONTENT).not.toContain('test-only-key');

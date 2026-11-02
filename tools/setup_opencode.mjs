@@ -667,6 +667,9 @@ export async function runOpenCode(
     cwd: path.resolve(opts.project),
     env: {
       ...env,
+      // OpenCode 2 selects its workspace from PWD before process.cwd(). Keep
+      // both aligned when the helper launches from another project directory.
+      PWD: path.resolve(opts.project),
       ZINC_API_KEY: env.ZINC_API_KEY || 'local',
       OPENCODE_CONFIG_CONTENT: JSON.stringify(live),
       OPENCODE_DISABLE_AUTOUPDATE: 'true',
@@ -786,7 +789,7 @@ export async function runVerification(
   const args = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
   const child = spawnImpl(shell, args, {
     cwd: path.resolve(opts.project),
-    env,
+    env: { ...env, PWD: path.resolve(opts.project) },
     detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
