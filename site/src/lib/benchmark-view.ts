@@ -179,6 +179,7 @@ export function overallRatio(row: BenchmarkRecord): number | null {
 }
 
 export function rateRatio(row: BenchmarkRecord, phase: 'prefill_tps' | 'decode_tps') {
+  if (qualityStatus(row).tone === 'caution') return null;
   const zinc = metric(row.zinc?.[phase]);
   const llama = metric(row.baseline?.[phase]);
   return zinc != null && zinc > 0 && llama != null && llama > 0 ? zinc / llama : null;
@@ -216,6 +217,9 @@ export function barWidth(value: number | null, maximum: number) {
 }
 
 export function qualityStatus(row: BenchmarkRecord) {
+  // A later correctness finding applies to the whole recorded model run,
+  // including every scenario and MTP variant; fluent previews cannot clear it.
+  if (row.model?.correctness_review?.tone === 'caution') return row.model.correctness_review;
   const observed = outputQualityStatus(row.zinc?.output_preview, row.zinc?.generated_tokens);
   return row.output_quality?.tone === 'caution' ? row.output_quality : observed;
 }

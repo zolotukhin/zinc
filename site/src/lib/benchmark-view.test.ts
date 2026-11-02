@@ -10,6 +10,7 @@ import {
   phaseSeconds,
   promptParity,
   qualityStatus,
+  rateRatio,
   rowsFor,
   scenarioOrder,
 } from './benchmark-view';
@@ -87,6 +88,42 @@ test('missing data, early stops, mismatched prompts, and flagged output cannot w
   expect(metric({ median: NaN })).toBeNull();
   expect(metric({ median: Infinity })).toBeNull();
   expect(phaseSeconds({})).toBeNull();
+});
+
+test('a later correctness finding excludes every variant while preserving recorded rates', () => {
+  const reviewed = {
+    ...row(engine(1000)),
+    model: { correctness_review: { tone: 'caution', note: 'Known incorrect prefill.' } },
+    output_quality: { tone: 'positive', note: 'Fluent preview.' },
+  };
+  expect(qualityStatus(reviewed).tone).toBe('caution');
+  expect(metric(reviewed.zinc.decode_tps)).toBe(1000);
+  expect(overallRatio(reviewed)).toBeNull();
+  expect(rateRatio(reviewed, 'prefill_tps')).toBeNull();
+  expect(rateRatio(reviewed, 'decode_tps')).toBeNull();
+  expect(aggregate([reviewed, row()])).toMatchObject({ completed: 1, comparable: 1, decode: 10 });
+
+  const before = JSON.stringify(data);
+  let reviewedModels = 0;
+  for (const target of data.targets) {
+    for (const model of target.models) {
+      if (!(model as any).correctness_review) continue;
+      reviewedModels++;
+      for (const mode of ['off', 'on'] as const) {
+        for (const scenario of scenarioOrder) {
+          const selected = rowsFor(target, scenario, mode).find((r) => r.model.id === model.id);
+          if (!selected) continue;
+          expect(qualityStatus(selected).tone).toBe('caution');
+          expect(qualityStatus(selected).source_url).toMatch(/^\/zinc\/docs\//);
+          expect(overallRatio(selected)).toBeNull();
+          expect(aggregate([selected]).completed).toBe(0);
+        }
+      }
+    }
+  }
+  // Restoring comparisons needs an explicit review of replacement measurements.
+  expect(reviewedModels).toBe(5);
+  expect(JSON.stringify(data)).toBe(before);
 });
 
 test('MTP off never silently displays an unpaired speculative measurement', () => {

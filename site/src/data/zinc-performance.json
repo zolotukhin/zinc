@@ -1460,7 +1460,14 @@
               "sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47"
             }
           },
-          "generated_at": "2026-09-24T08:41:17.342Z"
+          "generated_at": "2026-09-24T08:41:17.342Z",
+          "correctness_review": {
+            "tone": "caution",
+            "label": "Revalidation required",
+            "reviewed_at": "2026-11-02T00:09:14Z",
+            "note": "Historical measurement predates Gemma's Vulkan sliding-window correction and conservative prefill defaults; revalidation is required.",
+            "source_url": "/zinc/docs/vulkan-gemma-sliding-window/"
+          }
         },
         {
           "id": "gemma4-31b-q4k-m",
@@ -2856,7 +2863,14 @@
               "sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47"
             }
           },
-          "generated_at": "2026-09-24T08:49:00.104Z"
+          "generated_at": "2026-09-24T08:49:00.104Z",
+          "correctness_review": {
+            "tone": "caution",
+            "label": "Revalidation required",
+            "reviewed_at": "2026-11-02T00:09:14Z",
+            "note": "Historical measurement predates Gemma's Vulkan sliding-window correction and conservative prefill defaults; revalidation is required.",
+            "source_url": "/zinc/docs/vulkan-gemma-sliding-window/"
+          }
         },
         {
           "id": "muse-glimmer-30b-q4k-m",
@@ -10606,7 +10620,14 @@
               "sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7"
             }
           },
-          "generated_at": "2026-09-24T10:47:30.804Z"
+          "generated_at": "2026-09-24T10:47:30.804Z",
+          "correctness_review": {
+            "tone": "caution",
+            "label": "Revalidation required",
+            "reviewed_at": "2026-11-02T00:09:14Z",
+            "note": "Historical measurement uses ROCm Gemma MoE batched prefill, which fails the extended reference gate. Current defaults use serial prefill; revalidation is required.",
+            "source_url": "/zinc/docs/rocm-gemma-moe-prefill/"
+          }
         },
         {
           "id": "gemma4-31b-q4k-m",
@@ -24343,7 +24364,14 @@
                 "note": "The captured preview does not show an obvious stop-token, control-token, or repetition failure."
               }
             }
-          ]
+          ],
+          "correctness_review": {
+            "tone": "caution",
+            "label": "Revalidation required",
+            "reviewed_at": "2026-11-02T00:09:14Z",
+            "note": "Historical measurement predates Gemma's Vulkan sliding-window correction and conservative prefill defaults; revalidation is required.",
+            "source_url": "/zinc/docs/vulkan-gemma-sliding-window/"
+          }
         },
         {
           "id": "gemma4-31b-q4k-m",
@@ -25566,7 +25594,14 @@
                 "note": "The captured preview does not show an obvious stop-token, control-token, or repetition failure."
               }
             }
-          ]
+          ],
+          "correctness_review": {
+            "tone": "caution",
+            "label": "Revalidation required",
+            "reviewed_at": "2026-11-02T00:09:14Z",
+            "note": "Historical measurement predates Gemma's Vulkan sliding-window correction and conservative prefill defaults; revalidation is required.",
+            "source_url": "/zinc/docs/vulkan-gemma-sliding-window/"
+          }
         },
         {
           "id": "qwen35-9b-q4k-m",
@@ -34344,5 +34379,10 @@
         }
       ]
     }
-  ]
+  ],
+  "correctness_review": {
+    "reviewed_at": "2026-11-02T00:09:14Z",
+    "note": "Model correctness_review metadata supersedes historical comparison and aggregate claims. Recorded measurements and original summaries are retained. Flagged rows are excluded from website comparison summaries.",
+    "affected_model_rows": 5
+  }
 }
