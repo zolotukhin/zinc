@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,7 @@ import {
   readOnlyViolations,
   renderSummary,
   runCommand,
+  runFixture,
   snapshotReadOnlyFiles,
   summarizeTraceFiles,
   writeFixtureProject,
@@ -25,6 +26,53 @@ import { buildConfig, CONTEXT_PLUGIN_PATH, writeConfig } from './setup_opencode.
 async function tempDir(prefix = 'zinc-opencode-eval-test-') {
   return await mkdtemp(path.join(os.tmpdir(), prefix));
 }
+
+test('llama comparison launch skips ZINC capability discovery', async () => {
+  const dir = await tempDir();
+  let healthRequests = 0;
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch() {
+      healthRequests++;
+      return Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } });
+    },
+  });
+  try {
+    const client = path.join(dir, 'mock-opencode.mjs');
+    await writeFile(
+      client,
+      `#!/usr/bin/env bun
+await Bun.write(new URL('./captured.json', import.meta.url), process.env.OPENCODE_CONFIG_CONTENT);
+console.log(JSON.stringify({ type: 'text', part: { text: 'CPU launch fixture' } }));
+`,
+      { mode: 0o755 },
+    );
+    const opts = {
+      ...parseArgs([]),
+      opencodeBin: client,
+      openCodeRunFlags: [],
+      runBaseline: false,
+      timeoutMs: 10000,
+      llamaUpstream: server.url.href.replace(/\/$/, '') + '/v1',
+    };
+    const result = await runFixture(
+      'llama',
+      fixtureById('rate-limiter-single'),
+      opts,
+      path.join(dir, 'results'),
+    );
+    const config = JSON.parse(await readFile(path.join(dir, 'captured.json'), 'utf8'));
+    expect(config.provider.zinc.options.baseURL).toBe(opts.llamaUpstream);
+    expect(config.provider.zinc.options.body).not.toHaveProperty('session_id');
+    expect(healthRequests).toBe(0);
+    // The fake client makes no edits; a successful launch is not coding success.
+    expect(result.success).toBe(false);
+  } finally {
+    server.stop(true);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 describe('opencode eval args', () => {
   test('rejects unknown options missing values and invalid budgets', () => {

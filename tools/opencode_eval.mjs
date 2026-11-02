@@ -16,6 +16,7 @@ import {
   configForOpenCode,
   contextPluginPaths,
   runtimeConfig,
+  sessionRuntimeConfig,
   writeConfig,
 } from './setup_opencode.mjs';
 
@@ -703,9 +704,10 @@ export async function runFixture(provider, fixture, opts, providerDir) {
   const pluginPaths = contextPluginPaths(config);
   for (const pluginPath of pluginPaths)
     beforeReadOnly[pluginPath] = await sha256File(path.join(projectDir, pluginPath));
-  const live = runtimeConfig(
+  const live = await (opts.dryRun || provider !== 'zinc' ? runtimeConfig : sessionRuntimeConfig)(
     config,
     {
+      ZINC_API_KEY: process.env.ZINC_API_KEY || 'local',
       ZINC_API_BASE_URL: opts.manageProxy
         ? `http://127.0.0.1:${opts.proxyPort}/v1`
         : providerUpstream(provider, opts),

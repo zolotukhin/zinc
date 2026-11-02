@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -439,6 +439,39 @@ export function runtimeConfig(config, env = process.env, { project } = {}) {
   return copy;
 }
 
+// A stable key within one client run lets successive tool turns reuse their
+// common prompt. Never persist it in the portable config or infer support from
+// a backend name: older servers and unqualified backends omit the capability.
+export async function sessionRuntimeConfig(
+  config,
+  env = process.env,
+  { project, fetchImpl = fetch, sessionId = randomUUID, lookupTimeoutMs = 2000 } = {},
+) {
+  const live = runtimeConfig(config, env, { project });
+  const provider = live.provider.zinc;
+  const model = provider.models?.[live.model?.replace(/^zinc\//, '')];
+  const bodies = [provider.options.body, model?.options?.body, live.agent?.zinc?.options];
+  // Explicit empty/null keys are an opt-out too. Preserve caller precedence.
+  if (bodies.some((body) => body && Object.hasOwn(body, 'session_id'))) return live;
+  try {
+    const response = await fetchImpl(provider.options.baseURL.replace(/\/v1\/?$/, '/health'), {
+      headers: { authorization: `Bearer ${env.ZINC_API_KEY || 'local'}` },
+      signal: AbortSignal.timeout(lookupTimeoutMs),
+    });
+    if (!response.ok) return live;
+    const health = await response.json();
+    if (health?.status !== 'ok' || health?.capabilities?.chat_session_reuse !== true) return live;
+  } catch {
+    // Discovery is optional; its failure must not prevent a normal launch.
+    return live;
+  }
+  const key = `opencode-${sessionId()}`;
+  provider.options.body = { ...provider.options.body, session_id: key };
+  // The legacy SDK uses agent options; OpenCode 2 uses provider body overlays.
+  if (live.agent?.zinc) live.agent.zinc.options = { ...live.agent.zinc.options, session_id: key };
+  return live;
+}
+
 // Resolve the actual server context for `--context auto` with a single GET to
 // the runtime /v1/models endpoint. The endpoint and key come from the same
 // validated runtime configuration as check/run, and neither value is ever
@@ -612,14 +645,20 @@ export async function runOpenCode(
     stderr = process.stderr,
     onEvent,
     runFlags,
+    fetchImpl = fetch,
   } = {},
 ) {
   requireTask(opts);
   const timeoutMs = timeoutValue(opts.timeoutMs ?? 900000);
+  const launchStarted = performance.now();
   const flags = runFlags ?? openCodeRunFlags({ env });
   const portable = configForOpenCode(config, flags);
   await ensureContextPlugin(path.resolve(opts.project), portable);
-  const live = runtimeConfig(portable, env, { project: opts.project });
+  const live = await sessionRuntimeConfig(portable, env, {
+    project: opts.project,
+    fetchImpl,
+    lookupTimeoutMs: Math.min(2000, timeoutMs),
+  });
   const args = ['run', ...flags, '--format', 'json', '--model', live.model, '--agent', 'zinc'];
   if (opts.auto) args.push('--auto');
   if (opts.session) args.push('--session', opts.session);
@@ -694,10 +733,13 @@ export async function runOpenCode(
       pending = pending.slice(newline + 1);
     }
   });
-  timer = setTimeout(() => {
-    timedOut = true;
-    terminate('SIGTERM');
-  }, timeoutMs);
+  timer = setTimeout(
+    () => {
+      timedOut = true;
+      terminate('SIGTERM');
+    },
+    Math.max(1, timeoutMs - (performance.now() - launchStarted)),
+  );
   const interrupt = (signal, code) => {
     interruptedCode = code;
     terminate(signal);
