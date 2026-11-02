@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "astro build && bun tools/protect-code-html.mjs",
     "preview": "astro preview",
     "check:benchmarks": "bun tools/check-benchmarks.ts",
     "astro": "astro"
