@@ -10625,7 +10625,7 @@
             "tone": "caution",
             "label": "Revalidation required",
             "reviewed_at": "2026-11-02T00:09:14Z",
-            "note": "Historical measurement uses ROCm Gemma MoE batched prefill, which fails the extended reference gate. Current defaults use serial prefill; revalidation is required.",
+            "note": "Historical measurement uses earlier ROCm Gemma MoE batched prefill defaults. A later extended-reference failure required serial prefill by default; these rates need revalidation.",
             "source_url": "/zinc/docs/rocm-gemma-moe-prefill/"
           }
         },
