@@ -1,0 +1,138 @@
+{
+  "binary_sha256": "0020d98d3eff11965db68da9f04c866e05d9178797d186f0cff527823ba347a5",
+  "cleanup": "no GPU process remains",
+  "complete": true,
+  "filler_words": 9200,
+  "models": [
+    {
+      "chat_matches_reference_text": false,
+      "context": 12288,
+      "model": "gemma4-31b-q4k-m",
+      "reference": {
+        "content": "OK",
+        "elapsed_ms": 467777,
+        "tokens": [
+          7676,
+          106
+        ]
+      },
+      "reference_reply_contains_OK": true,
+      "rendered_prompt_sha256": "c65f73e0e05df9b94bf961ac25b8f8736080b8b6c35addd7a45d11e769212117",
+      "zinc_chat": {
+        "content": "word word word word word word word word word word word word word word word word",
+        "elapsed_ms": 103127,
+        "finish_reason": "length",
+        "usage": {
+          "completion_tokens": 16,
+          "prompt_tokens": 9232,
+          "total_tokens": 9248
+        }
+      },
+      "zinc_native": {
+        "content": "word word word word word word word word word word word word word word word word",
+        "exact_reference": false,
+        "tokens": [
+          3017,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658
+        ]
+      },
+      "zinc_reply_contains_OK": false
+    },
+    {
+      "chat_matches_reference_text": false,
+      "context": 16384,
+      "model": "gemma4-26b-a4b-q4k-m",
+      "reference": {
+        "content": "OK.",
+        "elapsed_ms": 111146,
+        "tokens": [
+          7676,
+          236761,
+          106
+        ]
+      },
+      "reference_reply_contains_OK": true,
+      "rendered_prompt_sha256": "c65f73e0e05df9b94bf961ac25b8f8736080b8b6c35addd7a45d11e769212117",
+      "zinc_chat": {
+        "content": "word word word word",
+        "elapsed_ms": 245281,
+        "finish_reason": "length",
+        "usage": {
+          "completion_tokens": 16,
+          "prompt_tokens": 9232,
+          "total_tokens": 9248
+        }
+      },
+      "zinc_native": {
+        "content": " word word word word word word word word word word word word word word word word",
+        "exact_reference": false,
+        "tokens": [
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658,
+          3658
+        ]
+      },
+      "zinc_reply_contains_OK": false
+    }
+  ],
+  "output_budget": 16,
+  "qualification": false,
+  "reference_artifacts": {
+    "library_sha256": {
+      "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+      "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+      "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+      "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+      "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+      "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+      "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+      "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+      "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+      "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+      "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+      "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+      "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+      "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+      "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+      "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+      "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+      "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+      "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+    },
+    "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+    "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+  },
+  "reference_kv": "f16",
+  "reference_kv_reason": "matches ZINC storage and permits the 31B long context within 32 GiB; separate from frozen 4K F32-reference qualification",
+  "schema": "zinc-intel-gemma-long-context-control-v1",
+  "scope": "distinguish a model reply from a long-context inference or template defect",
+  "source_commit": "18bb94331236c41852d811afff44586119cb6615",
+  "source_snapshot_sha256": "99e66252cffdbebe9ec1e6d18a07a4ec5f0fd2c140c31aa0d3a72d8e663c7a17"
+}

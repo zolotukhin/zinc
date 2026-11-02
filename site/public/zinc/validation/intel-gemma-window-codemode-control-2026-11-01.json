@@ -1,0 +1,444 @@
+{
+  "baseline_shader_archive_sha256": "3d914b42a8ece2b8b3c38b17503a9da62ddf8bb37d3b24c4c52761895140113f",
+  "binary_sha256": "c298ca25287fbe2a27c2ddff0d975c049b6aa6278d4915a700949a3902c78fb9",
+  "build_scope": "native final-default Gemma sliding-window and coding diagnostic",
+  "cleanup": "no GPU process remains",
+  "client_executable_sha256": {
+    "bun": "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235",
+    "opencode": "7e2003e3834c27a8ee9f438b26563c37d97756505e2d507a125d17bdc164fef8"
+  },
+  "client_harness": {
+    "cpu_protocol_passed": true,
+    "manifest_sha256": "51b6b7aa04e3cc56174129bb0e4254306e25fd843aa520b9b589812d5587b5e1",
+    "source": {
+      "base_source": "54c764798e5e3f00f50c19cf6c384ff528b0abc9",
+      "files": {
+        "tools/fixtures/opencode/zinc-cli-args.mjs": "cad991dd85bf47b942f20f2414efb275eb712cc319d8cb40e418df2ee7fb03ad",
+        "tools/opencode_eval.mjs": "58151581dc79c5941938a583e05cc71395b674296a7bb7082130641d11317d59",
+        "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+        "tools/setup_opencode.mjs": "0ad970fce8e2bc6f0097f9bae89551e0bbd9482c9f094fbbc1bd3c7e638171bc",
+        "tools/validate_opencode_api.mjs": "e676d958a59e88ef2f326dba78169907416142dd905e77d8a20838a056d47ffd",
+        "tools/validate_opencode_harness.mjs": "3dcc958d73b146946c114f3668b91c4d711ca3358bc43026567e40e76dc4dd7f"
+      },
+      "local_changes": true
+    }
+  },
+  "clients": {
+    "bun": "1.4.4",
+    "opencode": "opencode v2.0.21"
+  },
+  "complete": false,
+  "hardware": {
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.7-arch1-1"
+  },
+  "harness_commit": "1dee806138625be62aa00fb8c190fae71d9c8b6c",
+  "interpretation": {
+    "client_followup": "direct tools preset tested separately on the unchanged native executable",
+    "coding_control": "Gemma 31B made five execute calls, no implementation edit and no improved acceptance test; server recovery and native continuation replay passed",
+    "scope": "native preflights completed for both Gemmas; coding coordinator stopped after one retained completed Code Mode timeout; other coding fixtures not completed"
+  },
+  "interruption": {
+    "completed_fixtures": 1,
+    "inflight_fixture": "cart-multi-file",
+    "reason": "Stop after retained completed Code Mode timeout; retry with direct file and shell tools",
+    "remaining_fixtures": "not completed; no success claim"
+  },
+  "models": [
+    {
+      "actual_context": 12288,
+      "api": {
+        "checks": [
+          {
+            "ms": 1348,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1424,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1471,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 700,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 644,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 1853,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 1336,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1424,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1477,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 2557,
+            "name": "JSON tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 2546,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 4937,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 4921,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 3197,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": true
+          },
+          {
+            "ms": 1927,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 750,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 740,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 56,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 2283,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 750,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 166061,
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "pass": true
+          },
+          {
+            "ms": 755,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1989,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 29,
+        "total": 29
+      },
+      "api_exit_code": 0,
+      "catalog_id": "gemma4-31b-q4k-m",
+      "fixtures": [
+        {
+          "actual_context": 12288,
+          "baseline": {
+            "durationMs": 197,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 1,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 46,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 900112,
+            "exitCode": 130,
+            "signal": null,
+            "timedOut": true
+          },
+          "post_client_native_reference": {
+            "cases": 3,
+            "passed": true,
+            "tokens": 48
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 701,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "task_success": false,
+          "timeout_ms": 900000,
+          "tool_calls": 5,
+          "tool_counts": {
+            "execute": 5
+          },
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 12288,
+      "served_id": "gemma4-31b-q4k-m"
+    }
+  ],
+  "native_defaults": [
+    {
+      "cases": 3,
+      "context": 4096,
+      "environment_overrides": false,
+      "exact_cases": 3,
+      "model": "gemma4-31b-q4k-m",
+      "passed": true,
+      "reference_artifacts": {
+        "library_sha256": {
+          "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+          "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+        },
+        "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+        "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+      },
+      "tokens": 48
+    },
+    {
+      "cases": 3,
+      "context": 4096,
+      "environment_overrides": false,
+      "exact_cases": 3,
+      "model": "gemma4-26b-a4b-q4k-m",
+      "passed": true,
+      "reference_artifacts": {
+        "library_sha256": {
+          "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+          "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+        },
+        "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+        "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+      },
+      "tokens": 48
+    }
+  ],
+  "numerical_reference": {
+    "cases": 376,
+    "passed": true
+  },
+  "protocol": {
+    "fixture_timeout_ms": 900000,
+    "fresh_server_per_fixture": true,
+    "output_tokens": 2048,
+    "repair_proxy": false,
+    "steps": 16,
+    "supervisor_edits": false,
+    "temperature": 0,
+    "thinking": false,
+    "top_p": 1
+  },
+  "qualification": false,
+  "rebuilt_shaders": {
+    "flash_attn": {
+      "source_sha256": "45fbdc5a5bb3c069257c9035eeebbdf1c579a52076507b2758b71aa32bb13de5",
+      "spirv_sha256": "a214a0cc2eb07f9eb590760b535b2af7a154743a083f6420a44e7c65894352b1"
+    },
+    "flash_attn_batched": {
+      "source_sha256": "27aa02dec50bf7671b82cb99f16c092ef1b727edccfbffe0c876570bf8969121",
+      "spirv_sha256": "447555add7838b0689502f755a75bc84353d128773eaad50175ee1179766d7d7"
+    },
+    "flash_attn_batched_f16kv": {
+      "source_sha256": "a80a84dc875dd9b474ee4d5090ff8081fae8b9da133a97fdad29f8b2d23999a3",
+      "spirv_sha256": "6ac660ca541c9785c2e5815121117769c2eda90ac87c75b6b9e0bf4166516007"
+    },
+    "flash_attn_f16kv": {
+      "source_sha256": "24d6f70bd715f52ba6567796ad37add16b3b56cd0993b4c1d768e284095d8f5e",
+      "spirv_sha256": "0f8d2ffe585639e5a9968f67de89d676f57d31c17e7434d6bc22a6f2d256d19f"
+    },
+    "flash_attn_q8kv": {
+      "source_sha256": "76d2705ec671e080625762e656e0d014ffe5ab7119acb8df4fff99a9fdcd06b8",
+      "spirv_sha256": "4a49d9fcf3099190e7f8d99b50fec65923e9de99db89e6a97e99e197290f50a1"
+    },
+    "rms_norm_scale_dmmv_f32": {
+      "source_sha256": "07374570411daa30f3710263535feef8fb2154d61754d3c20786cb7f8def960f",
+      "spirv_sha256": "3907a6e901681afd9e9f039cbe25dde12f3241247ca29409e1807eed4ce3135a"
+    },
+    "rms_norm_scale_dmmv_f32_batch": {
+      "source_sha256": "f9ab24ce3e7b6e855ece0fe04b9e516d46d7849d1c4ce86d49273d8b4a076c66",
+      "spirv_sha256": "c95a32bdf98cc85f462001242d3751c53431d7ba3cbcc982e3186e9d832b9719"
+    },
+    "rms_norm_scale_dmmv_f32_topk": {
+      "source_sha256": "fd8fb134b80deda64458368fd20f08df1a292ba1cf139719a785324a2ad92902",
+      "spirv_sha256": "7f737da976b1669fbde7149495519abf4943e875d1824e7e342d16d423671155"
+    }
+  },
+  "schema": "zinc-intel-opencode-validation-v1",
+  "sliding_window_reference": [
+    {
+      "context": 4096,
+      "http_passed": true,
+      "maximum_prompt_tokens": 1139,
+      "minimum_prompt_tokens": 1136,
+      "model": "gemma4-31b-q4k-m",
+      "passed": true,
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "window_tokens": 1024
+    },
+    {
+      "context": 4096,
+      "http_passed": true,
+      "maximum_prompt_tokens": 1139,
+      "minimum_prompt_tokens": 1136,
+      "model": "gemma4-26b-a4b-q4k-m",
+      "passed": true,
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "window_tokens": 1024
+    }
+  ],
+  "source_commit": "1dee806138625be62aa00fb8c190fae71d9c8b6c",
+  "source_snapshot_sha256": "b0af1ffdbb1fa9b1748ebaad689f0c9a9029b4e9f07881f75bf4f441f52a1dd2",
+  "tokenizer_helper_from_baseline_sha256": "e8c1e42568d3c01ccc7451e14fbca789cb1cab85ac52cdefef7845e059c5c1ec"
+}
