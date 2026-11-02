@@ -4341,6 +4341,10 @@ pub fn parsePrefilledToolOutput(
     first_arg_name: ?[]const u8,
     generated_text: []const u8,
 ) !tool_format.ParsedAssistantOutput {
+    // Only the generic ChatML JSON dialect inserts this prefix. Native XML,
+    // Gemma and unsupported formats must keep their own parsing rules even if
+    // a caller accidentally supplies a forced name.
+    if (!format.usesJsonPrefill()) return format.parseAssistantToolCallsWithTools(generated_text, tools, allocator);
     const name = forced_name orelse return format.parseAssistantToolCallsWithTools(generated_text, tools, allocator);
     var restored: std.ArrayList(u8) = .empty;
     defer restored.deinit(allocator);
@@ -4354,9 +4358,11 @@ pub fn parsePrefilledToolOutput(
     }
     try restored.appendSlice(allocator, generated_text);
     var parsed = try format.parseAssistantToolCallsWithTools(restored.items, tools, allocator);
+    errdefer freeParsedToolOutput(allocator, parsed);
     if (parsed.tool_calls.len == 0) {
+        const fallback = try allocator.dupe(u8, trimTrailingChatArtifacts(completeUtf8Prefix(generated_text)));
         allocator.free(parsed.text_content);
-        parsed.text_content = try allocator.dupe(u8, generated_text);
+        parsed.text_content = fallback;
     }
     return parsed;
 }
@@ -5227,7 +5233,7 @@ test "truncated or malformed prefilled tools remain text instead of executable e
         const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(.chatml), &tools, "probe", "message", fragment);
         defer freeParsedToolOutput(std.testing.allocator, parsed);
         try std.testing.expectEqual(@as(usize, 0), parsed.tool_calls.len);
-        try std.testing.expectEqualStrings(fragment, parsed.text_content);
+        try std.testing.expectEqualStrings(trimTrailingChatArtifacts(fragment), parsed.text_content);
     }
 }
 
@@ -5250,6 +5256,41 @@ test "prefilled tools accept complete empty objects and quoted delimiter text wi
     var arguments = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, quoted.tool_calls[0].arguments_json, .{});
     defer arguments.deinit();
     try std.testing.expectEqualStrings("literal </tool_call> and \"quotes\"", arguments.value.object.get("message").?.string);
+}
+
+test "failed prefilled calls share UTF-8 and trailing artifact cleanup across transports" {
+    const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.chatmlToolFormat(), &.{}, "probe", "message", "unfinished<|endoftext|>\xE6\x9D");
+    defer freeParsedToolOutput(std.testing.allocator, parsed);
+    try std.testing.expectEqual(@as(usize, 0), parsed.tool_calls.len);
+    try std.testing.expectEqualStrings("unfinished", parsed.text_content);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(parsed.text_content));
+}
+
+test "JSON-prefill restoration leaves native and unsupported tool formats unchanged" {
+    // Supplying a forced name must not reinterpret another dialect as ChatML
+    // JSON. The ordinary parser retains ownership even for unsupported kinds.
+    inline for (.{ .llama3, .gemma, .openai_moe, .atem, .generic }) |kind| {
+        const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(kind), &.{}, "probe", "message", "unchanged");
+        defer freeParsedToolOutput(std.testing.allocator, parsed);
+        try std.testing.expectEqualStrings("unchanged", parsed.text_content);
+        try std.testing.expectEqual(@as(usize, 0), parsed.tool_calls.len);
+    }
+    const tools = [_]tool_format.ToolDefinition{.{ .name = "probe", .description = "", .parameters_json = "{}" }};
+    var xml = tool_format.chatmlToolFormat();
+    xml.native_xml = true;
+    const native_cases = .{
+        .{ xml, "<tool_call><function=probe><parameter=message>hello</parameter></function></tool_call>" },
+        .{ tool_format.gemmaToolFormat(), "<|tool_call>call:probe{message:<|\"|>hello<|\"|>}<tool_call|>" },
+    };
+    inline for (native_cases) |case| {
+        const parsed = try parsePrefilledToolOutput(std.testing.allocator, case[0], &tools, "probe", "message", case[1]);
+        defer freeParsedToolOutput(std.testing.allocator, parsed);
+        try std.testing.expectEqual(@as(usize, 1), parsed.tool_calls.len);
+        try std.testing.expectEqualStrings("probe", parsed.tool_calls[0].name);
+        const args = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, parsed.tool_calls[0].arguments_json, .{});
+        defer args.deinit();
+        try std.testing.expectEqualStrings("hello", args.value.object.get("message").?.string);
+    }
 }
 
 fn checkPrefilledToolAllocationFailures(allocator: std.mem.Allocator) !void {

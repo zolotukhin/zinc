@@ -16,8 +16,16 @@ it is never substituted for a failed parse. Root schema fields are selected
 from parsed JSON, preserving numbers, booleans, arrays, objects and strings.
 Temporary schema names and parsed outputs have explicit ownership.
 
+Prefix restoration applies only to the generic ChatML JSON dialect. Native
+XML and Gemma calls retain their existing parsers. Formats without tool
+support also return owned text, so callers can use the same cleanup contract.
+Failed calls use the same UTF-8 and trailing-artifact cleanup in JSON and SSE.
+Both transports exclude forced single-tool prefixes from session caching
+until that partially prefilled assistant history can be reconstructed safely.
+
 CPU regressions cover nested and escaped schema names, typed arguments,
 literal closing-tag text inside strings, complete empty objects, incomplete
-strings/objects/envelopes and allocation failures. Live model checks must
+strings/objects/envelopes, native-format dispatch, ownership and allocation
+failures. Live model checks must
 record API behavior separately from coding-task outcomes; correcting these
 transport defects does not establish that the small model completes a task.
