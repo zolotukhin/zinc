@@ -53,6 +53,23 @@ test('client conversion preserves unrelated plugin packages and options', () => 
   expect(config.plugin[1]).toEqual(['unrelated-plugin', { enabled: true }]);
 });
 
+test('OpenCode 2 coding defaults use direct tools without changing legacy or explicit permissions', () => {
+  const config: any = buildConfig();
+  const modern = configForOpenCode(config, ['--standalone']);
+  expect(modern.agent.zinc.permission).toEqual({
+    execute: 'deny',
+    ...config.agent.zinc.permission,
+  });
+  expect(configForOpenCode(modern, ['--standalone'])).toEqual(modern);
+  expect(config.agent.zinc.permission.execute).toBeUndefined();
+  expect(configForOpenCode(config, [])).toEqual(config);
+  expect(modern.agent.zinc.permission.task).toBe('deny');
+
+  config.agent.zinc.permission.execute = 'allow';
+  expect(configForOpenCode(config, ['--standalone']).agent.zinc.permission.execute).toBe('allow');
+  expect(config.agent.zinc.permission.execute).toBe('allow');
+});
+
 test('OpenCode 2 hooks bound actual event inputs and combined text output', async () => {
   const hooks: Record<string, Function> = {};
   await contextPluginV2({

@@ -178,6 +178,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
           temperature: body.temperature,
           top_p: body.top_p,
           enable_thinking: body.enable_thinking,
+          tool_names: body.tools.map((tool) => tool.function?.name),
         };
       if (!body.tools?.length) return reply(body, { content: 'Protocol fixture' }, 'stop');
       // Use the real client's schemas: OpenCode 2 calls bash "shell" and
@@ -351,6 +352,13 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       (requestSettings.temperature ?? 0) === 0 &&
       (requestSettings.top_p ?? 1) === 1 &&
       requestSettings.enable_thinking === false;
+    const directToolsMatch =
+      requestSettings?.tool_names.includes('read') &&
+      requestSettings.tool_names.includes('write') &&
+      requestSettings.tool_names.includes(
+        opts.runFlags.includes('--standalone') ? 'shell' : 'bash',
+      ) &&
+      (!opts.runFlags.includes('--standalone') || !requestSettings.tool_names.includes('execute'));
     const passed =
       configUnchanged &&
       protectedTestUnchanged &&
@@ -358,6 +366,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
         ? code === 1 && errors > 0 && checks.length === 0
         : name === 'bounded-tools'
           ? settingsMatch &&
+            directToolsMatch &&
             code === 0 &&
             errors === 0 &&
             boundedRead &&
@@ -367,6 +376,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
             checks[0] === 0 &&
             answerCorrect
           : settingsMatch &&
+            directToolsMatch &&
             code === 0 &&
             errors === 0 &&
             stalled > 0 &&
@@ -384,7 +394,9 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       elapsed_ms: Math.round(performance.now() - started),
       requests,
       request_settings: requestSettings,
-      ...(name === 'api-error' ? {} : { request_settings_valid: !!settingsMatch }),
+      ...(name === 'api-error'
+        ? {}
+        : { request_settings_valid: !!settingsMatch, direct_tools_valid: !!directToolsMatch }),
       error_events: errors,
       tool_events: tools,
       unique_sessions: sessions.size,
