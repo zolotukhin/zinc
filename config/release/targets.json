@@ -118,7 +118,8 @@
         "qwen36-27b-q4k-m",
         "qwen35-9b-q4k-m",
         "gemma4-31b-q4k-m",
-        "gemma4-26b-a4b-q4k-m"
+        "gemma4-26b-a4b-q4k-m",
+        "qwen38-27b-q4k-m"
       ]
     },
     {
@@ -139,7 +140,8 @@
         "qwen36-27b-q4k-m",
         "qwen35-9b-q4k-m",
         "gemma4-31b-q4k-m",
-        "gemma4-26b-a4b-q4k-m"
+        "gemma4-26b-a4b-q4k-m",
+        "qwen38-27b-q4k-m"
       ]
     },
     {

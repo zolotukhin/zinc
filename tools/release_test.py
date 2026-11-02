@@ -758,6 +758,15 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual([p["id"] for p in scoped["gpu_profiles"]], ["vulkan-rdna4", "vulkan-intel-xe2", "rocm-rdna4"])
         self.assertFalse(any(t["signing_required"] for t in scoped["targets"]))
 
+    def test_vulkan_release_roles_include_the_nextn_model_that_exposes_verifier_drift(self):
+        # The earlier six-model matrix omitted the catalog's NextN-bearing
+        # Qwen 3.8. Its default decode must pass the same native reference gate.
+        rows = release_lib.release_policy()["gpu_profiles"]
+        for identifier in ("vulkan-rdna4", "vulkan-intel-xe2"):
+            with self.subTest(profile=identifier):
+                profile = next(row for row in rows if row["id"] == identifier)
+                self.assertIn("qwen38-27b-q4k-m", profile["models"])
+
     def test_release_scope_rejects_unknown_duplicate_empty_or_uncovered_entries(self):
         data = policy()
         for scope in (None, [], {}, {"targets": [], "gpu_profiles": []},
