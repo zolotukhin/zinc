@@ -65,9 +65,14 @@ test('OpenCode 2 coding defaults use direct tools without changing legacy or exp
   expect(configForOpenCode(config, [])).toEqual(config);
   expect(modern.agent.zinc.permission.task).toBe('deny');
 
-  config.agent.zinc.permission.execute = 'allow';
-  expect(configForOpenCode(config, ['--standalone']).agent.zinc.permission.execute).toBe('allow');
-  expect(config.agent.zinc.permission.execute).toBe('allow');
+  for (const permission of ['allow', 'ask', 'deny']) {
+    config.agent.zinc.permission.execute = permission;
+    expect(configForOpenCode(config, ['--standalone']).agent.zinc.permission.execute).toBe(
+      permission,
+    );
+    expect(config.agent.zinc.permission.execute).toBe(permission);
+    expect(modern.agent.zinc.permission.execute).toBe('deny');
+  }
 });
 
 test('OpenCode 2 hooks bound actual event inputs and combined text output', async () => {
