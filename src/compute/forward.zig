@@ -31330,7 +31330,19 @@ pub const InferenceEngine = struct {
         try self.decodeStep(state, token, true);
     }
 
-    /// Reset per-request NextN bookkeeping (call before a new prompt's prefill).
+    /// Emit this request's counters before the next request resets them.
+    pub fn mtpLogRequest(self: *const InferenceEngine) void {
+        if (self.mtp) |*m| {
+            if (m.cycles == 0) return;
+            const acceptance = if (m.drafted > 0) 100.0 * @as(f64, @floatFromInt(m.accepted)) / @as(f64, @floatFromInt(m.drafted)) else 0.0;
+            log.info("NextN/MTP: request accepted {d}/{d} draft tokens ({d:.1}%) over {d} cycles; draft={d:.1} ms target={d:.1} ms restore={d:.1} ms catch-up={d:.1} ms", .{
+                m.accepted,                                  m.drafted,                                   acceptance,
+                m.cycles,                                    @as(f64, @floatFromInt(m.draft_ns)) / 1e6,   @as(f64, @floatFromInt(m.target_ns)) / 1e6,
+                @as(f64, @floatFromInt(m.restore_ns)) / 1e6, @as(f64, @floatFromInt(m.catchup_ns)) / 1e6,
+            });
+        }
+    }
+
     /// Reset per-request NextN bookkeeping. `pending_h` and `resident_context_len`
     /// describe what the engine physically holds, not this request, so they
     /// survive: a prompt that reuses the resident prefix primes only its suffix
@@ -31340,13 +31352,6 @@ pub const InferenceEngine = struct {
         self.mtp_prime_capture_base = 0;
         if (self.mtp) |*m| {
             if (m.cycles > 0) {
-                // Previous request's cycle statistics (the CLI prints its own at the end).
-                const acceptance = if (m.drafted > 0) 100.0 * @as(f64, @floatFromInt(m.accepted)) / @as(f64, @floatFromInt(m.drafted)) else 0.0;
-                log.info("NextN/MTP: request accepted {d}/{d} draft tokens ({d:.1}%) over {d} cycles; draft={d:.1} ms target={d:.1} ms restore={d:.1} ms catch-up={d:.1} ms", .{
-                    m.accepted,                                  m.drafted,                                   acceptance,
-                    m.cycles,                                    @as(f64, @floatFromInt(m.draft_ns)) / 1e6,   @as(f64, @floatFromInt(m.target_ns)) / 1e6,
-                    @as(f64, @floatFromInt(m.restore_ns)) / 1e6, @as(f64, @floatFromInt(m.catchup_ns)) / 1e6,
-                });
                 m.cycles = 0;
                 m.drafted = 0;
                 m.accepted = 0;

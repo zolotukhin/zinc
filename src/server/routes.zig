@@ -3485,6 +3485,7 @@ fn handleChatCompletions(
         }
         const decode_end_ns = host_io.nanoTimestamp();
         logGeneratedTiming(generated, decode_start_ns, decode_end_ns);
+        runtime.mtpLogRequest(engine);
 
         if (forced_tool_name) |tool_name| {
             const parsed_output = try parsePrefilledToolOutput(allocator, stream_tool_fmt, tools_for_choice, tool_name, forced_tool_first_arg_name, toolStreamText(gen_text_buf[0..gen_text_len]));
@@ -3570,6 +3571,7 @@ fn handleChatCompletions(
         }
         const decode_end_ns = host_io.nanoTimestamp();
         logGeneratedTiming(ns_gen, decode_start_ns, decode_end_ns);
+        runtime.mtpLogRequest(engine);
 
         // Escape the full text for JSON
         var structured_buf: [16384]u8 = undefined;

@@ -125,6 +125,11 @@ pub fn mtpBeginRequest(_engine: *InferenceEngine) void {
     }
 }
 
+/// Log counters for the completed request, before another request can reset them.
+pub fn mtpLogRequest(_engine: *const InferenceEngine) void {
+    if (comptime gpu.is_vulkan) _engine.mtpLogRequest();
+}
+
 /// Prime the NextN block over the freshly prefilled prompt. Returns false when
 /// MTP is unavailable (env off, model without NextN block, partial prefill).
 pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens: []const u32) bool {
