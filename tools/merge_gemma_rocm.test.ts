@@ -141,6 +141,20 @@ test('Python JSON key ordering does not change the reference policy', () => {
   expect(() => validateGemmaReport(report)).not.toThrow();
 });
 
+test('correctness may use the separately pinned release oracle while timing uses latest', () => {
+  const report = vulkanFixture('gemma4-31b-q4k-m');
+  report.oracle.commit = policy.reference.commit;
+  expect(() => validateGemmaReport(report)).not.toThrow();
+  report.reference.commit = policy.reference.commit;
+  expect(() => validateGemmaReport(report)).toThrow();
+});
+
+test('an arbitrary older correctness reference is rejected', () => {
+  const report = vulkanFixture('gemma4-31b-q4k-m');
+  report.oracle.commit = '9'.repeat(40);
+  expect(() => validateGemmaReport(report)).toThrow();
+});
+
 for (const target of ['rdna', 'intel'])
   for (const modelId of [gemmaModelId, 'gemma4-31b-q4k-m']) {
     test(`Vulkan ${target} ${modelId} needs the full current-reference matrix`, () => {

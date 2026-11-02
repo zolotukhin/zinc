@@ -75,6 +75,7 @@ def main():
     parser.add_argument("--zinc-source", type=Path, required=True)
     parser.add_argument("--llama-bin", type=Path, required=True)
     parser.add_argument("--oracle", type=Path, required=True, help="Vulkan reference bin directory")
+    parser.add_argument("--oracle-source", type=Path, help="Separate source for the pinned release correctness reference")
     parser.add_argument("--llama-source", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--model-id", choices=(MODEL_ID, "gemma4-31b-q4k-m"), default=MODEL_ID)
@@ -96,8 +97,9 @@ def main():
     if args.backend == "vulkan" and args.oracle_device != f"Vulkan{args.device}":
         parser.error("the Vulkan reference must select the same physical device")
     args.zinc_device = 0 if args.backend == "rocm" else args.device
+    args.oracle_source = args.oracle_source or args.llama_source
     kv = "f32" if args.backend == "rocm" else "f16"
-    for name in ("zinc_tree", "zinc_source", "llama_bin", "oracle", "llama_source", "model", "reservation", "output"):
+    for name in ("zinc_tree", "zinc_source", "llama_bin", "oracle", "oracle_source", "llama_source", "model", "reservation", "output"):
         setattr(args, name, getattr(args, name).resolve())
     install_signal_handlers()
     signal.signal(signal.SIGHUP, interrupted)
@@ -133,7 +135,8 @@ def main():
             checked_at, scope = now(), "run-start"
         report["latest_reference_check"] = {"commit": pin, "checked_at": checked_at, "scope": scope, "observed_head_at_run": latest}
         report["reference"] = reference_identity(args.llama_bin, args.llama_source, env, pin)
-        report["oracle"] = reference_identity(args.oracle, args.llama_source, env, pin)
+        oracle_pin = pin if args.oracle_source == args.llama_source else policy()["reference"]["commit"]
+        report["oracle"] = reference_identity(args.oracle, args.oracle_source, env, oracle_pin)
         assert subprocess.run(["git", "-C", str(args.zinc_source), "diff", "--quiet", "HEAD", "--", "src", "build.zig", "build.zig.zon"]).returncode == 0, "ZINC native source is modified"
         zinc = args.zinc_tree / "bin/zinc"
         report["zinc"] = {"commit": subprocess.check_output(["git", "-C", str(args.zinc_source), "rev-parse", "HEAD"], text=True).strip(), "sha256": sha256(zinc)}
@@ -155,7 +158,7 @@ def main():
                 diagnostics = gpu.output([str(zinc), "--check", "-d", str(args.device)], env, timeout=360)
                 report["hardware"] = gpu.hardware_evidence(diagnostics, family, args.device)
                 print("Correctness: 376 shader/reference cases", flush=True)
-                gpu.kernel_reference(args.zinc_tree, args.oracle, args.llama_source, args.device, work, env)
+                gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
                 report["kernel_reference"] = {"passed": True, "cases": 376}
             print("Correctness: twelve tokenizer corpus cases", flush=True)
             gpu.tokenizer_parity(args.zinc_tree, args.oracle, args.model, work, env)
@@ -193,7 +196,7 @@ def main():
                                 save()
                     idle()
             assert reference_identity(args.llama_bin, args.llama_source, env, pin) == report["reference"], "baseline bytes changed"
-            assert reference_identity(args.oracle, args.llama_source, env, pin) == report["oracle"], "oracle bytes changed"
+            assert reference_identity(args.oracle, args.oracle_source, env, oracle_pin) == report["oracle"], "oracle bytes changed"
             assert sha256(zinc) == report["zinc"]["sha256"], "ZINC bytes changed"
             report.update(passed=True, cleanup="no GPU process remains")
     except BaseException as error:

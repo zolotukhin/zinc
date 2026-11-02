@@ -79,11 +79,15 @@ export function validateGemmaReport(report) {
       report.model.sliding_window === modelPin.sliding_window,
     'Model identity differs',
   );
-  for (const ref of [report.reference, report.oracle]) {
-    requireBenchmarkReference(
-      { commit: ref?.commit, sha256: ref?.server_sha256 },
-      referencePin.commit,
-    );
+  for (const [role, ref] of [
+    ['performance', report.reference],
+    ['correctness', report.oracle],
+  ]) {
+    const pin =
+      role === 'correctness' && ref?.commit === policy.reference.commit
+        ? policy.reference.commit
+        : referencePin.commit;
+    requireBenchmarkReference({ commit: ref?.commit, sha256: ref?.server_sha256 }, pin);
     requireValue(
       digest(ref.tokenizer_sha256) &&
         Object.values(ref.library_sha256 ?? {}).length > 0 &&
@@ -329,6 +333,10 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
               backend: report.settings.backend,
               exact_cli_tokens: 96,
               http_full_continuations: 18,
+              correctness_reference: {
+                commit: report.oracle.commit,
+                sha256: report.oracle.server_sha256,
+              },
               release_qualification: false,
             },
           },
