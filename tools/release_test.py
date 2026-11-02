@@ -1578,7 +1578,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_candidate_and_readiness_reject_stale_cross_backend_or_changed_references(self):
         for entrypoint in ("candidate", "readiness"):
-            failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend", "late_cleanup"]
+            failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend", "late_cleanup", "sliding_window"]
             if entrypoint == "readiness": failures += ["wrong_validation", "dirty_validation"]
             else: failures.append("busy_bench")
             for failure in failures:
@@ -1597,7 +1597,8 @@ class ReleaseTest(unittest.TestCase):
                 real = policy()
                 data = {"reference": real["reference"], "gpu_profiles": [{"id": "rocm-rdna4", "target": "linux-x86_64-rocm", "family": "gfx1201", "models": ["fixture"]}],
                         "targets": [{"id": "linux-x86_64-rocm", "backend": "rocm", "interfaces": {"browser_chat": False}}],
-                        "models": [{"id": "fixture", "context": 32, "size_bytes": model.stat().st_size, "sha256": sha256(model)}]}
+                        "models": [{"id": "fixture", "context": 2048, "sliding_window": 1024,
+                                    "size_bytes": model.stat().st_size, "sha256": sha256(model)}]}
                 config = {"device": 7, "reference_args": ["-ngl", "99", "--device", "Vulkan7" if failure == "wrong_backend" else "ROCm7"],
                           "reference_bin": str(reference), "reference_source": str(folder), "lock_directory": str(folder / "reservation"), "models": {"fixture": str(model)}}
                 write_json(folder / "worker.json", config)
@@ -1616,6 +1617,9 @@ class ReleaseTest(unittest.TestCase):
                     self.assertNotIn("DYLD_LIBRARY_PATH", args[5])
                     if failure == "library": (reference / "libggml-hip.so").write_bytes(b"rebuilt library")
                 samples = [("prompt", {"comparison": {"tokens": 16, "near_ties": []}}) for _ in range(3)]
+                sliding = {"passed": True, "http_passed": True, "context": 2048, "window_tokens": 1024,
+                           "minimum_prompt_tokens": 1100, "maximum_prompt_tokens": 1200,
+                           "reference_agreement": {"total_tokens": 48, "exact_tokens": 48, "near_tie_tokens": 0}}
                 argv = ["release_gpu.py", "--directory", str(folder), "--profile", "rocm-rdna4", "--output", str(folder / "report.json")]
                 args = SimpleNamespace(profile="rocm-rdna4", directory=folder, version="9.8.7", commit=PREFLIGHT_MAIN,
                                        validation_commit="3" * 40 if failure == "wrong_validation" else COMMIT,
@@ -1632,6 +1636,8 @@ class ReleaseTest(unittest.TestCase):
                         stack.enter_context(patch.object(release_worker, name, return_value=value))
                     stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
                     stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
+                    window_check = stack.enter_context(patch.object(release_gpu, "sliding_window_reference", return_value=sliding,
+                        side_effect=ValueError("fixture long-window continuation differed") if failure == "sliding_window" else None))
                     if failure == "late_cleanup":
                         original_reservation = release_worker.reservation if entrypoint == "readiness" else release_gpu.worker_reservation
                         @contextlib.contextmanager
@@ -1650,12 +1656,19 @@ class ReleaseTest(unittest.TestCase):
                         reason = {"library": "reference artifacts changed", "during_version_probe": "reference artifacts changed",
                                   "stale_server": "reference executable", "wrong_backend": "native GPU backend",
                                   "wrong_validation": "validation checkout differs", "dirty_validation": "validation checkout is dirty",
-                                  "late_cleanup": "fixture cleanup failed", "busy_bench": "GPU worker is busy"}[failure]
+                                  "late_cleanup": "fixture cleanup failed", "busy_bench": "GPU worker is busy",
+                                  "sliding_window": "fixture long-window continuation differed"}[failure]
                         with self.assertRaisesRegex(ValueError, reason): run()
                         if entrypoint == "candidate": report.assert_not_called()
                         else: self.assertFalse(report.call_args.args[1]["passed"])
                     else:
                         run()
+                        # Exercise the real pin-to-execution wiring: all short
+                        # probes pass, but a missing extended check must still fail this test.
+                        window_check.assert_called_once()
+                        self.assertEqual(window_check.call_args.args[3], 2048)
+                        self.assertEqual(window_check.call_args.args[-1], 1024)
+                        self.assertEqual(report.call_args.args[1]["models"][0]["sliding_window_reference"], sliding)
                         self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
                         self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
                         if entrypoint == "readiness":
