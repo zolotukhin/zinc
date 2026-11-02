@@ -7,7 +7,7 @@ search the wrong workspace for longer.
 
 Launching a child with `cwd` does not rewrite its inherited `PWD`. OpenCode
 uses that environment variable to select its workspace; the
-[2.0.21 run implementation](https://github.com/anomalyco/opencode/blob/v2.0.21/packages/cli/src/run/run.ts)
+[2.0.21 run implementation](https://github.com/anomalyco/opencode/blob/8a8bd622a3d7dc29ccf30ec17f84e363ed95ed72/packages/cli/src/run/run.ts#L73)
 chooses `process.env.PWD` before `process.cwd()`. Absolute tool paths had hidden
 the mismatch in the earlier protocol fixtures.
 
