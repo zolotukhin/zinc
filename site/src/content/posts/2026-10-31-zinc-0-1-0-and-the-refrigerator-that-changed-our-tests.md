@@ -96,6 +96,8 @@ We had set the child process's working directory and inherited its parent's `PWD
 
 We retained the old GPU runs with that flawed launch context and started a fresh seven-model Intel matrix on one packaged executable. The engine had real bugs, the client had changed, and our harness could still make a correct model waste its time. Testing all three boundaries matters.
 
+On that fresh launch, both Gemmas completed all three tasks within the original 15-minute limit, with independent tests passing and protected files unchanged. The 31B model used 12K context and took 2.0–6.5 minutes per task; the 26B mixture-of-experts model used 16K and took 10.9–12.6 minutes. Each server remained responsive and passed its native-reference replays afterward. Those are useful successes with different waiting times, and the [full report](/zinc/docs/intel-opencode-validation/) keeps the configuration beside the result.
+
 The same investigation showed that every tool turn was sending its growing history without a ZINC session key. We checked the existing reuse path before enabling it automatically: both Gemmas reused more than 1,200 tokens on a tool-history turn and matched full prefill. An intervening request still produced the correct continuation. A hybrid Qwen control returned correct replies but could not restore its checkpoint, so automatic reuse stays off for recurrent models. The [packaged control](/zinc/validation/vulkan-session-reuse-packaged-control-2026-11-02.json) keeps both the successful reuse and the deliberate full-prefill fallback visible.
 
 ## Speculation needs a reference too

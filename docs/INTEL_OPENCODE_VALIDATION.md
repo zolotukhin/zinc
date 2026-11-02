@@ -1,6 +1,6 @@
 # Intel OpenCode validation
 
-The November 1 checks on an Intel Arc Pro B70 exercise all seven catalog models
+The November 1–2 checks on an Intel Arc Pro B70 exercise all seven catalog models
 with actual OpenCode 2.0.21. They exposed client compatibility, request recovery,
 Gemma cache allocation, long-prompt attention and working-directory defects.
 A model that loads or answers a short prompt has not yet passed a coding task.
@@ -266,11 +266,11 @@ matches all 48 choices with MTP both on and off. The default correction is
 therefore scoped to Intel, preserving the passing AMD path.
 
 Qwen 3.8 was absent from the earlier six-model Vulkan qualification roles.
-Both roles now require it. The fresh default package must pass all seven model
-rows before their actual OpenCode fixtures resume. A positive overridden
-control is not a pass for the old default package. The fresh package has now
-passed all 48 Qwen 3.8 default choices and complete HTTP replays; the remaining
-model and coding matrix is still running.
+Both roles now require it. A positive overridden control is not a pass for the
+old default package. The fresh package passes all seven default CLI/HTTP model
+gates and both extended Gemma windows: 431 of 432 native choices match exactly,
+and one meets the unchanged near-tie rule. Qwen 3.8 matches all 48 exactly.
+The actual OpenCode coding matrix is still running.
 
 ## Regression checks
 
