@@ -87,7 +87,8 @@ zinc model pull qwen35-9b-q4k-m
 zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
 ```
 
-Use a build containing the corrections above. The catalog's tested-profile
+Use a development build containing the corrections above; no public 0.1.0
+archive has been published. The catalog's tested-profile
 promotion is separate from these source-specific diagnostics; an untested
 profile warning remains possible. An explicit `--model-id` loads the installed
 model without changing its global activation.
@@ -160,7 +161,12 @@ The Metal preview retains its existing decode-time cancellation behavior.
 
 Correcting the cache allocation lets Gemma 31B start at 12K and Gemma 26B at
 16K with default F16 KV storage. Short continuations still match 48/48 native
-reference tokens for each model. Actual coding tasks then expose repetitive
+reference tokens for each model. This allocation-only executable passes
+**28/29 API checks on each Gemma**: the 9.2K long-prompt check fails. That check
+was absent from the earlier 8K 28/28 run because the request could not fit its
+context. The [allocation follow-up](/zinc/validation/intel-gemma-allocation-followup-2026-11-01.json)
+retains the failure; the [long-context negative control](/zinc/validation/intel-gemma-long-context-control-2026-11-01.json)
+compares the repetitive output with the native answer. Actual coding tasks then expose repetitive
 output and no tool calls once their prompts exceed Gemma's 1,024-token window.
 The Vulkan shaders had never received that window and attended to the complete
 prefix in every layer.
@@ -182,7 +188,8 @@ sweep. The direct-tools preset exposes file and shell tools without `execute`;
 actual OpenCode 1.19.4 and 2.0.21 each pass three scripted CPU protocol checks.
 
 The [complete direct-tools follow-up](/zinc/validation/intel-opencode-direct-tools-2026-11-02.json)
-uses the corrected Vulkan executable, unchanged model pins, default F16 KV and
+uses the later window-corrected `1dee8061` Vulkan source snapshot, unchanged
+model pins, default F16 KV and
 the same 900-second, 16-step, 2,048-output-token limits. It retains every attempt:
 
 | Model           | Context |                API checks | Successful coding fixtures | Same-server recovery |
@@ -209,10 +216,14 @@ model's 48 native choices and three complete HTTP reference replays. That is
 an API diagnostic on a different executable and GPU; it does not replace the
 Intel coding failures or qualify a release archive.
 
-## The inherited directory was wrong
+The 29/29 results apply to this later executable. They do not clear the
+allocation-only executable's 28/29 failure or combine different binaries into
+one qualification.
 
-The separate [1,800-second Gemma 31B Python control](/zinc/validation/intel-gemma31-python-longer-2026-11-02.json)
-finishes successfully in 1,752 seconds, with 4/4 independent tests and clean
+## Pre-fix budget-only control and the inherited directory
+
+The **pre-fix budget-only** [1,800-second Gemma 31B Python control](/zinc/validation/intel-gemma31-python-longer-2026-11-02.json)
+uses the stale-`PWD` launcher. It finishes in 1,752 seconds, with 4/4 independent tests and clean
 recovery/reference checks. The original 900-second failure remains failed.
 Reading the longer trace exposes a launch defect: after an absolute source
 edit, relative shell commands search outside the fixture. They cannot find
@@ -238,6 +249,28 @@ output after an intervening request. Hybrid Qwen advertises no automatic
 reuse and uses full prefill. Across these three models, 144/144 short native
 choices and all nine post-control HTTP continuations pass. The earlier hybrid
 checkpoint mismatch remains in a separate retained negative control.
+
+## The NextN model exposed another missing gate
+
+The [first corrected-launch package preflight](/zinc/validation/intel-qwen38-mtp-controls-2026-11-02.json)
+passes 376 numerical cases and five models, including both Gemmas beyond their
+window. It then stops at Qwen 3.8's lighthouse continuation: the seventh generated token (index six) differs
+from the native reference and is not an allowed near-tie. No coding fixtures
+start in that failed run; cleanup completes.
+
+Against the same frozen native references, ordinary decode with `ZINC_MTP=0`
+and normal F16 KV matches all 48 choices. F32 KV, disabled column matmul and
+disabled chained submissions retain the failing MTP continuations. A separate
+[R9700 Vulkan control](/zinc/validation/rdna4-qwen38-mtp-controls-2026-11-02.json)
+matches all 48 choices with MTP both on and off. The default correction is
+therefore scoped to Intel, preserving the passing AMD path.
+
+Qwen 3.8 was absent from the earlier six-model Vulkan qualification roles.
+Both roles now require it. The fresh default package must pass all seven model
+rows before their actual OpenCode fixtures resume. A positive overridden
+control is not a pass for the old default package. The fresh package has now
+passed all 48 Qwen 3.8 default choices and complete HTTP replays; the remaining
+model and coding matrix is still running.
 
 ## Regression checks
 

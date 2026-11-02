@@ -1,0 +1,126 @@
+{
+  "archive_sha256": "c78c71e1abec9408c1ce058e6884bb7d97c1fc04a77587d2fa4a14eff7280ad7",
+  "binary_sha256": "a1a03f25bd026a9deff3c0536664ed8796cca7dee121668c8b031f8816da4e03",
+  "cleanup": "no GPU process remains",
+  "complete": true,
+  "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+  "qualification": false,
+  "reference_artifacts": {
+    "library_sha256": {
+      "libggml-base.so": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0.10.0": "de19eedc75d0312bb25912e6500b2fc61ece0ddb48dbe9fd900ddce0b85fa179",
+      "libggml-base.so.0.22.0": "5796632ef4ce1bd6414b30ed20c94dd34f7c94d7c4edd219e15e1cb979d6ffbc",
+      "libggml-base.so.0.23.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0.9.8": "b8edbe62608913eb9203f54a8fc3c8ee96945bdfa0d5f18bf75aa23dcc934093",
+      "libggml-cpu.so": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0.10.0": "ef16531bd77e10c08b99af1f180021d8b623972371eeedaa7a694486138f5d47",
+      "libggml-cpu.so.0.22.0": "8f76576286f65f4fba8c16b8d68f6b9cbf720d68473a9f0f30cad613b5507456",
+      "libggml-cpu.so.0.23.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0.9.8": "50640c9a721a7d9a67345f48dcb567fffd3212f134c2613ff124d5260cda1282",
+      "libggml-vulkan.so": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0.10.0": "4d6a4b3d4a1be8e3654405d0f429a5573f549e99f88673fd4aa695123ee2da17",
+      "libggml-vulkan.so.0.22.0": "64faf40dd390eb9ca62b5774218792023d80ccc7bb90ea4a88d7ad265de961ea",
+      "libggml-vulkan.so.0.23.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0.9.8": "7aaf2ebb2431b9f23cd32c2ffd9146799bc8c8b923c1a5f2147ed65c94b77919",
+      "libggml.so": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0.10.0": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+      "libggml.so.0.22.0": "1d2656f21fe48a0403cc2ebafd6728fe801cf1617d555738da9156e285dd4704",
+      "libggml.so.0.23.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0.9.8": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+      "libllama-common.so.0": "a9cee6058c9f29b6c7f8a18a1a62572c8482a4abc81e035c748d164d0e3c47dd",
+      "libllama-server-impl.so": "fc220891606241e87e51e745517e51dd9daeb6a69aac0eff4cedc714cd617ddd",
+      "libllama.so": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+      "libllama.so.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+      "libllama.so.0.0.50": "05bc7e842899f4fbaaa5834c3f315bdcda2a97a60298011bad35a52d2f9fbec2",
+      "libllama.so.0.0.513": "c825c8c348bf35c3464c286ce6112eddea12c3413e880a847e772b9ba883e6b1",
+      "libllama.so.0.3.0": "fdd8a86155128852a233c8705970da263cbaf153ebc45f70bb9e359b3e5f3993",
+      "libllama.so.0.4.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191"
+    },
+    "server_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+    "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+  },
+  "scope": "Qwen38 Vulkan default versus MTP-disabled and serial-target diagnostics",
+  "source_commit": "6ac65d2a856b98153bb4a14799035f75b3f2ad83",
+  "variants": [
+    {
+      "overrides": {},
+      "passed": true,
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "variant": "default-f16"
+    },
+    {
+      "overrides": {
+        "ZINC_MTP": "0"
+      },
+      "passed": true,
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "variant": "mtp-off"
+    },
+    {
+      "overrides": {
+        "ZINC_MTP_COLS": "0"
+      },
+      "passed": true,
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "variant": "mtp-serial-target"
+    }
+  ]
+}

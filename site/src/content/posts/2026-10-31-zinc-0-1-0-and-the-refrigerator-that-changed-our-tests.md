@@ -98,6 +98,12 @@ We retained the old GPU runs with that flawed launch context and started a fresh
 
 The same investigation showed that every tool turn was sending its growing history without a ZINC session key. We checked the existing reuse path before enabling it automatically: both Gemmas reused more than 1,200 tokens on a tool-history turn and matched full prefill. An intervening request still produced the correct continuation. A hybrid Qwen control returned correct replies but could not restore its checkpoint, so automatic reuse stays off for recurrent models. The [packaged control](/zinc/validation/vulkan-session-reuse-packaged-control-2026-11-02.json) keeps both the successful reuse and the deliberate full-prefill fallback visible.
 
+## Speculation needs a reference too
+
+The fresh package then found another omission. Qwen 3.8 carries a NextN block for multi-token prediction, but it was absent from the earlier six-model Vulkan qualification roles. On Intel, the first six choices of a story matched the reference; the seventh did not. The alternative was outside our near-tie rule.
+
+Changing cache precision did not help. Ordinary decode matched all 48 choices across the three reference prompts. A separate AMD control matched with speculation both on and off, so we kept AMD's passing default and made Intel's speculative verifier an explicit opt-in while it is investigated. Both Vulkan release roles now include this model. The new Intel-default package passes its complete short CLI and HTTP continuations before the coding matrix continues.
+
 ## Sometimes the small model finds a server bug
 
 The starter also failed four API checks. It would have been easy to blame a 0.6B model for bad tool arguments. Following the bytes showed three host-side mistakes instead.
