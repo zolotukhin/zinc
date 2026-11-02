@@ -1245,77 +1245,48 @@ pub fn forcedSingleToolName(tools: []const tool_format.ToolDefinition, tool_choi
     return tools[0].name;
 }
 
-const JsonStringSlice = struct {
-    value: []const u8,
-    end: usize,
-};
-
-fn skipJsonWhitespace(json: []const u8, pos: *usize) void {
-    while (pos.* < json.len) : (pos.* += 1) {
-        switch (json[pos.*]) {
-            ' ', '\t', '\r', '\n' => {},
-            else => return,
-        }
-    }
-}
-
 fn isSafeJsonObjectKeyName(key: []const u8) bool {
     if (key.len == 0) return false;
     for (key) |c| {
         if ((c >= 'a' and c <= 'z') or
             (c >= 'A' and c <= 'Z') or
             (c >= '0' and c <= '9') or
-            c == '_' or c == '-' or c == '$')
-        {
-            continue;
-        }
+            c == '_' or c == '-' or c == '$') continue;
         return false;
     }
     return true;
 }
 
-fn parseSimpleJsonStringSlice(json: []const u8, quote_pos: usize) ?JsonStringSlice {
-    if (quote_pos >= json.len or json[quote_pos] != '"') return null;
-    var i = quote_pos + 1;
-    while (i < json.len) : (i += 1) {
-        const c = json[i];
-        if (c == '\\' or c < 0x20) return null;
-        if (c == '"') return .{
-            .value = json[quote_pos + 1 .. i],
-            .end = i + 1,
-        };
+/// Select only root schema fields: a nested object's required list does not
+/// describe the outer tool argument. The returned name is owned by the caller.
+fn firstToolArgumentNameAlloc(allocator: std.mem.Allocator, parameters_json: []const u8) !?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, parameters_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    if (parsed.value.object.get("required")) |required| {
+        if (required == .array and required.array.items.len > 0) {
+            const first = required.array.items[0];
+            if (first == .string and isSafeJsonObjectKeyName(first.string))
+                return try allocator.dupe(u8, first.string);
+        }
+    }
+    if (parsed.value.object.get("properties")) |properties| {
+        if (properties == .object and properties.object.count() > 0) {
+            const first = properties.object.keys()[0];
+            if (isSafeJsonObjectKeyName(first)) return try allocator.dupe(u8, first);
+        }
     }
     return null;
 }
 
-fn firstStringInArrayAfterField(json: []const u8, field_literal: []const u8) ?[]const u8 {
-    const field_pos = std.mem.indexOf(u8, json, field_literal) orelse return null;
-    var pos = field_pos + field_literal.len;
-    const array_rel = std.mem.indexOfScalar(u8, json[pos..], '[') orelse return null;
-    pos += array_rel + 1;
-    skipJsonWhitespace(json, &pos);
-    const parsed = parseSimpleJsonStringSlice(json, pos) orelse return null;
-    return if (isSafeJsonObjectKeyName(parsed.value)) parsed.value else null;
-}
-
-fn firstObjectKeyAfterField(json: []const u8, field_literal: []const u8) ?[]const u8 {
-    const field_pos = std.mem.indexOf(u8, json, field_literal) orelse return null;
-    var pos = field_pos + field_literal.len;
-    const object_rel = std.mem.indexOfScalar(u8, json[pos..], '{') orelse return null;
-    pos += object_rel + 1;
-    skipJsonWhitespace(json, &pos);
-    const parsed = parseSimpleJsonStringSlice(json, pos) orelse return null;
-    return if (isSafeJsonObjectKeyName(parsed.value)) parsed.value else null;
-}
-
-fn firstToolArgumentName(parameters_json: []const u8) ?[]const u8 {
-    return firstStringInArrayAfterField(parameters_json, "\"required\"") orelse
-        firstObjectKeyAfterField(parameters_json, "\"properties\"");
-}
-
-pub fn forcedSingleToolFirstArgumentName(tools: []const tool_format.ToolDefinition, tool_choice: ToolChoice) ?[]const u8 {
+/// Caller frees a returned name. Escaped JSON schema keys are decoded before
+/// selecting the prefilled field, and temporary schema allocations are released.
+pub fn forcedSingleToolFirstArgumentNameAlloc(allocator: std.mem.Allocator, tools: []const tool_format.ToolDefinition, tool_choice: ToolChoice) !?[]u8 {
     if (tool_choice != .required or tools.len != 1) return null;
-    return firstToolArgumentName(tools[0].parameters_json);
+    return firstToolArgumentNameAlloc(allocator, tools[0].parameters_json);
 }
 
 const ChatMessage = struct {
@@ -1403,7 +1374,8 @@ fn buildChatPrompt(allocator: std.mem.Allocator, tokenizer: *const tokenizer_mod
     const tf = tool_format.forTokenizer(tokenizer);
     const tools_for_template = if (tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else tools;
     const forced_tool_name = if (!tf.usesJsonPrefill()) null else forcedSingleToolName(tools_for_template, tool_choice);
-    const forced_tool_first_arg_name = if (!tf.usesJsonPrefill()) null else forcedSingleToolFirstArgumentName(tools_for_template, tool_choice);
+    const forced_tool_first_arg_name = if (!tf.usesJsonPrefill()) null else try forcedSingleToolFirstArgumentNameAlloc(allocator, tools_for_template, tool_choice);
+    defer if (forced_tool_first_arg_name) |name| allocator.free(name);
     return tokenizer.applyChatTemplateWithOptions(roles, contents, .{
         .enable_thinking = enable_thinking,
         .skip_thinking_template = skip_thinking_template and !tf.native_gemma,
@@ -2980,7 +2952,8 @@ fn handleChatCompletions(
     const tools_for_choice = if (parsed.tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else parsed.tools;
     const tools_active = tools_for_choice.len > 0 and tool_format.forTokenizer(tokenizer).supports_tools;
     const forced_tool_name = if (!tool_format.forTokenizer(tokenizer).usesJsonPrefill()) null else forcedSingleToolName(tools_for_choice, parsed.tool_choice);
-    const forced_tool_first_arg_name = if (forced_tool_name == null) null else forcedSingleToolFirstArgumentName(tools_for_choice, parsed.tool_choice);
+    const forced_tool_first_arg_name = if (forced_tool_name == null) null else try forcedSingleToolFirstArgumentNameAlloc(allocator, tools_for_choice, parsed.tool_choice);
+    defer if (forced_tool_first_arg_name) |name| allocator.free(name);
     const seed_bits: u128 = @bitCast(seed_ns);
     var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
     const random = prng.random();
@@ -3514,15 +3487,19 @@ fn handleChatCompletions(
         logGeneratedTiming(generated, decode_start_ns, decode_end_ns);
 
         if (forced_tool_name) |tool_name| {
-            const args_json = try forcedToolArgumentsJsonAlloc(allocator, forced_tool_first_arg_name, gen_text_buf[0..gen_text_len]);
-            defer allocator.free(args_json);
-            var forced_id_buf: [64]u8 = undefined;
-            const forced_id = std.fmt.bufPrint(&forced_id_buf, "call_forced_{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "call_forced";
-            const ev = try formatStreamingToolCallChunk(allocator, req_id, ts, model_name, tool_call_index, forced_id, tool_name, args_json);
-            defer allocator.free(ev);
-            try conn.writeSseEvent(ev);
-            any_tool_call_emitted = true;
-            tool_call_index += 1;
+            const parsed_output = try parsePrefilledToolOutput(allocator, stream_tool_fmt, tools_for_choice, tool_name, forced_tool_first_arg_name, toolStreamText(gen_text_buf[0..gen_text_len]));
+            defer freeParsedToolOutput(allocator, parsed_output);
+            for (parsed_output.tool_calls) |call| {
+                const ev = try formatStreamingToolCallChunk(allocator, req_id, ts, model_name, tool_call_index, call.id, call.name, call.arguments_json);
+                defer allocator.free(ev);
+                try conn.writeSseEvent(ev);
+                any_tool_call_emitted = true;
+                tool_call_index += 1;
+            }
+            if (parsed_output.tool_calls.len == 0) {
+                const visible = completeUtf8Prefix(parsed_output.text_content);
+                if (visible.len > 0) try streamText(conn, visible, req_id, ts, model_name);
+            }
         }
 
         // Final chunk with finish_reason
@@ -3620,7 +3597,7 @@ fn handleChatCompletions(
         // completion and keeps the path identical to mainline pre-merge.
         const tool_fmt = tool_format.forTokenizer(tokenizer);
         const parsed_output = if (parsed.tools.len > 0 and parsed.tool_choice != .none)
-            try tool_fmt.parseAssistantToolCallsWithTools(response_text, parsed.tools, allocator)
+            try parsePrefilledToolOutput(allocator, tool_fmt, parsed.tools, forced_tool_name, forced_tool_first_arg_name, response_text)
         else
             tool_format.ParsedAssistantOutput{ .text_content = "", .tool_calls = &.{} };
         defer if (parsed.tools.len > 0 and parsed.tool_choice != .none) {
@@ -3657,7 +3634,8 @@ fn handleChatCompletions(
             , .{ @tagName(finish_reason), prompt_tokens.len, ns_gen, prompt_tokens.len + ns_gen });
             try conn.sendJson(200, wb.items);
         } else {
-            const escaped_text = try jsonEscapeAlloc(allocator, response_text);
+            const response_content = if (forced_tool_name != null) parsed_output.text_content else response_text;
+            const escaped_text = try jsonEscapeAlloc(allocator, response_content);
             defer allocator.free(escaped_text);
             var wb: std.ArrayList(u8) = .empty;
             defer wb.deinit(allocator);
@@ -3670,7 +3648,7 @@ fn handleChatCompletions(
             });
             try conn.sendJson(200, wb.items);
         }
-        if (cacheable_session) {
+        if (cacheable_session and forced_tool_name == null) {
             var transport_buf: [32768]u8 = undefined;
             var tool_history_buf: std.ArrayList(u8) = .empty;
             defer tool_history_buf.deinit(allocator);
@@ -4352,87 +4330,51 @@ pub fn formatStreamingToolCallChunk(
     return wb.toOwnedSlice(allocator);
 }
 
-fn forcedToolArgumentTail(generated_text: []const u8) []const u8 {
-    var out = trimTrailingChatArtifacts(generated_text);
-    if (std.mem.indexOf(u8, out, "</tool_call>")) |idx| {
-        out = out[0..idx];
-    }
-    if (std.mem.indexOf(u8, out, "<|im_end|>")) |idx| {
-        out = out[0..idx];
-    }
-    return std.mem.trim(u8, out, " \t\r\n");
-}
-
-fn firstCompleteJsonObjectSlice(text: []const u8) ?[]const u8 {
-    const start = std.mem.indexOfScalar(u8, text, '{') orelse return null;
-    var depth: usize = 0;
-    var in_string = false;
-    var escaped = false;
-    var i = start;
-    while (i < text.len) : (i += 1) {
-        const c = text[i];
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-
-        switch (c) {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                if (depth == 0) return text[start .. i + 1];
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn forcedToolArgumentsSlice(generated_text: []const u8) []const u8 {
-    var out = forcedToolArgumentTail(generated_text);
-    if (firstCompleteJsonObjectSlice(out)) |json_object| {
-        return json_object;
-    }
-
-    if (out.len >= 2 and
-        ((out[0] == '\'' and out[out.len - 1] == '\'') or
-            (out[0] == '"' and out[out.len - 1] == '"')))
-    {
-        out = std.mem.trim(u8, out[1 .. out.len - 1], " \t\r\n");
-        if (firstCompleteJsonObjectSlice(out)) |json_object| {
-            return json_object;
-        }
-    }
-    return "";
-}
-
-pub fn forcedToolArgumentsJsonAlloc(allocator: std.mem.Allocator, first_arg_name: ?[]const u8, generated_text: []const u8) ![]u8 {
-    var merged: std.ArrayList(u8) = .empty;
-    defer merged.deinit(allocator);
-
+/// Restore the exact tool prefix already present in the prompt, then use the
+/// ordinary complete-envelope parser for both JSON and SSE. A truncated or
+/// malformed continuation stays text; never manufacture an empty call.
+pub fn parsePrefilledToolOutput(
+    allocator: std.mem.Allocator,
+    format: tool_format.ToolFormat,
+    tools: []const tool_format.ToolDefinition,
+    forced_name: ?[]const u8,
+    first_arg_name: ?[]const u8,
+    generated_text: []const u8,
+) !tool_format.ParsedAssistantOutput {
+    // Only the generic ChatML JSON dialect inserts this prefix. Native XML,
+    // Gemma and unsupported formats must keep their own parsing rules even if
+    // a caller accidentally supplies a forced name.
+    if (!format.usesJsonPrefill()) return format.parseAssistantToolCallsWithTools(generated_text, tools, allocator);
+    const name = forced_name orelse return format.parseAssistantToolCallsWithTools(generated_text, tools, allocator);
+    var restored: std.ArrayList(u8) = .empty;
+    defer restored.deinit(allocator);
+    const escaped_name = try jsonEscapeAlloc(allocator, name);
+    defer allocator.free(escaped_name);
+    try restored.print(allocator, "<tool_call>\n{{\"name\":\"{s}\",\"arguments\":", .{escaped_name});
     if (first_arg_name) |arg_name| {
-        try merged.print(allocator, "{{\"{s}\":", .{arg_name});
+        const escaped_arg = try jsonEscapeAlloc(allocator, arg_name);
+        defer allocator.free(escaped_arg);
+        try restored.print(allocator, "{{\"{s}\":", .{escaped_arg});
     }
-    try merged.appendSlice(allocator, forcedToolArgumentTail(generated_text));
+    try restored.appendSlice(allocator, generated_text);
+    var parsed = try format.parseAssistantToolCallsWithTools(restored.items, tools, allocator);
+    errdefer freeParsedToolOutput(allocator, parsed);
+    if (parsed.tool_calls.len == 0) {
+        const fallback = try allocator.dupe(u8, trimTrailingChatArtifacts(completeUtf8Prefix(generated_text)));
+        allocator.free(parsed.text_content);
+        parsed.text_content = fallback;
+    }
+    return parsed;
+}
 
-    const args = forcedToolArgumentsSlice(merged.items);
-    if (args.len == 0) return allocator.dupe(u8, "{}");
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, args, .{}) catch {
-        return allocator.dupe(u8, "{}");
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return allocator.dupe(u8, "{}");
-
-    return allocator.dupe(u8, args);
+fn freeParsedToolOutput(allocator: std.mem.Allocator, parsed: tool_format.ParsedAssistantOutput) void {
+    for (parsed.tool_calls) |call| {
+        allocator.free(call.id);
+        allocator.free(call.name);
+        allocator.free(call.arguments_json);
+    }
+    allocator.free(parsed.tool_calls);
+    allocator.free(parsed.text_content);
 }
 
 // ── Built-in Chat UI ─────────────────────────────────────────
@@ -5228,40 +5170,145 @@ test "required single-tool prompt prefills the tool call arguments slot" {
     try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n<tool_call>\n{\"name\":\"write\",\"arguments\":{\"filePath\":"));
 }
 
-test "firstToolArgumentName prefers required key then properties key" {
-    try std.testing.expectEqualStrings(
-        "content",
-        firstToolArgumentName("{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"content\",\"filePath\"]}").?,
-    );
-    try std.testing.expectEqualStrings(
-        "filePath",
-        firstToolArgumentName("{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}}}").?,
-    );
+test "prefilled tool fields use the root schema and own decoded names" {
+    const cases = .{
+        .{ "{\"properties\":{\"filePath\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"content\",\"filePath\"]}", "content" },
+        .{ "{\"properties\":{\"filePath\":{\"type\":\"string\"}}}", "filePath" },
+        .{ "{\"properties\":{\"options\":{\"properties\":{\"safe\":{\"type\":\"boolean\"}},\"required\":[\"safe\"]},\"count\":{\"type\":\"integer\"}},\"required\":[\"count\",\"options\"]}", "count" },
+        .{ "{\"properties\":{\"count\":{\"type\":\"integer\"}},\"required\":[\"\\u0063ount\"]}", "count" },
+    };
+    inline for (cases) |case| {
+        const name = (try firstToolArgumentNameAlloc(std.testing.allocator, case[0])).?;
+        defer std.testing.allocator.free(name);
+        try std.testing.expectEqualStrings(case[1], name);
+    }
+    for ([_][]const u8{ "{}", "[]", "{\"required\":[\"unsafe\\\"key\"]}", "{" }) |schema| {
+        try std.testing.expect((try firstToolArgumentNameAlloc(std.testing.allocator, schema)) == null);
+    }
 }
 
-test "forcedToolArgumentsSlice extracts the generated JSON object" {
-    try std.testing.expectEqualStrings(
-        "{\"filePath\":\"/tmp/a\",\"content\":\"hello\"}",
-        forcedToolArgumentsSlice("  '{\"filePath\":\"/tmp/a\",\"content\":\"hello\"}'\n</tool_call>\n<|im_end|>"),
+test "prefilled tool output preserves numbers booleans arrays objects and strings" {
+    const schema =
+        \\{"type":"object","properties":{"count":{"type":"integer"},"enabled":{"type":"boolean"},"labels":{"type":"array","items":{"type":"string"}},"options":{"type":"object","properties":{"safe":{"type":"boolean"}},"required":["safe"]},"text":{"type":"string"}},"required":["count","enabled","labels","options","text"]}
+    ;
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "typed_probe",
+        .description = "Typed probe.",
+        .parameters_json = schema,
+    }};
+    const name = (try forcedSingleToolFirstArgumentNameAlloc(std.testing.allocator, &tools, .required)).?;
+    defer std.testing.allocator.free(name);
+    try std.testing.expectEqualStrings("count", name);
+    const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(.chatml), &tools, "typed_probe", name,
+        \\2,"enabled":true,"labels":["東京"],"options":{"safe":true},"text":"0"}}</tool_call>
     );
-    try std.testing.expectEqualStrings(
-        "{\"path\":\"/tmp/a\",\"content\":\"hello\"}",
-        forcedToolArgumentsSlice("{\"path\":\"/tmp/a\",\"content\":\"hello\"}</tool_call> trailing"),
-    );
-    try std.testing.expectEqualStrings(
-        "{\"filePath\":\"/tmp/a\",\"content\":\"hello\"}",
-        forcedToolArgumentsSlice("{\"filePath\":\"/tmp/a\",\"content\":\"hello\"}}</tool_call> trailing"),
-    );
+    defer freeParsedToolOutput(std.testing.allocator, parsed);
+    try std.testing.expectEqual(@as(usize, 1), parsed.tool_calls.len);
+    try std.testing.expectEqualStrings("typed_probe", parsed.tool_calls[0].name);
+    var arguments = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, parsed.tool_calls[0].arguments_json, .{});
+    defer arguments.deinit();
+    const values = arguments.value.object;
+    try std.testing.expectEqual(@as(i64, 2), values.get("count").?.integer);
+    try std.testing.expect(values.get("enabled").?.bool);
+    try std.testing.expectEqualStrings("東京", values.get("labels").?.array.items[0].string);
+    try std.testing.expect(values.get("options").?.object.get("safe").?.bool);
+    try std.testing.expectEqualStrings("0", values.get("text").?.string);
 }
 
-test "forcedToolArgumentsJsonAlloc rebuilds prefilled first argument" {
-    const args = try forcedToolArgumentsJsonAlloc(std.testing.allocator, "filePath", "\"/tmp/a\",\"content\":\"hello\"}}</tool_call>");
-    defer std.testing.allocator.free(args);
-    try std.testing.expectEqualStrings("{\"filePath\":\"/tmp/a\",\"content\":\"hello\"}", args);
+test "truncated or malformed prefilled tools remain text instead of executable empty calls" {
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "probe",
+        .description = "Probe.",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}",
+    }};
+    for ([_][]const u8{
+        "\"",
+        "\"unfinished",
+        "}</tool_call>",
+        "\"complete\"}",
+        "\"complete\"}}",
+        "\"complete\", \"options\":{\"nested\":true}</tool_call>",
+        "\"complete\", \"broken\":}}</tool_call>",
+    }) |fragment| {
+        const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(.chatml), &tools, "probe", "message", fragment);
+        defer freeParsedToolOutput(std.testing.allocator, parsed);
+        try std.testing.expectEqual(@as(usize, 0), parsed.tool_calls.len);
+        try std.testing.expectEqualStrings(trimTrailingChatArtifacts(fragment), parsed.text_content);
+    }
+}
 
-    const invalid = try forcedToolArgumentsJsonAlloc(std.testing.allocator, "filePath", "}</tool_call>");
-    defer std.testing.allocator.free(invalid);
-    try std.testing.expectEqualStrings("{}", invalid);
+test "prefilled tools accept complete empty objects and quoted delimiter text without repairing input" {
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "probe",
+        .description = "Probe.",
+        .parameters_json = "{\"type\":\"object\"}",
+    }};
+    const empty = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(.chatml), &tools, "probe", null, "{}}</tool_call>");
+    defer freeParsedToolOutput(std.testing.allocator, empty);
+    try std.testing.expectEqual(@as(usize, 1), empty.tool_calls.len);
+    try std.testing.expectEqualStrings("{}", empty.tool_calls[0].arguments_json);
+
+    const quoted = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(.chatml), &tools, "probe", "message",
+        \\"literal </tool_call> and \"quotes\""}}</tool_call>
+    );
+    defer freeParsedToolOutput(std.testing.allocator, quoted);
+    try std.testing.expectEqual(@as(usize, 1), quoted.tool_calls.len);
+    var arguments = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, quoted.tool_calls[0].arguments_json, .{});
+    defer arguments.deinit();
+    try std.testing.expectEqualStrings("literal </tool_call> and \"quotes\"", arguments.value.object.get("message").?.string);
+}
+
+test "failed prefilled calls share UTF-8 and trailing artifact cleanup across transports" {
+    const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.chatmlToolFormat(), &.{}, "probe", "message", "unfinished<|endoftext|>\xE6\x9D");
+    defer freeParsedToolOutput(std.testing.allocator, parsed);
+    try std.testing.expectEqual(@as(usize, 0), parsed.tool_calls.len);
+    try std.testing.expectEqualStrings("unfinished", parsed.text_content);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(parsed.text_content));
+}
+
+test "JSON-prefill restoration leaves native and unsupported tool formats unchanged" {
+    // Supplying a forced name must not reinterpret another dialect as ChatML
+    // JSON. The ordinary parser retains ownership even for unsupported kinds.
+    inline for (.{ .llama3, .gemma, .openai_moe, .atem, .generic }) |kind| {
+        const parsed = try parsePrefilledToolOutput(std.testing.allocator, tool_format.forTemplate(kind), &.{}, "probe", "message", "unchanged");
+        defer freeParsedToolOutput(std.testing.allocator, parsed);
+        try std.testing.expectEqualStrings("unchanged", parsed.text_content);
+        try std.testing.expectEqual(@as(usize, 0), parsed.tool_calls.len);
+    }
+    const tools = [_]tool_format.ToolDefinition{.{ .name = "probe", .description = "", .parameters_json = "{}" }};
+    var xml = tool_format.chatmlToolFormat();
+    xml.native_xml = true;
+    const native_cases = .{
+        .{ xml, "<tool_call><function=probe><parameter=message>hello</parameter></function></tool_call>" },
+        .{ tool_format.gemmaToolFormat(), "<|tool_call>call:probe{message:<|\"|>hello<|\"|>}<tool_call|>" },
+    };
+    inline for (native_cases) |case| {
+        const parsed = try parsePrefilledToolOutput(std.testing.allocator, case[0], &tools, "probe", "message", case[1]);
+        defer freeParsedToolOutput(std.testing.allocator, parsed);
+        try std.testing.expectEqual(@as(usize, 1), parsed.tool_calls.len);
+        try std.testing.expectEqualStrings("probe", parsed.tool_calls[0].name);
+        const args = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, parsed.tool_calls[0].arguments_json, .{});
+        defer args.deinit();
+        try std.testing.expectEqualStrings("hello", args.value.object.get("message").?.string);
+    }
+}
+
+fn checkPrefilledToolAllocationFailures(allocator: std.mem.Allocator) !void {
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "probe",
+        .description = "Probe.",
+        .parameters_json = "{\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}",
+    }};
+    const name = (try forcedSingleToolFirstArgumentNameAlloc(allocator, &tools, .required)).?;
+    defer allocator.free(name);
+    for ([_][]const u8{ "\"ok\"}}</tool_call>", "\"" }) |fragment| {
+        const parsed = try parsePrefilledToolOutput(allocator, tool_format.forTemplate(.chatml), &tools, "probe", name, fragment);
+        defer freeParsedToolOutput(allocator, parsed);
+    }
+}
+
+test "prefilled tool parsing releases temporary schema and continuation allocations on failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkPrefilledToolAllocationFailures, .{});
 }
 
 test "buildChatPrompt succeeds for large Goose-style tool prompts" {

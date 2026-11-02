@@ -46,6 +46,8 @@ pub const ToolCall = struct {
 /// `ToolFormat.parseAssistantToolCalls` and consumed by the chat completions
 /// response builder when deciding between a `content` reply and a `tool_calls`
 /// reply.
+/// All returned strings and the tool-call slice belong to the caller's
+/// allocator, including formats without tool support. Free them after use.
 pub const ParsedAssistantOutput = struct {
     /// Anything outside the format's native tool-call envelopes.
     text_content: []const u8,
@@ -296,8 +298,7 @@ pub const NoopToolFormat = struct {
     }
 
     fn parse_calls(_: *anyopaque, model_output: []const u8, _: []const ToolDefinition, allocator: std.mem.Allocator) !ParsedAssistantOutput {
-        _ = allocator;
-        return .{ .text_content = model_output, .tool_calls = &.{} };
+        return .{ .text_content = try allocator.dupe(u8, model_output), .tool_calls = &.{} };
     }
 
     fn new_detector(_: *anyopaque, allocator: std.mem.Allocator) !*StreamingDetector {
@@ -782,8 +783,12 @@ test "NoopToolFormat.renderToolDefinitions is a no-op" {
 
 test "NoopToolFormat.parseAssistantToolCalls returns text_content unchanged" {
     const tf = noopToolFormat();
-    const result = try tf.parseAssistantToolCalls("hello world", std.testing.allocator);
-    try std.testing.expectEqualStrings("hello world", result.text_content);
+    var source = [_]u8{ 'h', 'e', 'l', 'l', 'o' };
+    const result = try tf.parseAssistantToolCalls(&source, std.testing.allocator);
+    defer std.testing.allocator.free(result.text_content);
+    defer std.testing.allocator.free(result.tool_calls);
+    source[0] = 'x';
+    try std.testing.expectEqualStrings("hello", result.text_content);
     try std.testing.expectEqual(@as(usize, 0), result.tool_calls.len);
 }
 
@@ -796,13 +801,11 @@ test "NoopToolFormat.renderToolResultMessage appends raw content" {
 }
 
 test "forTemplate returns a usable ToolFormat for every kind" {
-    inline for (.{ .chatml, .llama3, .gemma, .openai_moe, .generic }) |kind| {
+    inline for (.{ .chatml, .llama3, .gemma, .openai_moe, .atem, .generic }) |kind| {
         const tf = forTemplate(kind);
         const result = try tf.parseAssistantToolCalls("x", std.testing.allocator);
-        if (kind == .chatml) {
-            std.testing.allocator.free(result.text_content);
-            std.testing.allocator.free(result.tool_calls);
-        }
+        std.testing.allocator.free(result.text_content);
+        std.testing.allocator.free(result.tool_calls);
     }
 }
 

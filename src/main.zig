@@ -2331,9 +2331,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             if (tool_format_mod.forTokenizer(ctx.tokenizer).usesJsonPrefill()) {
                 if (routes_mod.forcedSingleToolName(chat.tools, chat.tool_choice)) |name| {
                     forced_tool_name = try allocator.dupe(u8, name);
-                    if (routes_mod.forcedSingleToolFirstArgumentName(chat.tools, chat.tool_choice)) |arg| {
-                        forced_tool_first_arg = try allocator.dupe(u8, arg);
-                    }
+                    forced_tool_first_arg = try routes_mod.forcedSingleToolFirstArgumentNameAlloc(allocator, chat.tools, chat.tool_choice);
                 }
             }
             const buf = routes_mod.allocChatPrompt(allocator, ctx.tokenizer, chat.roles, chat.contents, enable_thinking, skip_thinking, chat.tools, chat.tool_choice) catch |err| {
@@ -2384,8 +2382,6 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     // From here the worker borrows `prompt_tokens` + `chan`; do not return without
     // draining to `finished` (so the worker is done touching them) then `finish`.
     defer ctx.engine.finish(id, &chan);
-    var forced_id_buf: [64]u8 = undefined;
-    const forced_id = std.fmt.bufPrint(&forced_id_buf, "call_forced_{d}", .{id}) catch unreachable;
 
     if (stream_response) {
         conn.sendSseStart() catch {
@@ -2533,13 +2529,19 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     if (stream_response) {
         if (!write_failed) {
             if (tools_active) {
-                if (forced_tool_name) |name| {
-                    const args = try routes_mod.forcedToolArgumentsJsonAlloc(allocator, forced_tool_first_arg, routes_mod.completeUtf8Prefix(output.items));
-                    defer allocator.free(args);
-                    const event = try routes_mod.formatStreamingToolCallChunk(allocator, "chatcmpl-zinc", 0, "zinc", 0, forced_id, name, args);
-                    defer allocator.free(event);
-                    try conn.writeSseEvent(event);
-                    any_tool_call_emitted = true;
+                if (forced_tool_name != null) {
+                    var arena = std.heap.ArenaAllocator.init(allocator);
+                    defer arena.deinit();
+                    const a = arena.allocator();
+                    const parsed_tools = try routes_mod.parsePrefilledToolOutput(a, tool_format_mod.forTokenizer(ctx.tokenizer), tool_definitions, forced_tool_name, forced_tool_first_arg, output.items);
+                    for (parsed_tools.tool_calls, 0..) |call, index| {
+                        const event = try routes_mod.formatStreamingToolCallChunk(a, "chatcmpl-zinc", 0, "zinc", @intCast(index), call.id, call.name, call.arguments_json);
+                        try conn.writeSseEvent(event);
+                        any_tool_call_emitted = true;
+                    }
+                    if (parsed_tools.tool_calls.len == 0 and parsed_tools.text_content.len > 0) {
+                        try routes_mod.streamText(conn, parsed_tools.text_content, "chatcmpl-zinc", 0, "zinc");
+                    }
                 } else {
                     const tail = detector.finalize();
                     if (tail.len > 0) try routes_mod.streamText(conn, tail, "chatcmpl-zinc", 0, "zinc");
@@ -2568,7 +2570,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         try conn.sendError(500, "server_error", "model returned invalid UTF-8");
         return;
     }
-    const escaped = try jsonEscapeAlloc(allocator, response_output);
+    var escaped = try jsonEscapeAlloc(allocator, response_output);
     defer allocator.free(escaped);
     var response: std.ArrayList(u8) = .empty;
     defer response.deinit(allocator);
@@ -2576,10 +2578,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const parsed_tools = if (forced_tool_name) |name| tool_format_mod.ParsedAssistantOutput{
-            .text_content = "",
-            .tool_calls = &.{.{ .id = forced_id, .name = name, .arguments_json = try routes_mod.forcedToolArgumentsJsonAlloc(a, forced_tool_first_arg, response_output) }},
-        } else try tool_format_mod.forTokenizer(ctx.tokenizer).parseAssistantToolCallsWithTools(response_output, tool_definitions, a);
+        const parsed_tools = try routes_mod.parsePrefilledToolOutput(a, tool_format_mod.forTokenizer(ctx.tokenizer), tool_definitions, forced_tool_name, forced_tool_first_arg, response_output);
         if (parsed_tools.tool_calls.len > 0) {
             const ApiTool = struct { id: []const u8, type: []const u8 = "function", function: struct { name: []const u8, arguments: []const u8 } };
             const api_tools = try a.alloc(ApiTool, parsed_tools.tool_calls.len);
@@ -2596,6 +2595,12 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             }, .{});
             try conn.sendJson(200, json);
             return;
+        }
+        if (forced_tool_name != null) {
+            // Failed prefilled calls remain the same sanitized text as SSE.
+            const fallback = try jsonEscapeAlloc(allocator, parsed_tools.text_content);
+            allocator.free(escaped);
+            escaped = fallback;
         }
     }
     if (is_chat) {
