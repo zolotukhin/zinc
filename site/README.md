@@ -22,6 +22,10 @@ bun run dev
 | `bun run preview`          | Preview the production build locally                                          |
 | `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts |
 
+`bun run build` adds Cloudflare's exclusion markers around literal code after
+Astro compresses the HTML. This final pass uses Bun's HTML parser and verifies
+that all other HTML bytes remain unchanged. Publish the full command's output.
+
 After `bun run build`, run `bun run check:benchmarks`. Install the test browser
 with `bunx playwright install chromium` if needed. The check serves `dist/` on a
 temporary loopback port and stops it afterward. Use `BENCHMARK_BASE_URL` to
