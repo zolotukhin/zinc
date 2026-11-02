@@ -1,10 +1,35 @@
-//! Correctness defaults for backend prefill paths.
+//! Correctness defaults for backend inference acceleration.
 //! @section Inference Runtime
 //!
 //! Extra activation quantization is separate from a GGUF's weight format.
 //! Keep paths that change qualified continuations behind an explicit override.
 const std = @import("std");
 const ModelConfig = @import("../model/config.zig").ModelConfig;
+
+/// Carrying a NextN block establishes model compatibility, not verifier
+/// correctness. Qwen 3.8's Vulkan MTP path changes qualified greedy choices;
+/// ordinary decode matches the native reference. Keep speculation explicit
+/// until its target verifier has independent parity evidence.
+pub fn vulkanMtpRequested(eligible: bool, override: ?[]const u8) bool {
+    if (!eligible) return false;
+    const raw = override orelse return false;
+    return raw.len > 0 and
+        !std.mem.eql(u8, raw, "0") and
+        !std.ascii.eqlIgnoreCase(raw, "off") and
+        !std.ascii.eqlIgnoreCase(raw, "false") and
+        !std.ascii.eqlIgnoreCase(raw, "no");
+}
+
+test "Vulkan NextN compatibility does not silently enable unqualified speculation" {
+    try std.testing.expect(!vulkanMtpRequested(true, null));
+    for ([_][]const u8{ "", "0", "off", "FALSE", "No" }) |value| {
+        try std.testing.expect(!vulkanMtpRequested(true, value));
+    }
+    for ([_][]const u8{ "1", "true", "ON" }) |value| {
+        try std.testing.expect(vulkanMtpRequested(true, value));
+        try std.testing.expect(!vulkanMtpRequested(false, value));
+    }
+}
 
 /// Dense Gemma's Q8 activation prefill changes the copper continuation after
 /// a long prefix. F32-activation batched prefill retains the reference choice.
