@@ -122,10 +122,20 @@ export function validateGemmaReport(report) {
         (report.target === 'intel' ? /Intel/i : /AMD|Radeon/i).test(report.hardware.gpu),
       'Selected GPU evidence is missing',
     );
+    const selection = report.latest_reference_check;
+    const checkedAt = Date.parse(selection?.checked_at);
+    const startedAt = Date.parse(report.started_at);
     requireValue(
-      report.latest_reference_check?.commit === referencePin.commit &&
-        Date.parse(report.latest_reference_check.checked_at) >= Date.parse(report.started_at) &&
-        Date.parse(report.latest_reference_check.checked_at) <= Date.parse(report.completed_at),
+      selection?.commit === referencePin.commit &&
+        /^[a-f0-9]{40}$/.test(selection.observed_head_at_run ?? '') &&
+        (selection.scope === 'run-start'
+          ? selection.observed_head_at_run === referencePin.commit &&
+            checkedAt >= startedAt &&
+            checkedAt <= Date.parse(report.completed_at)
+          : selection.scope === 'campaign-before-build' &&
+            selection.checked_at === referencePin.checked_at_utc &&
+            checkedAt <= startedAt &&
+            startedAt - checkedAt <= 2 * 60 * 60 * 1000),
       'The reference was not checked against current upstream',
     );
   }

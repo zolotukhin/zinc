@@ -30,7 +30,8 @@ export async function checkBenchmarkReference() {
 
 if (import.meta.main) {
   const command = process.argv[2];
-  if (command === 'check') console.log(await checkBenchmarkReference());
+  if (command === 'head') console.log(await latestBenchmarkReference());
+  else if (command === 'check') console.log(await checkBenchmarkReference());
   else if (command === 'update') {
     const pin = JSON.parse(await readFile(pinFile, 'utf8'));
     pin.commit = await latestBenchmarkReference();
@@ -39,5 +40,5 @@ if (import.meta.main) {
     console.log(
       `Pinned ${pin.commit}. Rebuild llama-server and llama-tokenize before benchmarking.`,
     );
-  } else throw new Error('Usage: bun tools/benchmark_reference.mjs <check|update>');
+  } else throw new Error('Usage: bun tools/benchmark_reference.mjs <head|check|update>');
 }

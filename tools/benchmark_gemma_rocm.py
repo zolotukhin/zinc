@@ -87,6 +87,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--reference-selected-at", help="Reuse the pin verified before this campaign's builds (at most two hours old)")
     args = parser.parse_args()
     if not sys.platform.startswith("linux") or min(args.rounds, args.runs, args.warmup) < 1:
         parser.error("run on the remote Linux GPU worker with positive repetition counts")
@@ -119,10 +120,18 @@ def main():
             env["ROCR_VISIBLE_DEVICES"] = str(args.device)
         else:
             env["RADV_PERFTEST"] = "coop_matrix"
-        pin = json.loads((ROOT / "config/benchmark-reference.json").read_text())["commit"]
-        latest = subprocess.check_output(["bun", str(ROOT / "tools/benchmark_reference.mjs"), "check"], text=True, timeout=60).strip()
-        assert latest == pin, "the performance reference is stale"
-        report["latest_reference_check"] = {"commit": latest, "checked_at": now()}
+        selected = json.loads((ROOT / "config/benchmark-reference.json").read_text())
+        pin = selected["commit"]
+        latest = subprocess.check_output(["bun", str(ROOT / "tools/benchmark_reference.mjs"), "head"], text=True, timeout=60).strip()
+        if args.reference_selected_at:
+            assert args.reference_selected_at == selected["checked_at_utc"], "campaign selection differs from the recorded pin"
+            age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(args.reference_selected_at.replace("Z", "+00:00"))
+            assert datetime.timedelta(0) <= age <= datetime.timedelta(hours=2), "select a fresh reference before building the campaign"
+            checked_at, scope = args.reference_selected_at, "campaign-before-build"
+        else:
+            assert latest == pin, "the performance reference is stale"
+            checked_at, scope = now(), "run-start"
+        report["latest_reference_check"] = {"commit": pin, "checked_at": checked_at, "scope": scope, "observed_head_at_run": latest}
         report["reference"] = reference_identity(args.llama_bin, args.llama_source, env, pin)
         report["oracle"] = reference_identity(args.oracle, args.llama_source, env, pin)
         assert subprocess.run(["git", "-C", str(args.zinc_source), "diff", "--quiet", "HEAD", "--", "src", "build.zig", "build.zig.zon"]).returncode == 0, "ZINC native source is modified"

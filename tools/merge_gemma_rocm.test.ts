@@ -116,7 +116,12 @@ function vulkanFixture(modelId = gemmaModelId, target = 'rdna'): any {
     driver: 'Mesa',
   };
   report.kernel_reference = { passed: true, cases: 376 };
-  report.latest_reference_check = { commit: reference.commit, checked_at: '2026-11-02T05:00:01Z' };
+  report.latest_reference_check = {
+    commit: reference.commit,
+    checked_at: '2026-11-02T05:00:01Z',
+    scope: 'run-start',
+    observed_head_at_run: reference.commit,
+  };
   report.scenarios = gemmaWorkloadsForModel(modelId).map((scenario) => ({
     id: scenario.id,
     request_sha256: requestDigest(scenario.body),
@@ -142,6 +147,29 @@ for (const target of ['rdna', 'intel'])
       expect(() => validateGemmaReport(vulkanFixture(modelId, target))).not.toThrow();
     });
   }
+
+test('a campaign freezes the reference verified before its build while recording later upstream changes', () => {
+  const report = vulkanFixture();
+  const selected = Date.parse(reference.checked_at_utc);
+  report.started_at = new Date(selected + 5 * 60 * 1000).toISOString();
+  report.completed_at = new Date(selected + 30 * 60 * 1000).toISOString();
+  report.latest_reference_check = {
+    commit: reference.commit,
+    checked_at: reference.checked_at_utc,
+    scope: 'campaign-before-build',
+    observed_head_at_run: '9'.repeat(40),
+  };
+  expect(() => validateGemmaReport(report)).not.toThrow();
+  report.started_at = new Date(selected + 3 * 60 * 60 * 1000).toISOString();
+  report.completed_at = new Date(selected + 4 * 60 * 60 * 1000).toISOString();
+  expect(() => validateGemmaReport(report)).toThrow('current upstream');
+});
+
+test('a changed upstream HEAD cannot be silently labeled as a current run-start reference', () => {
+  const report = vulkanFixture();
+  report.latest_reference_check.observed_head_at_run = '9'.repeat(40);
+  expect(() => validateGemmaReport(report)).toThrow('current upstream');
+});
 
 for (const [name, mutate] of [
   [
