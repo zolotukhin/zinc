@@ -307,8 +307,6 @@ These builds currently ignore `-d`; a Vulkan index is not a native HIP/CUDA inde
 
 Use a larger context only if the model and GPU VRAM budget can support it.
 
-<span id="enable-turboquant-kv-compression"></span>
-
 ## KV cache configuration
 
 `--kv-quant 0/2/3/4` is a reserved compatibility option. It is parsed but does

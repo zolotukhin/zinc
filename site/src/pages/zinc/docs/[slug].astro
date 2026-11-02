@@ -2,6 +2,7 @@
 import DocLayout from '../../../layouts/DocLayout.astro';
 import { loadDocs } from '../../../lib/docs-loader';
 import { rehypeDocLinks } from '../../../lib/docs-links';
+import { rehypeDocHeadingAliases } from '../../../lib/docs-heading-aliases';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -196,6 +197,7 @@ const contentHtml = String(
       langAlias: { metal: 'cpp' },
     })
     .use(rehypeDocNavigation)
+    .use(rehypeDocHeadingAliases, { slug: doc.slug })
     .use(rehypeStringify)
     .process(content)
 );

@@ -143,8 +143,6 @@ also uses hipBLAS and rocWMMA headers. They do not require Vulkan shaders or
 RADV settings. See [ROCm setup](/zinc/docs/rocm/) for dependencies and exact
 validated model, KV, prefill, MTP and concurrency settings.
 
-<span id="43-shared-runtime-behavior"></span>
-
 ### 4.4 Shared Runtime Behavior
 
 The backends share a CLI entrypoint, GGUF metadata, tokenizer, catalog and
@@ -472,8 +470,6 @@ This is the most explicit realization of ZINC's paged-KV design today.
 Metal keeps the same conceptual contract but currently favors a **contiguous fast path**. The flash-attention interface still understands page-table inputs, but the current engine can select a contiguous traversal mode for better practicality on Apple Silicon.
 
 Metal also includes a `q8_0` KV-cache option for model families where the quality/performance tradeoff is acceptable.
-
-<span id="103-shared-memory-planner"></span>
 
 ### 10.3 Vulkan/Metal Memory Planner
 

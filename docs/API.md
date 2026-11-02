@@ -13,8 +13,6 @@ export OPENAI_BASE_URL=http://localhost:8080/v1
 `zinc chat` defaults to port 9090 unless `-p` is provided. Vulkan/Metal builds
 open the built-in browser UI; ROCm/CUDA builds provide the HTTP API only.
 
-<span id="compatibility-notes"></span>
-
 ## Backend coverage
 
 Each executable contains one backend. Check `zinc --version` before selecting
@@ -47,8 +45,6 @@ compatibility; consult the [binary release guide](BINARY_RELEASES.md).
 The detailed catalog, health and browser sections below describe **Vulkan/Metal**.
 For portable clients, set `stream` explicitly, get the loaded model from
 `/v1/models`, and do not assume model switching, sampling or prefix caching.
-
-<span id="status--known-gaps-read-first"></span>
 
 ## Status and compatibility limits
 
@@ -126,6 +122,11 @@ values must agree; conflicting limits return HTTP 400 before inference. Omitting
 both uses 256 on Vulkan/Metal or the server's CLI `-n` value on ROCm/CUDA
 (also 256 unless overridden). Raw `/v1/completions` continues to use `max_tokens`.
 
+ROCm/CUDA also retain legacy `n_predict` as a fallback when neither standard
+chat limit is set, or when raw `max_tokens` is absent. Standard token-limit
+fields take precedence over `n_predict`; it is not a third consistency alias.
+Vulkan/Metal do not use this native compatibility field.
+
 Supported message roles:
 
 | Role        | Description                                                                                   |
@@ -146,7 +147,8 @@ ZINC_TOOL_CALLING=0 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m
 ZINC never executes tools. It only renders tool definitions into the prompt,
 parses model-emitted Qwen or native Gemma tool envelopes, returns structured
 `tool_calls`, and accepts subsequent `role: "tool"` result messages from the
-client.
+client. The [JSON-prefill tool guide](JSON_PREFILL_TOOL_CALLS.md) documents
+required-single-tool prefixes, their CPU regressions and verified API controls.
 
 Example request:
 
