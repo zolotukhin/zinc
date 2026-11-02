@@ -11,7 +11,7 @@ ZINC runs on consumer GPUs through Vulkan, ROCm/HIP, Metal, and an experimental 
 | **Linux**        | AMD RDNA 3.5 APU (Strix Halo / gfx1151) | Vulkan 1.3  | Supported with APU-specific bandwidth tuning |
 | **Linux**        | AMD RDNA3                               | Vulkan 1.3  | Supported, less tuned                        |
 | **Linux**        | Intel Arc Xe2 / Battlemage              | Vulkan 1.3+ | Supported, validated benchmark target        |
-| **macOS**        | Apple Silicon M1 through M5             | Metal       | Supported, native MSL shaders                |
+| **macOS**        | Apple Silicon M1 through M5             | Metal       | Source backend; unsigned 0.1.0 preview       |
 | **Linux / WSL2** | NVIDIA RTX 40/50 series                 | CUDA        | Experimental                                 |
 
 On AMD Radeon, Vulkan and ROCm are separate first-class builds. Vulkan is the broad RDNA3/RDNA4 path; ROCm uses HIP and dedicated AMD kernels, with the current public validation centered on `gfx1201`. Benchmark results are kept separate because the runtimes and driver stacks are different.
@@ -53,7 +53,7 @@ The validated ROCm reference is a Radeon AI PRO R9700 (`gfx1201`) running Linux 
 
 - **OS**: Linux
 - **Runtime**: ROCm/HIP with a working ROCr device
-- **Development libraries**: `amdhip64`, `hiprtc`, and `hipblas`
+- **Runtime compilation files**: HIP/hipRTC/hipBLAS development libraries and HIP/rocWMMA headers, including for prebuilt ROCm archives
 - **Current validated GPU target**: RDNA4 `gfx1201`
 
 Verify the runtime and build the ROCm backend explicitly:
@@ -61,7 +61,7 @@ Verify the runtime and build the ROCm backend explicitly:
 ```bash
 rocminfo
 ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
+./zig-out/bin/zinc --check
 ```
 
 If `rocminfo` cannot see the GPU, or HIP reports `hipErrorNoBinaryForGpu`, first check that the running `amdgpu` driver, ROCr runtime, and ROCm userspace support the same target. See the [ROCm backend guide](/zinc/docs/rocm/) for the full setup and troubleshooting notes.
@@ -110,7 +110,7 @@ If that command does not show your Intel Arc GPU, ZINC will not use it.
 
 See [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for the full B-series card table, device IDs, memory bandwidth, Xe2 opcode notes, and ZINC tuning guidance.
 
-The public benchmark matrix currently validates four managed catalog models on an Intel Arc BMG G31-class node. Decode and prefill beat the same-machine llama.cpp baseline on those rows. End-to-end server latency and Arc-specific tuning are still ongoing.
+The [benchmark dashboard](/zinc/benchmarks/#intel) records matched Intel Vulkan measurements. The [Intel OpenCode report](/zinc/docs/intel-opencode-validation/) covers all seven catalog models on Arc Pro B70, including extended Gemma windows, tool calls, coding outcomes and recovery limits. Passing inference checks does not imply that every model is suitable for coding tasks.
 
 ## Other Vulkan GPUs
 
@@ -120,7 +120,7 @@ The public benchmark matrix currently validates four managed catalog models on a
 
 ## NVIDIA RTX GPUs (experimental CUDA)
 
-ZINC also has an experimental native CUDA backend for recent NVIDIA RTX cards. It is measured on RTX 5090 and RTX 4090 hardware, but it is younger than the supported Vulkan, ROCm, and Metal paths.
+ZINC also has an experimental native CUDA backend for recent NVIDIA RTX cards. It is measured on RTX 5090 and RTX 4090 hardware, and remains outside the Linux Vulkan/ROCm 0.1.0 stable qualification. Metal is an unsigned preview for this release.
 
 - **OS**: Linux or WSL2
 - **Toolkit**: CUDA with Driver API, NVRTC, cuBLAS, and CUDA runtime libraries
@@ -226,7 +226,7 @@ vulkaninfo --summary
 ```bash
 lspci | grep -i "vga\|display\|amd\|radeon"
 rocminfo
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
+./zig-out/bin/zinc --check
 ```
 
 ### Linux (Intel Arc)
@@ -270,7 +270,7 @@ Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
 ```bash
 ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
 rocminfo
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
+./zig-out/bin/zinc --check
 ./zig-out/bin/zinc model pull qwen35-9b-q4k-m
 ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc chat
 ```

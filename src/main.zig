@@ -47,13 +47,12 @@ const forward_mod = if (gpu.is_vulkan) @import("compute/forward.zig") else struc
 // Backend-specific imports (only one branch compiles per platform)
 const instance_mod = if (gpu.is_vulkan) @import("vulkan/instance.zig") else gpu.backend;
 const gpu_detect = if (gpu.is_vulkan) @import("vulkan/gpu_detect.zig") else struct {};
-// CUDA: backend modules (only resolve under -Dbackend=cuda; stubbed elsewhere)
+// Shared CUDA/ROCm orchestration; the selected C shim supplies CUDA or HIP.
 const cuda_device_mod = if (gpu.is_cuda) @import("cuda/device.zig") else struct {};
 const loader_cuda_mod = if (gpu.is_cuda) @import("model/loader_cuda.zig") else struct {};
 const forward_cuda_mod = if (gpu.is_cuda) @import("compute/forward_cuda.zig") else struct {};
 const forward_cuda_gemma_mod = if (gpu.is_cuda) @import("compute/forward_cuda_gemma.zig") else struct {};
-// Effort 28 (inc 3 / 3b): CUDA multi-tenant serving engine (gemma dense). Only
-// referenced on the CUDA backend; the struct{} stub keeps other backends clean.
+// CUDA/ROCm batched serving engine; inactive on Vulkan and Metal.
 const cuda_serve_mod = if (gpu.is_cuda) @import("server/cuda_serve.zig") else struct {};
 const http_mod = @import("server/http.zig");
 const model_manager_mod = @import("server/model_manager_runtime.zig");
@@ -464,110 +463,9 @@ const ResolvedCheckTarget = struct {
     }
 };
 
-const banner =
-    \\ZINC — Zig INferenCe Engine for consumer GPUs and Apple Silicon
-    \\
-    \\Usage:
-    \\  zinc -m <model.gguf> --prompt "Hello"
-    \\  zinc -m <model.gguf> [-p 8080]
-    \\  zinc chat [-m <model.gguf> | --model-id <id>] [-p 9090]
-    \\  zinc --model-id <id> [--prompt "Hello"]
-    \\  zinc -hf <owner/model[:quant]> [--prompt "Hello"]
-    \\  zinc --check [-m <model.gguf> | --model-id <id>]
-    \\  zinc model <list|pull|use|active|rm> [args]
-    \\
-    \\Common options:
-    \\  -m, --model <path>       GGUF model file to load
-    \\  --model-id <id>          Managed model id from the local catalog/cache
-    \\  -hf, --hf-repo <spec>    Hugging Face repo (owner/model[:quant]) to download and load
-    \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
-    \\  --chat                   Apply the model chat template to --prompt
-    \\  --system-prompt <text>   Add an explicit system turn (requires --chat)
-    \\  --raw                    Do not auto-apply chat templates to --prompt
-    \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
-    \\  -d, --device <id>        GPU device index (default: auto, prefers discrete Vulkan GPU)
-    \\  -c, --context <size>     Context length (default: auto — sized to GPU memory; pass 0 to force auto)
-    \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0)
-    \\
-    \\Server options:
-    \\  -p, --port <port>        Server port (default: 8080)
-    \\  --parallel <n>           Requests in flight; CUDA decodes them together, other
-    \\                           backends serialize generation and queue the rest (default: 4)
-    \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
-    \\
-    \\Model management:
-    \\  model list [--all] [--json] List managed models (--json for machine-readable output)
-    \\  model pull <id>          Download a supported managed model into the local cache
-    \\  model use <id>           Set the active managed model for future runs
-    \\  model active             Print the active managed model
-    \\  model rm [-f] <id>       Remove a cached model (catalog or hf-- id); -f unloads it first if active
-    \\
-    \\Diagnostics:
-    \\  --check                  Run system diagnostics and verify dependencies
-    \\  --version                Show version and build metadata
-    \\  -h, --help               Show this help
-    \\  --help-all               Show diagnostics and developer-only flags too
-    \\
-    \\Use `--help-all` to show graph export, profiling, and debug flags.
-    \\
-;
-
-const banner_full =
-    \\ZINC — Zig INferenCe Engine for consumer GPUs and Apple Silicon
-    \\
-    \\Usage:
-    \\  zinc -m <model.gguf> --prompt "Hello"
-    \\  zinc -m <model.gguf> [-p 8080]
-    \\  zinc chat [-m <model.gguf> | --model-id <id>] [-p 9090]
-    \\  zinc --model-id <id> [--prompt "Hello"]
-    \\  zinc -hf <owner/model[:quant]> [--prompt "Hello"]
-    \\  zinc --check [-m <model.gguf> | --model-id <id>]
-    \\  zinc model <list|pull|use|active|rm> [args]
-    \\
-    \\Common options:
-    \\  -m, --model <path>       GGUF model file to load
-    \\  --model-id <id>          Managed model id from the local catalog/cache
-    \\  -hf, --hf-repo <spec>    Hugging Face repo (owner/model[:quant]) to download and load
-    \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
-    \\  --chat                   Apply the model chat template to --prompt
-    \\  --system-prompt <text>   Add an explicit system turn (requires --chat)
-    \\  --raw                    Do not auto-apply chat templates to --prompt
-    \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
-    \\  -d, --device <id>        GPU device index (default: auto, prefers discrete Vulkan GPU)
-    \\  -c, --context <size>     Context length (default: auto — sized to GPU memory; pass 0 to force auto)
-    \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0)
-    \\
-    \\Server options:
-    \\  -p, --port <port>        Server port (default: 8080)
-    \\  --parallel <n>           Requests in flight; CUDA decodes them together, other
-    \\                           backends serialize generation and queue the rest (default: 4)
-    \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
-    \\
-    \\Model management:
-    \\  model list [--all] [--json] List managed models (--json for machine-readable output)
-    \\  model pull <id>          Download a supported managed model into the local cache
-    \\  model use <id>           Set the active managed model for future runs
-    \\  model active             Print the active managed model
-    \\  model rm [-f] <id>       Remove a cached model (catalog or hf-- id); -f unloads it first if active
-    \\
-    \\Diagnostics:
-    \\  --check                  Run system diagnostics and verify dependencies
-    \\  --version                Show version and build metadata
-    \\
-    \\Analysis and developer options:
-    \\  --graph-report <path>    Write decode-graph analysis JSON report
-    \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
-    \\  --profile                Enable runtime profiling (per-dispatch on Vulkan, phase summary on Metal)
-    \\  --debug                  Enable verbose debug logging
-    \\
-    \\Help:
-    \\  -h, --help               Show the short help
-    \\  --help-all               Show the full help
-    \\
-;
-
 fn helpText(show_all: bool) []const u8 {
-    return if (show_all) banner_full else banner;
+    const backend: @import("cli_help.zig").Backend = if (gpu.is_metal) .metal else if (gpu.is_rocm) .rocm else if (gpu.is_cuda) .cuda else .vulkan;
+    return @import("cli_help.zig").render(backend, show_all);
 }
 
 /// Parse the process argument vector into a validated runtime configuration.
@@ -1103,7 +1001,7 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(host_io.io, &stdout_buffer);
     const active_model_id = if (active) |selection| selection.model_id else null;
-    const backend_name = if (gpu.is_metal) "Metal" else if (gpu.is_vulkan) "Vulkan" else "GPU";
+    const backend_name = if (gpu.is_metal) "Metal" else if (gpu.is_vulkan) "Vulkan" else accelerator_name;
 
     const support = resolveManagedGpuSupport(config.gpuDevicePreference(), allocator) catch |err| {
         if (!config.show_all_models and !config.json_output) {
@@ -2103,7 +2001,7 @@ const ServeConnCtx = struct {
     model_path: ?[]const u8,
 };
 
-/// Stand up the CUDA serving path: build the tokenizer, spawn the GPU worker via
+/// Stand up the shared CUDA/ROCm serving path: build the tokenizer, spawn the GPU worker via
 /// `ServeEngine`, then accept connections and hand each to a detached handler.
 /// `fwd` is a `cuda_serve.Forward` so the server drives EITHER the gemma4 dense or
 /// the qwen35/36 hybrid-SSM+MoE forward (Effort 28 increment 4 — qwen serving).
@@ -2187,6 +2085,7 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
 const ServeReqBody = struct {
     prompt: ?[]const u8 = null,
     max_tokens: ?u32 = null,
+    max_completion_tokens: ?u32 = null,
     n_predict: ?u32 = null,
     /// Preserve the original SSE default when omitted; explicit false selects
     /// the OpenAI-compatible non-streaming response used by benchmark clients.
@@ -2194,6 +2093,20 @@ const ServeReqBody = struct {
     /// Expose model reasoning in a `<think>` envelope when the template has a
     /// structured internal channel (including Muse Glimmer's ATEM protocol).
     enable_thinking: ?bool = null,
+
+    fn tokenLimit(self: ServeReqBody, is_chat: bool, default: u32) !u32 {
+        // Match the shared chat parser's modern alias without changing raw
+        // completion/n_predict compatibility or the server's configured default.
+        if (is_chat) {
+            if (self.max_completion_tokens) |modern| {
+                if (self.max_tokens) |legacy| {
+                    if (modern != legacy) return error.ConflictingTokenLimits;
+                }
+                return modern;
+            }
+        }
+        return self.max_tokens orelse self.n_predict orelse default;
+    }
 };
 
 fn handleServeConn(ctx: *ServeConnCtx) void {
@@ -2256,12 +2169,21 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
 fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []const u8, is_chat: bool) !void {
     const allocator = ctx.allocator;
 
+    const parsed = std.json.parseFromSlice(ServeReqBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        try conn.sendError(400, "invalid_request_error", "bad json");
+        return;
+    };
+    defer parsed.deinit();
+    var max_tokens = parsed.value.tokenLimit(is_chat, ctx.default_max) catch {
+        try conn.sendError(400, "invalid_request_error", "max_tokens and max_completion_tokens must agree when both are provided");
+        return;
+    };
+
     // ── Build the prompt token ids ───────────────────────────────────────────
     var prompt_tokens: []u32 = undefined;
-    var max_tokens: u32 = ctx.default_max;
     var owns_tokens = false;
-    var stream_response = true;
-    var enable_thinking: ?bool = null;
+    const stream_response = parsed.value.stream orelse true;
+    var enable_thinking = parsed.value.enable_thinking;
     var tools_active = false;
     var chat_request: ?routes_mod.ParsedChatRequest = null;
     defer if (chat_request) |*chat| chat.deinit();
@@ -2275,14 +2197,6 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         // Gate contract: body is JSON {"prompt":"t0,t1,...","max_tokens":N}; the
         // prompt is raw comma-separated token ids — bypasses tokenizer + detok so
         // the streamed ids compare exactly to the isolated reference.
-        const parsed = std.json.parseFromSlice(ServeReqBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
-            try conn.sendError(400, "invalid_request_error", "bad json");
-            return;
-        };
-        defer parsed.deinit();
-        if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
-        stream_response = parsed.value.stream orelse true;
-        enable_thinking = parsed.value.enable_thinking;
         const ptxt = parsed.value.prompt orelse {
             try conn.sendError(400, "invalid_request_error", "missing prompt");
             return;
@@ -2290,15 +2204,6 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         prompt_tokens = try parseTokenIdList(allocator, ptxt);
         owns_tokens = true;
     } else {
-        const parsed = std.json.parseFromSlice(ServeReqBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
-            try conn.sendError(400, "invalid_request_error", "bad json");
-            return;
-        };
-        defer parsed.deinit();
-        if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
-        stream_response = parsed.value.stream orelse true;
-        enable_thinking = parsed.value.enable_thinking;
-
         var prompt_text: []const u8 = "";
         var chat_buf: ?[]u8 = null;
         defer if (chat_buf) |b| allocator.free(b);
@@ -2736,6 +2641,28 @@ test "accelerator SSE content preserves control bytes and Unicode through JSON" 
     try std.testing.expect(std.mem.indexOf(u8, escaped, "\\u0000") != null);
 }
 
+test "accelerator chat honors modern token budgets without changing raw completion defaults" {
+    const cases = .{
+        .{ "{}", @as(u32, 73), @as(u32, 73) },
+        .{ "{\"max_completion_tokens\":1}", @as(u32, 1), @as(u32, 73) },
+        .{ "{\"max_tokens\":2}", @as(u32, 2), @as(u32, 2) },
+        .{ "{\"max_tokens\":null,\"max_completion_tokens\":3}", @as(u32, 3), @as(u32, 73) },
+        .{ "{\"max_tokens\":4,\"max_completion_tokens\":4}", @as(u32, 4), @as(u32, 4) },
+        .{ "{\"n_predict\":5}", @as(u32, 5), @as(u32, 5) },
+        .{ "{\"n_predict\":5,\"max_completion_tokens\":6}", @as(u32, 6), @as(u32, 5) },
+        .{ "{\"max_completion_tokens\":0}", @as(u32, 0), @as(u32, 73) },
+    };
+    inline for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(ServeReqBody, std.testing.allocator, case[0], .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try std.testing.expectEqual(case[1], try parsed.value.tokenLimit(true, 73));
+        try std.testing.expectEqual(case[2], try parsed.value.tokenLimit(false, 73));
+    }
+    const conflicting = ServeReqBody{ .max_tokens = 1, .max_completion_tokens = 2 };
+    try std.testing.expectError(error.ConflictingTokenLimits, conflicting.tokenLimit(true, 73));
+    try std.testing.expectEqual(@as(u32, 1), try conflicting.tokenLimit(false, 73));
+}
+
 /// True if an env var is set to an "on" value (1/true/yes/on).
 fn envIsOn(name: []const u8) bool {
     const v = host_io.getenv(name) orelse return false;
@@ -2743,10 +2670,8 @@ fn envIsOn(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on");
 }
 
-// CUDA: `zinc --check` for NVIDIA. Detects the best CUDA device and prints a
-// diagnostics report (device name, compute capability, SMs, VRAM, backend),
-// then OK. diagnostics_mod is a no-op stub on the CUDA backend, so this is the
-// operator-facing preflight on this platform.
+// CUDA/ROCm preflight. Device diagnostics use native backend terminology:
+// NVIDIA compute capability/SMs or AMD target/CUs. No Vulkan shader assets are needed.
 fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: std.mem.Allocator) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(host_io.io, &stdout_buffer);
@@ -3571,11 +3496,11 @@ test "helpText: short help hides developer-only flags" {
     try std.testing.expect(std.mem.indexOf(u8, text, "--debug") == null);
 }
 
-test "helpText: full help includes developer-only flags" {
+test "helpText: full help includes supported developer-only flags" {
     const text = helpText(true);
     try std.testing.expect(std.mem.indexOf(u8, text, "Analysis and developer options:") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "--graph-report") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "--profile") != null);
+    try std.testing.expectEqual(!gpu.is_cuda, std.mem.indexOf(u8, text, "--profile") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "--debug") != null);
 }
 

@@ -5,11 +5,14 @@ Instructions for AI coding agents working on this repository.
 ## Commands
 
 ```bash
-# Build Vulkan on Linux or Metal on macOS
+# Build Vulkan on Linux or Metal on macOS (one backend per binary)
 ./scripts/zig.sh build -Doptimize=ReleaseFast
 
+# AMD ROCm is an explicit Linux build; see docs/ROCM.md for prerequisites
+ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
+
 # Run inference
-ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3] [--debug]
+ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--debug]
 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "Hello" [--chat]
 
 # Run CPU-only unit tests; hardware cases require explicit -Dgpu-tests=true

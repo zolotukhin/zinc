@@ -10,57 +10,78 @@ the server by changing the base URL.
 export OPENAI_BASE_URL=http://localhost:8080/v1
 ```
 
-`zinc chat` is a convenience command for the built-in chat UI and defaults to
-port 9090 unless `-p` is provided.
+`zinc chat` defaults to port 9090 unless `-p` is provided. Vulkan/Metal builds
+open the built-in browser UI; ROCm/CUDA builds provide the HTTP API only.
 
-## Status & known gaps (read first)
+<span id="compatibility-notes"></span>
 
-Before you integrate, know these limits up front. Each is a deliberate state of the engine today, not a bug to file:
+## Backend coverage
 
-- **Decode is serialized.** Concurrent HTTP requests are accepted, but generation runs behind a single engine lock — request N+1 queues until request N finishes. Throughput scales with one stream, not N. Continuous batching is on the roadmap; until then, do not architect around parallel streams.
-- **`/v1/embeddings` is not implemented.** ZINC is a chat/completion engine today; there is no embedding endpoint and no plan to fake one. If you need embeddings for RAG, run them in a separate process (llama.cpp's `llama-embedding`, a hosted API, etc.) and only point chat at ZINC.
-- **`/v1/completions` is non-streaming and ignores sampling controls.** Use `/v1/chat/completions` for anything that needs streaming, `temperature`, `top_p`, or `enable_thinking`.
-- **Client-supplied `stop` sequences are not honored.** Chat generation stops on the model/template end markers (`<|im_end|>`, etc.) only.
-- **No `/v1/audio/*`, no image inputs, no fine-tuning endpoints, no batch API.** These are out of scope; if you need them, ZINC is not the right engine.
+Each executable contains one backend. Check `zinc --version` before selecting
+an interface or copying server settings. Vulkan is the Linux default; ROCm/HIP
+is a separate AMD build, Metal is a macOS preview, and CUDA is experimental.
 
-Everything else listed in the endpoint table below works as documented.
+| Feature                             | Vulkan / Metal                                | ROCm / experimental CUDA                                        |
+| ----------------------------------- | --------------------------------------------- | --------------------------------------------------------------- |
+| `POST /v1/chat/completions`         | JSON or SSE; JSON by default                  | JSON or SSE; SSE by default                                     |
+| `POST /v1/completions`              | Raw text, JSON only                           | Raw text, JSON or SSE; SSE by default                           |
+| Chat `temperature` / `top_p`        | Applied                                       | Ignored; greedy decoding                                        |
+| Chat function tools                 | Supported model templates                     | Shared parser; supported model templates                        |
+| Chat token limit                    | `max_completion_tokens` or `max_tokens`       | Same aliases; defaults to CLI `-n` (256 if omitted)             |
+| Generation concurrency              | Serialized; requests queue                    | Batched decode for supported models; Gemma MoE uses one slot    |
+| Default context                     | Sized to GPU memory                           | 2,048 tokens per slot; `-c 0` also means 2,048                  |
+| `GET /v1/models`                    | Managed catalog, fit and install state        | Loaded model only, with per-slot context                        |
+| HTTP model pull / activate / remove | Supported                                     | Unavailable (404)                                               |
+| Request `model` field               | Can activate an installed managed model       | Does not change the loaded model                                |
+| Browser UI at `/` or `/chat`        | Included                                      | Unavailable (404)                                               |
+| Chat `session_id` reuse             | Advertised only for eligible Vulkan models    | Unavailable; full prefill                                       |
+| Chat client `stop` strings          | Applied, alongside template markers           | Ignored; model/template markers only                            |
+| `GET /health`                       | Model, queue, uptime, memory and capabilities | Status, backend and context length; 503 after execution failure |
+| `GET /stats`, `POST /generate`      | Unavailable                                   | Native counters and completion alias                            |
 
-## Compatibility Notes
+ROCm setup, runtime dependencies and optional KV/MTP controls are documented in
+the [ROCm guide](ROCM.md). Vulkan and ROCm use independent device lists, driver
+stacks and benchmark results. Release qualification is narrower than source
+compatibility; consult the [binary release guide](BINARY_RELEASES.md).
 
-The API intentionally follows the OpenAI response shapes where practical, but
-ZINC is still a local single-process engine:
+The detailed catalog, health and browser sections below describe **Vulkan/Metal**.
+For portable clients, set `stream` explicitly, get the loaded model from
+`/v1/models`, and do not assume model switching, sampling or prefix caching.
 
-- `/v1/chat/completions` supports streaming SSE, non-streaming responses,
-  `temperature`, `top_p`, `enable_thinking`, optional `session_id` prompt reuse,
-  and OpenAI-style tool calling for ChatML/Qwen-family templates.
-- `/v1/completions` is currently a raw, non-streaming text-completion path.
-  It accepts common compatibility fields, but sampling controls and `stream`
-  are not applied on this endpoint yet.
-- Request-provided `stop` sequences are not implemented yet. Chat generation
-  still stops on model/template end markers such as `<|im_end|>`.
-- Generation runs under one engine lock. Concurrent HTTP requests are accepted,
-  but decode is serialized.
-- `/health` advertises `capabilities.chat_session_reuse` on Vulkan builds
-  with an attention-only active model. Clients can send a per-conversation `session_id` to reuse matching
-  prefixes; absence or a false capability means clients should use full
-  requests without assuming cache support. An intervening request or changed
-  prefix falls back to full prefill.
-- The `model` request field is honored for managed models: if it names an
-  installed catalog model different from the active model, ZINC attempts to
-  activate it before generation.
+<span id="status--known-gaps-read-first"></span>
+
+## Status and compatibility limits
+
+- Vulkan/Metal serialize generation behind one engine lock. `--parallel` bounds
+  requests in flight; it does not multiply decode throughput. ROCm/CUDA use their
+  batched worker; model and memory constraints still apply.
+- `/v1/embeddings`, `/v1/audio/*`, image input, fine-tuning and the OpenAI batch
+  API are not implemented. Batched GPU decode is separate from the batch API.
+- The raw `/v1/completions` route ignores sampling controls. Use chat when you
+  need sampling on Vulkan/Metal. ROCm/CUDA remain greedy on both routes.
+- `/health` advertises `capabilities.chat_session_reuse` only on Vulkan with an
+  eligible attention-only model. Clients may send a per-conversation
+  `session_id` when this is true. Missing or false capability means full
+  requests without assumed cache support; changed or displaced prefixes fall
+  back to full prefill.
+- Tool calling depends on the model's chat template and output quality. Qwen
+  uses ChatML/JSON tool envelopes; Gemma uses its native tool protocol. ZINC
+  returns tool calls and accepts tool results; the client executes the tools.
 
 ## Endpoints
 
-| Method | Path                   | Description                                                   |
-| ------ | ---------------------- | ------------------------------------------------------------- |
-| POST   | `/v1/chat/completions` | Chat inference, streaming and non-streaming                   |
-| POST   | `/v1/completions`      | Raw text completion, non-streaming                            |
-| GET    | `/v1/models`           | Managed catalog, install state, active model, memory status   |
-| POST   | `/v1/models/pull`      | Download an installed-compatible managed model asynchronously |
-| POST   | `/v1/models/activate`  | Activate an installed managed model                           |
-| POST   | `/v1/models/remove`    | Remove a cached managed model, optionally unloading it first  |
-| GET    | `/health`              | Health, queue counters, uptime, GPU memory/context status     |
-| GET    | `/` or `/chat`         | Built-in chat UI                                              |
+| Method | Path                   | Vulkan / Metal                      | ROCm / experimental CUDA |
+| ------ | ---------------------- | ----------------------------------- | ------------------------ |
+| POST   | `/v1/chat/completions` | Chat inference                      | Chat inference           |
+| POST   | `/v1/completions`      | Raw completion                      | Raw completion           |
+| GET    | `/v1/models`           | Managed catalog and runtime state   | Loaded model and context |
+| POST   | `/v1/models/pull`      | Download a compatible managed model | Unavailable              |
+| POST   | `/v1/models/activate`  | Activate an installed model         | Unavailable              |
+| POST   | `/v1/models/remove`    | Remove a cached model               | Unavailable              |
+| GET    | `/health`              | Runtime health and capabilities     | Native backend health    |
+| GET    | `/` or `/chat`         | Built-in browser UI                 | Unavailable              |
+| GET    | `/stats`               | Unavailable                         | Worker counters          |
+| POST   | `/generate`            | Unavailable                         | Alias of raw completion  |
 
 ---
 
@@ -86,32 +107,33 @@ Generate a chat completion from a message list.
 }
 ```
 
-| Field                   | Type             | Default       | Description                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------- | ---------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model`                 | string           | current model | Managed model id to use. If installed and different from the active model, the server activates it before generation.                                                                                                                                                                                                                                                                            |
-| `session_id`            | string           | empty         | Optional prompt-reuse key. Reusing a session id lets ZINC reuse the matching prefix for append-only chat histories.                                                                                                                                                                                                                                                                              |
-| `messages`              | array            | required      | OpenAI-style messages. `content` may be a string, `null`, or an array of text content blocks. Non-text blocks are ignored.                                                                                                                                                                                                                                                                       |
-| `max_completion_tokens` | integer or null  | 256           | Maximum generated tokens before context-budget clamping. Supported by modern OpenAI-compatible clients, including OpenCode 2.                                                                                                                                                                                                                                                                    |
-| `max_tokens`            | integer or null  | 256           | Legacy alias of `max_completion_tokens`.                                                                                                                                                                                                                                                                                                                                                         |
-| `temperature`           | float            | 0.0           | Sampling temperature. `0` uses greedy decoding. Values are clamped to `0..2`.                                                                                                                                                                                                                                                                                                                    |
-| `top_p`                 | float            | 1.0           | Nucleus sampling threshold, clamped to `0..1`.                                                                                                                                                                                                                                                                                                                                                   |
-| `enable_thinking`       | boolean          | model default | For templates that support it, request an open thinking block. Catalog entries with unstable thinking force it off. Sending `false` also matters on the tool-calling path: without it, a request carrying `tools` gets a bare assistant header with nothing suppressing deliberation, and a thinking model can spend the whole `max_tokens` budget reasoning before it ever emits the tool call. |
-| `stream`                | boolean          | false         | Enable Server-Sent Events streaming.                                                                                                                                                                                                                                                                                                                                                             |
-| `tools`                 | array            | empty         | OpenAI function-tool definitions. Rendered for ChatML/Qwen-style templates when tool calling is enabled.                                                                                                                                                                                                                                                                                         |
-| `tool_choice`           | string or object | `auto`        | `"none"` suppresses tool injection. `"auto"` and forced function-object choices are currently treated as automatic tool choice.                                                                                                                                                                                                                                                                  |
+| Field                   | Type             | Default          | Description                                                                                                                                                                                                            |
+| ----------------------- | ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                 | string           | current model    | Vulkan/Metal: activates an installed managed model if different from the active model. ROCm/CUDA: does not switch the loaded model.                                                                                    |
+| `session_id`            | string           | empty            | Optional prompt-reuse key only when `/health` advertises `capabilities.chat_session_reuse`; other backends ignore it.                                                                                                  |
+| `messages`              | array            | required         | OpenAI-style messages. `content` may be a string, `null`, or an array of text content blocks. Non-text blocks are ignored.                                                                                             |
+| `max_completion_tokens` | integer or null  | 256              | Maximum generated tokens before context-budget clamping. Supported by modern OpenAI-compatible clients, including OpenCode 2.                                                                                          |
+| `max_tokens`            | integer or null  | 256              | Legacy alias of `max_completion_tokens`.                                                                                                                                                                               |
+| `temperature`           | float            | 0.0              | Sampling temperature. `0` uses greedy decoding. Values are clamped to `0..2`.                                                                                                                                          |
+| `top_p`                 | float            | 1.0              | Nucleus sampling threshold, clamped to `0..1`.                                                                                                                                                                         |
+| `enable_thinking`       | boolean          | model default    | Controls reasoning for compatible templates. Vulkan/Metal also apply the managed catalog's stability policy. Tool requests normally suppress thinking unless explicitly enabled; model/template behavior still varies. |
+| `stream`                | boolean          | backend-specific | Enable Server-Sent Events streaming. Set explicitly: Vulkan/Metal default to `false`, ROCm/CUDA to `true`.                                                                                                             |
+| `tools`                 | array            | empty            | OpenAI function-tool definitions. Rendered using the model's supported Qwen/ChatML or native Gemma tool format.                                                                                                        |
+| `tool_choice`           | string or object | `auto`           | `"none"` suppresses tool injection. `"auto"` allows tool selection. `"required"` can prefill a single tool where the template supports it. Function-object choices currently fall back to automatic choice.            |
 
-Both token-limit names use the same budget. If both are non-null, their values
-must agree; conflicting limits return HTTP 400 before inference. Omitting both
-uses the 256-token default. Raw `/v1/completions` continues to use `max_tokens`.
+Both chat token-limit names use the same budget. If both are non-null, their
+values must agree; conflicting limits return HTTP 400 before inference. Omitting
+both uses 256 on Vulkan/Metal or the server's CLI `-n` value on ROCm/CUDA
+(also 256 unless overridden). Raw `/v1/completions` continues to use `max_tokens`.
 
 Supported message roles:
 
-| Role        | Description                                                                                                       |
-| ----------- | ----------------------------------------------------------------------------------------------------------------- |
-| `system`    | System prompt.                                                                                                    |
-| `user`      | User message.                                                                                                     |
-| `assistant` | Previous assistant response. May include historical `tool_calls`.                                                 |
-| `tool`      | Tool result message with `tool_call_id`; rendered back into ChatML tool-response blocks for Qwen-style templates. |
+| Role        | Description                                                                                   |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `system`    | System prompt.                                                                                |
+| `user`      | User message.                                                                                 |
+| `assistant` | Previous assistant response. May include historical `tool_calls`.                             |
+| `tool`      | Tool result message with `tool_call_id`; rendered in the model's native tool-response format. |
 
 ### Tool Calling
 
@@ -122,7 +144,7 @@ ZINC_TOOL_CALLING=0 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m
 ```
 
 ZINC never executes tools. It only renders tool definitions into the prompt,
-parses model-emitted `<tool_call>...</tool_call>` blocks, returns structured
+parses model-emitted Qwen or native Gemma tool envelopes, returns structured
 `tool_calls`, and accepts subsequent `role: "tool"` result messages from the
 client.
 
@@ -258,6 +280,10 @@ curl -N http://localhost:8080/v1/chat/completions \
 
 ## POST /v1/completions
 
+The request/JSON example below applies to all backends. Vulkan/Metal return
+JSON only; ROCm/CUDA also stream raw completions and default to SSE. Set
+`stream: false` explicitly when expecting the JSON shape.
+
 Generate from a raw text prompt without applying a chat template.
 
 ### Request
@@ -270,13 +296,13 @@ Generate from a raw text prompt without applying a chat template.
 }
 ```
 
-| Field         | Type    | Default       | Description                                                                 |
-| ------------- | ------- | ------------- | --------------------------------------------------------------------------- |
-| `model`       | string  | current model | Managed model id to use; may activate an installed model before generation. |
-| `prompt`      | string  | required      | Raw text prompt.                                                            |
-| `max_tokens`  | integer | 256           | Maximum generated tokens before context-budget clamping.                    |
-| `temperature` | float   | accepted      | Parsed for compatibility but not applied by this endpoint yet.              |
-| `stream`      | boolean | accepted      | Parsed for compatibility but ignored; responses are non-streaming JSON.     |
+| Field         | Type    | Default          | Description                                                                     |
+| ------------- | ------- | ---------------- | ------------------------------------------------------------------------------- |
+| `model`       | string  | current model    | Vulkan/Metal may activate an installed model. ROCm/CUDA keep the startup model. |
+| `prompt`      | string  | required         | Raw text prompt.                                                                |
+| `max_tokens`  | integer | 256              | Maximum generated tokens before context-budget clamping.                        |
+| `temperature` | float   | accepted         | Parsed for compatibility but not applied by this endpoint yet.                  |
+| `stream`      | boolean | backend-specific | Vulkan/Metal ignore it and return JSON; ROCm/CUDA honor it and default to SSE.  |
 
 ### Response
 
@@ -560,10 +586,10 @@ Errors use an OpenAI-style envelope:
   -m, --model <path>       Path to GGUF model file
   --model-id <id>          Managed model id from the built-in catalog/cache
   -p, --port <port>        Server port (default: 8080; `zinc chat` defaults to 9090)
-  -d, --device <id>        GPU device index (default: auto; prefers discrete Vulkan GPU)
-  -c, --context <size>     Context length (default: 4096)
-  --parallel <n>           Max queued/concurrent HTTP requests (default: 4)
-  --kv-quant <bits>        TurboQuant KV cache compression: 0/2/3/4 (default: 0=off)
+  -d, --device <id>        Vulkan/Metal index; ROCm/CUDA use native visibility environment variables
+  -c, --context <size>     Vulkan/Metal: auto; ROCm/CUDA: 2048 tokens per slot
+  --parallel <n>           Requests in flight / native request slots (default: 4; see coverage above)
+  --kv-quant <bits>        Reserved compatibility option; no runtime effect
   --prompt <text>          Single prompt mode (CLI only; does not start the server)
   -n, --max-tokens <n>     CLI generation token cap
   --chat                   Apply the model chat template in CLI prompt mode
@@ -584,5 +610,6 @@ managed catalog:
 | F16    | Yes       | Small tensors and some model data    |
 | F32    | Yes       | Baseline/scalar tensor path          |
 
-Run `./zig-out/bin/zinc model list` or `GET /v1/models` for the exact catalog
-entries that are supported and fit on the current machine.
+Run `./zig-out/bin/zinc model list` for catalog entries and fit checks. Vulkan/Metal
+also expose them through `GET /v1/models`; ROCm/CUDA return only the loaded model.
+Use the backend's qualification report for the exact model, context and cache settings tested.

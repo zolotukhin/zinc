@@ -43,8 +43,10 @@ Metal and Vulkan also provide browser chat:
 ```
 
 ROCm provides CLI/HTTP chat without the built-in browser UI or hot model
-switching. See the backend's guide before selecting optional KV, MTP, or
-concurrent serving settings.
+switching. See the [API coverage matrix](https://zolotukhin.ai/zinc/docs/api/#backend-coverage)
+and backend guide before selecting optional KV, MTP, or concurrent serving
+settings. Vulkan device indices and `RADV_PERFTEST` do not configure ROCm;
+use its native visibility setting if you need to restrict the GPU.
 
 ## Install, upgrade, or get help
 

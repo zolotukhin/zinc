@@ -5,6 +5,7 @@
 ```
 src/
 ├── main.zig                     # CLI entry, arg parsing, server startup, chat subcommand
+├── cli_help.zig                 # CPU-only backend-specific help and capability/default tests
 ├── bench_hot_decode.zig         # Hot decode microbenchmark binary
 ├── bench_support.zig            # Shared helpers for Metal benchmarks
 ├── regression_tests.zig         # Source-level regression guards
@@ -13,7 +14,7 @@ src/
 ├── compute/
 │   ├── forward.zig              # Vulkan inference engine — prefill + decode loop
 │   ├── forward_metal.zig        # Metal inference engine — prefill + decode loop
-│   ├── forward_cuda*.zig        # CUDA inference engines
+│   ├── forward_cuda*.zig        # Shared CUDA/ROCm inference engines
 │   ├── forward_zinc_rt.zig      # ZINC_RT inference engine
 │   ├── dmmv.zig                 # DMMV dispatch (quantized matmul-vec)
 │   ├── elementwise.zig          # Fused elementwise ops (RMS norm, SwiGLU, etc.)
@@ -26,7 +27,7 @@ src/
 │   ├── gguf.zig                 # GGUF file parser and tensor metadata
 │   ├── loader.zig               # Model loader (Vulkan — mmap + DMA to VRAM)
 │   ├── loader_metal.zig         # Model loader (Metal — zero-copy mmap)
-│   ├── loader_cuda.zig          # CUDA model loader
+│   ├── loader_cuda.zig          # Shared CUDA/ROCm model loader
 │   ├── architecture.zig         # Architecture detection (Qwen, MoE, SSM, etc.)
 │   ├── config.zig               # Model configuration from GGUF metadata
 │   └── managed.zig              # Managed model download, install, activation
@@ -53,10 +54,11 @@ src/
 │   ├── command.zig              # Command buffer and encoder
 │   ├── shim.h                   # C header exposed to Zig
 │   └── shim.m                   # Objective-C shim (Metal.framework bridge)
-├── cuda/                        # CUDA device, buffers, pipeline, and kernels
+├── cuda/                        # Shared CUDA/ROCm orchestration and NVIDIA C shim/kernels
+├── rocm/                        # HIP C shim and AMD kernels for the shared C ABI
 ├── zinc_rt/                     # Native GPU runtime, IR, rings, and ISA
 ├── gpu/
-│   ├── interface.zig            # Backend abstraction (Vulkan vs Metal)
+│   ├── interface.zig            # Compile-time Vulkan / Metal / ROCm / CUDA selection
 │   ├── memory_plan.zig          # Cross-backend memory planning
 │   ├── process_lock.zig         # Cross-process GPU reservation lock
 │   └── test_policy.zig          # Explicit opt-in for hardware unit tests
@@ -160,19 +162,24 @@ types or functions before editing.
 | Built-in chat UI                            | `src/server/chat.html`                                    |
 | Tokenization and chat templates             | `src/model/tokenizer.zig`                                 |
 
+ROCm deliberately reuses `cuda_*` module/type names behind its HIP C ABI.
+`gpu.is_cuda` includes ROCm; `gpu.is_rocm` identifies the AMD implementation.
+The Vulkan/Metal route/model-manager layer and native ROCm/CUDA transport have
+[different HTTP capabilities](/zinc/docs/api/#backend-coverage).
+
 ### Models and inference
 
-| Area                         | Start here                                                           |
-| ---------------------------- | -------------------------------------------------------------------- |
-| GGUF metadata and tensors    | `src/model/gguf.zig`, `src/model/config.zig`                         |
-| Architecture detection       | `src/model/architecture.zig`                                         |
-| Managed model catalog/cache  | `src/model/catalog.zig`, `src/model/managed.zig`                     |
-| Vulkan model loading         | `src/model/loader.zig`                                               |
-| Metal and CUDA model loading | `src/model/loader_metal.zig`, `src/model/loader_cuda.zig`            |
-| Vulkan inference             | `src/compute/forward.zig`                                            |
-| Metal inference              | `src/compute/forward_metal.zig`                                      |
-| CUDA inference               | `src/compute/forward_cuda.zig`, `src/compute/forward_cuda_gemma.zig` |
-| ZINC_RT inference            | `src/compute/forward_zinc_rt.zig`, `src/zinc_rt/`                    |
+| Area                               | Start here                                                           |
+| ---------------------------------- | -------------------------------------------------------------------- |
+| GGUF metadata and tensors          | `src/model/gguf.zig`, `src/model/config.zig`                         |
+| Architecture detection             | `src/model/architecture.zig`                                         |
+| Managed model catalog/cache        | `src/model/catalog.zig`, `src/model/managed.zig`                     |
+| Vulkan model loading               | `src/model/loader.zig`                                               |
+| Metal and native ROCm/CUDA loading | `src/model/loader_metal.zig`, `src/model/loader_cuda.zig`            |
+| Vulkan inference                   | `src/compute/forward.zig`                                            |
+| Metal inference                    | `src/compute/forward_metal.zig`                                      |
+| ROCm/CUDA inference                | `src/compute/forward_cuda.zig`, `src/compute/forward_cuda_gemma.zig` |
+| ZINC_RT inference                  | `src/compute/forward_zinc_rt.zig`, `src/zinc_rt/`                    |
 
 The conceptual request path is: tokenize → load/activate model → prefill prompt →
 decode tokens → sample → detokenize/stream. Architecture-specific attention, SSM,
@@ -187,7 +194,7 @@ dense FFN, and MoE branches live in the active backend's forward implementation.
 | Attention, elementwise ops, sampling    | `src/compute/attention.zig`, `src/compute/elementwise.zig`, `src/compute/argmax.zig` |
 | Vulkan infrastructure                   | `src/vulkan/`, `src/shaders/*.comp`                                                  |
 | Metal infrastructure                    | `src/metal/`, `src/shaders/metal/*.metal`                                            |
-| CUDA infrastructure                     | `src/cuda/`                                                                          |
+| Shared ROCm/CUDA infrastructure         | `src/cuda/`                                                                          |
 | ROCm C ABI and execution errors         | `src/rocm/rocm_shim.c`, `src/cuda/command.zig`                                       |
 | Qwen chunked prefill and prompt reuse   | `src/compute/forward_cuda.zig`                                                       |
 | ROCm Qwen KV storage accounting         | `src/compute/kv_storage.zig`                                                         |

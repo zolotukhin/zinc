@@ -6,7 +6,7 @@ This is a lightweight public roadmap for contributors. It is not a guarantee of 
 
 Current priorities:
 
-- qualify and publish the first Metal, Vulkan, and ROCm binary release, including real hardware evidence and verified installation
+- qualify and publish Linux Vulkan/ROCm 0.1.0 archives with real hardware evidence and verified installation; keep Metal as an unsigned preview
 - make the core Linux AMD path more stable on real hardware
 - keep source builds and packages reliable across the documented Linux and macOS targets
 - harden the OpenAI-compatible server path

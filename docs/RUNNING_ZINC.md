@@ -9,8 +9,13 @@ This page is the shortest path from “the project builds” to “I can actuall
 From the repo root:
 
 ```bash
-zig build -Doptimize=ReleaseFast
+./scripts/zig.sh build -Doptimize=ReleaseFast
 ```
+
+Linux defaults to Vulkan; macOS defaults to Metal. Each binary contains one
+backend. For AMD ROCm, use the explicit [HIP build instructions](/zinc/docs/rocm/)
+instead. See [backend selection](/zinc/docs/getting-started/#choose-your-backend)
+and [API coverage](/zinc/docs/api/#backend-coverage) before copying settings.
 
 The executable will be here:
 
@@ -20,14 +25,14 @@ The executable will be here:
 
 ## Run a preflight check first
 
-This is the fastest way to answer "does this machine, Vulkan or Metal stack, and model look runnable at all?"
+This is the fastest way to answer "does this machine, selected GPU backend, and model look runnable at all?"
 
 ```bash
-# General machine + Vulkan + shader preflight
-./zig-out/bin/zinc --check
-
-# Recommended on RDNA4 shells
+# AMD Vulkan only: set this before the first GPU check or inference
 export RADV_PERFTEST=coop_matrix
+
+# General preflight for the backend compiled into this binary
+./zig-out/bin/zinc --check
 
 # Check one exact GGUF file
 ./zig-out/bin/zinc --check -m /path/to/model.gguf
@@ -274,7 +279,7 @@ That runs a single CLI inference pass and prints the build, model, GPU, prefill,
 
 ## Pick a specific GPU
 
-By default ZINC auto-selects the best compute-capable discrete Vulkan GPU.
+In a Vulkan build, ZINC auto-selects the best compute-capable discrete GPU.
 If your machine exposes multiple Vulkan devices and you need to override that
 choice, choose one explicitly:
 
@@ -287,6 +292,10 @@ choice, choose one explicitly:
 
 Useful when the Vulkan device list includes integrated graphics, llvmpipe, or multiple AMD devices.
 
+ROCm/CUDA use their native device lists instead. Set `ROCR_VISIBLE_DEVICES` or
+`CUDA_VISIBLE_DEVICES` before starting the process and inspect `zinc --check`.
+These builds currently ignore `-d`; a Vulkan index is not a native HIP/CUDA index.
+
 ## Change context length
 
 ```bash
@@ -298,29 +307,23 @@ Useful when the Vulkan device list includes integrated graphics, llvmpipe, or mu
 
 Use a larger context only if the model and GPU VRAM budget can support it.
 
-## Enable TurboQuant KV compression
+<span id="enable-turboquant-kv-compression"></span>
 
-ZINC exposes KV cache quantization through `--kv-quant`.
+## KV cache configuration
 
-```bash
-./zig-out/bin/zinc \
-  -m /path/to/model.gguf \
-  --kv-quant 3 \
-  --prompt "Explain page attention in one paragraph"
-```
+`--kv-quant 0/2/3/4` is a reserved compatibility option. It is parsed but does
+not configure runtime storage, so it does not reduce memory use. The
+[TurboQuant specification](/zinc/docs/turboquant-spec/) describes separate work.
 
-Supported values:
-
-- `0` = disabled
-- `2` = 2-bit
-- `3` = 3-bit
-- `4` = 4-bit
-
-If you are experimenting with constrained VRAM, `3` is the natural first value to try.
+Use the active backend's documented KV controls and qualified precision.
+ROCm's optional `ZINC_KV_CACHE=q8` requires its supported model path and
+`--parallel 1` for serving; see [ROCm native context](/zinc/docs/rocm-native-context/).
+Keep the release's default cache settings for qualification comparisons.
 
 ## Run ZINC as a server
 
-When you omit `--prompt`, ZINC starts an HTTP server with a built-in chat interface and an OpenAI-compatible API:
+When you omit `--prompt`, ZINC starts an HTTP API server. Vulkan/Metal also
+include browser chat; ROCm/CUDA expose the API without that UI:
 
 ```bash
 ./zig-out/bin/zinc \
@@ -328,9 +331,9 @@ When you omit `--prompt`, ZINC starts an HTTP server with a built-in chat interf
   -p 8080
 ```
 
-Once you see `Server listening on 0.0.0.0:8080`, open your browser:
+Once the server reports that it is listening, check its local endpoints:
 
-- **Chat UI**: [http://localhost:8080/](http://localhost:8080/) — a ChatGPT-like interface with streaming, markdown rendering, syntax highlighting, and copy buttons on code blocks.
+- **Chat UI (Vulkan/Metal)**: [http://localhost:8080/](http://localhost:8080/) — a ChatGPT-like interface with streaming, markdown rendering, syntax highlighting, and copy buttons on code blocks.
 - **Health**: [http://localhost:8080/health](http://localhost:8080/health)
 
 ### RDNA4 test-node deploy
@@ -434,29 +437,29 @@ Without `force`, a loaded target returns `409` and ZINC leaves the cached files 
 Node.js:
 
 ```javascript
-import OpenAI from "openai";
-const client = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "unused" });
+import OpenAI from 'openai';
+const client = new OpenAI({ baseURL: 'http://localhost:8080/v1', apiKey: 'unused' });
 const stream = await client.chat.completions.create({
-  model: "qwen3.5-35b",
-  messages: [{ role: "user", content: "Hello!" }],
+  model: 'qwen3.5-35b',
+  messages: [{ role: 'user', content: 'Hello!' }],
   stream: true,
 });
 for await (const chunk of stream) {
-  process.stdout.write(chunk.choices[0]?.delta?.content || "");
+  process.stdout.write(chunk.choices[0]?.delta?.content || '');
 }
 ```
 
 ### All endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Built-in chat interface |
-| GET | `/health` | Server status, loaded model, active/queued requests, uptime |
-| GET | `/v1/models` | List managed models, fit status, install state, and the active entry |
-| POST | `/v1/models/activate` | Activate an installed managed model |
-| POST | `/v1/models/remove` | Remove a cached managed model, optionally unloading it first |
-| POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
-| POST | `/v1/completions` | Text completion |
+| Method | Path                   | Description                                                          |
+| ------ | ---------------------- | -------------------------------------------------------------------- |
+| GET    | `/`                    | Built-in chat interface                                              |
+| GET    | `/health`              | Server status, loaded model, active/queued requests, uptime          |
+| GET    | `/v1/models`           | List managed models, fit status, install state, and the active entry |
+| POST   | `/v1/models/activate`  | Activate an installed managed model                                  |
+| POST   | `/v1/models/remove`    | Remove a cached managed model, optionally unloading it first         |
+| POST   | `/v1/chat/completions` | Chat completion (streaming + non-streaming)                          |
+| POST   | `/v1/completions`      | Text completion                                                      |
 
 The full API contract is documented in [Serving HTTP API](/zinc/docs/api/).
 
