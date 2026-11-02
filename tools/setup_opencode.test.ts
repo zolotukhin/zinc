@@ -235,6 +235,26 @@ describe('portable OpenCode setup', () => {
       expect(live).toEqual(runtimeConfig(config, {}));
     }
   });
+  test('session discovery normalizes trailing slashes while preserving proxy path prefixes', async () => {
+    for (const [base, health] of [
+      ['https://example.invalid/v1/', 'https://example.invalid/health'],
+      ['https://example.invalid/proxy/zinc/v1', 'https://example.invalid/proxy/zinc/health'],
+      ['https://example.invalid/proxy/zinc/v1/', 'https://example.invalid/proxy/zinc/health'],
+    ]) {
+      let requested;
+      await sessionRuntimeConfig(
+        buildConfig(),
+        { ZINC_API_BASE_URL: base },
+        {
+          fetchImpl: (async (url) => {
+            requested = url;
+            return Response.json({ status: 'ok' });
+          }) as any,
+        },
+      );
+      expect(requested).toBe(health);
+    }
+  });
   test('explicit provider model and agent session keys including opt-outs win without discovery', async () => {
     for (const value of ['chosen', '', null]) {
       for (const location of ['provider', 'model', 'agent']) {

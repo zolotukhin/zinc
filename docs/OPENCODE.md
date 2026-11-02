@@ -18,6 +18,11 @@ matching prompt prefix. The key stays in the inline launch configuration;
 saved project files are unchanged. Older servers, other backends and failed
 discovery keep the ordinary full-prefill behavior. An explicit `session_id`,
 including an empty or null key to disable reuse, takes precedence.
+Auxiliary title/summary requests can evict the resident prefix; the next tool
+turn then uses full prefill. Changed prefixes, a different model or session,
+and an intervening request never justify reusing another request's GPU state.
+The evaluator only discovers this capability for its ZINC provider, leaving
+the llama.cpp comparison path unchanged.
 
 ## Start the model server
 

@@ -704,7 +704,7 @@ export async function runFixture(provider, fixture, opts, providerDir) {
   const pluginPaths = contextPluginPaths(config);
   for (const pluginPath of pluginPaths)
     beforeReadOnly[pluginPath] = await sha256File(path.join(projectDir, pluginPath));
-  const live = await (opts.dryRun ? runtimeConfig : sessionRuntimeConfig)(
+  const live = await (opts.dryRun || provider !== 'zinc' ? runtimeConfig : sessionRuntimeConfig)(
     config,
     {
       ZINC_API_KEY: process.env.ZINC_API_KEY || 'local',
