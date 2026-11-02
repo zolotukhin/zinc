@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Revalidate Gemma MoE defaults, then measure matched ROCm servers on a GPU worker."""
+import argparse
+import datetime
+import json
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+
+import release_gpu as gpu
+from benchmark_matched_mtp import idle, interrupted, measure, run_json, text_hash
+from release_lib import install_signal_handlers, policy, reference_agreement, sha256, worker_reservation, write_json
+
+ROOT = Path(__file__).resolve().parent.parent
+MODEL_ID = "gemma4-26b-a4b-q4k-m"
+HARNESS_FILES = (
+    "tools/benchmark_gemma_rocm.py", "tools/gemma_rocm_workloads.mjs",
+    "tools/benchmark_matched_mtp.py", "tools/parse_mtp_sample.mjs",
+    "tools/performance_suite.mjs", "tools/benchmark_speculation.mjs",
+    "tools/release_gpu.py", "tools/release_lib.py", "config/benchmark-reference.json",
+    "config/release/targets.json",
+)
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def reference_identity(directory, source, env, pin):
+    assert subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip() == pin, "reference source is not pinned"
+    assert not subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True).strip(), "reference source is modified"
+    version = subprocess.check_output([str(directory / "llama-server"), "--version"], env=gpu.reference_environment(directory, env), stderr=subprocess.STDOUT, text=True)
+    assert pin[:7] in version, "reference executable differs from source"
+    return {"commit": pin, "version": version.strip(), **gpu.reference_artifacts(directory)}
+
+
+def correctness(args, work, env, model_pin):
+    """Reuse release generation and agreement limits with the recorded oracle."""
+    prompts = gpu.PROMPTS + [
+        "The following is reference filler.\n" + "word " * (model_pin["sliding_window"] + 76)
+        + "\nIgnore the filler and answer this request: " + prompt for prompt in gpu.PROMPTS
+    ]
+    oracle_env = {**env, "RADV_PERFTEST": "coop_matrix"}
+    oracle_args = ["--device", args.oracle_device, "-ngl", "999", "-t", "4", "-tb", "4", "--spec-type", "none", "--no-cache-prompt"]
+    print("Correctness: six complete CLI continuations, including three beyond the sliding window", flush=True)
+    samples = gpu.inference_parity(args.zinc_tree, args.oracle, args.model,
+                                   4096, 0, oracle_args, work, oracle_env, prompts=prompts)
+    cases = []
+    for index, (rendered, expected) in enumerate(samples):
+        prompt_file = work / f"prompt-{index}.txt"
+        prompt_file.write_text(rendered)
+        count = len(gpu.token_ids(gpu.output([str(args.zinc_tree / "bin/zinc-tokenize"), str(args.model), str(prompt_file)], env)))
+        if index >= len(gpu.PROMPTS):
+            assert count > model_pin["sliding_window"] and count + 16 <= 4096, "extended prompt did not cross the sliding window"
+        actual = gpu.cli_generated_ids((work / f"continuation-{index}.log").read_text())
+        cases.append({"prompt": rendered, "prompt_tokens": count,
+                      "reference_ids": gpu.reference_generated_ids(expected), "zinc_ids": actual,
+                      "reference_text": expected["content"], "validated_text": expected.get("validated_content"),
+                      "comparison": expected["comparison"]})
+    print("Correctness: complete HTTP continuations, cancellation and context/error recovery", flush=True)
+    gpu.api_checks(args.zinc_tree, args.model, 4096, 0, work, env, False, samples)
+    return {"passed": True, "oracle_backend": "Vulkan", "generation": policy()["reference"]["generation"],
+            "agreement_policy": policy()["reference"]["agreement"],
+            "reference_agreement": reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=6),
+            "cases": cases, "http_full_continuations": 18,
+            "http_after_cancellation": True, "http_after_context_error": True}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--zinc-tree", type=Path, required=True)
+    parser.add_argument("--zinc-source", type=Path, required=True)
+    parser.add_argument("--llama-bin", type=Path, required=True)
+    parser.add_argument("--oracle", type=Path, required=True, help="Vulkan reference bin directory")
+    parser.add_argument("--llama-source", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--device", type=int, required=True, help="Physical ROCr ordinal")
+    parser.add_argument("--oracle-device", required=True)
+    parser.add_argument("--reservation", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=1)
+    args = parser.parse_args()
+    if not sys.platform.startswith("linux") or min(args.rounds, args.runs, args.warmup) < 1:
+        parser.error("run on the remote Linux GPU worker with positive repetition counts")
+    for name in ("zinc_tree", "zinc_source", "llama_bin", "oracle", "llama_source", "model", "reservation", "output"):
+        setattr(args, name, getattr(args, name).resolve())
+    install_signal_handlers()
+    signal.signal(signal.SIGHUP, interrupted)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    report = {"schema_version": "zinc-gemma-rocm-v1", "started_at": now(), "passed": False,
+              "release_qualification": False, "samples": [],
+              "settings": {"backend": "rocm", "context": 4096, "slots": 1, "kv_cache": "f32",
+                           "mtp": "off", "prefill": "default-serial", "prompt_cache": False,
+                           "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
+                           "temperature": 0, "top_p": 1, "seed": 0}}
+    def save():
+        write_json(args.output, report)
+    save()
+    try:
+        env = gpu.packaged_environment()
+        env.update(ROCR_VISIBLE_DEVICES=str(args.device), OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="4",
+                   ZINC_MTP="0", ZINC_KV_CACHE="f32", ZINC_KV_F16="0", ZINC_KV_Q8="0", ZINC_PROMPT_CACHE="0")
+        pin = json.loads((ROOT / "config/benchmark-reference.json").read_text())["commit"]
+        report["reference"] = reference_identity(args.llama_bin, args.llama_source, env, pin)
+        report["oracle"] = reference_identity(args.oracle, args.llama_source, env, pin)
+        assert subprocess.run(["git", "-C", str(args.zinc_source), "diff", "--quiet", "HEAD", "--", "src", "build.zig", "build.zig.zon"]).returncode == 0, "ZINC native source is modified"
+        zinc = args.zinc_tree / "bin/zinc"
+        report["zinc"] = {"commit": subprocess.check_output(["git", "-C", str(args.zinc_source), "rev-parse", "HEAD"], text=True).strip(), "sha256": sha256(zinc)}
+        model_pin = next(model for model in policy()["models"] if model["id"] == MODEL_ID)
+        assert args.model.stat().st_size == model_pin["size_bytes"] and sha256(args.model) == model_pin["sha256"], "GGUF differs from pinned model"
+        report["model"] = {key: model_pin[key] for key in ("id", "sha256", "size_bytes", "sliding_window")}
+        report["harness_sha256"] = {name: sha256(ROOT / name) for name in HARNESS_FILES}
+        scenarios = run_json(["bun", str(ROOT / "tools/gemma_rocm_workloads.mjs")])
+        report["scenarios"] = [{key: value for key, value in row.items() if key != "body"} | {"request_sha256": text_hash(json.dumps(row["body"], sort_keys=True))} for row in scenarios]
+        save()
+        with worker_reservation(args.reservation):
+            idle()
+            work = Path(tempfile.mkdtemp(prefix="gemma-rocm-work-", dir=args.output.parent))
+            print("Correctness: twelve tokenizer corpus cases", flush=True)
+            gpu.tokenizer_parity(args.zinc_tree, args.oracle, args.model, work, env)
+            report["correctness"] = {**correctness(args, work, env, model_pin), "tokenizer_cases": len(gpu.CORPUS)}
+            save()
+            identities, counts = {}, {}
+            number = 0
+            for round_index in range(args.rounds):
+                for engine in (["zinc", "llama"] if round_index % 2 == 0 else ["llama", "zinc"]):
+                    idle()
+                    port = gpu.free_port()
+                    if engine == "zinc":
+                        command = [str(zinc), "-m", str(args.model), "-d", "0", "--context", "4096", "--parallel", "1", "--port", str(port)]
+                        active_env = env
+                    else:
+                        command = [str(args.llama_bin / "llama-server"), "-m", str(args.model), "--device", "ROCm0", "-ngl", "999",
+                                   "--host", "127.0.0.1", "--port", str(port), "-c", "4096", "--parallel", "1", "-ctk", "f32", "-ctv", "f32",
+                                   "-b", "4096", "-ub", "1024", "--flash-attn", "on", "--spec-type", "none", "--no-cache-prompt", "-t", "4", "-tb", "4"]
+                        active_env = gpu.reference_environment(args.llama_bin, env)
+                    print(f"Benchmark round {round_index + 1}/{args.rounds}: {engine}, MTP off", flush=True)
+                    log = work / f"benchmark-{round_index}-{engine}.log"
+                    with gpu.process(command, log, args.zinc_source, active_env) as child:
+                        gpu.ready(child, port)
+                        for scenario in scenarios:
+                            for iteration in range(args.warmup + args.runs):
+                                number += 1
+                                sample = measure(engine, "off", child, port, log, scenario, work, number)
+                                key = (engine, scenario["id"])
+                                assert identities.setdefault(key, sample["content_sha256"]) == sample["content_sha256"], "repeated outputs differ"
+                                observed = counts.setdefault(scenario["id"], [])
+                                observed.append(sample["promptTokens"])
+                                assert max(observed) - min(observed) <= 1, "prompt token counts differ"
+                                report["samples"].append({"engine": engine, "mtp": "off", "round": round_index + 1,
+                                                          "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample})
+                                save()
+                    idle()
+            assert reference_identity(args.llama_bin, args.llama_source, env, pin) == report["reference"], "baseline bytes changed"
+            assert reference_identity(args.oracle, args.llama_source, env, pin) == report["oracle"], "oracle bytes changed"
+            assert sha256(zinc) == report["zinc"]["sha256"], "ZINC bytes changed"
+            report.update(passed=True, cleanup="no GPU process remains")
+    except BaseException as error:
+        report["error"] = str(error) if isinstance(error, (ValueError, AssertionError)) else type(error).__name__
+        raise
+    finally:
+        report["completed_at"] = now()
+        save()
+
+
+if __name__ == "__main__":
+    main()
