@@ -1,6 +1,6 @@
-//! CUDA command wrapper — kernel dispatch and stream/event synchronization
-//! (mirrors src/metal/command.zig). A CudaCommand wraps the context's CUstream
-//! plus a backend-owned completion event. ROCm creates that event lazily in
+//! Shared CUDA/ROCm kernel dispatch and stream/event synchronization.
+//! A CudaCommand wraps the selected shim's native stream and completion event.
+//! ROCm creates that event lazily in
 //! `commitAsync`, while CUDA may allocate it when the command begins.
 //! @section CUDA Runtime
 const std = @import("std");

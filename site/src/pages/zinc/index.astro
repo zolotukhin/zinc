@@ -22,8 +22,9 @@ const examples = [
   return { label, zinc: median(zinc?.decode_tps), baseline: median(scenario?.baseline?.decode_tps) };
 });
 const platforms = [
-  { name: 'AMD Radeon', backend: 'Vulkan or ROCm', note: 'Linux · RDNA3 / RDNA4', href: '/zinc/docs/rocm/', link: 'AMD setup' },
-  { name: 'Apple Silicon', backend: 'Metal', note: 'macOS · M-series', href: '/zinc/docs/getting-started/#macos-apple-silicon', link: 'Mac setup' },
+  { name: 'AMD Radeon', backend: 'Vulkan', note: 'Linux · RDNA3 / RDNA4', href: '/zinc/docs/getting-started/#linux-amd-or-intel-arc', link: 'Vulkan setup' },
+  { name: 'AMD Radeon', backend: 'ROCm / HIP', note: 'Linux · R9700 / gfx1201 validated', href: '/zinc/docs/rocm/', link: 'ROCm setup' },
+  { name: 'Apple Silicon', backend: 'Metal · preview', note: 'macOS · M-series', href: '/zinc/docs/getting-started/#macos-apple-silicon', link: 'Mac setup' },
   { name: 'Intel Arc', backend: 'Vulkan', note: 'Linux · Xe2 / Battlemage', href: '/zinc/docs/intel-gpu-reference/', link: 'Intel setup' },
   { name: 'NVIDIA RTX', backend: 'CUDA · experimental', note: 'Linux / WSL2', href: '/zinc/docs/hardware-requirements/', link: 'Requirements' },
 ];
@@ -65,7 +66,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="use-cases" aria-label="Ways to use ZINC">
       <a href="/zinc/docs/getting-started/#start-the-chat-ui">
         <span class="number" aria-hidden="true">01</span>
-        <div><h2>Chat in your browser</h2><p>A built-in interface for local conversations.</p></div>
+        <div><h2>Chat in your browser</h2><p>Local conversations in Vulkan and Metal builds.</p></div>
         <span aria-hidden="true">↗</span>
       </a>
       <a href="/zinc/docs/running-zinc/">
@@ -86,7 +87,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
       <p>Follow the <a href="/zinc/docs/getting-started/">setup guide</a> to install the prerequisites for your GPU, then build and open a chat.</p>
-      <p>The build selects Vulkan on Linux and Metal on macOS. The wrapper downloads and verifies Zig 0.17.0 when needed.</p>
+      <p>The default build selects Vulkan on Linux and Metal on macOS. Each binary contains one backend. The wrapper downloads and verifies Zig 0.17.0 when needed.</p>
       <p>Prefer a download? The first binary release is undergoing qualification. See <a href="/zinc/docs/binary-releases/">release status and installation</a>.</p>
       <p class="setup-note">AMD with Vulkan: set <code>RADV_PERFTEST=coop_matrix</code> before the GPU check or chat. ROCm has its own <a href="/zinc/docs/rocm/">build instructions</a>.</p>
     </div>
@@ -106,7 +107,7 @@ cd zinc
     <div class="section-copy">
       <p class="eyebrow">Use your hardware</p>
       <h2 id="hardware-heading">Choose your GPU path.</h2>
-      <p>AMD, Apple Silicon and Intel Arc are supported. NVIDIA CUDA is experimental. Model coverage varies by backend.</p>
+      <p>Linux 0.1.0 qualification targets AMD with Vulkan or ROCm and Intel Arc with Vulkan. Metal stays an unsigned preview; CUDA is experimental. Exact GPU and model coverage varies by backend.</p>
       <a class="text-link" href="/zinc/docs/hardware-requirements/">Check hardware and memory requirements →</a>
     </div>
     <div class="platforms">
@@ -129,12 +130,13 @@ cd zinc
       <a class="text-link" href="/zinc/harnesses/setup-opencode.mjs" download="setup-opencode.mjs">Download the setup script ↓</a>
     </div>
     <div class="terminal-wrap">
-      <TerminalWindow title="Connect OpenCode" density="compact" code={`bun install --global opencode-ai@1.19.4
-bun tools/setup_opencode.mjs --project ../my-project --context 32768
+      <TerminalWindow title="Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.0.21
+bun tools/setup_opencode.mjs --project ../my-project \\
+  --model qwen35-9b-q4k-m --context auto --output 2048 --steps 16
 bun tools/setup_opencode.mjs check --project ../my-project
 bun tools/setup_opencode.mjs run --project ../my-project \\
   --auto --verify 'bun test' -- "Fix the failing tests and run them."`} />
-      <p class="caption">Run from the ZINC checkout with a Qwen server at <code>-c 32768 --parallel 1</code>. Match your server's context and replace <code>bun test</code> with your project's acceptance command.</p>
+      <p class="caption">Run from the ZINC checkout with a Qwen 3.5 9B server at <code>-c 16384 --parallel 1</code>. Setup discovers that capacity; it does not allocate more GPU memory. Replace <code>bun test</code> with your project's acceptance command.</p>
     </div>
   </section>
 

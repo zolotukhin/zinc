@@ -1,4 +1,8 @@
-//! @section CUDA multi-tenant serving engine (Effort 28, increment 3 / 3b)
+//! Shared ROCm/CUDA batched serving worker.
+//! @section API Server
+//!
+//! The selected C shim supplies AMD HIP or NVIDIA CUDA execution; the
+//! `cuda_serve` module name is shared by both native backends.
 //!
 //! One GPU **worker thread** runs the continuous-batching loop
 //! (admit → prefill → `decodeBatch` → evict); many transport (HTTP) handler

@@ -1,7 +1,8 @@
-//! CUDA device wrapper — NVIDIA GPU backend (mirrors src/metal/device.zig).
+//! Shared native device wrapper for NVIDIA CUDA and AMD ROCm/HIP.
 //!
-//! Owns CUDA context init and capability queries used by the loader,
-//! diagnostics, and CUDA inference runtime.
+//! Owns context initialization and capability queries used by the loader,
+//! diagnostics and native inference runtime. The CudaDevice name is shared;
+//! the selected C shim supplies CUDA or HIP operations.
 //! @section CUDA Runtime
 const std = @import("std");
 const host_io = @import("host_io");

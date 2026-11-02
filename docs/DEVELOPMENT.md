@@ -6,13 +6,14 @@ If you just want to run inference, see [Getting Started](/zinc/docs/getting-star
 
 ## Prerequisites
 
-| Tool                | Version            | What it does                                                                  |
-| ------------------- | ------------------ | ----------------------------------------------------------------------------- |
-| **Zig**             | 0.17.0             | Host compiler for all Zig source                                              |
-| **Bun**             | 1.4.4 minimum      | TypeScript tests, package management, site scripts, and `bun fmt`             |
-| **glslc**           | Current LunarG SDK | Shader compiler with `GL_EXT_integer_dot_product` support (Linux Vulkan only) |
-| **Vulkan SDK**      | 1.3+               | Runtime for AMD and Intel Arc GPU dispatch (Linux only)                       |
-| **Xcode CLI Tools** | Latest             | Metal compiler and frameworks (macOS only)                                    |
+| Tool                | Version               | What it does                                                                  |
+| ------------------- | --------------------- | ----------------------------------------------------------------------------- |
+| **Zig**             | 0.17.0                | Host compiler for all Zig source                                              |
+| **Bun**             | 1.4.4 minimum         | TypeScript tests, package management, site scripts, and `bun fmt`             |
+| **glslc**           | Current LunarG SDK    | Shader compiler with `GL_EXT_integer_dot_product` support (Linux Vulkan only) |
+| **ROCm**            | Validated 7.2.4 stack | HIP/hipRTC/hipBLAS development files and rocWMMA headers (Linux ROCm only)    |
+| **Vulkan SDK**      | 1.3+                  | Runtime for AMD and Intel Arc GPU dispatch (Linux only)                       |
+| **Xcode CLI Tools** | Latest                | Metal compiler and frameworks (macOS only)                                    |
 
 On macOS (Apple Silicon):
 
@@ -21,7 +22,7 @@ brew install bun
 xcode-select --install
 ```
 
-On Linux (AMD or Intel Arc GPU):
+On Linux with Vulkan (AMD or Intel Arc GPU):
 
 ```bash
 # Zig 0.17.0 is selected and downloaded by scripts/zig.sh when needed.
@@ -43,7 +44,17 @@ cd zinc
 ./scripts/zig.sh build -Doptimize=ReleaseFast
 ```
 
-The binary lands at `./zig-out/bin/zinc`. Shaders are compiled from `src/shaders/*.comp` to SPIR-V during the build.
+The binary lands at `./zig-out/bin/zinc`. The Linux default is Vulkan, which
+compiles `src/shaders/*.comp` into SPIR-V during the build. macOS uses Metal.
+For AMD ROCm, install the [HIP prerequisites](/zinc/docs/rocm/) and build explicitly:
+
+```bash
+ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
+```
+
+Each executable contains one backend. ROCm/CUDA compile embedded native kernels
+at runtime; they do not use Vulkan shaders, `glslc`, or `RADV_PERFTEST`.
+Check `zinc --version` and the [API matrix](/zinc/docs/api/#backend-coverage).
 
 ## Test
 

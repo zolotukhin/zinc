@@ -8,6 +8,27 @@ For prebuilt archives and install/upgrade/rollback instructions, see
 [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/). The 0.1.0 binary pipeline is
 undergoing qualification; the instructions below describe a source build.
 
+## Choose your backend
+
+Each binary contains one backend. Linux defaults to Vulkan; ROCm is a separate
+build, not a Vulkan setting or a runtime fallback.
+
+| GPU / platform                 | Build choice     | Setup and interface                                                                                   |
+| ------------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------- |
+| AMD RDNA3 / RDNA4 on Linux     | Default Vulkan   | Follow the Vulkan steps below; CLI, browser chat and HTTP API                                         |
+| AMD R9700 (`gfx1201`) on Linux | `-Dbackend=rocm` | [ROCm/HIP setup](/zinc/docs/rocm/); CLI and HTTP API                                                  |
+| Intel Arc Xe2 on Linux         | Default Vulkan   | [Intel guide](/zinc/docs/intel-gpu-reference/); CLI, browser chat and HTTP API                        |
+| Apple Silicon on macOS         | Default Metal    | macOS steps below; unsigned preview for 0.1.0                                                         |
+| NVIDIA on Linux / WSL2         | `-Dbackend=cuda` | [Experimental CUDA requirements](/zinc/docs/hardware-requirements/#nvidia-rtx-gpus-experimental-cuda) |
+
+The ROCm reference is narrower than the Vulkan hardware range. Check the
+[hardware requirements](/zinc/docs/hardware-requirements/) and release validation
+for your exact card, driver, model and context. ROCm/CUDA use a different server
+from Vulkan/Metal; see [API coverage](/zinc/docs/api/#backend-coverage).
+
+The remaining quickstart builds Vulkan or Metal. For ROCm, use its linked build
+and server commands; `zinc chat` does not provide a browser UI in that build.
+
 ## Install dependencies
 
 You need Git, the development files for your GPU backend, and Python 3 for the
@@ -72,8 +93,8 @@ export RADV_PERFTEST=coop_matrix
 ./zig-out/bin/zinc --check
 ```
 
-Look for `READY [OK]`. The check verifies GPU detection, shader assets, and
-runtime initialization. Resolve any reported setup issue before downloading
+Look for `READY [OK]`. In the Vulkan/Metal build used here, the check verifies
+GPU detection, shader assets, and runtime initialization. Resolve any reported setup issue before downloading
 a model.
 
 ## Choose a model

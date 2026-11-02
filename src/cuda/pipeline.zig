@@ -1,11 +1,11 @@
-//! CUDA compute pipeline wrapper — NVRTC-compiled CUfunction (mirrors
-//! src/metal/pipeline.zig). Compiles a `.cu` source string for the running
-//! device's arch (sm_XY) or loads a precompiled cubin/PTX image.
+//! Shared CUDA/ROCm compute pipeline wrapper for native kernel compilation.
+//! CUDA uses NVRTC with an `sm_XY` target; ROCm uses hipRTC with a `gfx*` target.
+//! The selected C shim owns native modules and kernel handles.
 //! @section CUDA Runtime
-//! Each pipeline holds a `CUmodule` + `CUfunction` pair obtained from the C
-//! shim. Use `createPipeline` for JIT compilation via NVRTC or
-//! `createPipelineFromImage` when an offline-compiled cubin/PTX blob is
-//! available. Free with `freePipeline` when done.
+//! Each pipeline holds an opaque module/function pair obtained from the shim.
+//! Use `createPipeline` for runtime compilation or `createPipelineFromImage` for
+//! an image supported by the selected backend (cubin/PTX on CUDA). Free with
+//! `freePipeline` when done.
 const std = @import("std");
 const shim = @import("c.zig").shim;
 

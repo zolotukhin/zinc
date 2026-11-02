@@ -4,8 +4,9 @@
 
 # ZINC
 
-Run GGUF language models on your own GPU. ZINC gives you a command line,
-browser chat, and an OpenAI-compatible API in one native binary.
+Run GGUF language models on your own GPU. ZINC gives you a command line
+and an OpenAI-compatible API in one native binary. Vulkan and Metal builds
+also include browser chat.
 
 [![Tests](https://github.com/zolotukhin/zinc/actions/workflows/test.yml/badge.svg)](https://github.com/zolotukhin/zinc/actions/workflows/test.yml)
 [![Zig 0.17.0](https://img.shields.io/badge/Zig-0.17.0-F7A41D?logo=zig&logoColor=white)](.zig-version)
@@ -53,18 +54,21 @@ You can also load an existing file with `-m /path/to/model.gguf`.
 
 ## Choose your GPU path
 
-| Hardware                   | Backend             | Setup                                                                                                      |
-| -------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| AMD Radeon RDNA3 / RDNA4   | Vulkan or ROCm/HIP  | [Vulkan](https://zolotukhin.ai/zinc/docs/getting-started/) · [ROCm](https://zolotukhin.ai/zinc/docs/rocm/) |
-| Apple Silicon              | Metal               | [macOS](https://zolotukhin.ai/zinc/docs/getting-started/#macos-apple-silicon)                              |
-| Intel Arc Xe2 / Battlemage | Vulkan              | [Intel guide](https://zolotukhin.ai/zinc/docs/intel-gpu-reference/)                                        |
-| NVIDIA RTX                 | CUDA · experimental | [Requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)                                     |
+| Hardware                            | Backend             | Setup                                                                         |
+| ----------------------------------- | ------------------- | ----------------------------------------------------------------------------- |
+| AMD Radeon RDNA3 / RDNA4            | Vulkan              | [Linux Vulkan setup](https://zolotukhin.ai/zinc/docs/getting-started/)        |
+| AMD Radeon AI PRO R9700 (`gfx1201`) | ROCm/HIP            | [Validated ROCm setup](https://zolotukhin.ai/zinc/docs/rocm/)                 |
+| Apple Silicon                       | Metal · preview     | [macOS](https://zolotukhin.ai/zinc/docs/getting-started/#macos-apple-silicon) |
+| Intel Arc Xe2 / Battlemage          | Vulkan              | [Intel guide](https://zolotukhin.ai/zinc/docs/intel-gpu-reference/)           |
+| NVIDIA RTX                          | CUDA · experimental | [Requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)        |
 
-For AMD with a working ROCm installation, choose the HIP backend at build time:
+Each binary contains one backend; there is no runtime switch or automatic
+fallback between Vulkan and ROCm. For a validated AMD ROCm stack, choose HIP
+at build time:
 
 ```bash
 ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
+./zig-out/bin/zinc --check
 ```
 
 Model coverage and performance vary by backend. The
@@ -87,7 +91,7 @@ validated cards, operating systems, drivers, and current limitations.
 
 **An existing app** can connect to `http://localhost:9090/v1` while the server
 is running. The [API guide](https://zolotukhin.ai/zinc/docs/api/) has curl and
-SDK examples; endpoint coverage varies by backend.
+SDK examples; [endpoint coverage differs by backend](https://zolotukhin.ai/zinc/docs/api/#backend-coverage).
 
 The managed catalog includes Qwen, Gemma, and other tested model families.
 See [model selection](https://zolotukhin.ai/zinc/docs/getting-started/#models-in-current-work)

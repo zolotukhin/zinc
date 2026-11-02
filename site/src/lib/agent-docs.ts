@@ -12,25 +12,29 @@ const SUPPLEMENTAL_DOCS: SupplementalDocMeta[] = [
   {
     slug: 'spec',
     title: 'ZINC Technical Specification',
-    description: 'Architecture, GPU kernels, model support, scheduler behavior, and system design context around the runtime.',
+    description:
+      'Architecture, GPU kernels, model support, scheduler behavior, and system design context around the runtime.',
     order: 1,
   },
   {
     slug: 'turboquant-spec',
     title: 'TurboQuant KV Cache Compression',
-    description: 'Two-stage vector quantization, residual correction, and memory-reduction tradeoffs for the paged KV-cache path.',
+    description:
+      'Two-stage vector quantization, residual correction, and memory-reduction tradeoffs for the paged KV-cache path.',
     order: 2,
   },
   {
     slug: 'rdna4-tuning',
     title: 'RDNA4 GPU Tuning Guide',
-    description: 'Performance profiling for AMD GPUs, cooperative matrix behavior, SPIR-V toolchain notes, and bandwidth tuning.',
+    description:
+      'Performance profiling for AMD GPUs, cooperative matrix behavior, SPIR-V toolchain notes, and bandwidth tuning.',
     order: 3,
   },
   {
     slug: 'api',
     title: 'Serving HTTP API',
-    description: 'OpenAI-compatible request and response shapes for clients talking to ZINC. This is the network API, not the Zig code reference.',
+    description:
+      'OpenAI-compatible request and response shapes for clients talking to ZINC. This is the network API, not the Zig code reference.',
     order: 4,
   },
 ];
@@ -45,11 +49,11 @@ function absoluteUrl(siteUrl: string, path: string): string {
 }
 
 function supplementalDocs(docs: DocPage[], siteUrl: string) {
-  const bySlug = new Map(SUPPLEMENTAL_DOCS.map(doc => [doc.slug, doc] as const));
+  const bySlug = new Map(SUPPLEMENTAL_DOCS.map((doc) => [doc.slug, doc] as const));
 
   return [...docs]
     .sort((a, b) => (bySlug.get(a.slug)?.order ?? 99) - (bySlug.get(b.slug)?.order ?? 99))
-    .map(doc => {
+    .map((doc) => {
       const meta = bySlug.get(doc.slug);
       return {
         slug: doc.slug,
@@ -68,7 +72,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
   return [
     '# zolotukhin.ai',
     '',
-    '> Technical writing and documentation for ZINC, local LLM inference on AMD GPUs, Vulkan compute, Zig, and systems engineering.',
+    '> Technical writing and documentation for ZINC, local LLM inference on AMD (Vulkan or ROCm/HIP), Intel Arc (Vulkan), Apple Silicon (Metal preview), experimental NVIDIA CUDA, Zig, and systems engineering.',
     '',
     'For ZINC, prefer the generated Zig API reference first. It is the canonical internal runtime reference.',
     '',
@@ -81,7 +85,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     `Zig API coverage: ${zigApi.sections.length} sections, ${zigApi.moduleCount} modules, ${zigApi.codeLineCount} Zig code lines, ${zigApi.exportCount} exports, ${zigApi.memberCount} methods.`,
     '',
     '## Supplemental ZINC Documentation',
-    ...supplemental.map(doc => `- ${doc.title}: ${doc.url}`),
+    ...supplemental.map((doc) => `- ${doc.title}: ${doc.url}`),
     '',
     '## Other Surfaces',
     `- Blog: ${absoluteUrl(base, '/blog')}`,
@@ -89,7 +93,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     '',
     '## Guidance',
     '- Use the Zig API for internal implementation details, symbols, signatures, and module relationships.',
-    '- Use the Serving HTTP API page for client-facing request and response contracts.',
+    '- Use the Serving HTTP API page and its backend coverage matrix for client-facing contracts; ROCm/CUDA do not expose the Vulkan/Metal browser UI or hot model management.',
     '- Prefer the JSON export when building tools or agents that need structured access.',
     '',
   ].join('\n');
@@ -125,7 +129,7 @@ export function renderLlmsFullTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl:
       `### ${section.title}`,
       section.description,
       `URL: ${absoluteUrl(base, `/zinc/docs/zig-api#${section.slug}`)}`,
-      `Coverage: ${section.modules.length} modules, ${section.symbolCount} symbols`
+      `Coverage: ${section.modules.length} modules, ${section.symbolCount} symbols`,
     );
 
     for (const module of section.modules) {
