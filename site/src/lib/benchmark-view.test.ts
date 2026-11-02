@@ -125,8 +125,9 @@ test('a later correctness finding excludes every variant while preserving record
       }
     }
   }
-  // Restoring comparisons needs an explicit review of replacement measurements.
-  expect(reviewedModels).toBe(5);
+  // Only validated replacement measurements can retire a historical caution.
+  expect(reviewedModels).toBe(data.correctness_review.affected_model_rows);
+  expect(reviewedModels).toBeGreaterThan(0);
   expect(JSON.stringify(data)).toBe(before);
 });
 
