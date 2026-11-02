@@ -11,6 +11,14 @@ version in the [validation report](OPENCODE_RELEASE_VALIDATION.md).
 `tools/setup_opencode.mjs` from a ZINC checkout. The downloaded script has no
 package dependencies and accepts the same arguments.
 
+The helper discovers `capabilities.chat_session_reuse` through `/health`
+before launching a task. When a Vulkan server advertises support, it gives
+that client run a fresh `session_id`, allowing later tool turns to reuse their
+matching prompt prefix. The key stays in the inline launch configuration;
+saved project files are unchanged. Older servers, other backends and failed
+discovery keep the ordinary full-prefill behavior. An explicit `session_id`,
+including an empty or null key to disable reuse, takes precedence.
+
 ## Start the model server
 
 Build for [your GPU](GETTING_STARTED.md), then start a Qwen model with enough

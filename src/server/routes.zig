@@ -622,9 +622,12 @@ fn buildHealthJson(
     const active_context_tokens = memory_usage.activeContextTokens(snapshot.active_context_tokens);
     const active_context_bytes = memory_usage.activeContextBytes(active_context_tokens);
     return std.fmt.bufPrint(buf,
-        \\{{"status":"ok","model":"{s}","active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
+        \\{{"status":"ok","model":"{s}","capabilities":{{"chat_session_reuse":{s}}},"active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
     , .{
         model_name,
+        // Vulkan preserves both attention KV and hybrid recurrent state.
+        // Other backends stay opt-out until their reuse path is qualified.
+        if (runtime.is_vulkan) "true" else "false",
         snapshot.active_requests,
         snapshot.queued_requests,
         snapshot.uptime_seconds,
@@ -6138,6 +6141,9 @@ test "buildHealthJson includes request counts and uptime" {
         .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
     }, &buf);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"ok\"") != null);
+    const health = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer health.deinit();
+    try std.testing.expectEqual(runtime.is_vulkan, health.value.object.get("capabilities").?.object.get("chat_session_reuse").?.bool);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"qwen3.5-35b\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"active_requests\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"queued_requests\":1") != null);

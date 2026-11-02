@@ -40,6 +40,11 @@ ZINC is still a local single-process engine:
   still stops on model/template end markers such as `<|im_end|>`.
 - Generation runs under one engine lock. Concurrent HTTP requests are accepted,
   but decode is serialized.
+- `/health` advertises `capabilities.chat_session_reuse` on qualified Vulkan
+  builds. Clients can send a per-conversation `session_id` to reuse matching
+  prefixes; absence or a false capability means clients should use full
+  requests without assuming cache support. An intervening request or changed
+  prefix falls back to full prefill.
 - The `model` request field is honored for managed models: if it names an
   installed catalog model different from the active model, ZINC attempts to
   activate it before generation.

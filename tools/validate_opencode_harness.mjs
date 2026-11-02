@@ -131,6 +131,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
   const stdout = capture(),
     stderr = capture();
   const sessions = new Set(),
+    reuseKeys = new Set(),
     checks = [],
     controllers = new Set(),
     heartbeats = new Set();
@@ -143,6 +144,7 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     boundedStage = 0,
     boundedRead = false,
     boundedOutput = false;
+  let invalidReuseKeys = 0;
   let requestSettings;
   const server = Bun.serve({
     hostname: '127.0.0.1',
@@ -150,7 +152,12 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     idleTimeout: 255,
     async fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === '/health') return Response.json({ status: 'ok', context_length: 16384 });
+      if (url.pathname === '/health')
+        return Response.json({
+          status: 'ok',
+          context_length: 16384,
+          capabilities: { chat_session_reuse: true },
+        });
       if (url.pathname === '/v1/models')
         return Response.json({
           object: 'list',
@@ -159,6 +166,10 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       if (req.method !== 'POST' || url.pathname !== '/v1/chat/completions')
         return new Response(null, { status: 404 });
       requests++;
+      const body = await req.json();
+      if (typeof body.session_id === 'string' && /^opencode-[a-f0-9-]{36}$/.test(body.session_id))
+        reuseKeys.add(body.session_id);
+      else invalidReuseKeys++;
       if (name === 'api-error')
         return Response.json(
           {
@@ -169,7 +180,6 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
           },
           { status: 400 },
         );
-      const body = await req.json();
       if (body.tools?.length && !requestSettings)
         requestSettings = {
           keys: Object.keys(body),
@@ -362,6 +372,8 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
     const passed =
       configUnchanged &&
       protectedTestUnchanged &&
+      reuseKeys.size > 0 &&
+      invalidReuseKeys === 0 &&
       (name === 'api-error'
         ? code === 1 && errors > 0 && checks.length === 0
         : name === 'bounded-tools'
@@ -400,6 +412,8 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
       error_events: errors,
       tool_events: tools,
       unique_sessions: sessions.size,
+      prompt_reuse_keys_valid: reuseKeys.size > 0 && invalidReuseKeys === 0,
+      unique_prompt_reuse_keys: reuseKeys.size,
       verification_exit_codes: checks,
       stalled_requests: stalled,
       configuration_unchanged: configUnchanged,

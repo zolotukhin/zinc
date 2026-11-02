@@ -14,10 +14,12 @@ import {
   runVerification,
   runVerifiedOpenCode,
   runtimeConfig,
+  sessionRuntimeConfig,
   writeConfig,
 } from './setup_opencode.mjs';
 
 const dirs: string[] = [];
+const noSessionCacheFetch = (async () => Response.json({ status: 'ok' })) as any;
 let testProject: string;
 beforeEach(async () => {
   testProject = await temp();
@@ -190,6 +192,74 @@ describe('portable OpenCode setup', () => {
       );
     }
   });
+  test('session reuse is discovered strictly and stays out of saved configuration', async () => {
+    const config = buildConfig();
+    const before = structuredClone(config);
+    const seen: any[] = [];
+    let next = 0;
+    const deps = {
+      sessionId: () => String(++next),
+      fetchImpl: (async (url: string, options: any) => {
+        seen.push({ url, options });
+        return Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } });
+      }) as any,
+    };
+    const env = { ZINC_API_BASE_URL: 'https://example.invalid/api/v1', ZINC_API_KEY: 'test-key' };
+    const first = await sessionRuntimeConfig(config, env, deps);
+    const second = await sessionRuntimeConfig(config, env, deps);
+    expect(first.provider.zinc.options.body.session_id).toBe('opencode-1');
+    expect(first.agent.zinc.options.session_id).toBe('opencode-1');
+    expect(second.provider.zinc.options.body.session_id).toBe('opencode-2');
+    expect(seen[0].url).toBe('https://example.invalid/api/health');
+    expect(seen[0].options.headers.authorization).toBe('Bearer test-key');
+    expect(seen[0].options.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.stringify(first)).not.toContain('test-key');
+    expect(config).toEqual(before);
+    await writeConfig(testProject, config);
+    expect(await readFile(path.join(testProject, CONFIG_NAME), 'utf8')).not.toContain('session_id');
+  });
+  test('missing false malformed unhealthy and unavailable discovery preserve uncached execution', async () => {
+    const config = buildConfig();
+    for (const fetchImpl of [
+      async () => Response.json({ status: 'ok' }),
+      async () => Response.json({ status: 'ok', capabilities: { chat_session_reuse: false } }),
+      async () => Response.json({ status: 'ok', capabilities: { chat_session_reuse: 'true' } }),
+      async () => Response.json({ status: 'failed', capabilities: { chat_session_reuse: true } }),
+      async () => new Response('invalid json'),
+      async () => new Response(null, { status: 503 }),
+      async () => {
+        throw new Error('private endpoint failure');
+      },
+    ]) {
+      const live = await sessionRuntimeConfig(config, {}, { fetchImpl: fetchImpl as any });
+      expect(live).toEqual(runtimeConfig(config, {}));
+    }
+  });
+  test('explicit provider model and agent session keys including opt-outs win without discovery', async () => {
+    for (const value of ['chosen', '', null]) {
+      for (const location of ['provider', 'model', 'agent']) {
+        const config: any = buildConfig();
+        const provider = config.provider.zinc;
+        if (location === 'provider') provider.options.body.session_id = value;
+        if (location === 'model')
+          provider.models['qwen38-27b-q4k-m'].options = { body: { session_id: value } };
+        if (location === 'agent') config.agent.zinc.options.session_id = value;
+        let calls = 0;
+        const live = await sessionRuntimeConfig(
+          config,
+          {},
+          {
+            fetchImpl: (async () => {
+              calls++;
+              throw new Error('unexpected lookup');
+            }) as any,
+          },
+        );
+        expect(calls).toBe(0);
+        expect(live).toEqual(runtimeConfig(config, {}));
+      }
+    }
+  });
   test('headless execution forwards literal task text and the child exit status', async () => {
     const dir = await temp();
     let captured: any;
@@ -199,6 +269,7 @@ describe('portable OpenCode setup', () => {
       {
         env: { OPENCODE_BIN: 'custom-opencode', ZINC_API_KEY: 'test-only-key' },
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: ((bin: string, args: string[], options: any) => {
           captured = { bin, args, options };
           const child = new EventEmitter();
@@ -218,6 +289,32 @@ describe('portable OpenCode setup', () => {
     expect(captured.options.shell).toBeUndefined();
     expect(captured.options.env.OPENCODE_CONFIG_CONTENT).not.toContain('test-only-key');
   });
+  test('launch gives one ephemeral key to the provider and legacy agent paths', async () => {
+    const config = buildConfig();
+    let captured: any;
+    const code = await runOpenCode(
+      config,
+      { project: testProject, prompt: ['task'] },
+      {
+        env: {},
+        runFlags: [],
+        fetchImpl: (async () =>
+          Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } })) as any,
+        spawnImpl: ((_bin, _args, options) => {
+          captured = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT);
+          const child = new EventEmitter();
+          queueMicrotask(() => child.emit('close', 0, null));
+          return child;
+        }) as any,
+      },
+    );
+    expect(code).toBe(0);
+    const key = captured.provider.zinc.options.body.session_id;
+    expect(key).toMatch(/^opencode-[a-f0-9-]{36}$/);
+    expect(captured.agent.zinc.options.session_id).toBe(key);
+    expect(config.provider.zinc.options.body).not.toHaveProperty('session_id');
+    expect(config.agent.zinc.options).not.toHaveProperty('session_id');
+  });
   test('a timed-out agent returns 124 and receives a termination signal', async () => {
     const dir = await temp();
     const signals: string[] = [];
@@ -227,6 +324,7 @@ describe('portable OpenCode setup', () => {
       {
         env: {},
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.kill = (signal: string) => {
@@ -254,6 +352,7 @@ describe('portable OpenCode setup', () => {
           },
         } as any,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: ((_bin, args) => {
           expect(args).toContain('ses_example');
           const child: any = new EventEmitter();
@@ -292,6 +391,7 @@ describe('portable OpenCode setup', () => {
           },
         } as any,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -324,6 +424,7 @@ describe('independent verification', () => {
           throw new Error('check started');
         },
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           throw new Error('process started');
         }) as any,
@@ -353,6 +454,7 @@ describe('independent verification', () => {
   test('rejects deadlines that overflow native timers before starting processes', async () => {
     const deps = {
       runFlags: [],
+      fetchImpl: noSessionCacheFetch,
       spawnImpl: (() => {
         throw new Error('process started');
       }) as any,
@@ -388,6 +490,7 @@ describe('independent verification', () => {
         stdout: quiet,
         stderr: quiet,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -773,6 +876,7 @@ setInterval(() => {}, 1000);
         env: {},
         stdout: quiet,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -841,6 +945,7 @@ process.exit(0);
       {
         stderr: quiet,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stdout = new EventEmitter();
@@ -869,6 +974,7 @@ process.exit(0);
       {
         stderr: quiet,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.kill = (signal: string) => {
@@ -893,6 +999,7 @@ process.exit(0);
       {
         stderr: quiet,
         runFlags: [],
+        fetchImpl: noSessionCacheFetch,
         spawnImpl: (() => {
           const child: any = new EventEmitter();
           child.stderr = new EventEmitter();
