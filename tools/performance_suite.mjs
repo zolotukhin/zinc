@@ -1,4 +1,7 @@
 import { outputQualityStatus } from './benchmark_quality.mjs';
+import { checkBenchmarkReference } from './benchmark_reference.mjs';
+import { requireBenchmarkReference, speculationPair } from './benchmark_speculation.mjs';
+import benchmarkReference from '../config/benchmark-reference.json' with { type: 'json' };
 export { outputQualityStatus } from './benchmark_quality.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -164,6 +167,8 @@ export function parseArgs(argv) {
     runs: 3,
     warmupRuns: 1,
     phase: 'all',
+    mtp: 'off',
+    mtpDrafts: 3,
     scenarios: null,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     models: null,
@@ -238,6 +243,16 @@ export function parseArgs(argv) {
       case '--warmup':
         args.warmupRuns = parseInteger(argv[++i], '--warmup');
         break;
+      case '--mtp': {
+        const value = argv[++i];
+        if (!['off', 'on'].includes(value)) throw new Error('--mtp must be off or on');
+        args.mtp = value;
+        break;
+      }
+      case '--mtp-drafts':
+        args.mtpDrafts = parseInteger(argv[++i], '--mtp-drafts');
+        if (args.mtpDrafts < 1 || args.mtpDrafts > 16) throw new Error('--mtp-drafts must be 1–16');
+        break;
       case '--phase': {
         const value = argv[++i] ?? '';
         if (!['all', 'zinc', 'baseline'].includes(value)) {
@@ -302,8 +317,8 @@ export function parseArgs(argv) {
       }
       case '--rdna-llama-kv': {
         const format = argv[++i];
-        if (!['f16', 'q8_0'].includes(format))
-          throw new Error('--rdna-llama-kv must be f16 or q8_0');
+        if (!['f32', 'f16', 'q8_0'].includes(format))
+          throw new Error('--rdna-llama-kv must be f32, f16 or q8_0');
         args.rdnaLlamaKv = format;
         break;
       }
@@ -388,6 +403,8 @@ export function parseArgs(argv) {
     }
   }
 
+  if (args.mtp === 'on' && args.target !== 'rdna')
+    throw new Error('--mtp on currently requires --target rdna');
   if (args.runs === 0) throw new Error('--runs must be at least 1');
   if (!['auto', 'vulkan', 'rocm', 'zinc_rt'].includes(args.rdnaBackend)) {
     throw new Error(
@@ -416,6 +433,8 @@ function usage() {
   --no-site-write             Do not update the site JSON artifact
   --runs <n>                  Measured runs per model (default: 3)
   --warmup <n>                Warmup runs per model (default: 1)
+  --mtp <off|on>              Explicit MTP mode for both RDNA engines (default: off); on requires RDNA.
+  --mtp-drafts <n>            Maximum draft tokens for both engines (default: 3, range: 1–16).
   --phase <all|zinc|baseline> Measure both phases, only ZINC, or only llama.cpp (default: all)
   --scenarios <ids>           Comma-separated scenario ids: core,context-medium,context-long,decode-extended
   --timeout-ms <ms>           Per-command timeout (default: 900000)
@@ -440,7 +459,7 @@ function usage() {
   --rdna-vk-device <n>        GPU index: Vulkan, or ROCr with the ROCm backend (default 0).
                               Use vulkaninfo for Vulkan, or rocminfo for ROCm.
   --rdna-context <n>          Context per slot for both RDNA servers (default: model setting or 4096).
-  --rdna-llama-kv <format>    Baseline KV format: f16 (default) or q8_0 for larger contexts.
+  --rdna-llama-kv <format>    KV format for both engines: f32, f16 (Vulkan default), or q8_0; ROCm defaults to f32.
   --rdna-llama-cli <path>     Override remote RDNA llama-cli baseline binary
   --rdna-llama-server <path>  Override remote RDNA llama-server baseline binary
   --rdna-llama-device <dev>   Override RDNA llama.cpp --device value, e.g. Vulkan1 or ROCm0.
@@ -564,7 +583,7 @@ export function parseZincServerOutput(text) {
   return {
     ...parsed,
     promptTokens,
-    prefillTokens: promptTokens ?? parsed.prefillTokens,
+    prefillTokens: parsed.prefillTokens ?? promptTokens,
     generatedTokens,
     outputPreview:
       typeof content === 'string' && content.trim() ? content.trim() : parsed.outputPreview,
@@ -681,8 +700,24 @@ export function parseOpenAiCompletionOutput(text) {
     decodeMs: generatedTokens > 0 && decodeTps ? (generatedTokens / decodeTps) * 1000 : null,
     decodeTps,
     msPerToken: decodeTps ? 1000 / decodeTps : null,
+    speculative:
+      timings.draft_n > 0 && Number.isFinite(timings.draft_n_accepted)
+        ? {
+            kind: 'nextn',
+            drafted: timings.draft_n,
+            accepted: timings.draft_n_accepted,
+            acceptancePct: (100 * timings.draft_n_accepted) / timings.draft_n,
+          }
+        : null,
     outputPreview: typeof content === 'string' ? content.trim() : '',
   };
+}
+
+export function requireObservedMtp(sample, mode) {
+  if (mode == null) return;
+  const active = (sample.speculative?.drafted ?? 0) > 0;
+  if (active !== (mode === 'on'))
+    throw new Error(`Requested MTP ${mode} differs from observed drafting telemetry`);
 }
 
 export function summarizeValues(values) {
@@ -765,7 +800,8 @@ export function promptTokensMatch(zincTokens, baselineTokens) {
 }
 
 export function buildComparison(zincSummary, baselineSummary, options = {}) {
-  if (!zincSummary || !baselineSummary) return null;
+  if (!zincSummary || !baselineSummary || !speculationPair(zincSummary, baselineSummary).matched)
+    return null;
   const zincDecode = finiteMetric(
     zincSummary.decode_tps?.median ?? zincSummary.decode_tps?.avg ?? null,
   );
@@ -983,6 +1019,21 @@ function recalculateScenarioComparison(scenario) {
   return {
     ...scenario,
     comparison,
+    ...(scenario.variants
+      ? {
+          variants: Object.fromEntries(
+            Object.entries(scenario.variants).map(([key, variant]) => [
+              key,
+              {
+                ...variant,
+                comparison: buildComparison(variant.zinc, variant.baseline ?? scenario.baseline, {
+                  expectedGeneratedTokens: variant.max_tokens ?? scenario.max_tokens,
+                }),
+              },
+            ]),
+          ),
+        }
+      : {}),
     output_quality: outputQualityStatus(
       scenario?.zinc?.output_preview,
       scenario?.zinc?.generated_tokens,
@@ -991,8 +1042,26 @@ function recalculateScenarioComparison(scenario) {
 }
 
 function recalculateModelComparisons(model) {
+  const blocked = model.correctness_review?.tone === 'caution';
   const scenarios = Array.isArray(model.scenarios)
-    ? model.scenarios.map(recalculateScenarioComparison)
+    ? model.scenarios.map(recalculateScenarioComparison).map((scenario) =>
+        blocked
+          ? {
+              ...scenario,
+              comparison: null,
+              ...(scenario.variants
+                ? {
+                    variants: Object.fromEntries(
+                      Object.entries(scenario.variants).map(([id, value]) => [
+                        id,
+                        { ...value, comparison: null },
+                      ]),
+                    ),
+                  }
+                : {}),
+            }
+          : scenario,
+      )
     : null;
   const primary = selectPrimaryScenario(scenarios);
   const comparison =
@@ -1011,7 +1080,7 @@ function recalculateModelComparisons(model) {
           baseline: primary.baseline ?? model.baseline,
         }
       : {}),
-    comparison,
+    comparison: blocked ? null : comparison,
     ...(scenarios ? { scenarios } : {}),
   };
 }
@@ -1094,6 +1163,7 @@ function compactMean(values) {
 }
 
 function modelScenariosForSummary(model) {
+  if (model.correctness_review?.tone === 'caution') return [];
   if (Array.isArray(model.scenarios) && model.scenarios.length > 0) return model.scenarios;
   return [
     {
@@ -1223,7 +1293,7 @@ function targetSummary(models) {
   };
 }
 
-function createStats(name, rows) {
+export function createStats(name, rows) {
   const prefillValues = rows.map((row) => row.prefillTps).filter((value) => value != null);
   const decodeValues = rows.map((row) => row.decodeTps).filter((value) => value != null);
   const msValues = rows.map((row) => row.msPerToken).filter((value) => value != null);
@@ -1240,6 +1310,11 @@ function createStats(name, rows) {
           kind: speculativeRows[0].speculative.kind,
           acceptance_pct: summarizeValues(
             speculativeRows.map((row) => row.speculative.acceptancePct),
+          ),
+          drafted_tokens: speculativeRows.reduce((n, row) => n + (row.speculative.drafted ?? 0), 0),
+          accepted_tokens: speculativeRows.reduce(
+            (n, row) => n + (row.speculative.accepted ?? 0),
+            0,
           ),
           runs_with_speculation: speculativeRows.length,
           runs: rows.length,
@@ -1629,21 +1704,19 @@ async function captureLlamaCppProvenance(
     };
   }
 
-  try {
-    const result = await runShell(`${shellQuote(binaryPath)} --version`, { cwd, env, timeoutMs });
-    const parsed = parseLlamaCppVersionOutput(result.combined);
-    return {
-      binary: path.basename(binaryPath),
-      version: parsed?.version ?? null,
-      commit: parsed?.commit ?? null,
-    };
-  } catch {
-    return {
-      binary: path.basename(binaryPath),
-      version: null,
-      commit: null,
-    };
-  }
+  const result = await runShell(`${shellQuote(binaryPath)} --version`, { cwd, env, timeoutMs });
+  const parsed = parseLlamaCppVersionOutput(result.combined);
+  const observed = {
+    binary: path.basename(binaryPath),
+    version: parsed?.version ?? null,
+    commit: parsed?.commit ?? null,
+    sha256: (await import('node:crypto'))
+      .createHash('sha256')
+      .update(await fs.readFile(binaryPath))
+      .digest('hex'),
+  };
+  requireBenchmarkReference(observed, benchmarkReference.commit);
+  return observed;
 }
 
 async function captureRemoteLlamaCppProvenance(binaryPath, creds, timeoutMs = 120_000) {
@@ -1666,9 +1739,8 @@ async function captureRemoteLlamaCppProvenance(binaryPath, creds, timeoutMs = 12
     commit = parsed?.commit ?? null;
   } catch {}
 
-  // Some benchmark binaries are built from exported or detached worktrees and
-  // therefore report an unknown llama.cpp commit. Preserve an exact binary
-  // identity even in that case so the baseline remains reproducible.
+  // An executable digest and the pinned upstream revision are both required.
+  // A stale or unknown baseline cannot create a new performance comparison.
   let sha256 = null;
   try {
     const command = rdnaRemoteCommand(`sha256sum ${shellQuote(binaryPath)}`, creds);
@@ -1676,12 +1748,9 @@ async function captureRemoteLlamaCppProvenance(binaryPath, creds, timeoutMs = 12
     sha256 = result.stdout.match(/^([0-9a-f]{64})\b/i)?.[1]?.toLowerCase() ?? null;
   } catch {}
 
-  return {
-    binary: path.basename(binaryPath),
-    version,
-    commit,
-    sha256,
-  };
+  const observed = { binary: path.basename(binaryPath), version, commit, sha256 };
+  requireBenchmarkReference(observed, benchmarkReference.commit);
+  return observed;
 }
 
 function shouldUseManagedModelId(caseDef) {
@@ -2060,7 +2129,7 @@ function rdnaServerContext(caseDef) {
 
 export function rdnaLlamaServerArgs(caseDef, creds, serverPath, port) {
   const kv = creds.llamaKvCache ?? 'f16';
-  if (!['f16', 'q8_0'].includes(kv)) throw new Error('Unsupported llama.cpp KV format');
+  if (!['f32', 'f16', 'q8_0'].includes(kv)) throw new Error('Unsupported llama.cpp KV format');
   return [
     serverPath,
     '--host',
@@ -2086,6 +2155,12 @@ export function rdnaLlamaServerArgs(caseDef, creds, serverPath, port) {
     '--flash-attn',
     'on',
     '--no-cache-prompt',
+    '--spec-type',
+    creds.mtpMode === 'on' ? 'draft-mtp' : 'none',
+    '--spec-draft-n-max',
+    String(creds.mtpDrafts ?? 3),
+    '--spec-draft-p-min',
+    '0',
   ];
 }
 
@@ -2238,7 +2313,8 @@ async function runRdnaOpenAiSeries({ label, warmupRuns, runs, creds, port, caseD
   for (let i = 0; i < warmupRuns; i += 1) {
     console.log(`  warmup ${i + 1}/${warmupRuns}: ${label}`);
     const result = await runShell(command, { cwd: ROOT, timeoutMs });
-    parseOpenAiCompletionOutput(splitLoadavgProbe(result.stdout).stdout);
+    const parsed = parseOpenAiCompletionOutput(splitLoadavgProbe(result.stdout).stdout);
+    requireObservedMtp(parsed, creds.mtpMode);
   }
 
   for (let i = 0; i < runs; i += 1) {
@@ -2248,6 +2324,7 @@ async function runRdnaOpenAiSeries({ label, warmupRuns, runs, creds, port, caseD
     const ended = performance.now();
     const probe = splitLoadavgProbe(result.stdout);
     const parsed = parseOpenAiCompletionOutput(probe.stdout);
+    requireObservedMtp(parsed, creds.mtpMode);
     parsed.hostLoad1m = probe.hostLoad1m;
     parsed.totalLatencyMs = ended - started;
     const totalTokens = (parsed.promptTokens ?? 0) + (parsed.generatedTokens ?? 0);
@@ -2298,7 +2375,10 @@ async function runRdnaZincOpenAiSeries({
   for (let i = 0; i < warmupRuns; i += 1) {
     console.log(`  warmup ${i + 1}/${warmupRuns}: ${label}`);
     const result = await runShell(command, { cwd: ROOT, timeoutMs });
-    parseZincServerOutput(splitLoadavgProbe(result.stdout).stdout);
+    requireObservedMtp(
+      parseZincServerOutput(splitLoadavgProbe(result.stdout).stdout),
+      creds.mtpMode,
+    );
   }
 
   for (let i = 0; i < runs; i += 1) {
@@ -2308,6 +2388,7 @@ async function runRdnaZincOpenAiSeries({
     const ended = performance.now();
     const probe = splitLoadavgProbe(result.stdout);
     const parsed = parseZincServerOutput(probe.stdout);
+    requireObservedMtp(parsed, creds.mtpMode);
     parsed.hostLoad1m = probe.hostLoad1m;
     parsed.totalLatencyMs = ended - started;
     const totalTokens = (parsed.promptTokens ?? 0) + (parsed.generatedTokens ?? 0);
@@ -3541,7 +3622,17 @@ export async function buildRdnaCreds(args) {
       'RDNA benchmarking needs node-specific ZINC_<NODE>_HOST/ZINC_<NODE>_USER, ZINC_RDNA_HOST/ZINC_RDNA_USER, or ZINC_HOST/ZINC_USER in the environment or .env',
     );
   }
-  const tuningEnv = collectRemoteZincTuningEnv(dotEnv);
+  const llamaKvCache = args.rdnaLlamaKv ?? (args.rdnaBackend === 'rocm' ? 'f32' : 'f16');
+  if (args.rdnaBackend === 'rocm' && llamaKvCache === 'f16')
+    throw new Error('ROCm ZINC supports f32 or q8 KV storage; choose a matched --rdna-llama-kv');
+  const tuningEnv = {
+    ...collectRemoteZincTuningEnv(dotEnv),
+    ZINC_KV_CACHE: llamaKvCache === 'q8_0' ? 'q8' : 'f32',
+    ZINC_KV_F16: llamaKvCache === 'f16' ? '1' : '0',
+    ZINC_KV_Q8: llamaKvCache === 'q8_0' ? '1' : '0',
+    ZINC_MTP: args.mtp === 'on' ? '1' : '0',
+    ZINC_MTP_DRAFTS: String(args.mtpDrafts ?? 3),
+  };
   const baselineDevice = args.rdnaLlamaDevice ?? (args.rdnaBackend === 'rocm' ? 'ROCm0' : null);
   return {
     host,
@@ -3549,7 +3640,9 @@ export async function buildRdnaCreds(args) {
     port,
     sshKey,
     workdir: args.rdnaWorkdir,
-    llamaKvCache: args.rdnaLlamaKv ?? 'f16',
+    mtpMode: args.mtp ?? 'off',
+    mtpDrafts: args.mtpDrafts ?? 3,
+    llamaKvCache,
     env:
       args.rdnaBackend === 'rocm'
         ? { ...tuningEnv, ROCR_VISIBLE_DEVICES: String(args.rdnaVkDevice ?? 0) }
@@ -3954,7 +4047,7 @@ async function runRdnaTarget(args) {
       ...summary,
       server_context_tokens: rdnaServerContext(entry),
       server_kv_cache: {
-        zinc: creds.env?.ZINC_KV_CACHE ?? 'backend default',
+        zinc: creds.llamaKvCache === 'q8_0' ? 'q8' : creds.llamaKvCache,
         llama_cpp: creds.llamaKvCache ?? 'f16',
       },
       zinc_context_options: {
@@ -4725,6 +4818,7 @@ async function main() {
     return;
   }
 
+  if (args.phase !== 'zinc') await checkBenchmarkReference();
   const incoming = [];
   if (args.target === 'metal' || args.target === 'both' || args.target === 'all') {
     incoming.push(await runMetalTarget(args));

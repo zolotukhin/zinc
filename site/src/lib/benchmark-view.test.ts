@@ -61,6 +61,7 @@ test('displayed phase times agree with the harness across every published target
 });
 
 const engine = (decode: number, generated = 10) => ({
+  speculative_decoding: { enabled: false },
   prompt_tokens: 10,
   prefill_tokens: 10,
   generated_tokens: generated,
@@ -130,7 +131,10 @@ test('a later correctness finding excludes every variant while preserving record
 test('unavailable measurements retain their correctness note and investigation link', () => {
   const reviewed = {
     ...row(),
-    zinc: { unavailable_reason: 'Earlier run could not finish.' },
+    zinc: {
+      speculative_decoding: { enabled: false },
+      unavailable_reason: 'Earlier run could not finish.',
+    },
     model: {
       correctness_review: {
         tone: 'caution',
@@ -218,4 +222,21 @@ test('historical flat model records normalize to a usable core workload', () => 
   expect(legacy[0].id).toBe('core');
   expect(metric(legacy[0].zinc.decode_tps)).toBe(10);
   expect(overallRatio(legacy[0])).toBe(0.75);
+});
+
+test('MTP mismatch and missing telemetry hide ratios without altering raw rates', () => {
+  const on = { ...engine(200), speculative_decoding: { enabled: true } };
+  for (const baseline of [engine(10), { ...engine(10), speculative_decoding: undefined }]) {
+    const value = row(on, baseline);
+    expect(overallRatio(value)).toBeNull();
+    expect(rateRatio(value, 'decode_tps')).toBeNull();
+    expect(aggregate([value]).comparable).toBe(0);
+    expect(metric(value.zinc.decode_tps)).toBe(200);
+    expect(metric(value.baseline.decode_tps)).toBe(10);
+    expect(
+      rowNotes(value)
+        .map((note) => note.text)
+        .join(' '),
+    ).toContain('Excluded from comparisons');
+  }
 });

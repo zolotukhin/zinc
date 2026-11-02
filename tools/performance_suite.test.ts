@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 import {
+  requireObservedMtp,
+  createStats,
   buildArtifact,
   buildRdnaCreds,
   buildComparison,
@@ -1124,8 +1126,18 @@ test('prompt parity tolerates a BOS but flags a different template', () => {
   expect(promptTokensMatch(null, 87)).toBe(null);
   const metric = (m: number) => ({ median: m });
   const cmp = buildComparison(
-    { prompt_tokens: 47, decode_tps: metric(30), prefill_tps: metric(300) },
-    { prompt_tokens: 87, decode_tps: metric(28), prefill_tps: metric(200) },
+    {
+      speculative_decoding: { enabled: false },
+      prompt_tokens: 47,
+      decode_tps: metric(30),
+      prefill_tps: metric(300),
+    },
+    {
+      speculative_decoding: { enabled: false },
+      prompt_tokens: 87,
+      decode_tps: metric(28),
+      prefill_tps: metric(200),
+    },
   )!;
   expect(cmp.prompt_token_delta).toBe(-40);
   expect(cmp.prompt_parity).toBe(false);
@@ -1321,6 +1333,7 @@ test('buildComparison adds prompt and latency deltas', () => {
   const comparison = buildComparison(
     {
       name: 'ZINC',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 10,
       generated_tokens: 20,
       prefill_tps: { median: 50, avg: 50 },
@@ -1330,6 +1343,7 @@ test('buildComparison adds prompt and latency deltas', () => {
     },
     {
       name: 'llama.cpp',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 10,
       generated_tokens: 20,
       prefill_tps: { median: 100, avg: 100 },
@@ -1355,6 +1369,7 @@ test('buildComparison uses measured prefill tokens for cached server timings', (
   const comparison = buildComparison(
     {
       name: 'ZINC',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 70,
       prefill_tokens: 70,
       generated_tokens: 256,
@@ -1363,6 +1378,7 @@ test('buildComparison uses measured prefill tokens for cached server timings', (
     },
     {
       name: 'llama.cpp',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 73,
       prefill_tokens: 5,
       generated_tokens: 256,
@@ -1384,6 +1400,7 @@ test('buildComparison rates overall by backend wall time, not mixed throughput a
   const comparison = buildComparison(
     {
       name: 'ZINC',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 36,
       generated_tokens: 96,
       prefill_tps: { median: 45.4, avg: 45.4 },
@@ -1391,6 +1408,7 @@ test('buildComparison rates overall by backend wall time, not mixed throughput a
     },
     {
       name: 'llama.cpp',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 35,
       generated_tokens: 96,
       prefill_tps: { median: 2820, avg: 2820 },
@@ -1411,6 +1429,7 @@ test('buildComparison withholds overall percentage for early-stop rows', () => {
   const comparison = buildComparison(
     {
       name: 'ZINC',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 36,
       generated_tokens: 2,
       prefill_tps: { median: 85, avg: 85 },
@@ -1418,6 +1437,7 @@ test('buildComparison withholds overall percentage for early-stop rows', () => {
     },
     {
       name: 'llama.cpp',
+      speculative_decoding: { enabled: false },
       prompt_tokens: 35,
       generated_tokens: 96,
       prefill_tps: { median: 160, avg: 160 },
@@ -1447,12 +1467,14 @@ test('buildArtifact skips non-comparable core rows for model headlines', () => {
               max_tokens: 64,
               zinc: {
                 name: 'ZINC',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 2,
                 decode_tps: { median: 200, avg: 200 },
               },
               baseline: {
                 name: 'llama.cpp',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 64,
                 decode_tps: { median: 50, avg: 50 },
@@ -1463,12 +1485,14 @@ test('buildArtifact skips non-comparable core rows for model headlines', () => {
               max_tokens: 64,
               zinc: {
                 name: 'ZINC',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 64,
                 decode_tps: { median: 40, avg: 40 },
               },
               baseline: {
                 name: 'llama.cpp',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 64,
                 decode_tps: { median: 50, avg: 50 },
@@ -1499,12 +1523,14 @@ test('buildArtifact recomputes stale overall ratings and aggregates by total wal
           label: 'Model',
           zinc: {
             name: 'ZINC',
+            speculative_decoding: { enabled: false },
             prompt_tokens: 0,
             generated_tokens: 100,
             decode_tps: { median: 10, avg: 10 },
           },
           baseline: {
             name: 'llama.cpp',
+            speculative_decoding: { enabled: false },
             prompt_tokens: 0,
             generated_tokens: 100,
             decode_tps: { median: 20, avg: 20 },
@@ -1515,12 +1541,14 @@ test('buildArtifact recomputes stale overall ratings and aggregates by total wal
               max_tokens: 100,
               zinc: {
                 name: 'ZINC',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 100,
                 decode_tps: { median: 10, avg: 10 },
               },
               baseline: {
                 name: 'llama.cpp',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 100,
                 decode_tps: { median: 20, avg: 20 },
@@ -1532,12 +1560,14 @@ test('buildArtifact recomputes stale overall ratings and aggregates by total wal
               max_tokens: 10,
               zinc: {
                 name: 'ZINC',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 10,
                 decode_tps: { median: 10, avg: 10 },
               },
               baseline: {
                 name: 'llama.cpp',
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 0,
                 generated_tokens: 10,
                 decode_tps: { median: 5, avg: 5 },
@@ -1683,13 +1713,21 @@ test('mergeArtifacts can preserve missing phase data for split benchmark runs', 
             {
               id: 'qwen',
               label: 'Qwen',
-              zinc: { name: 'ZINC', decode_tps: { median: 120, avg: 120 } },
+              zinc: {
+                name: 'ZINC',
+                speculative_decoding: { enabled: false },
+                decode_tps: { median: 120, avg: 120 },
+              },
               baseline: null,
               scenarios: [
                 {
                   id: 'core',
                   label: 'Core Prompt',
-                  zinc: { name: 'ZINC', decode_tps: { median: 120, avg: 120 } },
+                  zinc: {
+                    name: 'ZINC',
+                    speculative_decoding: { enabled: false },
+                    decode_tps: { median: 120, avg: 120 },
+                  },
                 },
               ],
             },
@@ -1705,12 +1743,20 @@ test('mergeArtifacts can preserve missing phase data for split benchmark runs', 
           {
             id: 'qwen',
             label: 'Qwen',
-            baseline: { name: 'llama.cpp', decode_tps: { median: 100, avg: 100 } },
+            baseline: {
+              name: 'llama.cpp',
+              speculative_decoding: { enabled: false },
+              decode_tps: { median: 100, avg: 100 },
+            },
             scenarios: [
               {
                 id: 'core',
                 label: 'Core Prompt',
-                baseline: { name: 'llama.cpp', decode_tps: { median: 100, avg: 100 } },
+                baseline: {
+                  name: 'llama.cpp',
+                  speculative_decoding: { enabled: false },
+                  decode_tps: { median: 100, avg: 100 },
+                },
               },
             ],
           },
@@ -1805,6 +1851,7 @@ test('artifact target summary excludes preview-flagged rows from headline stats'
               label: 'Core',
               max_tokens: 96,
               zinc: {
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 10,
                 generated_tokens: 96,
                 output_preview: '2\n</think>\n<|im_start|>0.\n<|im_end|>',
@@ -1812,6 +1859,7 @@ test('artifact target summary excludes preview-flagged rows from headline stats'
                 decode_tps: { median: 200, avg: 200 },
               },
               baseline: {
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 10,
                 generated_tokens: 96,
                 prefill_tps: { median: 100, avg: 100 },
@@ -1829,6 +1877,7 @@ test('artifact target summary excludes preview-flagged rows from headline stats'
               label: 'Core',
               max_tokens: 96,
               zinc: {
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 10,
                 generated_tokens: 96,
                 output_preview:
@@ -1837,6 +1886,7 @@ test('artifact target summary excludes preview-flagged rows from headline stats'
                 decode_tps: { median: 50, avg: 50 },
               },
               baseline: {
+                speculative_decoding: { enabled: false },
                 prompt_tokens: 10,
                 generated_tokens: 96,
                 prefill_tps: { median: 90, avg: 90 },
@@ -1935,4 +1985,114 @@ test('host load probe is split off before the response is parsed', () => {
   });
   expect(splitLoadavgProbe(`${body}\n\n__ZINC_LOADAVG__ \n`).hostLoad1m).toBe(null);
   expect(splitLoadavgProbe(body)).toEqual({ stdout: body, hostLoad1m: null });
+});
+
+test('matched MTP flags reach llama.cpp and observed telemetry is mandatory', () => {
+  const args = parseArgs([
+    '--target',
+    'rdna',
+    '--mtp',
+    'on',
+    '--mtp-drafts',
+    '3',
+    '--rdna-llama-kv',
+    'f32',
+  ]);
+  expect(args.mtp).toBe('on');
+  expect(args.rdnaLlamaKv).toBe('f32');
+  const flags = rdnaLlamaServerArgs(
+    { model_path: 'fixture.gguf' },
+    { mtpMode: 'on', mtpDrafts: args.mtpDrafts, llamaKvCache: args.rdnaLlamaKv },
+    'llama-server',
+    9090,
+  );
+  expect(flags[flags.indexOf('--spec-type') + 1]).toBe('draft-mtp');
+  expect(flags[flags.indexOf('--spec-draft-n-max') + 1]).toBe('3');
+  expect(flags[flags.indexOf('--spec-draft-p-min') + 1]).toBe('0');
+  const off = rdnaLlamaServerArgs(
+    { model_path: 'fixture.gguf' },
+    { mtpMode: 'off' },
+    'llama-server',
+    9090,
+  );
+  expect(off[off.indexOf('--spec-type') + 1]).toBe('none');
+  const sample = parseOpenAiCompletionOutput(
+    JSON.stringify({ timings: { draft_n: 15, draft_n_accepted: 9 } }),
+  );
+  expect(sample.speculative?.acceptancePct).toBe(60);
+  expect(() => requireObservedMtp(sample, 'on')).not.toThrow();
+  expect(() => requireObservedMtp(sample, 'off')).toThrow('telemetry');
+  expect(() => requireObservedMtp({ speculative: null }, 'on')).toThrow('telemetry');
+  expect(() => parseArgs(['--target', 'intel', '--mtp', 'on'])).toThrow();
+  expect(() => parseArgs(['--target', 'rdna', '--mtp-drafts', '0'])).toThrow();
+});
+
+test('a high MTP-on rate cannot win against an off or unrecorded baseline', () => {
+  const sample = {
+    promptTokens: 10,
+    prefillTokens: 10,
+    generatedTokens: 10,
+    prefillTps: 100,
+    decodeTps: 100,
+    msPerToken: 10,
+  };
+  const zinc = createStats('ZINC', [
+    { ...sample, speculative: { kind: 'nextn', drafted: 15, accepted: 9, acceptancePct: 60 } },
+  ]);
+  const baseline = createStats('llama.cpp', [{ ...sample, decodeTps: 10 }]);
+  expect(buildComparison(zinc, baseline)).toBeNull();
+  expect(buildComparison(zinc, { ...baseline, speculative_decoding: undefined })).toBeNull();
+  const matched = { ...baseline, speculative_decoding: { enabled: true } };
+  expect(buildComparison(zinc, matched)?.pct_of_baseline).toBe(1000);
+  expect(zinc.speculative_decoding.drafted_tokens).toBe(15);
+});
+
+test('ZINC prefill telemetry retains the uncached token count rather than HTTP usage', () => {
+  const parsed = parseZincServerOutput(
+    JSON.stringify({ usage: { prompt_tokens: 100, completion_tokens: 10 } }) +
+      '\n__ZINC_TIMING__\ninfo(forward): Prefill: 2 tokens in 1.0 ms (2000.0 tok/s)\ninfo(forward): Generated 10 tokens in 100.0 ms — 100.0 tok/s (10.0 ms/tok)',
+  );
+  expect(parsed.promptTokens).toBe(100);
+  expect(parsed.prefillTokens).toBe(2);
+});
+
+test('a model correctness caution removes historical ratios and summary wins for every variant', () => {
+  const engine = (rate: number) => ({
+    speculative_decoding: { enabled: false },
+    prompt_tokens: 10,
+    prefill_tokens: 10,
+    generated_tokens: 10,
+    prefill_tps: { median: rate },
+    decode_tps: { median: rate },
+  });
+  const model = (id: string, rate: number) => ({
+    id,
+    label: id,
+    scenarios: [
+      {
+        id: 'core',
+        max_tokens: 10,
+        zinc: engine(rate),
+        baseline: engine(10),
+        variants: { mtp_off: { zinc: engine(rate), baseline: engine(10) } },
+      },
+    ],
+  });
+  const artifact = buildArtifact([
+    {
+      id: 'rdna',
+      models: [
+        { ...model('bad', 1000), correctness_review: { tone: 'caution' } },
+        model('valid', 20),
+      ],
+    },
+  ]);
+  const target = artifact.targets[0];
+  expect(target.summary.fastest_model_id).toBe('valid');
+  expect(target.summary.compared_models).toBe(1);
+  const bad = target.models.find((entry) => entry.id === 'bad');
+  expect(bad.comparison).toBeNull();
+  expect(bad.scenarios[0].comparison).toBeNull();
+  expect(bad.scenarios[0].variants.mtp_off.comparison).toBeNull();
+  expect(bad.scenarios[0].zinc.decode_tps.median).toBe(1000);
 });

@@ -12,6 +12,7 @@ import {
   overallRatio,
   rowsFor,
   scenarioOrder,
+  speculationPair,
 } from '../src/lib/benchmark-view';
 
 // Run against a dev or production-preview server. External services are blocked
@@ -123,8 +124,8 @@ try {
             row.prompt ?? 'Not recorded',
           );
           assert.equal(
-            await card.locator('.mtp-badge').count(),
-            row.zinc?.speculative_decoding?.enabled ? 1 : 0,
+            await card.locator('.mtp-badge').innerText(),
+            speculationPair(row.zinc, row.baseline).label,
           );
           await card.locator('.row-evidence > summary').click();
         }

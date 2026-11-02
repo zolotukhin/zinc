@@ -1,4 +1,6 @@
 import { outputQualityStatus } from '../../../tools/benchmark_quality.mjs';
+import { speculationPair } from '../../../tools/benchmark_speculation.mjs';
+export { speculationPair } from '../../../tools/benchmark_speculation.mjs';
 
 // Presentation helpers. Published measurements stay immutable; each view selects
 // a complete recorded run before deriving any chart, summary, or timing.
@@ -165,6 +167,7 @@ export function overallRatio(row: BenchmarkRecord): number | null {
   const llamaSeconds = phaseSeconds(row.baseline);
   const generated = row.zinc?.generated_tokens;
   if (
+    !speculationPair(row.zinc, row.baseline).matched ||
     promptParity(row) !== true ||
     qualityStatus(row).tone === 'caution' ||
     !Number.isFinite(generated) ||
@@ -179,7 +182,8 @@ export function overallRatio(row: BenchmarkRecord): number | null {
 }
 
 export function rateRatio(row: BenchmarkRecord, phase: 'prefill_tps' | 'decode_tps') {
-  if (qualityStatus(row).tone === 'caution') return null;
+  if (qualityStatus(row).tone === 'caution' || !speculationPair(row.zinc, row.baseline).matched)
+    return null;
   const zinc = metric(row.zinc?.[phase]);
   const llama = metric(row.baseline?.[phase]);
   return zinc != null && zinc > 0 && llama != null && llama > 0 ? zinc / llama : null;
@@ -232,6 +236,8 @@ export function rowNotes(row: BenchmarkRecord): { text: string; href?: string }[
       text: 'A measurement is unavailable. See the published data for the recorded failure.',
     });
   const quality = qualityStatus(row);
+  const pairing = speculationPair(row.zinc, row.baseline);
+  if (pairing.note) notes.push({ text: pairing.note });
   // Missing telemetry must not hide a later correctness review of the same run.
   if (quality.tone === 'caution')
     notes.push({
@@ -242,7 +248,7 @@ export function rowNotes(row: BenchmarkRecord): { text: string; href?: string }[
     notes.push({
       text: 'Different prompt token counts. Per-token rates are indicative; excluded from the overall comparison.',
     });
-  else if (!warning && overallRatio(row) == null)
+  else if (!warning && pairing.matched && overallRatio(row) == null)
     notes.push({
       text: 'Output budgets differ, a run stopped early, or phase telemetry is incomplete. Excluded from the overall comparison.',
     });

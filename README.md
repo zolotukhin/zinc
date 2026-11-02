@@ -129,19 +129,24 @@ on a 32GB ROCm card. Match the harness context to the server when changing it.
 
 ## Inspect the performance
 
-The chart compares six models on the same Radeon AI PRO R9700, with **ROCm on
+The chart compares eligible measurements on the same Radeon AI PRO R9700, with **ROCm on
 both ZINC and llama.cpp**. Both engines use the same GGUF files, prompt tokens,
 reusable servers, warmups, and repeat counts.
 
 <a href="https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm">
-  <img src="assets/rocm-r9700-benchmark.svg" alt="Prompt processing and answer generation for ZINC and llama.cpp across six models on the same Radeon AI PRO R9700 with ROCm" width="100%">
+  <img src="assets/rocm-r9700-benchmark.svg" alt="Prompt processing and answer generation for ZINC and llama.cpp with matched MTP-off settings on the same Radeon AI PRO R9700 with ROCm" width="100%">
 </a>
 
 Speculative decoding is **off for both engines** in this chart. The
 [benchmark dashboard](https://zolotukhin.ai/zinc/benchmarks/) includes every
 workload, GPU, sample spread, build revision, and the speculative-decoding
-on/off measurements. It also retains incomplete results and cases where
-llama.cpp is ahead.
+on/off measurements. Each row shows both engines' MTP settings. Different or
+unrecorded settings and correctness cautions are excluded from ratios. It also
+retains incomplete results and cases where llama.cpp is ahead.
+
+New campaigns [refresh and verify the latest llama.cpp](docs/BENCHMARKING.md#latest-llamacpp-and-matched-mtp-pairs)
+and measure **on/on and off/off**; older measurements retain their original
+build revisions and dates.
 
 The chart is generated from
 [`zinc-performance.json`](site/src/data/zinc-performance.json).

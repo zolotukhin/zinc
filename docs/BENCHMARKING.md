@@ -14,7 +14,7 @@ The [benchmark dashboard](https://zolotukhin.ai/zinc/benchmarks/) renders the me
 
 The overall ratio is `llama.cpp phase time / ZINC phase time`, where each engine's phase time is `prefill_tokens / prefill_tps + generated_tokens / decode_tps`. It excludes HTTP, process startup, and model loading. `1.00×` is parity; larger ratios favor ZINC. The summary divides the sum of comparable llama.cpp phase times by the sum of ZINC phase times, rather than averaging ratios. Rate summaries are means of model medians. Missing measurements are not zeroes.
 
-The page excludes mismatched prompt counts, unequal or incomplete output budgets, flagged previews, and incomplete phase telemetry from overall comparisons. The recorded prompt-parity check allows a one-token BOS accounting difference. A preview is a sanity check, not an evaluation of answer quality. Older Metal, Intel, and CUDA records used ZINC CLI runs against a baseline that preferred a persistent server; the page labels those protocols as historical diagnostics. Their request latencies must not be compared as if both engines were reusable servers.
+The page excludes mismatched or unrecorded MTP settings, mismatched prompt counts, unequal or incomplete output budgets, flagged previews, and incomplete phase telemetry from overall comparisons. The recorded prompt-parity check allows a one-token BOS accounting difference. A preview is a sanity check, not an evaluation of answer quality. Older Metal, Intel, and CUDA records used ZINC CLI runs against a baseline that preferred a persistent server; the page labels those protocols as historical diagnostics. Their request latencies must not be compared as if both engines were reusable servers.
 
 Follow the runner link at the **recorded revision** to reproduce historical flags, templates, and system messages. Current defaults may have changed. Some older artifacts lack driver versions, model checksums, or exact build metadata; the page says **Not recorded** instead of filling those gaps from today's machine. Reproducing those records exactly may require a new run with the missing metadata captured.
 
@@ -53,7 +53,7 @@ bun tools/performance_suite.mjs --target metal
 
 # AMD Vulkan, remote node from .env. Select the baseline device from
 # vulkaninfo and set ZINC_RDNA_LLAMA_DEVICE to that device's llama.cpp name.
-ZINC_MTP=0 bun tools/performance_suite.mjs --target rdna --phase all \
+bun tools/performance_suite.mjs --target rdna --phase all --mtp off \
   --rdna-sync --rdna-build --rdna-start-llama --rdna-backend vulkan \
   --rdna-llama-device "${ZINC_RDNA_LLAMA_DEVICE:?Set the llama.cpp Vulkan device}" \
   --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-vulkan.json
@@ -85,43 +85,116 @@ For password-auth Intel nodes, the suite reads `ZINC_INTEL_SSH_PASSWORD`, `ZINC_
 
 The default RDNA suite covers Gemma 4 26B-A4B Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3.5 9B Q4_K_M, Qwen 3.6 35B-A3B UD Q4_K_XL, and Qwen 3.8 27B Q4_K_M. The small-Qwen row is `Qwen3.5-9B-Q4_K_M.gguf`, not the older Qwen 3 8B GGUF.
 
-## Publishing an MTP on/off pair
+## Latest llama.cpp and matched MTP pairs
 
-NextN/MTP speculative decoding changes what is being compared, so a decode
-number measured with it on is not like-for-like against a llama.cpp run without
-it. llama.cpp is not incapable here: its converter can export the same NextN
-block as a standalone draft model (`--mtp`, `supports_mtp_export` on the Qwen
-conversion class) and drive it with `--model-draft`. Our runs do not do that
-yet, so rows that speculate carry both measurements, the published comparison
-uses the non-speculative one, and the dashboard shows an on/off switch. The
-published artifact has paired `qwen38-27b-q4k-m` measurements on both AMD Vulkan
-and ROCm. The switch selects a complete recorded variant, including its prefill,
-decode, request timing, token counts, source revision, and output preview.
-The baseline remains non-speculative in both views. A speculative run without a
-recorded MTP-off variant is shown as unavailable in the off view.
-
-Measure the pair with two passes over the same model, then fold the second one
-into the published row:
+New comparisons use the upstream revision in
+[`config/benchmark-reference.json`](../config/benchmark-reference.json).
+Before a campaign, refresh the pin, then build both `llama-server` and
+`llama-tokenize` from that exact checkout for each native GPU backend:
 
 ```bash
-# 1. The published row, measured the normal way (MTP on by default).
-bun tools/performance_suite.mjs --target rdna --models qwen38-27b-q4k-m \
-  --rdna-sync --rdna-build --rdna-start-llama --output /tmp/mtp-on.json
-
-# 2. The same scenarios with speculation disabled. ZINC_MTP is forwarded to the
-#    remote server, and --phase zinc skips the unchanged llama.cpp baseline.
-ZINC_MTP=0 bun tools/performance_suite.mjs --target rdna --models qwen38-27b-q4k-m \
-  --phase zinc --no-site-write --output /tmp/mtp-off.json
-
-# 3. Attach it as variants.mtp_off on the published scenarios.
-bun tools/merge_mtp_variant.mjs --off /tmp/mtp-off.json
+bun tools/benchmark_reference.mjs update
+# Build the pinned checkout on the remote worker; see the commands below.
+bun tools/benchmark_reference.mjs check
 ```
 
-The merge compares the off-variant against the baseline already published for
-that row, so both variants share one llama.cpp run, and it refuses an artifact
-whose runs still report speculation (a missed `ZINC_MTP=0`). Run the pair back
-to back on the same build: the toggle invites a direct comparison of the two
-numbers, so they should differ only in speculation.
+The main suite checks upstream HEAD before collecting a new baseline and
+requires its executable to identify the pin and an exact SHA256. If upstream
+advances, refresh and rebuild before the next campaign. Freeze the revision
+through an active campaign. Release correctness qualification has its own
+separate pin in `config/release/targets.json`; refreshing the performance
+reference does not revise old release evidence.
+
+Current llama.cpp supports the embedded NextN block directly. MTP on means
+`--spec-type draft-mtp --spec-draft-n-max 3 --spec-draft-p-min 0`; off means
+`--spec-type none`. A separate exported draft model is unnecessary for this
+Qwen 3.8 GGUF. See the upstream [speculative decoding guide](https://github.com/ggml-org/llama.cpp/blob/785322d17f2d51e5185cf996a1f4e46d87640841/docs/speculative.md).
+
+The suite accepts `--mtp on|off` and `--mtp-drafts N` for `--target rdna`.
+It configures both engines and requires request-specific drafting telemetry:
+ZINC's acceptance counters and llama.cpp's `timings.draft_n` /
+`timings.draft_n_accepted`. A flag alone is insufficient evidence that MTP ran.
+Every sample in an on run must show drafting; an off run must not show it.
+
+The dashboard's off view selects **both** engines' off measurements; the on
+view selects **both** engines' on measurements. Unknown or different settings
+retain their raw speeds and dates but cannot produce a ratio. The README
+chart applies the same guard. Historical MTP-on/off comparisons are not
+relabeled as matched measurements.
+
+### Controlled 27B campaign
+
+[`tools/benchmark_matched_mtp.py`](../tools/benchmark_matched_mtp.py) uses the
+canonical suite's four prompts, payloads, parsers and summary statistics. Run
+it **on the remote Linux GPU worker**. The worker must be idle; an existing
+GPU process or reservation fails without terminating anything. Use the
+scheduler's shared reservation location, not ZINC's native process-lock file.
+Each server and its children are owned and reaped inside the invocation,
+including failures and cancellation.
+
+Build the reference on that worker from the performance pin. Select one
+backend per build directory:
+
+```bash
+# LLAMA_SOURCE and LLAMA_BUILD are operator-supplied paths on the worker.
+# Check out the commit from config/benchmark-reference.json first.
+cmake -S "$LLAMA_SOURCE" -B "$LLAMA_BUILD" \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_NATIVE=OFF \
+  -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF
+cmake --build "$LLAMA_BUILD" -j4 --target llama-server llama-tokenize
+
+# For ROCm use a separate build with -DGGML_HIP=ON instead of Vulkan,
+# -DAMDGPU_TARGETS=<gpu-target>, and the ROCm clang/clang++ compilers.
+```
+
+Build ZINC ReleaseFast for the same backend, then run:
+
+```bash
+python3 tools/benchmark_matched_mtp.py \
+  --backend vulkan --device "$ZINC_GPU_DEVICE" \
+  --llama-device "$LLAMA_GPU_DEVICE" \
+  --zinc "$ZINC_BINARY" --zinc-source "$ZINC_SOURCE" \
+  --llama-server "$LLAMA_BUILD/bin/llama-server" --llama-source "$LLAMA_SOURCE" \
+  --model "$MODEL_GGUF" --reservation "$GPU_RESERVATION" \
+  --rounds 3 --runs 3 --warmup 1 --drafts 3 --output "$REPORT_JSON"
+```
+
+Use `--backend rocm` with the ROCm builds and device selectors for HIP.
+Both engines use the identical pinned Qwen 3.8 27B Q4_K_M file, F32 K/V,
+4,096 context tokens, one slot, temperature zero, seed zero, full prompt
+prefill, and common output caps. F32 is explicitly selected through
+`ZINC_KV_F16=0 ZINC_KV_Q8=0` for Vulkan and `ZINC_KV_CACHE=f32` for ROCm;
+the runner requires ZINC's startup log to confirm it. The ordinary suite's
+`--rdna-llama-kv` option now sets both engines' cache storage as well.
+
+Three rounds alternate treatment order. Each treatment keeps a server alive
+across all workloads, excludes one warmup per workload and measures three
+requests. That is nine measured samples per workload/engine/mode, or
+144 measured requests plus 48 warmups per backend. HTTP latency is captured
+separately from engine phase timing. All responses must reach the common
+output budget, have matching prompt counts within one BOS token, and preserve
+each engine's complete greedy output across repeats and MTP modes. This is a
+bounded correctness control, not a replacement for release qualification.
+
+The default runner stops on a greedy-output difference. For an investigation,
+`--record-output-drift` retains mode differences while still rejecting
+nondeterministic repeats. Such a report has `protocol_passed: true` only if the
+full timing matrix completed, and `passed: false` when any output control
+failed. Its `output_drift` entries remain failures; completing measurements
+does not clear them or establish that either wording is incorrect.
+`--engines` and `--scenarios` select diagnostic subsets, which cannot qualify
+a complete four-workload campaign.
+
+The report records model/source/binary/library/harness hashes and acceptance
+counts. Reference libraries and the ZINC binary must remain byte-identical
+through the campaign. ZINC's draft vocabulary may be restricted to 98,304
+rows; llama.cpp uses its default draft vocabulary. Both verify with the full
+target model. Report these implementation choices alongside matched mode
+and draft limits rather than treating MTP-off as the competing MTP result.
+
+The legacy `merge_mtp_variant.mjs` helper accepts a freshly measured baseline
+for the off variant. Reusing an old baseline with missing or different MTP
+settings cannot create a comparison.
 
 ## Ad-hoc llama.cpp baseline on the RDNA4 node
 

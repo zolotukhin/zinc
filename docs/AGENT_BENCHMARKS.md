@@ -9,7 +9,7 @@ for a new campaign.
 
 ### Baseline: 107 tok/s (2026-03-26)
 
-The reference baseline is llama.cpp server on the RDNA4 test node with this exact configuration. All ZINC numbers are compared against this.
+The reference baseline is llama.cpp server on the RDNA4 test node with this exact configuration. These March 2026 numbers describe that historical campaign. New campaigns must refresh the performance reference and match MTP settings as described in [BENCHMARKING.md](BENCHMARKING.md#latest-llamacpp-and-matched-mtp-pairs).
 
 Headline RDNA comparisons must use the fair server-vs-server harness in
 `tools/performance_suite.mjs`: one reusable ZINC server per model, one reusable
