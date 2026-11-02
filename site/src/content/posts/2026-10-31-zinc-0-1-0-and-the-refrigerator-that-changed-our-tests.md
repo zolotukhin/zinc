@@ -128,7 +128,7 @@ The [window correction](/zinc/docs/vulkan-gemma-sliding-window/) now has numeric
 
 The [fresh automatic R9700 report](/zinc/validation/worker-readiness-window-gate-2026-11-02.json) matches all **432 short and extended CLI token choices exactly** across seven Vulkan models, with complete HTTP continuations and cleanup. Actual OpenCode outcomes remain their own check in the [Intel report](/zinc/docs/intel-opencode-validation/).
 
-Requiring those longer references also caught a ROCm Gemma MoE disagreement that its short answers had missed. Full serial prefill restored the failing continuation, so that became the conservative default while the batched path remains an explicit opt-in. We retained the failed package and checked the new default through all six models, including their HTTP responses and recovery. The old throughput measurements remain visible, with the affected rows excluded from comparison summaries until they are rerun. Correcting the computation changes what a speed comparison means.
+Requiring those longer references also caught a ROCm Gemma MoE disagreement that its short answers had missed. Full serial prefill restored the failing continuation, so that became the conservative default while the batched path remains an explicit opt-in. We retained the failed package and checked the new default through all six models, including their HTTP responses and recovery. The old throughput measurements retain their correctness cautions. A [fresh ROCm revalidation](/zinc/docs/rocm-gemma-moe-prefill/) then replaces the affected MoE row, preserving the original measurements and provenance in its history. Correcting the computation changes what a speed comparison means.
 
 ## Eventually we had to test the reference
 
