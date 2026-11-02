@@ -19,25 +19,27 @@ Each executable contains one backend. Check `zinc --version` before selecting
 an interface or copying server settings. Vulkan is the Linux default; ROCm/HIP
 is a separate AMD build, Metal is a macOS preview, and CUDA is experimental.
 
-| Feature             | Vulkan / Metal                  | ROCm / CUDA                      |
-| ------------------- | ------------------------------- | -------------------------------- |
-| Chat responses      | JSON default; SSE optional      | SSE default; JSON optional       |
-| Raw responses       | JSON only                       | SSE default; JSON optional       |
-| Chat sampling       | Supported                       | Greedy                           |
-| Serving             | Serialized; requests queue      | Batched; Gemma MoE uses one slot |
-| Default context     | Auto-sized                      | 2,048 per slot                   |
-| Models              | Catalog and hot switching       | Startup model only               |
-| Browser chat        | Included                        | Unavailable                      |
-| Prefix reuse        | Eligible Vulkan models          | Unavailable                      |
-| Client stop strings | Applied                         | Ignored                          |
-| Health details      | Model, queue, uptime and memory | Status, backend and context      |
+| Feature           | Vulkan / Metal                  | ROCm / CUDA                      |
+| ----------------- | ------------------------------- | -------------------------------- |
+| Chat responses    | JSON default; SSE optional      | SSE default; JSON optional       |
+| Raw responses     | JSON only                       | SSE default; JSON optional       |
+| Chat sampling     | Supported                       | Greedy                           |
+| Serving           | Serialized; requests queue      | Batched; Gemma MoE uses one slot |
+| Default context   | Auto-sized                      | 2,048 per slot                   |
+| Models            | Catalog and hot switching       | Startup model only               |
+| Browser chat      | Included                        | Unavailable                      |
+| Prefix reuse      | Eligible Vulkan models          | Unavailable                      |
+| Chat stop strings | Applied                         | Ignored                          |
+| Health details    | Model, queue, uptime and memory | Status, backend and context      |
 
 Both chat APIs accept `max_completion_tokens` and `max_tokens`; tools depend on
 the model template. Vulkan/Metal default to 256 output tokens. ROCm/CUDA default
 to the CLI `-n` value (256 unless overridden), and `-c 0` still means a
 2,048-token context per slot. ROCm/CUDA's `model` field does not switch the
 startup model, and its model discovery lists that loaded model rather than the
-catalog. Native health returns 503 after GPU execution failure.
+catalog. Native health returns 503 after GPU execution failure. On ROCm/CUDA, a zero output
+limit uses the remaining context budget; send a positive limit for bounded
+portable requests.
 
 ROCm setup, runtime dependencies and optional KV/MTP controls are documented in
 the [ROCm guide](ROCM.md). Vulkan and ROCm use independent device lists, driver
