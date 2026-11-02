@@ -126,6 +126,9 @@ from prompts beyond its pinned sliding window, through both CLI and HTTP.
 The report records measured token bounds and reference agreement. A missing
 mask is invisible to the short continuations; missing, unexercised or failed
 window evidence blocks aggregation. See the [Vulkan correction](VULKAN_GEMMA_SLIDING_WINDOW.md).
+Readiness with `exercise_models=true` also preserves the pinned window and
+runs these extended checks. Historical readiness reports without that evidence
+establish only their recorded short-prompt results.
 
 Reports also inventory the reference's ggml/llama libraries. Their hashes and
 both executable hashes must remain unchanged from the version probe through

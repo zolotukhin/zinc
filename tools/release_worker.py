@@ -124,7 +124,12 @@ def model_pins(profile, config):
         path = Path(config["models"][identifier]).expanduser().resolve()
         require(path.is_file() and path.stat().st_size == expected["size_bytes"] and sha256(path) == expected["sha256"],
                 "model pin differs: " + identifier)
-        result.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"]})
+        model = {"id": identifier, "sha256": expected["sha256"], "context": expected["context"]}
+        # The execution loop uses this boundary to require extended CLI/HTTP
+        # references. Dropping it here would silently turn Gemma into a short-only check.
+        if expected.get("sliding_window"):
+            model["sliding_window"] = expected["sliding_window"]
+        result.append(model)
     return result
 
 
