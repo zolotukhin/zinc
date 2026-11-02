@@ -122,6 +122,13 @@ retain their raw speeds and dates but cannot produce a ratio. The README
 chart applies the same guard. Historical MTP-on/off comparisons are not
 relabeled as matched measurements.
 
+Gemma's [Vulkan revalidation protocol](VULKAN_GEMMA_SLIDING_WINDOW.md#repeating-the-benchmark-after-a-correctness-fix)
+runs the numerical, tokenizer, complete continuation and recovery gates before
+the repeated server comparisons. Its [fresh AMD and Intel results](VULKAN_GEMMA_SLIDING_WINDOW.md#fresh-vulkan-measurements)
+record the performance baseline and correctness oracle separately. Publication
+replaces only a passing model's rows and preserves its complete old record and
+caution in measurement history.
+
 ### Controlled 27B campaign
 
 [`tools/benchmark_matched_mtp.py`](../tools/benchmark_matched_mtp.py) uses the

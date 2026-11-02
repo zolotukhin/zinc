@@ -188,6 +188,8 @@ The reference is pinned too: llama.cpp commit `5f436dddb`, using its native Vulk
 
 This still leaves actual coding tasks as a separate gate. A server can pass inference and API tests while a coding client fails to edit a workspace correctly. Our [OpenCode validation notes](/zinc/docs/opencode-release-validation/) track that distinction. The Intel diagnostic here is not a claim that those coding tasks passed on this executable.
 
+**November 2 follow-up:** [Fresh default-path benchmarks](/zinc/docs/vulkan-gemma-sliding-window/#fresh-vulkan-measurements) now cover both Gemmas on Intel and AMD. Each model/GPU pair passed 376 numerical cases, 96 exact CLI token choices and eighteen complete HTTP continuations before its repeated server comparison with current llama.cpp. The report includes the cost of Intel's conservative prefill, full source and binary identities, and every timing sample. Qualification of the complete release archive remains the separate gate described above.
+
 ## Trying the Intel Vulkan path
 
 The [ZINC repository](https://github.com/zolotukhin/zinc) contains the current source and setup instructions. On a Linux machine with the card and a working Intel Vulkan driver, the source-build entry point is:

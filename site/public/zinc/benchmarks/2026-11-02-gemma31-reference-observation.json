@@ -1,0 +1,252 @@
+{
+  "schema": "zinc-gemma-reference-observation-v1",
+  "observed_at": "2026-11-02T16:35:24.887958+00:00",
+  "scope": "Diagnostic continuation; not a throughput measurement or release qualification.",
+  "release_qualification": false,
+  "model": {
+    "id": "gemma4-31b-q4k-m",
+    "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "size_bytes": 18323733440,
+    "sliding_window": 1024
+  },
+  "zinc": {
+    "commit": "0e1f84bbb4aafa86d97f2eeb05cf7bd3714f56dc",
+    "sha256": "c7f1ec54205a105b4ce8238c8dbdb0c2509cd5dbd27707947983ecbb8db1aced",
+    "version": "zinc 0.1.0-dev\ncommit: 0e1f84bbb4aafa86d97f2eeb05cf7bd3714f56dc\ntarget: x86_64-linux-gnu\noptimize: fast\nbackends: vulkan"
+  },
+  "harness": {
+    "commit": "c5138c6a5d62dd796e27eb03cbeb20d136b7255a",
+    "sha256": {
+      "config/benchmark-reference.json": "d4b52879787961678b59f92a858ed3d9b04c42e6f90c0205a25ae875850aaef0",
+      "config/release/targets.json": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+      "tools/benchmark_gemma_rocm.py": "e6229445eba5eebe30d6966f68615f656b70d6b682bab38ba274531ce65550d1",
+      "tools/benchmark_matched_mtp.py": "1bf4be63efda8b3f2a24df03cf136f3ceff71c4b5a40250c33c1deba09ea53e8",
+      "tools/benchmark_reference.mjs": "505c7df26b73146d77667ca18018420e325cdc33a9c4b83bc74fd85bfbec8f8b",
+      "tools/benchmark_speculation.mjs": "b6b0a457ed5af218d411760ca600eae73e8ab495183d7f5023696bc0dc9fb751",
+      "tools/gemma_rocm_workloads.mjs": "bf98e1551bbcbb612066dba16bb41b4199c454ba69b92a14fe7cd6e34f64f476",
+      "tools/parse_mtp_sample.mjs": "615644b3e61ca5be57590a9e430222e1959d42710874c8e807d4cd8840b925b6",
+      "tools/performance_suite.mjs": "ee7a659c4bb264a0fdedadef13079c50d5b27c64998752d5a8ba38ed07105f75",
+      "tools/release_gpu.py": "936eec1c7be88356c1ee012d2d9dce8c8fa5ce005daa28efc888523224a9ca3e",
+      "tools/release_lib.py": "fbfd432c6932278d1573094e00ac1be7828d3e0fdd69894ca7ae11909ee40919"
+    }
+  },
+  "performance_reference": {
+    "commit": "1b6935b227b9f9aa89deea8016c0e208f547446f",
+    "library_sha256": {
+      "libggml-base.so": "feb1e1bcd5467d0d5dc9c7463fd67b5a678916def777f56711dd42dc98dfbfca",
+      "libggml-base.so.0": "feb1e1bcd5467d0d5dc9c7463fd67b5a678916def777f56711dd42dc98dfbfca",
+      "libggml-base.so.0.28.0": "feb1e1bcd5467d0d5dc9c7463fd67b5a678916def777f56711dd42dc98dfbfca",
+      "libggml-cpu.so": "56f1719f276e13e527e58973f99bbcbe9dcbfb68e80a7316c0c9fe42c8145ed6",
+      "libggml-cpu.so.0": "56f1719f276e13e527e58973f99bbcbe9dcbfb68e80a7316c0c9fe42c8145ed6",
+      "libggml-cpu.so.0.28.0": "56f1719f276e13e527e58973f99bbcbe9dcbfb68e80a7316c0c9fe42c8145ed6",
+      "libggml-vulkan.so": "f9e948c8066234fcce8a3c864e57bb17366bd5379a315bfea9d679e1792e4974",
+      "libggml-vulkan.so.0": "f9e948c8066234fcce8a3c864e57bb17366bd5379a315bfea9d679e1792e4974",
+      "libggml-vulkan.so.0.28.0": "f9e948c8066234fcce8a3c864e57bb17366bd5379a315bfea9d679e1792e4974",
+      "libggml.so": "24a6cb17f3428363dad87c2303d890882a4dbe33996bc1639bec3651231bc241",
+      "libggml.so.0": "24a6cb17f3428363dad87c2303d890882a4dbe33996bc1639bec3651231bc241",
+      "libggml.so.0.28.0": "24a6cb17f3428363dad87c2303d890882a4dbe33996bc1639bec3651231bc241",
+      "libllama-common.so": "2ea8eb02eae23311689797fdcf9abc98e649835ad13c4543cc4bc87d950a9643",
+      "libllama-common.so.0": "2ea8eb02eae23311689797fdcf9abc98e649835ad13c4543cc4bc87d950a9643",
+      "libllama-common.so.0.8.0": "2ea8eb02eae23311689797fdcf9abc98e649835ad13c4543cc4bc87d950a9643",
+      "libllama-server-impl.so": "a08ef8a433db126132b0d68c8e9ba72d27401df26553c80ed8ba081be3467030",
+      "libllama.so": "caa1a10aa5c226f62b237ebeba7f306a09731a5507a6c7994803e0b3e58037f1",
+      "libllama.so.0": "caa1a10aa5c226f62b237ebeba7f306a09731a5507a6c7994803e0b3e58037f1",
+      "libllama.so.0.8.0": "caa1a10aa5c226f62b237ebeba7f306a09731a5507a6c7994803e0b3e58037f1"
+    },
+    "server_sha256": "0adfc1bbe291d9be1b35d726aa4b959aee5390c27804e2597d3d1e41b4acd54a",
+    "tokenizer_sha256": "7ba375b7313a4a430569d97a9aba86e9054868a45fbfbfe97a8b56539b7d9bf7",
+    "version": "version: 0.8.0-dev (build 1, commit 1b6935b22)\nbuilt with GNU 13.3.0 for Linux x86_64"
+  },
+  "release_reference": {
+    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "server_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+    "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f",
+    "library_sha256": {
+      "libggml-base.so": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0.10.0": "de19eedc75d0312bb25912e6500b2fc61ece0ddb48dbe9fd900ddce0b85fa179",
+      "libggml-base.so.0.22.0": "5796632ef4ce1bd6414b30ed20c94dd34f7c94d7c4edd219e15e1cb979d6ffbc",
+      "libggml-base.so.0.23.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0.9.8": "b8edbe62608913eb9203f54a8fc3c8ee96945bdfa0d5f18bf75aa23dcc934093",
+      "libggml-cpu.so": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0.10.0": "ef16531bd77e10c08b99af1f180021d8b623972371eeedaa7a694486138f5d47",
+      "libggml-cpu.so.0.22.0": "8f76576286f65f4fba8c16b8d68f6b9cbf720d68473a9f0f30cad613b5507456",
+      "libggml-cpu.so.0.23.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0.9.8": "50640c9a721a7d9a67345f48dcb567fffd3212f134c2613ff124d5260cda1282",
+      "libggml-vulkan.so": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0.10.0": "4d6a4b3d4a1be8e3654405d0f429a5573f549e99f88673fd4aa695123ee2da17",
+      "libggml-vulkan.so.0.22.0": "64faf40dd390eb9ca62b5774218792023d80ccc7bb90ea4a88d7ad265de961ea",
+      "libggml-vulkan.so.0.23.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0.9.8": "7aaf2ebb2431b9f23cd32c2ffd9146799bc8c8b923c1a5f2147ed65c94b77919",
+      "libggml.so": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0.10.0": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+      "libggml.so.0.22.0": "1d2656f21fe48a0403cc2ebafd6728fe801cf1617d555738da9156e285dd4704",
+      "libggml.so.0.23.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0.9.8": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+      "libllama-common.so.0": "a9cee6058c9f29b6c7f8a18a1a62572c8482a4abc81e035c748d164d0e3c47dd",
+      "libllama-server-impl.so": "fc220891606241e87e51e745517e51dd9daeb6a69aac0eff4cedc714cd617ddd",
+      "libllama.so": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+      "libllama.so.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+      "libllama.so.0.0.50": "05bc7e842899f4fbaaa5834c3f315bdcda2a97a60298011bad35a52d2f9fbec2",
+      "libllama.so.0.0.513": "c825c8c348bf35c3464c286ce6112eddea12c3413e880a847e772b9ba883e6b1",
+      "libllama.so.0.3.0": "fdd8a86155128852a233c8705970da263cbaf153ebc45f70bb9e359b3e5f3993",
+      "libllama.so.0.4.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191"
+    }
+  },
+  "generation": {
+    "batch_size": 512,
+    "micro_batch": 1,
+    "parallel": 1,
+    "kv_cache": "f32",
+    "flash_attention": false
+  },
+  "zinc_settings": {
+    "backend": "vulkan",
+    "context": 4096,
+    "slots": 1,
+    "kv_cache": "f16",
+    "mtp": "off",
+    "prefill": "backend-default",
+    "prompt_cache": false
+  },
+  "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: List three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+  "zinc_ids": [
+    19765,
+    6178,
+    529,
+    14561,
+    659,
+    236787,
+    108,
+    236770,
+    236761,
+    5213,
+    109454,
+    35615,
+    1018,
+    568,
+    26303,
+    531
+  ],
+  "performance_reference_ids": [
+    19765,
+    6178,
+    529,
+    14561,
+    659,
+    236787,
+    108,
+    236770,
+    236761,
+    5213,
+    109454,
+    80288,
+    53121,
+    18800,
+    531,
+    1061
+  ],
+  "release_reference_ids": [
+    19765,
+    6178,
+    529,
+    14561,
+    659,
+    236787,
+    108,
+    236770,
+    236761,
+    5213,
+    109454,
+    35615,
+    1018,
+    568,
+    26303,
+    531
+  ],
+  "performance_reference_top_logprobs": [
+    {
+      "bytes": [
+        32,
+        87,
+        105,
+        114,
+        105,
+        110,
+        103
+      ],
+      "id": 80288,
+      "logprob": -0.6262747645378113,
+      "token": " Wiring"
+    },
+    {
+      "bytes": [
+        32,
+        119,
+        105,
+        114,
+        105,
+        110,
+        103
+      ],
+      "id": 35615,
+      "logprob": -0.7648265361785889,
+      "token": " wiring"
+    }
+  ],
+  "release_reference_top_logprobs": [
+    {
+      "id": 35615,
+      "token": " wiring",
+      "bytes": [
+        32,
+        119,
+        105,
+        114,
+        105,
+        110,
+        103
+      ],
+      "logprob": -0.468106746673584
+    },
+    {
+      "id": 80288,
+      "token": " Wiring",
+      "bytes": [
+        32,
+        87,
+        105,
+        114,
+        105,
+        110,
+        103
+      ],
+      "logprob": -0.9840139746665955
+    }
+  ],
+  "observation": "ZINC matches the complete pinned-release-reference continuation. The current performance reference chooses different capitalization at generated token 12 under the same recorded oracle settings. The performance and correctness references have separate pins.",
+  "hardware": {
+    "driver": "1.4.305 / radv / Mesa 25.0.7-0ubuntu0.24.04.2",
+    "gpu": "AMD Radeon AI PRO R9700 (RADV GFX1201)",
+    "os": "Linux 7.2.2-070202-generic"
+  },
+  "first_difference": {
+    "zero_based_index": 11,
+    "generated_token_number": 12
+  },
+  "first_attempt": {
+    "passed": false,
+    "error": "reference choice exceeds near-tie policy",
+    "performance_requests": 0
+  },
+  "agreement_policy": {
+    "cases": 3,
+    "tokens_per_case": 16,
+    "min_exact_fraction": 0.975,
+    "max_logprob_gap": 0.05,
+    "max_near_ties_per_case": 1
+  }
+}

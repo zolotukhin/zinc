@@ -302,14 +302,28 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
       {
         ...target,
         generated_at: report.completed_at,
+        ...(report.hardware
+          ? {
+              machine: {
+                ...target.machine,
+                gpu: report.hardware.gpu,
+                os: report.hardware.os,
+                driver: report.hardware.driver,
+              },
+            }
+          : {}),
         provenance,
         source: 'tools/benchmark_gemma_rocm.py',
         methodology: {
           ...target.methodology,
-          runner: 'Persistent server vs persistent server; model-specific recorded runners',
+          runner: 'Model-specific recorded protocols',
           notes: [
             ...new Set([
-              ...target.methodology.notes,
+              ...target.methodology.notes.map((note) =>
+                /^(ZINC path|Baseline path):/.test(note)
+                  ? `Earlier records: ${note}`
+                  : note.replace(/\bUbuntu host\b/g, 'Linux host'),
+              ),
               `${previous.label ?? modelId} was revalidated with ${report.settings.backend} defaults, six complete CLI reference continuations and eighteen HTTP/recovery continuations. Its new off/off measurements use nine measured requests per workload and engine.`,
             ]),
           ],
@@ -317,6 +331,8 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
         models: [
           {
             ...previous,
+            ...(report.hardware ? { hardware: report.hardware } : {}),
+            benchmark_protocol: 'persistent-server',
             scenarios,
             provenance,
             generated_at: report.completed_at,

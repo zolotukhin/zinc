@@ -157,6 +157,9 @@ The chart is generated from
 llama.cpp, including the output controls that still need investigation.
 The [fresh Gemma MoE measurements](docs/ROCM_GEMMA_MOE_PREFILL.md#fresh-r9700-measurements)
 include its checked serial prefill path and the resulting performance cost.
+The [fresh Vulkan Gemma measurements](docs/VULKAN_GEMMA_SLIDING_WINDOW.md#fresh-vulkan-measurements)
+cover both Gemmas on AMD and Intel, with full reference/recovery checks and
+matched MTP-off server comparisons against the latest pre-campaign llama.cpp.
 The earlier [Zig 0.17 MTP optimization study](docs/ROCM_MTP_0_17.md) records a
 separate comparison between two ZINC builds.
 

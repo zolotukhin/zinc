@@ -253,6 +253,8 @@ test('Vulkan replacements retire only their own model and hardware cautions', ()
   ).toBe(true);
   const target = result.targets.find((t: any) => t.id === 'rdna');
   const dense = target.models.find((m: any) => m.id === 'gemma4-31b-q4k-m');
+  expect(dense.hardware).toEqual(vulkanFixture().hardware);
+  expect(target.machine.os).toBe(vulkanFixture().hardware.os);
   expect(dense.correctness_review).toBeNull();
   expect(dense.server_kv_cache).toEqual({ zinc: 'f16', llama_cpp: 'f16' });
   expect(dense.measurement_history[0].correctness_review.tone).toBe('caution');
@@ -260,6 +262,34 @@ test('Vulkan replacements retire only their own model and hardware cautions', ()
   expect(
     overallRatio(rowsFor(target, 'core', 'off').find((row: any) => row.model.id === dense.id)!),
   ).not.toBeNull();
+});
+
+test('sequential replacements retain inherited old dates and sources in the second archive', () => {
+  const legacySource = { llama_cpp: { commit: '1234567', source_unavailable: true } };
+  const original = {
+    id: 'gemma4-31b-q4k-m',
+    label: 'Dense Gemma',
+    correctness_review: { tone: 'caution', note: 'Old sliding-window implementation.' },
+    scenarios: [],
+  };
+  const existing: any = {
+    targets: [
+      {
+        id: 'intel',
+        generated_at: '2026-07-08T03:45:07.447Z',
+        provenance: legacySource,
+        methodology: { notes: [] },
+        models: [{ ...original, id: gemmaModelId }, original],
+      },
+    ],
+  };
+  const first = mergeGemmaReport(existing, vulkanFixture(gemmaModelId, 'intel'), '/moe.json');
+  const result = mergeGemmaReport(first, vulkanFixture(original.id, 'intel'), '/dense.json');
+  const archived = result.targets[0].models.find((m: any) => m.id === original.id)
+    .measurement_history[0];
+  expect(archived).toMatchObject(original);
+  expect(archived.generated_at).toBe(existing.targets[0].generated_at);
+  expect(archived.provenance).toEqual(legacySource);
 });
 
 const failures: [string, (report: any) => void][] = [

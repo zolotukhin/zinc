@@ -128,8 +128,44 @@ test('a later correctness finding excludes every variant while preserving record
   }
   // Only validated replacement measurements can retire a historical caution.
   expect(reviewedModels).toBe(data.correctness_review.affected_model_rows);
-  expect(reviewedModels).toBeGreaterThan(0);
+  expect(data.correctness_review.initial_affected_model_rows).toBeGreaterThan(0);
   expect(JSON.stringify(data)).toBe(before);
+});
+
+test('a model review excludes both MTP variants even when published revalidations are complete', () => {
+  const model = {
+    id: 'reviewed',
+    label: 'Reviewed model',
+    scenarios: [
+      {
+        ...row(
+          {
+            ...engine(1000),
+            speculative_decoding: { enabled: true },
+            prefill_timing_scope: 'target-and-draft-prefill',
+          },
+          {
+            ...engine(500),
+            speculative_decoding: { enabled: true },
+            prefill_timing_scope: 'target-and-draft-prefill',
+          },
+        ),
+        id: 'core',
+        variants: { mtp_off: row(engine(2000), engine(1000)) },
+      },
+    ],
+  };
+  const flagged = {
+    ...model,
+    correctness_review: { tone: 'caution', note: 'Failed reference continuation.' },
+  };
+  for (const mode of ['off', 'on'] as const) {
+    expect(overallRatio(rowsFor({ models: [model] }, 'core', mode)[0])).not.toBeNull();
+    const selected = rowsFor({ models: [flagged] }, 'core', mode)[0];
+    expect(qualityStatus(selected).tone).toBe('caution');
+    expect(overallRatio(selected)).toBeNull();
+    expect(aggregate([selected]).comparable).toBe(0);
+  }
 });
 
 test('unavailable measurements retain their correctness note and investigation link', () => {
@@ -191,6 +227,48 @@ test('published ROCm Gemma uses the complete passing replacement and archives it
     expect(row.baseline.decode_tps.samples).toHaveLength(9);
   }
 });
+
+for (const targetId of ['rdna', 'intel']) {
+  for (const modelId of ['gemma4-26b-a4b-q4k-m', 'gemma4-31b-q4k-m']) {
+    test(`published Vulkan ${targetId} ${modelId} is backed by a fresh complete campaign`, () => {
+      const target = data.targets.find((target) => target.id === targetId)!;
+      const model = target.models.find((model) => model.id === modelId) as any;
+      const report = JSON.parse(
+        readFileSync(
+          new URL('../../public' + model.revalidation_evidence.url, import.meta.url),
+          'utf8',
+        ),
+      );
+      expect(report.passed).toBe(true);
+      expect(report.target).toBe(targetId);
+      expect(report.model.id).toBe(modelId);
+      expect(report.kernel_reference).toEqual({ passed: true, cases: 376 });
+      expect(report.samples).toHaveLength(96);
+      expect(report.correctness.reference_agreement.exact_tokens).toBe(96);
+      expect(report.correctness.tokenizer_cases).toBe(12);
+      expect(report.correctness.http_full_continuations).toBe(18);
+      expect(model.generated_at).toBe(report.completed_at);
+      expect(model.provenance.zinc.sha256).toBe(report.zinc.sha256);
+      expect(model.provenance.llama_cpp.sha256).toBe(report.reference.server_sha256);
+      expect(model.revalidation_evidence.correctness_reference.commit).toBe(report.oracle.commit);
+      expect(model.server_kv_cache).toEqual({ zinc: 'f16', llama_cpp: 'f16' });
+      expect(model.correctness_review).toBeNull();
+      expect(
+        model.measurement_history.some(
+          (record: any) => record.correctness_review?.tone === 'caution',
+        ),
+      ).toBe(true);
+      for (const scenario of scenarioOrder) {
+        const row = rowsFor(target, scenario, 'off').find((row) => row.model.id === model.id)!;
+        expect(qualityStatus(row).tone).not.toBe('caution');
+        expect(overallRatio(row)).not.toBeNull();
+        expect(rateRatio(row, 'prefill_tps')).not.toBeNull();
+        expect(row.zinc.decode_tps.samples).toHaveLength(9);
+        expect(row.baseline.decode_tps.samples).toHaveLength(9);
+      }
+    });
+  }
+}
 
 test('MTP off never silently displays an unpaired speculative measurement', () => {
   const target = {

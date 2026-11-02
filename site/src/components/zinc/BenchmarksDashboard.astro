@@ -122,8 +122,9 @@ const jsonLd = {
       const scenarioIds = scenarioOrder.filter((id) => target.models.some((model) => scenarios(model).some((scenario) => scenario.id === id)));
       const supportsMtp = hasMtpVariants(target);
       const modes = supportsMtp ? ['off', 'on'] as const : ['off'] as const;
+      const modelSpecific = /model-specific/i.test(methodology.runner ?? '');
       const historicalCli = /ZINC CLI/i.test(methodology.runner ?? '');
-      const protocol = historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : /no CLI fallback/i.test(methodology.runner ?? '') ? 'Persistent server protocol (27B refresh)' : /server/i.test(methodology.runner ?? '') ? 'Server protocol (CLI fallback allowed)' : 'Protocol not recorded';
+      const protocol = modelSpecific ? 'Protocols recorded per model' : historicalCli ? 'ZINC CLI vs llama.cpp (historical)' : /no CLI fallback/i.test(methodology.runner ?? '') ? 'Persistent server protocol (27B refresh)' : /server/i.test(methodology.runner ?? '') ? 'Server protocol (CLI fallback allowed)' : 'Protocol not recorded';
       return (
         <section id={target.id} class="target-panel" role="tabpanel" aria-labelledby={`tab-${target.id}`}
           tabindex="0" data-bench-target-panel={target.id} data-default-scenario={scenarioIds[0]}>
@@ -133,7 +134,7 @@ const jsonLd = {
               <h2>{machine.gpu ?? 'GPU not recorded'}</h2>
               <p class="hardware">{machine.memory ?? 'Memory not recorded'} · {machine.os ?? 'OS not recorded'}</p>
               <p class="backend-comparison"><strong>ZINC: {methodology.zinc_backend?.replace(/\bROCM\b/g, 'ROCm') ?? 'Not recorded'}</strong><span aria-hidden="true">/</span><strong>llama.cpp: {methodology.llama_backend ?? 'Not recorded'}</strong></p>
-              <p class="run-meta"><time datetime={target.generated_at}>{formatDate(target.generated_at)}</time> · {protocol} · {measuredRuns(methodology)} measured · {methodology.warmup_runs ?? 'Not recorded'} warmup</p>
+              <p class="run-meta"><time datetime={target.generated_at}>{formatDate(target.generated_at)}</time> · {protocol}{!modelSpecific && <> · {measuredRuns(methodology)} measured · {methodology.warmup_runs ?? 'Not recorded'} warmup</>}</p>
             </div>
             <button type="button" class="share-button" data-bench-share>Copy link to this view</button>
           </header>
@@ -146,7 +147,7 @@ const jsonLd = {
               <dl class="config-grid">
                 <div><dt>ZINC backend</dt><dd>{methodology.zinc_backend?.replace(/\bROCM\b/g, 'ROCm') ?? 'Not recorded'}</dd></div>
                 <div><dt>llama.cpp backend</dt><dd>{methodology.llama_backend ?? 'Not recorded'}</dd></div>
-                <div><dt>Recorded llama.cpp device</dt><dd><code>{methodology.llama_device ?? 'Not recorded'}</code></dd></div>
+                {!modelSpecific && <div><dt>Recorded llama.cpp device</dt><dd><code>{methodology.llama_device ?? 'Not recorded'}</code></dd></div>}
                 <div><dt>Protocol</dt><dd>{methodology.runner ?? 'Not recorded'}</dd></div>
                 <div><dt>ZINC commit</dt><dd><CommitReference project="zinc" provenance={provenance.zinc} /></dd></div>
                 <div><dt>llama.cpp commit</dt><dd><CommitReference project="llama.cpp" provenance={provenance.llama_cpp} />{provenance.llama_cpp?.version && <small>Version {provenance.llama_cpp.version}</small>}</dd></div>
@@ -249,7 +250,7 @@ const jsonLd = {
                               <h5>Recorded user prompt</h5><pre class="prompt" tabindex="0" role="region" aria-label="Recorded user prompt"><code>{row.prompt ?? 'Not recorded'}</code></pre>
                               <p class="config-note">Chat mode also applies the engine’s chat template and harness system message. <a href={sourceUrl(harnessProvenance?.commit ?? zincProvenance?.commit, harnessProvenance?.path ?? 'tools/performance_suite.mjs')}>{zincProvenance?.commit ? 'Read the runner at this revision' : 'Read the current runner (historical revision not recorded)'}</a> for the full request, flags, and warmup policy. Token counts allow a one-token BOS accounting difference.</p>
                               {row.model.matched_mtp_evidence?.url && <p class="config-note"><a href={row.model.matched_mtp_evidence.url}>Download the complete matched MTP campaign</a>, including output controls and binary/library hashes.</p>}
-                              {row.model.revalidation_evidence?.url && <p class="config-note">{row.model.revalidation_evidence.prefill === 'serial' ? 'Default serial prefill.' : 'Default Vulkan prefill.'} <a href={row.model.revalidation_evidence.url}>Reference checks and all benchmark samples</a>: {row.model.revalidation_evidence.exact_cli_tokens} exact CLI token choices and {row.model.revalidation_evidence.http_full_continuations} complete HTTP continuations, including request recovery.</p>}
+                              {row.model.revalidation_evidence?.url && <p class="config-note">{row.model.benchmark_protocol === 'persistent-server' && <>Persistent server vs persistent server. </>}{row.model.revalidation_evidence.prefill === 'serial' ? 'Default serial prefill.' : 'Default Vulkan prefill.'} {row.model.server_kv_cache?.zinc && <>Both engines use {row.model.server_kv_cache.zinc.toUpperCase()} K/V. </>}<a href={row.model.revalidation_evidence.url}>Reference checks and all benchmark samples</a>: {row.model.revalidation_evidence.exact_cli_tokens} exact CLI token choices and {row.model.revalidation_evidence.http_full_continuations} complete HTTP continuations, including request recovery. {row.model.revalidation_evidence.correctness_reference?.commit && <>Correctness reference: <a href={`https://github.com/ggml-org/llama.cpp/commit/${row.model.revalidation_evidence.correctness_reference.commit}`}>{row.model.revalidation_evidence.correctness_reference.commit.slice(0, 12)}</a>.</>}</p>}
                               <details class="preview"><summary>Captured ZINC output preview</summary><pre tabindex="0" role="region" aria-label="Captured ZINC output preview"><code>{row.zinc?.output_preview ?? 'Not recorded'}</code></pre></details>
                             </div>
                           </details>
