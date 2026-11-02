@@ -233,6 +233,10 @@ def policy(path=None):
         source_sha(model["revision"])
         require(DIGEST.fullmatch(model["sha256"]) and model["size_bytes"] > 0 and model["context"] >= 2048,
                 "model policy requires pinned bytes and a context limit")
+        window = model.get("sliding_window")
+        require((window is None and not model["id"].startswith("gemma4-")) or
+                (type(window) is int and 0 < window and window + 256 <= model["context"]),
+                "Gemma policy requires a sliding-window boundary reference")
     require(all(p.get("models") and set(p["models"]).issubset(model_ids) and len(set(p["models"])) == len(p["models"]) for p in profiles),
             "GPU profile is missing its required model matrix")
     source_sha(data["reference"]["commit"])

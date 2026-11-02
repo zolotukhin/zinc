@@ -42,6 +42,7 @@ layout(push_constant) uniform PushConstants {
     uint n_chunks;        // split-K chunks this dispatch runs (1 = write final output)
     uint q_offset_v4;     // vec4 offset of this query's row block in q_data (batched callers)
     uint o_offset_v4;     // vec4 offset of this query's row block in o_data (batched callers)
+    uint sliding_window_size; // 0 = global; includes the current query token
 };
 
 // Buffer bindings. Q, K, V, and Output are aliased as vec4 so the inner
@@ -118,14 +119,17 @@ void main() {
     // the spec-const branch and this collapses to [0, seq_len) — bit-equivalent
     // to the pre-split path. With n_chunks > 1 each chunk takes a contiguous
     // slice; the last chunk picks up any non-divisible tail.
+    const uint window_start = sliding_window_size > 0u && seq_len > sliding_window_size
+        ? seq_len - sliding_window_size : 0u;
+    const uint visible_len = seq_len - window_start;
     uint i_start;
     uint i_end;
     if (n_chunks == 1u) {
-        i_start = 0u;
+        i_start = window_start;
         i_end = seq_len;
     } else {
-        i_start = (chunk_id * seq_len) / n_chunks;
-        i_end = (chunk_id + 1u == n_chunks) ? seq_len : (((chunk_id + 1u) * seq_len) / n_chunks);
+        i_start = window_start + (chunk_id * visible_len) / n_chunks;
+        i_end = window_start + ((chunk_id + 1u) * visible_len) / n_chunks;
     }
 
     // --- Load query vector into registers ---

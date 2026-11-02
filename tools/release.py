@@ -317,6 +317,14 @@ def aggregate(args):
             require(model.get("sha256") == expected["sha256"] and model.get("context") == expected["context"] and model.get("passed") is True,
                     "model digest/context differs from policy")
             verify_reference_agreement(model.get("reference_agreement"))
+            if expected.get("sliding_window"):
+                sliding = model.get("sliding_window_reference") or {}
+                require(sliding.get("passed") is True and sliding.get("http_passed") is True and sliding.get("context") == expected["context"] and
+                        type(sliding.get("window_tokens")) is int and sliding["window_tokens"] == expected["sliding_window"] and
+                        type(sliding.get("minimum_prompt_tokens")) is int and type(sliding.get("maximum_prompt_tokens")) is int and
+                        expected["sliding_window"] < sliding["minimum_prompt_tokens"] <= sliding["maximum_prompt_tokens"] <= expected["context"] - policy()["reference"]["agreement"]["tokens_per_case"],
+                        "missing or unexercised sliding-window reference evidence")
+                verify_reference_agreement(sliding.get("reference_agreement"))
             if spec["target"].endswith("vulkan") and model["id"] == "qwen36-35b-a3b-q4k-xl":
                 prefill = model.get("prefill_cancellation") or {}
                 require(prefill.get("passed") is True and type(prefill.get("recovery_ms")) is int and

@@ -58,6 +58,22 @@ hashes, not qualified release archives. The longer-budget coding sweep is
 separate evidence; a fast recovery probe does not establish coding success.
 The Metal preview retains its existing decode-time cancellation behavior.
 
+## The larger-context Gemma follow-up
+
+Correcting the cache allocation lets Gemma 31B start at 12K and Gemma 26B at
+16K with default F16 KV storage. Short continuations still match 48/48 native
+reference tokens for each model. Actual coding tasks then expose repetitive
+output and no tool calls once their prompts exceed Gemma's 1,024-token window.
+The Vulkan shaders had never received that window and attended to the complete
+prefix in every layer.
+
+The [sliding-window correction](VULKAN_GEMMA_SLIDING_WINDOW.md) adds the missing
+mask and numerical/page-boundary regressions. Extended model references also
+expose a dense-prefill activation approximation; dense Gemma now keeps F32
+activations unless explicitly requested. These checks are distinct from the
+successful allocation fix. Coding qualification requires actual-client runs
+on the corrected build; the failed attempts remain evidence.
+
 ## Regression checks
 
 CPU tests cover keepalive timing, failed writes, latched cancellation and API
