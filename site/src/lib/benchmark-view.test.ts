@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import data from '../data/zinc-performance.json';
 import { buildComparison } from '../../../tools/performance_suite.mjs';
 import {
@@ -160,6 +161,35 @@ test('unavailable measurements retain their correctness note and investigation l
       output_quality: { tone: 'caution', note: 'Repetitive output.' },
     }).tone,
   ).toBe('caution');
+});
+
+test('published ROCm Gemma uses the complete passing replacement and archives its old caution', () => {
+  const target = data.targets.find((target) => target.id === 'rdna-rocm')!;
+  const model = target.models.find((model) => model.id === 'gemma4-26b-a4b-q4k-m') as any;
+  const report = JSON.parse(
+    readFileSync(
+      new URL('../../public' + model.revalidation_evidence.url, import.meta.url),
+      'utf8',
+    ),
+  );
+  expect(report.passed).toBe(true);
+  expect(report.samples).toHaveLength(96);
+  expect(report.correctness.reference_agreement.exact_tokens).toBe(96);
+  expect(report.correctness.http_full_continuations).toBe(18);
+  expect(model.provenance.zinc.sha256).toBe(report.zinc.sha256);
+  expect(model.provenance.llama_cpp.sha256).toBe(report.reference.server_sha256);
+  expect(model.correctness_review).toBeNull();
+  expect(
+    model.measurement_history.some((record: any) => record.correctness_review?.tone === 'caution'),
+  ).toBe(true);
+  for (const scenario of scenarioOrder) {
+    const row = rowsFor(target, scenario, 'off').find((row) => row.model.id === model.id)!;
+    expect(qualityStatus(row).tone).not.toBe('caution');
+    expect(overallRatio(row)).not.toBeNull();
+    expect(rateRatio(row, 'prefill_tps')).not.toBeNull();
+    expect(row.zinc.decode_tps.samples).toHaveLength(9);
+    expect(row.baseline.decode_tps.samples).toHaveLength(9);
+  }
 });
 
 test('MTP off never silently displays an unpaired speculative measurement', () => {

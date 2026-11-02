@@ -27,6 +27,36 @@ three complete short continuations and three continuations beyond Gemma's
 1,024-token window, through CLI and HTTP, followed by request recovery. No
 reference tolerances, prompts or agreement limits were weakened.
 
+## Fresh R9700 measurements
+
+The November 2, 2026 revalidation passes **96/96 exact CLI token choices**,
+all **18 complete HTTP continuations** and twelve tokenizer cases. Extended
+prompts contain 1,136–1,139 tokens. The same continuations still match after
+stream cancellation, a near-capacity request and rejected invalid requests.
+The subsequent benchmark completes all 96 requests: 72 measured and 24 warmups.
+
+The [complete report](/zinc/benchmarks/2026-11-02T05-33-10-gemma-rocm-revalidated.json)
+records the pinned GGUF, native ZINC `34f33b900969`, frozen harness
+`93f431d40d2b`, and llama.cpp `785322d17f2d`, verified as upstream HEAD when
+the campaign began. Both performance engines use ROCm. The separate numerical
+oracle uses Vulkan at that same llama.cpp revision.
+
+| Workload          | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
+| ----------------- | -----------: | ----------------: | ----------: | ---------------: | ------: |
+| Quick chat        |       111.18 |            789.58 |       91.02 |            81.49 |   0.79× |
+| Coding review     |       105.11 |          1,859.01 |       79.09 |            77.23 |   0.55× |
+| Incident context  |        98.04 |          2,539.48 |       72.43 |            75.29 |   0.34× |
+| Long coding draft |       110.27 |            992.45 |       83.55 |            79.45 |   0.87× |
+
+Rates are median tokens per second over nine measured requests per cell.
+Overall is llama.cpp's combined prefill/decode phase time divided by ZINC's;
+higher favors ZINC. The corrected serial path gives up substantial prefill
+speed. ZINC decodes faster in three workloads, while llama.cpp wins combined
+phase time in all four. These measurements replace the unqualified September
+rates on the dashboard and README chart. The complete September record and its
+correctness caution remain in `measurement_history` in the downloadable data.
+The batched opt-in remains unqualified.
+
 ## Revalidate a published measurement
 
 `tools/benchmark_gemma_rocm.py` runs the correctness gate before collecting

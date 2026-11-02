@@ -114,8 +114,8 @@ export function validateGemmaReport(report) {
     'Complete correctness and recovery gates are required',
   );
   requireValue(
-    JSON.stringify(check.generation) === JSON.stringify(policy.reference.generation) &&
-      JSON.stringify(check.agreement_policy) === JSON.stringify(policy.reference.agreement),
+    requestDigest(check.generation) === requestDigest(policy.reference.generation) &&
+      requestDigest(check.agreement_policy) === requestDigest(policy.reference.agreement),
     'Reference policy changed',
   );
   requireValue(check.cases?.length === 6, 'Six full reference cases are required');
@@ -216,7 +216,8 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
   const { measurement_history: history = [], ...old } = previous;
   const sameCampaign =
     previous.generated_at === report.completed_at &&
-    previous.provenance?.zinc?.sha256 === report.zinc.sha256;
+    previous.provenance?.zinc?.sha256 === report.zinc.sha256 &&
+    previous.provenance?.llama_cpp?.sha256 === report.reference.server_sha256;
   const provenance = {
     harness: { commit: report.harness_source_commit, path: 'tools/benchmark_gemma_rocm.py' },
     zinc: {
@@ -311,7 +312,8 @@ if (import.meta.main) {
   const report = JSON.parse(await readFile(file, 'utf8'));
   validateGemmaHarness(report, commit);
   report.harness_source_commit = commit;
-  const name = report.completed_at.slice(0, 10) + '-gemma-rocm-revalidated.json';
+  const name =
+    report.completed_at.slice(0, 19).replaceAll(':', '-') + '-gemma-rocm-revalidated.json';
   const url = '/zinc/benchmarks/' + name;
   const siteFile = 'site/src/data/zinc-performance.json';
   const result = mergeGemmaReport(JSON.parse(await readFile(siteFile, 'utf8')), report, url);

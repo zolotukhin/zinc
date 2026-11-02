@@ -97,6 +97,14 @@ test('Gemma publication requires full reference, recovery and repeated benchmark
   expect(() => validateGemmaReport(fixture())).not.toThrow();
 });
 
+test('Python JSON key ordering does not change the reference policy', () => {
+  const report = fixture();
+  for (const key of ['generation', 'agreement_policy']) {
+    report.correctness[key] = Object.fromEntries(Object.entries(report.correctness[key]).sort());
+  }
+  expect(() => validateGemmaReport(report)).not.toThrow();
+});
+
 const failures: [string, (report: any) => void][] = [
   [
     'old baseline',
