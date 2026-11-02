@@ -13,15 +13,23 @@ models pass the default CLI/HTTP reference gates; API probes pass
 The table reports completed clients with passing independent tests, protected
 files intact, a responsive server and correct post-client native replays.
 
-| Model            | Context | API checks | Successful coding fixtures | Same-server recovery |
-| ---------------- | ------: | ---------: | -------------------------: | -------------------- |
-| Gemma 4 31B      |  12,288 |      29/29 |                        3/3 | 694–739 ms           |
-| Gemma 4 26B-A4B  |  16,384 |      29/29 |                        3/3 | 297–317 ms           |
-| Qwen 3.6 35B-A3B |  16,384 |      29/29 |                        3/3 | 400–410 ms           |
-| Qwen 3.6 27B     |  16,384 |      29/29 |                        3/3 | 390–415 ms           |
-| Qwen 3.5 9B      |  16,384 |      29/29 |                        3/3 | 166–196 ms           |
-| Qwen 3.8 27B     |  16,384 |      29/29 |                        3/3 | 350–362 ms           |
-| Qwen 3 0.6B      |  16,384 |      29/29 |                        0/3 | 158–207 ms           |
+Gemma 31B uses 12,288 context tokens; every other row uses 16,384. Coding
+counts require all acceptance conditions above, including a successful client
+exit.
+
+| Model            |   API | Coding |
+| ---------------- | ----: | -----: |
+| Gemma 4 31B      | 29/29 |    3/3 |
+| Gemma 4 26B-A4B  | 29/29 |    3/3 |
+| Qwen 3.6 35B-A3B | 29/29 |    3/3 |
+| Qwen 3.6 27B     | 29/29 |    3/3 |
+| Qwen 3.5 9B      | 29/29 |    3/3 |
+| Qwen 3.8 27B     | 29/29 |    3/3 |
+| Qwen 3 0.6B      | 29/29 |    0/3 |
+
+All 21 same-server recovery requests pass in **158–739 ms**, and all 63
+post-client HTTP continuations pass their frozen native references. The JSON
+retains individual contexts, timings and fixture outcomes.
 
 The numerical shader suite passes **376/376** cases. The seven short native
 checks and two extended Gemma checks compare **432 choices: 431 exact and
