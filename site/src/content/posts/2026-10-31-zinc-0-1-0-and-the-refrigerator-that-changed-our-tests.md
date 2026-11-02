@@ -96,6 +96,8 @@ We had set the child process's working directory and inherited its parent's `PWD
 
 We retained the old GPU runs with that flawed launch context and started a fresh seven-model Intel matrix on one packaged executable. The engine had real bugs, the client had changed, and our harness could still make a correct model waste its time. Testing all three boundaries matters.
 
+The same investigation showed that every tool turn was sending its growing history without a ZINC session key. We checked the existing reuse path before enabling it automatically: both Gemmas reused more than 1,200 tokens on a tool-history turn and matched full prefill. An intervening request still produced the correct continuation. A hybrid Qwen control returned correct replies but could not restore its checkpoint, so automatic reuse stays off for recurrent models. The [packaged control](/zinc/validation/vulkan-session-reuse-packaged-control-2026-11-02.json) keeps both the successful reuse and the deliberate full-prefill fallback visible.
+
 ## Sometimes the small model finds a server bug
 
 The starter also failed four API checks. It would have been easy to blame a 0.6B model for bad tool arguments. Following the bytes showed three host-side mistakes instead.

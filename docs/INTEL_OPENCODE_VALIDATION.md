@@ -231,6 +231,14 @@ audited and remain unchanged. The corrected GPU rerun retains the old failures
 with their launch context and does not attribute those timeouts to model
 ability alone.
 
+The [packaged session-reuse control](/zinc/validation/vulkan-session-reuse-packaged-control-2026-11-02.json)
+checks the same Vulkan archive on the R9700. Both attention-only Gemmas reuse
+1,211 tokens on a tool-history turn, match full prefill, and retain correct
+output after an intervening request. Hybrid Qwen advertises no automatic
+reuse and uses full prefill. Across these three models, 144/144 short native
+choices and all nine post-control HTTP continuations pass. The earlier hybrid
+checkpoint mismatch remains in a separate retained negative control.
+
 ## Regression checks
 
 CPU tests cover keepalive timing, failed writes, latched cancellation and API
