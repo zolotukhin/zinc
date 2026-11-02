@@ -43,7 +43,7 @@ test('llama comparison launch skips ZINC capability discovery', async () => {
     await writeFile(
       client,
       `#!/usr/bin/env bun
-await Bun.write(new URL('./captured.json', import.meta.url), process.env.OPENCODE_CONFIG_CONTENT);
+await Bun.write(new URL('./captured.json', import.meta.url), JSON.stringify({ config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT), cwd: process.cwd(), pwd: process.env.PWD }));
 console.log(JSON.stringify({ type: 'text', part: { text: 'CPU launch fixture' } }));
 `,
       { mode: 0o755 },
@@ -62,7 +62,10 @@ console.log(JSON.stringify({ type: 'text', part: { text: 'CPU launch fixture' } 
       opts,
       path.join(dir, 'results'),
     );
-    const config = JSON.parse(await readFile(path.join(dir, 'captured.json'), 'utf8'));
+    const captured = JSON.parse(await readFile(path.join(dir, 'captured.json'), 'utf8'));
+    const config = captured.config;
+    expect(captured.pwd).toBe(captured.cwd);
+    expect(captured.cwd).toBe(result.projectDir);
     expect(config.provider.zinc.options.baseURL).toBe(opts.llamaUpstream);
     expect(config.provider.zinc.options.body).not.toHaveProperty('session_id');
     expect(healthRequests).toBe(0);
