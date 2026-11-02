@@ -179,6 +179,7 @@ export function overallRatio(row: BenchmarkRecord): number | null {
 }
 
 export function rateRatio(row: BenchmarkRecord, phase: 'prefill_tps' | 'decode_tps') {
+  if (qualityStatus(row).tone === 'caution') return null;
   const zinc = metric(row.zinc?.[phase]);
   const llama = metric(row.baseline?.[phase]);
   return zinc != null && zinc > 0 && llama != null && llama > 0 ? zinc / llama : null;
@@ -216,6 +217,34 @@ export function barWidth(value: number | null, maximum: number) {
 }
 
 export function qualityStatus(row: BenchmarkRecord) {
+  // A later correctness finding applies to the whole recorded model run,
+  // including every scenario and MTP variant; fluent previews cannot clear it.
+  if (row.model?.correctness_review?.tone === 'caution') return row.model.correctness_review;
   const observed = outputQualityStatus(row.zinc?.output_preview, row.zinc?.generated_tokens);
   return row.output_quality?.tone === 'caution' ? row.output_quality : observed;
+}
+
+export function rowNotes(row: BenchmarkRecord): { text: string; href?: string }[] {
+  const notes: { text: string; href?: string }[] = [];
+  const warning = row.zinc?.unavailable_reason ?? row.baseline?.unavailable_reason;
+  if (warning)
+    notes.push({
+      text: 'A measurement is unavailable. See the published data for the recorded failure.',
+    });
+  const quality = qualityStatus(row);
+  // Missing telemetry must not hide a later correctness review of the same run.
+  if (quality.tone === 'caution')
+    notes.push({
+      text: `${quality.note} Excluded from comparison summaries.`,
+      href: quality.source_url,
+    });
+  else if (!warning && promptParity(row) === false)
+    notes.push({
+      text: 'Different prompt token counts. Per-token rates are indicative; excluded from the overall comparison.',
+    });
+  else if (!warning && overallRatio(row) == null)
+    notes.push({
+      text: 'Output budgets differ, a run stopped early, or phase telemetry is incomplete. Excluded from the overall comparison.',
+    });
+  return notes;
 }

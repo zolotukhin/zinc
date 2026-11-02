@@ -59,7 +59,7 @@ pub const FitState = enum {
 /// Shared GPU profile string used for all Apple Silicon (Metal) devices.
 pub const apple_silicon_profile = "apple-silicon";
 
-/// The complete list of ZINC-validated managed models available for download.
+/// Managed downloads, with per-entry validation status and hardware profiles.
 pub const entries = [_]CatalogEntry{
     .{
         .id = "qwen3-0.6b-q8-0",
@@ -79,6 +79,8 @@ pub const entries = [_]CatalogEntry{
         .thinking_stable = false,
         // Keep experimental until the approved release profiles pass on packaged bytes.
         // ROCm's hybrid forward path does not implement plain Qwen3.
+        // Intel OpenCode checks also expose unreliable typed tool arguments;
+        // inference qualification alone must not turn this into a chat recommendation.
         .status = .experimental,
         .tested_profiles = &.{},
     },
@@ -458,6 +460,13 @@ test "find returns known qwen3.6 entry" {
     try std.testing.expect(!entry.recommended_for_chat);
     try std.testing.expect(entry.thinking_stable);
     try std.testing.expect(entry.status == .supported);
+}
+
+test "qualification starter is not recommended for chat or agent tasks" {
+    const entry = find("qwen3-0.6b-q8-0") orelse return error.TestExpectedEqual;
+    try std.testing.expect(entry.status == .experimental);
+    try std.testing.expect(!entry.recommended_for_chat);
+    try std.testing.expect(!entry.thinking_stable);
 }
 
 test "find returns qwen3.6 27b dense entry" {
