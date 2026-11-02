@@ -8,6 +8,7 @@ tags:
   - rdna4
   - rocm
   - vulkan
+  - intel-arc
   - metal
 keywords:
   - ZINC 0.1.0
@@ -71,6 +72,60 @@ On preview `11519aaa`, Gemma 31B completed those three fixtures at 8K, passing a
 
 That evidence covers those bounded tasks. The [earlier repository trial](/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/) describes getting a feature through review, including tool-output limits and an initial green check that missed two contract violations.
 
+## Intel found the distance between one token and 256
+
+Moving the coding tests to an Intel Arc Pro B70 added another layer: the client itself had changed. OpenCode 2 removed a command-line option, changed plugin registration and started sending `max_completion_tokens`. Our older server understood `max_tokens` and silently ignored the newer spelling.
+
+A request for **one token produced 256**. In a coding session, that default cut off tool arguments before the model had finished writing them. We added both budget spellings to the server, reject conflicting budgets, and exercise actual OpenCode 1.19.4 and 2.0.21 in CPU protocol tests. Those scripted tests establish client compatibility; they do not establish model ability.
+
+The GPU supplied a separate surprise. A 64-thread workgroup is not necessarily one 64-lane subgroup. Gemma's expert router needed a complete workgroup reduction on Intel's smaller subgroups. A numerical test now checks that distinction against the reference instead of trusting a plausible answer.
+
+After those fixes, the first Intel coding trial passed its independent acceptance tests and still failed as a client run. OpenCode timed out while ZINC continued prefill for an abandoned request. The next user could then wait behind work whose caller had already left.
+
+Vulkan prefill now checks request liveness between tokens, chunks and layers. Controlled cancellations on the same Intel server recovered in **417–419 ms**. The subsequent Qwen 3.5, 3.6 and 3.8 trials completed all three core fixtures with the client exiting successfully, protected tests unchanged and a responsive server afterward. Their larger, 15-minute fixture budget remains part of the result.
+
+Gemma exposed another boundary: an 8K window could trigger OpenCode's compaction before the first tool call, and the summary itself could exhaust the remaining output budget. Increasing a timeout cannot create context space. We retain those failures alongside the model-specific context settings in the [Intel investigation](/zinc/docs/intel-opencode-validation/).
+
+Even a correct backend can get stuck at the client boundary. After Gemma's reference and API checks passed, its first OpenCode 2 retry spent 15 minutes trying imports and undiscovered tool names inside Code Mode's restricted JavaScript runtime. The task's tests never improved. We kept that failure and gave the local coding preset direct file and shell tools. The actual-client protocol tests check the advertised tool list, rather than assuming that a configuration field took effect.
+
+That helped, but it did not make every model a reliable coding agent. With the corrected backend and the earlier launcher on Intel, Gemma 31B completed two of three fixtures at the same 15-minute budget; Gemma 26B completed one. The 31B Python task passed its independent tests but timed out before the client finished. We still count it as a failed run. The small starter completed none, and one attempt changed a protected file. The harness rejected it.
+
+Then a longer trial exposed a mistake in our own launcher. The Python task eventually finished after almost half an hour. In its trace, an absolute file edit reached the fixture, but relative shell commands could not find `src` or `test`. The client spent turn after turn searching elsewhere.
+
+We had set the child process's working directory and inherited its parent's `PWD`. OpenCode used the inherited variable to select its workspace. Our earlier scripted protocol tests used absolute file paths, so they had hidden the difference. The new test deliberately supplies the wrong `PWD`, then reads and writes relative files and checks a marker through the shell. Both tested OpenCode versions fail that control before the launcher fix and pass afterward, leaving the other directory's sentinel unchanged.
+
+We retained the old GPU runs with that flawed launch context and started a fresh seven-model Intel matrix on one packaged executable. The engine had real bugs, the client had changed, and our harness could still make a correct model waste its time. Testing all three boundaries matters.
+
+The same investigation showed that every tool turn was sending its growing history without a ZINC session key. We checked the existing reuse path before enabling it automatically: both Gemmas reused more than 1,200 tokens on a tool-history turn and matched full prefill. An intervening request still produced the correct continuation. A hybrid Qwen control returned correct replies but could not restore its checkpoint, so automatic reuse stays off for recurrent models. The [packaged control](/zinc/validation/vulkan-session-reuse-packaged-control-2026-11-02.json) keeps both the successful reuse and the deliberate full-prefill fallback visible.
+
+## Speculation needs a reference too
+
+The fresh package then found another omission. Qwen 3.8 carries a NextN block for multi-token prediction, but it was absent from the earlier six-model Vulkan qualification roles. On Intel, the first six choices of a story matched the reference; the seventh did not. The alternative was outside our near-tie rule.
+
+Changing cache precision did not help. Ordinary decode matched all 48 choices across the three reference prompts. A separate AMD control matched with speculation both on and off, so we kept AMD's passing default and made Intel's speculative verifier an explicit opt-in while it is investigated. Both Vulkan release roles now include this model. The new Intel-default package passes its complete short CLI and HTTP continuations before the coding matrix continues.
+
+## Sometimes the small model finds a server bug
+
+The starter also failed four API checks. It would have been easy to blame a 0.6B model for bad tool arguments. Following the bytes showed three host-side mistakes instead.
+
+For a required single tool, we put the beginning of its call in the prompt so the model only has to continue it. The JSON response parser then inspected only the generated tail. A schema search could pick a nested object's required field instead of the call's outer argument. And the streaming fallback could turn an invalid continuation into an executable empty argument object.
+
+We restored the prefix, parsed the schema structurally and made both transports use the same complete-call parser. Incomplete output stays text. The starter then passed all 29 API checks in a separate GPU control, alongside the 9B comparison. Its failed coding trials remain failed. A small model can expose an engine defect without becoming a model we recommend for repository work.
+
+## The bug that waited until token 1,025
+
+Gemma made the distinction between short answers and coding painfully concrete. We corrected its cache allocation, got the 31B model to start at 12K on Intel, and watched a coding request produce repetitive text without touching a file. All 48 short reference tokens still matched.
+
+Gemma combines sliding attention with global attention. Its sliding layers discard keys at least 1,024 positions behind the query. Our Vulkan path had never passed that window into the attention shaders. Before the boundary, there was nothing for the missing mask to exclude. A short test could therefore pass while the computation was wrong for the source files and tool definitions in a real coding request.
+
+A 9.2K filler prompt made the disagreement easy to see: ZINC repeated “word”; the native reference answered “OK.” We added 256 numerical cases that compare complete attention vectors, including permuted KV pages and batches crossing the window boundary. The old shaders fail that control. Both the Intel and AMD boards pass with the correction.
+
+Then a longer native continuation caught another difference: dense Gemma's extra activation quantization chose “Wiring” where the reference chose “wiring,” outside our near-tie allowance. Keeping F32 activations during batched prefill restored the exact continuation. That approximation now requires an explicit opt-in.
+
+The [window correction](/zinc/docs/vulkan-gemma-sliding-window/) now has numerical tests and complete reference continuations beyond the boundary, through both CLI and HTTP. On the final defaults, the R9700's Vulkan build matches all **384 short and extended CLI token choices exactly** across its six-model regression. Actual OpenCode outcomes remain their own check in the [Intel report](/zinc/docs/intel-opencode-validation/).
+
+Requiring those longer references also caught a ROCm Gemma MoE disagreement that its short answers had missed. Full serial prefill restored the failing continuation, so that became the conservative default while the batched path remains an explicit opt-in. We retained the failed package and checked the new default through all six models, including their HTTP responses and recovery. The old throughput measurements remain visible, with the affected rows excluded from comparison summaries until they are rerun. Correcting the computation changes what a speed comparison means.
+
 ## Eventually we had to test the reference
 
 The reference engine deserves the same scrutiny as ZINC.
@@ -121,9 +176,9 @@ The R9700 now has an isolated non-root worker for both backends, sharing one GPU
 
 As of October 31, the fresh [ROCm worker run](https://github.com/zolotukhin/zinc/actions/runs/41268656993) and [Vulkan worker run](https://github.com/zolotukhin/zinc/actions/runs/41269120680) pass all twelve required model/backend rows on the R9700, using unsigned preview commit `dbbfff54`. Across the two runs, **575 of 576 CLI token choices match exactly**, with one policy-qualified near-tie. The complete API checks pass, including active chat-stream cancellation and recovery, and neither run leaves a GPU process behind.
 
-The main-model checks use 4K context; the small starter uses 2K. All use 32-bit floating-point key/value caches, one slot and each backend's default multi-token prediction setting. Each model has three frozen 16-token continuations, supplemented by the tokenizer, HTTP and boundary checks.
+The main-model checks use 4K context; the small starter uses 2K. They use backend-default key/value caches, one slot and each backend's default multi-token prediction setting. The original report label incorrectly said F32; Vulkan's default is F16, and the reports now describe that policy accurately. Each model has three frozen 16-token continuations, supplemented by the tokenizer, HTTP and boundary checks.
 
-Those are useful results on one board. With the Linux-first launch, the remaining hardware work is the complete Intel matrix and its automated worker, followed by all three Linux profiles on the final candidate. The small starter needs its promotion review, and publication still needs a rehearsal with clean public downloads and installation. The [release readiness plan](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md) tracks those remaining gates.
+Those are useful results on one board. The November 1 Intel follow-up tests all seven catalog models with actual OpenCode over SSH, retaining client failures separately from server recovery and reference correctness. Final-candidate qualification across all three Linux profiles and the isolated Intel worker remain separate release gates. The small starter needs its promotion review, and publication still needs a rehearsal with clean public downloads and installation. The [release readiness plan](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md) tracks those remaining gates.
 
 The refrigerator prompt remains in the tests. So do the long request, the cancelled stream, the failed shorter coding trial and the old reference identity. Keeping those cases gives the next optimization something concrete to answer to.
 

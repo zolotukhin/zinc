@@ -1,0 +1,1919 @@
+{
+  "baseline_shader_archive_sha256": "3d914b42a8ece2b8b3c38b17503a9da62ddf8bb37d3b24c4c52761895140113f",
+  "binary_sha256": "f9a68e89272eef6abf648b2dfeb1ea25f43424caa75d9395176d78f4b310d605",
+  "build_scope": "native prefill cancellation correctness diagnostic",
+  "cleanup": "no GPU process remains",
+  "client_executable_sha256": {
+    "bun": "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235",
+    "opencode": "7e2003e3834c27a8ee9f438b26563c37d97756505e2d507a125d17bdc164fef8"
+  },
+  "client_harness": {
+    "cpu_protocol_passed": true,
+    "manifest_sha256": "51b6b7aa04e3cc56174129bb0e4254306e25fd843aa520b9b589812d5587b5e1",
+    "source": {
+      "base_source": "54c764798e5e3f00f50c19cf6c384ff528b0abc9",
+      "files": {
+        "tools/fixtures/opencode/zinc-cli-args.mjs": "cad991dd85bf47b942f20f2414efb275eb712cc319d8cb40e418df2ee7fb03ad",
+        "tools/opencode_eval.mjs": "58151581dc79c5941938a583e05cc71395b674296a7bb7082130641d11317d59",
+        "tools/opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
+        "tools/setup_opencode.mjs": "0ad970fce8e2bc6f0097f9bae89551e0bbd9482c9f094fbbc1bd3c7e638171bc",
+        "tools/validate_opencode_api.mjs": "e676d958a59e88ef2f326dba78169907416142dd905e77d8a20838a056d47ffd",
+        "tools/validate_opencode_harness.mjs": "3dcc958d73b146946c114f3668b91c4d711ca3358bc43026567e40e76dc4dd7f"
+      },
+      "local_changes": true
+    }
+  },
+  "clients": {
+    "bun": "1.4.4",
+    "opencode": "opencode v2.0.21"
+  },
+  "complete": true,
+  "gemma26_native_defaults": {
+    "cases": 3,
+    "environment_overrides": false,
+    "exact_cases": 3,
+    "passed": true,
+    "reference_artifacts": {
+      "library_sha256": {
+        "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+        "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+        "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+        "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+      },
+      "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+      "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+    },
+    "tokens": 48
+  },
+  "harness_commit": "d611994ad85d92bd1bc243f5b3cb5d090192f6e6",
+  "models": [
+    {
+      "actual_context": 16384,
+      "api": {
+        "checks": [
+          {
+            "ms": 790,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 771,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 807,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 496,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 487,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 1056,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 818,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 857,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 883,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 2780,
+            "name": "JSON tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 2785,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 4022,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 4014,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 4827,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": true
+          },
+          {
+            "ms": 1196,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 402,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 393,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 14,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1231,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 414,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 121931,
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "pass": true
+          },
+          {
+            "ms": 419,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1440,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 29,
+        "total": 29
+      },
+      "api_exit_code": 0,
+      "catalog_id": "qwen36-35b-a3b-q4k-xl",
+      "fixtures": [
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 153,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 40,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 388356,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 402,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 5,
+          "tool_counts": {
+            "edit": 1,
+            "read": 3,
+            "shell": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 25,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 55,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "cart-multi-file",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 331945,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 394,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 6,
+          "tool_counts": {
+            "edit": 2,
+            "read": 3,
+            "shell": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 258,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 134,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 4
+            }
+          },
+          "fixture": "python-log-cli",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 382323,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 395,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 4,
+          "tool_counts": {
+            "read": 2,
+            "shell": 1,
+            "write": 1
+          },
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 16384,
+      "served_id": "qwen36-35b-a3b-q4k-xl"
+    },
+    {
+      "actual_context": 16384,
+      "api": {
+        "checks": [
+          {
+            "ms": 662,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 745,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 868,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 455,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 404,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 1512,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 659,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 754,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 887,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 2718,
+            "name": "JSON tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 2651,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 5081,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 5058,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 2334,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": true
+          },
+          {
+            "ms": 965,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 434,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 435,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 6,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 55,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1268,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 450,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 42996,
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "pass": true
+          },
+          {
+            "ms": 458,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1820,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 29,
+        "total": 29
+      },
+      "api_exit_code": 0,
+      "catalog_id": "qwen36-27b-q4k-m",
+      "fixtures": [
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 135,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 66,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 214929,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 409,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 5,
+          "tool_counts": {
+            "edit": 1,
+            "read": 3,
+            "shell": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 31,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 51,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "cart-multi-file",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 223033,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 394,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 8,
+          "tool_counts": {
+            "edit": 2,
+            "read": 5,
+            "shell": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 224,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 138,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 4
+            }
+          },
+          "fixture": "python-log-cli",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 185252,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 401,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 4,
+          "tool_counts": {
+            "read": 2,
+            "shell": 1,
+            "write": 1
+          },
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 16384,
+      "served_id": "qwen36-27b-q4k-m"
+    },
+    {
+      "actual_context": 16384,
+      "api": {
+        "checks": [
+          {
+            "ms": 348,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 350,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 370,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 159,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 157,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 534,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 315,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 351,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 387,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 864,
+            "name": "JSON tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 862,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 1683,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 1677,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 725,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": true
+          },
+          {
+            "ms": 326,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 189,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 177,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 12,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 577,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 196,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 13236,
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "pass": true
+          },
+          {
+            "ms": 214,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1540,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 29,
+        "total": 29
+      },
+      "api_exit_code": 0,
+      "catalog_id": "qwen35-9b-q4k-m",
+      "fixtures": [
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 32,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 52,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 96055,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 174,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 5,
+          "tool_counts": {
+            "edit": 2,
+            "read": 1,
+            "shell": 2
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 20,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 52,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "cart-multi-file",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 56640,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 179,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 4,
+          "tool_counts": {
+            "edit": 1,
+            "read": 2,
+            "shell": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 166,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 136,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 4
+            }
+          },
+          "fixture": "python-log-cli",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 97041,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 198,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 6,
+          "tool_counts": {
+            "edit": 1,
+            "read": 2,
+            "shell": 2,
+            "write": 1
+          },
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 16384,
+      "served_id": "qwen35-9b-q4k-m"
+    },
+    {
+      "api_error_type": "ValueError",
+      "catalog_id": "gemma4-31b-q4k-m",
+      "fixtures": [
+        {
+          "error_type": "ValueError",
+          "fixture": "rate-limiter-single",
+          "success": false
+        },
+        {
+          "error_type": "ValueError",
+          "fixture": "cart-multi-file",
+          "success": false
+        },
+        {
+          "error_type": "ValueError",
+          "fixture": "python-log-cli",
+          "success": false
+        }
+      ],
+      "requested_context": 8192
+    },
+    {
+      "actual_context": 8192,
+      "api": {
+        "checks": [
+          {
+            "ms": 584,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 584,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 623,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 450,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 429,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 858,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 632,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 667,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 682,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1590,
+            "name": "JSON tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 1585,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 3270,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 3251,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 2581,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": true
+          },
+          {
+            "ms": 1343,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 311,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 316,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 31,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 981,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 361,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 318,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1388,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 28,
+        "total": 28
+      },
+      "api_exit_code": 0,
+      "catalog_id": "gemma4-26b-a4b-q4k-m",
+      "fixtures": [
+        {
+          "actual_context": 8192,
+          "baseline": {
+            "durationMs": 182,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 1,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 40,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 210507,
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 304,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 0,
+          "tool_counts": {},
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 8192,
+          "baseline": {
+            "durationMs": 28,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 1,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 31,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "fixture": "cart-multi-file",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 210782,
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 300,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 0,
+          "tool_counts": {},
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 8192,
+          "baseline": {
+            "durationMs": 206,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 1,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 173,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "fixture": "python-log-cli",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 208750,
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 311,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 0,
+          "tool_counts": {},
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 8192,
+      "served_id": "gemma4-26b-a4b-q4k-m"
+    },
+    {
+      "actual_context": 16384,
+      "api": {
+        "checks": [
+          {
+            "ms": 686,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 701,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 728,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 421,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 412,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 1150,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 627,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 733,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 758,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1896,
+            "name": "JSON tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 1903,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 3033,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 3037,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": true
+          },
+          {
+            "ms": 2452,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": true
+          },
+          {
+            "ms": 831,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 365,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 365,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 6,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 24,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1075,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 392,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 46207,
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "pass": true
+          },
+          {
+            "ms": 393,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1734,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 29,
+        "total": 29
+      },
+      "api_exit_code": 0,
+      "catalog_id": "qwen38-27b-q4k-m",
+      "fixtures": [
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 78,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 27,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 194617,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 386,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 4,
+          "tool_counts": {
+            "read": 2,
+            "shell": 1,
+            "write": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 29,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 28,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 3
+            }
+          },
+          "fixture": "cart-multi-file",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 147018,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 351,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 6,
+          "tool_counts": {
+            "edit": 2,
+            "read": 3,
+            "shell": 1
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 203,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 0,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 158,
+            "exitCode": 0,
+            "tests": {
+              "fail": 0,
+              "pass": 4
+            }
+          },
+          "fixture": "python-log-cli",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 162328,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 383,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": true,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 4,
+          "tool_counts": {
+            "read": 2,
+            "shell": 1,
+            "write": 1
+          },
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 16384,
+      "served_id": "qwen38-27b-q4k-m"
+    },
+    {
+      "actual_context": 16384,
+      "api": {
+        "checks": [
+          {
+            "ms": 314,
+            "name": "JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 307,
+            "name": "JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 321,
+            "name": "JSON/SSE parity at 7 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 200,
+            "name": "JSON max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 195,
+            "name": "SSE max_completion_tokens budget",
+            "pass": true
+          },
+          {
+            "ms": 448,
+            "name": "Unicode JSON/SSE parity",
+            "pass": true
+          },
+          {
+            "ms": 326,
+            "name": "Unicode JSON/SSE parity at 1 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 341,
+            "name": "Unicode JSON/SSE parity at 2 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 346,
+            "name": "Unicode JSON/SSE parity at 3 output tokens",
+            "pass": true
+          },
+          {
+            "ms": 1061,
+            "name": "JSON tool arguments and unique ID",
+            "pass": false
+          },
+          {
+            "ms": 1039,
+            "name": "SSE tool arguments and unique ID",
+            "pass": true
+          },
+          {
+            "ms": 1383,
+            "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+            "pass": false
+          },
+          {
+            "ms": 1395,
+            "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+            "pass": false
+          },
+          {
+            "ms": 1953,
+            "name": "Truncated tool calls remain text without an executable call",
+            "pass": false
+          },
+          {
+            "ms": 481,
+            "name": "Null assistant content and tool-result history",
+            "pass": true
+          },
+          {
+            "ms": 162,
+            "name": "tool_choice none",
+            "pass": true
+          },
+          {
+            "ms": 162,
+            "name": "Text content arrays",
+            "pass": true
+          },
+          {
+            "ms": 2,
+            "name": "Malformed JSON returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Invalid message content returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Empty messages returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Negative modern token budget returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 1,
+            "name": "Conflicting token budgets returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 14,
+            "name": "Context overflow returns HTTP 400",
+            "pass": true
+          },
+          {
+            "ms": 504,
+            "name": "Queued requests keep conversations separate",
+            "pass": true
+          },
+          {
+            "ms": 169,
+            "name": "Streaming cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 90549,
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "pass": true
+          },
+          {
+            "ms": 175,
+            "name": "Buffered tool-call cancellation releases the slot",
+            "pass": true
+          },
+          {
+            "ms": 1182,
+            "name": "Active prefill cancellation releases the slot",
+            "pass": true
+          }
+        ],
+        "complete": true,
+        "passed": 25,
+        "total": 29
+      },
+      "api_exit_code": 1,
+      "catalog_id": "qwen3-0.6b-q8-0",
+      "fixtures": [
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 25,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 1,
+          "failed_tools": 3,
+          "final_test": {
+            "durationMs": 27,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "fixture": "rate-limiter-single",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 900090,
+            "exitCode": 130,
+            "signal": null,
+            "timedOut": true
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 158,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 17,
+          "tool_counts": {
+            "edit": 3,
+            "execute": 11,
+            "read": 3
+          },
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 20,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 0,
+          "failed_tools": 0,
+          "final_test": {
+            "durationMs": 50,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "fixture": "cart-multi-file",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 43564,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 166,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 0,
+          "tool_counts": {},
+          "unexpected_files": 0
+        },
+        {
+          "actual_context": 16384,
+          "baseline": {
+            "durationMs": 142,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "driver_exit_code": 1,
+          "errors_count": 0,
+          "failed_tools": 1,
+          "final_test": {
+            "durationMs": 146,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "fixture": "python-log-cli",
+          "malformed_json_lines": 0,
+          "opencode": {
+            "durationMs": 98720,
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false
+          },
+          "protected_file_violations": 0,
+          "repaired_events": 0,
+          "server_recovery": {
+            "elapsed_ms": 156,
+            "passed": true
+          },
+          "shortcuts_count": 0,
+          "success": false,
+          "suppressed_events": 0,
+          "timeout_ms": 900000,
+          "tool_calls": 1,
+          "tool_counts": {
+            "edit": 1
+          },
+          "unexpected_files": 0
+        }
+      ],
+      "requested_context": 16384,
+      "served_id": "qwen3-0.6b-q8-0"
+    }
+  ],
+  "protocol": {
+    "fixture_timeout_ms": 900000,
+    "fresh_server_per_fixture": true,
+    "output_tokens": 2048,
+    "repair_proxy": false,
+    "steps": 16,
+    "supervisor_edits": false,
+    "temperature": 0,
+    "thinking": false,
+    "top_p": 1
+  },
+  "qualification": false,
+  "schema": "zinc-intel-opencode-validation-v1",
+  "source_snapshot_sha256": "e70c9f603a808480eec67db6c81c0e9ad2332e2c7b75aec67cd1652e2d39e90e",
+  "token_budget_preflight": {
+    "cases": [
+      {
+        "actual_completion_tokens": 1,
+        "field": "max_tokens",
+        "finish_reason": "length",
+        "requested_tokens": 1
+      },
+      {
+        "actual_completion_tokens": 1,
+        "field": "max_completion_tokens",
+        "finish_reason": "length",
+        "requested_tokens": 1
+      }
+    ],
+    "passed": true
+  },
+  "tokenizer_helper_from_baseline_sha256": "e8c1e42568d3c01ccc7451e14fbca789cb1cab85ac52cdefef7845e059c5c1ec",
+  "observed_at": "2026-11-01",
+  "hardware": "Intel Arc Pro B70",
+  "interpretation": {
+    "qwen_coding": "four models pass all three core fixtures at 16K",
+    "gemma31_8k": "server initialization failed before client tasks; uniform KV allocation overcounted actual layer widths",
+    "gemma26_8k": "all three clients failed during compaction before a tool call; summaries hit the output token limit",
+    "tiny": "all three coding fixtures fail; 25/29 API checks pass; no coding recommendation",
+    "scope": "native development diagnostic; not release archive qualification"
+  }
+}
