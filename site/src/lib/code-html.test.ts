@@ -30,3 +30,18 @@ test('HTML parser preserves code-like strings in scripts and unrelated page mark
     '<!DOCTYPE html><p title="東京">Hello</p><script>const example = "<code>not an element</code>";</script>';
   expect(await protectCodeHtml(source)).toEqual({ html: source, codeCount: 0 });
 });
+
+test('protects an outer code element once when code elements are nested', async () => {
+  const result = await protectCodeHtml('<code>outer <code>pkg@2.0.21</code> tail</code>');
+  expect(result).toEqual({
+    html: '<code><!--email_off-->outer <code>pkg@2.0.21</code> tail<!--/email_off--></code>',
+    codeCount: 1,
+  });
+});
+
+test('preserves attribute quoting, boolean attributes, entities and whitespace', async () => {
+  const source =
+    '<input disabled checked=checked data-mode=plain>\r\n<p title=\'a &amp; b\'>  spaced  </p><code data-mode="x">pkg@1.2.3</code>';
+  const result = await protectCodeHtml(source);
+  expect(result.html.replace(/<!--\/?email_off-->/g, '')).toBe(source);
+});
