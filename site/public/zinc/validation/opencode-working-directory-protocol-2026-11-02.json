@@ -1,0 +1,559 @@
+{
+  "deliberately_stale_inherited_pwd": true,
+  "fixed": [
+    {
+      "client": "modern",
+      "exit_code": 0,
+      "result": {
+        "cases": [
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 15928,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "timeout-repair",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "stream_options",
+                "store",
+                "max_completion_tokens",
+                "temperature",
+                "top_p",
+                "enable_thinking",
+                "session_id"
+              ],
+              "max_completion_tokens": 1024,
+              "temperature": 0,
+              "tool_names": [
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "shell",
+                "skill",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 5,
+            "run_exit_code": 0,
+            "stalled_requests": 1,
+            "tool_events": 2,
+            "unique_prompt_reuse_keys": 2,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              1,
+              0
+            ]
+          },
+          {
+            "configuration_unchanged": true,
+            "elapsed_ms": 811,
+            "error_events": 2,
+            "logs_truncated": false,
+            "name": "api-error",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "requests": 3,
+            "run_exit_code": 1,
+            "stalled_requests": 0,
+            "tool_events": 0,
+            "unique_prompt_reuse_keys": 1,
+            "unique_sessions": 1,
+            "verification_exit_codes": []
+          },
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 913,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "bounded-tools",
+            "output_limit_enforced": true,
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "read_limit_enforced": true,
+            "relative_tools_in_project": true,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "stream_options",
+                "store",
+                "max_completion_tokens",
+                "temperature",
+                "top_p",
+                "enable_thinking",
+                "session_id"
+              ],
+              "max_completion_tokens": 1024,
+              "temperature": 0,
+              "tool_names": [
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "shell",
+                "skill",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 5,
+            "run_exit_code": 0,
+            "stalled_requests": 0,
+            "tool_events": 3,
+            "unique_prompt_reuse_keys": 1,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              0
+            ]
+          }
+        ],
+        "helper_sha256": "3978c61274dd505865c2f009c586d52444363b2d003bd720891670354d4a4e20",
+        "model_inference": false,
+        "opencode_version": "2.0.21",
+        "passed": true,
+        "performance_measurement": false,
+        "scope": "CPU protocol fixtures with actual OpenCode and scripted responses",
+        "validator_sha256": "231fad24eb09a5a0653bd8ad94050cc2bae5d2ef5ad362f4e7b258cb200d6c5c"
+      }
+    },
+    {
+      "client": "legacy",
+      "exit_code": 0,
+      "result": {
+        "cases": [
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 16408,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "timeout-repair",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "max_tokens",
+                "top_p",
+                "enable_thinking",
+                "session_id",
+                "messages",
+                "tools",
+                "tool_choice",
+                "stream",
+                "stream_options"
+              ],
+              "max_tokens": 1024,
+              "tool_names": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "skill",
+                "todowrite",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 5,
+            "run_exit_code": 0,
+            "stalled_requests": 1,
+            "tool_events": 2,
+            "unique_prompt_reuse_keys": 2,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              1,
+              0
+            ]
+          },
+          {
+            "configuration_unchanged": true,
+            "elapsed_ms": 1324,
+            "error_events": 1,
+            "logs_truncated": false,
+            "name": "api-error",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "requests": 2,
+            "run_exit_code": 1,
+            "stalled_requests": 0,
+            "tool_events": 0,
+            "unique_prompt_reuse_keys": 1,
+            "unique_sessions": 1,
+            "verification_exit_codes": []
+          },
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 1437,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "bounded-tools",
+            "output_limit_enforced": true,
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "read_limit_enforced": true,
+            "relative_tools_in_project": true,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "max_tokens",
+                "top_p",
+                "enable_thinking",
+                "session_id",
+                "messages",
+                "tools",
+                "tool_choice",
+                "stream",
+                "stream_options"
+              ],
+              "max_tokens": 1024,
+              "tool_names": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "skill",
+                "todowrite",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 5,
+            "run_exit_code": 0,
+            "stalled_requests": 0,
+            "tool_events": 3,
+            "unique_prompt_reuse_keys": 1,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              0
+            ]
+          }
+        ],
+        "helper_sha256": "3978c61274dd505865c2f009c586d52444363b2d003bd720891670354d4a4e20",
+        "model_inference": false,
+        "opencode_version": "1.19.4",
+        "passed": true,
+        "performance_measurement": false,
+        "scope": "CPU protocol fixtures with actual OpenCode and scripted responses",
+        "validator_sha256": "231fad24eb09a5a0653bd8ad94050cc2bae5d2ef5ad362f4e7b258cb200d6c5c"
+      }
+    }
+  ],
+  "negative": [
+    {
+      "client": "modern",
+      "exit_code": 1,
+      "result": {
+        "cases": [
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 15931,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "timeout-repair",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "stream_options",
+                "store",
+                "max_completion_tokens",
+                "temperature",
+                "top_p",
+                "enable_thinking",
+                "session_id"
+              ],
+              "max_completion_tokens": 1024,
+              "temperature": 0,
+              "tool_names": [
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "shell",
+                "skill",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 5,
+            "run_exit_code": 0,
+            "stalled_requests": 1,
+            "tool_events": 2,
+            "unique_prompt_reuse_keys": 2,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              1,
+              0
+            ]
+          },
+          {
+            "configuration_unchanged": true,
+            "elapsed_ms": 796,
+            "error_events": 2,
+            "logs_truncated": false,
+            "name": "api-error",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "requests": 3,
+            "run_exit_code": 1,
+            "stalled_requests": 0,
+            "tool_events": 0,
+            "unique_prompt_reuse_keys": 1,
+            "unique_sessions": 1,
+            "verification_exit_codes": []
+          },
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 2563,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "bounded-tools",
+            "output_limit_enforced": false,
+            "outside_directory_unchanged": false,
+            "passed": false,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "read_limit_enforced": false,
+            "relative_tools_in_project": false,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "stream_options",
+                "store",
+                "max_completion_tokens",
+                "temperature",
+                "top_p",
+                "enable_thinking",
+                "session_id"
+              ],
+              "max_completion_tokens": 1024,
+              "temperature": 0,
+              "tool_names": [
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "shell",
+                "skill",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 7,
+            "run_exit_code": 1,
+            "stalled_requests": 0,
+            "tool_events": 3,
+            "unique_prompt_reuse_keys": 3,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              1,
+              1,
+              1
+            ]
+          }
+        ],
+        "helper_sha256": "7e415fb6b36eb157b7a9a3c1dad4e35783d32669fbb372d7497d30e7c660addc",
+        "model_inference": false,
+        "opencode_version": "2.0.21",
+        "passed": false,
+        "performance_measurement": false,
+        "scope": "CPU protocol fixtures with actual OpenCode and scripted responses",
+        "validator_sha256": "231fad24eb09a5a0653bd8ad94050cc2bae5d2ef5ad362f4e7b258cb200d6c5c"
+      }
+    },
+    {
+      "client": "legacy",
+      "exit_code": 1,
+      "result": {
+        "cases": [
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 16461,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "timeout-repair",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "max_tokens",
+                "top_p",
+                "enable_thinking",
+                "session_id",
+                "messages",
+                "tools",
+                "tool_choice",
+                "stream",
+                "stream_options"
+              ],
+              "max_tokens": 1024,
+              "tool_names": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "skill",
+                "todowrite",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 5,
+            "run_exit_code": 0,
+            "stalled_requests": 1,
+            "tool_events": 2,
+            "unique_prompt_reuse_keys": 2,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              1,
+              0
+            ]
+          },
+          {
+            "configuration_unchanged": true,
+            "elapsed_ms": 1307,
+            "error_events": 1,
+            "logs_truncated": false,
+            "name": "api-error",
+            "outside_directory_unchanged": true,
+            "passed": true,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "requests": 2,
+            "run_exit_code": 1,
+            "stalled_requests": 0,
+            "tool_events": 0,
+            "unique_prompt_reuse_keys": 1,
+            "unique_sessions": 1,
+            "verification_exit_codes": []
+          },
+          {
+            "configuration_unchanged": true,
+            "direct_tools_valid": true,
+            "elapsed_ms": 4083,
+            "error_events": 0,
+            "logs_truncated": false,
+            "name": "bounded-tools",
+            "output_limit_enforced": false,
+            "outside_directory_unchanged": false,
+            "passed": false,
+            "prompt_reuse_keys_valid": true,
+            "protected_test_unchanged": true,
+            "read_limit_enforced": false,
+            "relative_tools_in_project": false,
+            "request_settings": {
+              "enable_thinking": false,
+              "keys": [
+                "model",
+                "max_tokens",
+                "top_p",
+                "enable_thinking",
+                "session_id",
+                "messages",
+                "tools",
+                "tool_choice",
+                "stream",
+                "stream_options"
+              ],
+              "max_tokens": 1024,
+              "tool_names": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "read",
+                "skill",
+                "todowrite",
+                "write"
+              ],
+              "top_p": 1
+            },
+            "request_settings_valid": true,
+            "requests": 7,
+            "run_exit_code": 1,
+            "stalled_requests": 0,
+            "tool_events": 3,
+            "unique_prompt_reuse_keys": 3,
+            "unique_sessions": 1,
+            "verification_exit_codes": [
+              1,
+              1,
+              1
+            ]
+          }
+        ],
+        "helper_sha256": "7e415fb6b36eb157b7a9a3c1dad4e35783d32669fbb372d7497d30e7c660addc",
+        "model_inference": false,
+        "opencode_version": "1.19.4",
+        "passed": false,
+        "performance_measurement": false,
+        "scope": "CPU protocol fixtures with actual OpenCode and scripted responses",
+        "validator_sha256": "231fad24eb09a5a0653bd8ad94050cc2bae5d2ef5ad362f4e7b258cb200d6c5c"
+      }
+    }
+  ],
+  "outside_directory_is_an_owned_test_sentinel": true,
+  "relative_read_write_and_shell": true,
+  "schema": "zinc-opencode-working-directory-protocol-v1",
+  "scope": "actual OpenCode clients with scripted CPU responses; no model inference or performance measurement"
+}

@@ -79,8 +79,8 @@ pub const entries = [_]CatalogEntry{
         .thinking_stable = false,
         // Keep experimental until the approved release profiles pass on packaged bytes.
         // ROCm's hybrid forward path does not implement plain Qwen3.
-        // Intel OpenCode checks also expose unreliable typed tool arguments;
-        // inference qualification alone must not turn this into a chat recommendation.
+        // Inference qualification and real coding readiness are separate.
+        // Review the corrected client launch before recommending chat/agent use.
         .status = .experimental,
         .tested_profiles = &.{},
     },
@@ -462,7 +462,7 @@ test "find returns known qwen3.6 entry" {
     try std.testing.expect(entry.status == .supported);
 }
 
-test "qualification starter is not recommended for chat or agent tasks" {
+test "qualification starter stays experimental and is not a chat recommendation" {
     const entry = find("qwen3-0.6b-q8-0") orelse return error.TestExpectedEqual;
     try std.testing.expect(entry.status == .experimental);
     try std.testing.expect(!entry.recommended_for_chat);

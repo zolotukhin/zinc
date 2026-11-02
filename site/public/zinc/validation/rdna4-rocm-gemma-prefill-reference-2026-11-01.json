@@ -1,0 +1,1092 @@
+{
+  "explicit_optin_negative_control": {
+    "binary_sha256": "4718d6770185dd431658f692eced53b559d25a911ad1bb6406cccdf17de5b1b3",
+    "cleanup": "no GPU process remains",
+    "default_reference_tokens": [
+      19765,
+      6178,
+      529,
+      14561,
+      659,
+      236787,
+      108,
+      236770,
+      236761,
+      138,
+      1018,
+      109454,
+      80288,
+      53121,
+      18800,
+      531
+    ],
+    "first_difference": 0,
+    "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+    "negative_control_observed": true,
+    "optin_tokens": [
+      8291,
+      659,
+      1806,
+      3364,
+      6178,
+      529,
+      14561,
+      236787,
+      108,
+      236770,
+      236761,
+      138,
+      1018,
+      109454,
+      80288,
+      53121
+    ],
+    "override": {
+      "ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL": "1"
+    },
+    "qualification": false,
+    "scope": "explicit batched opt-in retains the diagnosed negative path",
+    "source_commit": "f1fb00520d10d5a873cd2ced9727bd5ddfa2ed2e",
+    "warning_observed": true
+  },
+  "failed_packaged_probe": {
+    "archive_sha256": "81ea4f1021cb68f32a994c7d289791a2ccfb816019a5a48afce0e7b22ec2402b",
+    "binary_sha256": "bb23842d27914f577835c4f8152053655fe03a436af0531ab327506f0e2a4848",
+    "cleanup": "no GPU process remains",
+    "commit": "0cd9536a164d1272396c0d848e9b74ad185f90ca",
+    "complete": false,
+    "failure": {
+      "actual_id": 8291,
+      "actual_logprob": -2.3719067573547363,
+      "actual_token": "Here",
+      "case": 2,
+      "first_difference": 0,
+      "logprob_gap": 2.273920066654682,
+      "model": "gemma4-26b-a4b-q4k-m",
+      "reference_id": 19765,
+      "reference_logprob": -0.09798669070005417,
+      "reference_token": "Three",
+      "type": "extended reference choice exceeds unchanged near-tie policy"
+    },
+    "hardware": {
+      "driver": "ROCm 7.2.4",
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic"
+    },
+    "harness_commit": "1dee806138625be62aa00fb8c190fae71d9c8b6c",
+    "models": [
+      {
+        "bounded_prefill": {
+          "cases": 3,
+          "chunk_tokens": 16,
+          "passed": true,
+          "tokens": 48
+        },
+        "context": 4096,
+        "http_passed": true,
+        "id": "gemma4-31b-q4k-m",
+        "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 80288,
+                    "logprob_gap": 0.0398978590965271,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 35615
+                  }
+                ],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "id": "gemma4-26b-a4b-q4k-m",
+        "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      }
+    ],
+    "pr_head": "1dee806138625be62aa00fb8c190fae71d9c8b6c",
+    "qualification": false,
+    "reference_artifacts": {
+      "library_sha256": {
+        "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-cpu.so": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-cpu.so.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-cpu.so.0.23.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-hip.so": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml-hip.so.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml-hip.so.0.23.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml.so": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libggml.so.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libggml.so.0.23.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libllama-common.so.0": "d734d118bbe2fcbb64fbdbc85f628fd60ebb2ec8948c04f0d348b40e6cf74eda",
+        "libllama-server-impl.so": "dc719a4a00985859a23827f16fdbc365752e100c2759139fed708dfbbfc97e96",
+        "libllama.so": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+        "libllama.so.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+        "libllama.so.0.4.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff"
+      },
+      "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+    },
+    "scope": "exact PR52 ROCm archive Gemma core, sliding-window CLI/HTTP and bounded-prefill diagnostic",
+    "version": "0.1.0-dev.41360675102"
+  },
+  "fixed_native": {
+    "binary_sha256": "4718d6770185dd431658f692eced53b559d25a911ad1bb6406cccdf17de5b1b3",
+    "cleanup": "no GPU process remains",
+    "complete": true,
+    "hardware": {
+      "driver": "ROCm 7.2.4",
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic"
+    },
+    "models": [
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen38-27b-q4k-m",
+        "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [
+                {
+                  "chosen_id": 36337,
+                  "logprob_gap": 0.032131314277648926,
+                  "position": 11,
+                  "rank": 2,
+                  "reference_id": 3618
+                }
+              ],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 47,
+          "near_tie_tokens": 1,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen36-27b-q4k-m",
+        "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen35-9b-q4k-m",
+        "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "bounded_prefill": {
+          "cases": 3,
+          "chunk_tokens": 16,
+          "passed": true,
+          "tokens": 48
+        },
+        "context": 4096,
+        "http_passed": true,
+        "id": "gemma4-31b-q4k-m",
+        "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 80288,
+                    "logprob_gap": 0.0398978590965271,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 35615
+                  }
+                ],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "gemma4-26b-a4b-q4k-m",
+        "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        },
+        "tokenizer_passed": true
+      }
+    ],
+    "qualification": false,
+    "reference_artifacts": {
+      "library_sha256": {
+        "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-cpu.so": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-cpu.so.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-cpu.so.0.23.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-hip.so": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml-hip.so.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml-hip.so.0.23.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml.so": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libggml.so.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libggml.so.0.23.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libllama-common.so.0": "d734d118bbe2fcbb64fbdbc85f628fd60ebb2ec8948c04f0d348b40e6cf74eda",
+        "libllama-server-impl.so": "dc719a4a00985859a23827f16fdbc365752e100c2759139fed708dfbbfc97e96",
+        "libllama.so": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+        "libllama.so.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+        "libllama.so.0.4.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff"
+      },
+      "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+    },
+    "scope": "native ROCm conservative Gemma MoE default regression",
+    "source_commit": "f1fb00520d10d5a873cd2ced9727bd5ddfa2ed2e",
+    "source_snapshot_sha256": "d70ec51ed430c494e449a173b3eb36df8bead0a0e863b92b9dabc221eec9ec8c",
+    "tokenizer_helper_sha256": "b0f579d549079cf336f256649e9e4fd16b4faea412bd1ec384ceec4939feb436"
+  },
+  "fixed_packaged_diagnostic": {
+    "archive_sha256": "9809d8faa59a8d1727e7d60aec070b9d205a0e9ba8121bb5b81ab123d5b22ed5",
+    "binary_sha256": "82df24100e28aef947de41bc865f732270cae1ffc15a6f46b29de1a620806ae0",
+    "cleanup": "no GPU process remains",
+    "commit": "cc727678dbe73177eb1c79456770030a0bbd726b",
+    "complete": true,
+    "hardware": {
+      "driver": "ROCm 7.2.4",
+      "gpu": "AMD Radeon AI PRO R9700",
+      "os": "Linux 7.2.2-070202-generic"
+    },
+    "harness_commit": "f1fb00520d10d5a873cd2ced9727bd5ddfa2ed2e",
+    "models": [
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen38-27b-q4k-m",
+        "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [
+                {
+                  "chosen_id": 36337,
+                  "logprob_gap": 0.032131314277648926,
+                  "position": 11,
+                  "rank": 2,
+                  "reference_id": 3618
+                }
+              ],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 47,
+          "near_tie_tokens": 1,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen36-27b-q4k-m",
+        "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "qwen35-9b-q4k-m",
+        "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "bounded_prefill": {
+          "cases": 3,
+          "chunk_tokens": 16,
+          "passed": true,
+          "tokens": 48
+        },
+        "context": 4096,
+        "http_passed": true,
+        "id": "gemma4-31b-q4k-m",
+        "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 80288,
+                    "logprob_gap": 0.0398978590965271,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 35615
+                  }
+                ],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        },
+        "tokenizer_passed": true
+      },
+      {
+        "context": 4096,
+        "http_passed": true,
+        "id": "gemma4-26b-a4b-q4k-m",
+        "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        },
+        "tokenizer_passed": true
+      }
+    ],
+    "pr_head": "f1fb00520d10d5a873cd2ced9727bd5ddfa2ed2e",
+    "qualification": false,
+    "reference_artifacts": {
+      "library_sha256": {
+        "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+        "libggml-cpu.so": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-cpu.so.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-cpu.so.0.23.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+        "libggml-hip.so": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml-hip.so.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml-hip.so.0.23.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+        "libggml.so": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libggml.so.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libggml.so.0.23.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+        "libllama-common.so.0": "d734d118bbe2fcbb64fbdbc85f628fd60ebb2ec8948c04f0d348b40e6cf74eda",
+        "libllama-server-impl.so": "dc719a4a00985859a23827f16fdbc365752e100c2759139fed708dfbbfc97e96",
+        "libllama.so": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+        "libllama.so.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+        "libllama.so.0.4.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff"
+      },
+      "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+      "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+    },
+    "scope": "exact PR54 ROCm archive complete six-model, sliding-window CLI/HTTP and recovery diagnostic",
+    "version": "0.1.0-dev.41365035003"
+  },
+  "precision_controls": {
+    "archive_sha256": "81ea4f1021cb68f32a994c7d289791a2ccfb816019a5a48afce0e7b22ec2402b",
+    "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+    "prompt_case": 2,
+    "qualification": false,
+    "rows": [
+      {
+        "actual_tokens": [
+          8291,
+          659,
+          1806,
+          3364,
+          6178,
+          529,
+          14561,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121
+        ],
+        "exact": false,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": 0,
+        "overrides": {
+          "ZINC_ROCM_GEMMA_Q8_PREFILL": "0"
+        },
+        "variant": "q8-projections-f32"
+      },
+      {
+        "actual_tokens": [
+          8291,
+          659,
+          1806,
+          3364,
+          6178,
+          529,
+          14561,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121
+        ],
+        "exact": false,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": 0,
+        "overrides": {
+          "ZINC_ROCM_GEMMA_ATTN_F16": "0"
+        },
+        "variant": "attention-f32"
+      },
+      {
+        "actual_tokens": [
+          86477,
+          1852,
+          237323,
+          236772,
+          236745,
+          236772,
+          236744,
+          1852,
+          237323,
+          1852,
+          1852,
+          237323,
+          236772,
+          236772,
+          236772,
+          236772
+        ],
+        "exact": false,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": 0,
+        "overrides": {
+          "ZINC_GEMMA_MOE_PREFILL_SERIAL": "1"
+        },
+        "variant": "moe-serial"
+      },
+      {
+        "actual_tokens": [
+          19765,
+          3364,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800
+        ],
+        "exact": false,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": 1,
+        "overrides": {
+          "ZINC_GEMMA_ATTN_PREFILL_SERIAL": "1"
+        },
+        "variant": "attention-serial"
+      },
+      {
+        "actual_tokens": [
+          3834,
+          506,
+          1345,
+          529,
+          506,
+          4284,
+          236764,
+          993,
+          563,
+          496,
+          1519,
+          600,
+          3189,
+          623,
+          818,
+          1345
+        ],
+        "exact": false,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": 0,
+        "overrides": {
+          "ZINC_GEMMA_ATTN_PREFILL_SERIAL": "1",
+          "ZINC_GEMMA_MOE_PREFILL_SERIAL": "1"
+        },
+        "variant": "attention-and-moe-serial"
+      },
+      {
+        "actual_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "exact": true,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": null,
+        "overrides": {
+          "ZINC_BATCHED_PREFILL": "0"
+        },
+        "variant": "prefill-serial"
+      }
+    ]
+  },
+  "qualification": false,
+  "reference": {
+    "agreement": {
+      "cases": 3,
+      "max_logprob_gap": 0.05,
+      "max_near_ties_per_case": 1,
+      "min_exact_fraction": 0.975,
+      "tokens_per_case": 16
+    },
+    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "generation": {
+      "batch_size": 512,
+      "flash_attention": false,
+      "kv_cache": "f32",
+      "micro_batch": 1,
+      "parallel": 1
+    },
+    "repository": "ggml-org/llama.cpp"
+  },
+  "schema": "zinc-rocm-gemma-prefill-validation-v1",
+  "scope": "native conservative-default correction with retained packaged negative control; not candidate qualification",
+  "serial_head_skip_control": {
+    "archive_sha256": "81ea4f1021cb68f32a994c7d289791a2ccfb816019a5a48afce0e7b22ec2402b",
+    "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+    "prompt_case": 2,
+    "qualification": false,
+    "rows": [
+      {
+        "actual_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "exact": true,
+        "expected_tokens": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "first_difference": null,
+        "overrides": {
+          "ZINC_BATCHED_PREFILL": "0",
+          "ZINC_PREFILL_SKIP": "1"
+        },
+        "variant": "serial-head-skip"
+      }
+    ]
+  }
+}
