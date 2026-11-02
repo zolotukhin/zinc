@@ -64,6 +64,14 @@ For OpenCode 2, install `bun add --global --trust @opencode/cli@2.0.21`
 instead. The scoped package's postinstall installs its platform executable.
 The helper detects `--standalone`, runs in the project directory, and selects
 that client's plugin format. Both versions keep their generated setup portable.
+The OpenCode 2 coding preset enables direct file and shell tools and disables
+Code Mode's `execute` tool. Intel Gemma trials otherwise spent their task budget
+trying unsupported imports and undiscovered tool names inside that runtime.
+An explicit `agent.zinc.permission.execute` setting takes precedence; set it to
+`allow` in the generated configuration if a task needs Code Mode or its MCP tools.
+The legacy client's tool selection is unchanged. Actual-client CPU checks
+require the advertised read/write/shell tools and verify the OpenCode 2 preset
+omits `execute`.
 OpenCode 2 needs a ZINC build supporting `max_completion_tokens`; older servers
 silently used a 256-token default and truncated tool calls. The
 [compatibility evidence](/zinc/validation/opencode-client-compatibility-2026-11-01.json)

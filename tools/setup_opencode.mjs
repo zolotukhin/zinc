@@ -132,6 +132,12 @@ const CONTEXT_PLUGIN_V2_ENTRY = `./${path.posix.dirname(CONTEXT_PLUGIN_V2_PATH)}
 export function configForOpenCode(config, runFlags) {
   const copy = structuredClone(config);
   const modern = runFlags.includes('--standalone');
+  if (modern && copy.agent?.zinc) {
+    // Local Gemma trials repeatedly import tools inside Code Mode's restricted
+    // runtime instead of calling the advertised file tools. Keep the coding
+    // preset on direct tools; an explicit user permission still takes priority.
+    copy.agent.zinc.permission = { execute: 'deny', ...copy.agent.zinc.permission };
+  }
   if (
     !modern &&
     !copy.plugins &&
