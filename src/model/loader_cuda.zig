@@ -1,9 +1,9 @@
-//! CUDA-specific model loading — mmap the GGUF, upload every tensor to the
-//! NVIDIA device, and expose them to the CUDA forward pass.
+//! Shared ROCm/CUDA model loading — mmap GGUF weights and upload tensors to
+//! the native AMD HIP or NVIDIA CUDA device for the selected forward pass.
 //!
 //! Unlike the Metal loader (Apple unified memory, zero-copy
-//! newBufferWithBytesNoCopy), CUDA device memory is NOT CPU-visible, so each
-//! tensor is copied host->device once at load time via `cuda_buffer.uploadMmap`.
+//! newBufferWithBytesNoCopy), this loader uses explicit native allocations, so
+//! tensors are copied host->device at load time via `cuda_buffer.uploadMmap`.
 //! The file mapping is kept alive after upload because the embedding lookup
 //! (`dequantEmbeddingRow`) dequantizes a single `token_embd.weight` row on the
 //! CPU directly out of the mapping.

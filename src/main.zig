@@ -132,8 +132,7 @@ comptime {
         _ = @import("server/routes.zig");
     }
     if (gpu.is_cuda) {
-        // CUDA: force-compile the CUDA backend modules + the shared catalog/
-        // managed-model code the CUDA CLI path reuses.
+        // CUDA/ROCm: compile the shared native modules and catalog/model helpers.
         _ = @import("cuda/device.zig");
         _ = @import("cuda/buffer.zig");
         _ = @import("cuda/pipeline.zig");
@@ -967,7 +966,7 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
     }
 
     if (gpu.is_cuda) {
-        // CUDA: probe the best NVIDIA device, derive the catalog profile from
+        // CUDA/ROCm: probe the best visible native device and derive its catalog profile from
         // the device name, and use free VRAM as the fit budget (mirrors the
         // Metal branch's working-set budget). device_index is ignored here —
         // initBest picks the highest-CC device (5090 over 4090).
@@ -1780,7 +1779,7 @@ fn batchedPrefillDefaultOn() bool {
 }
 
 /// Tokenize the prompt, prefill, greedily generate, and print — shared by the
-/// qwen and gemma CUDA forward paths (`fwd` is duck-typed: needs `decodeStep`
+/// Qwen and Gemma native CUDA/ROCm forward paths (`fwd` is duck-typed: needs `decodeStep`
 /// and `d.vocab`).
 fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, max_ctx: u32, allocator: std.mem.Allocator) !void {
     const prompt = config.prompt.?;
@@ -1977,7 +1976,7 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
     log.info("Output ({d} tokens): {s}", .{ generated.items.len, output_text });
 }
 
-// ── Effort 28 increment 3 (3b): CUDA multi-tenant HTTP/SSE serving ───────────
+// ── Shared CUDA/ROCm HTTP/SSE serving ───────────────────────────────────────
 //
 // `zinc -m gemma.gguf` (no --prompt) → multi-tenant server: ONE GPU worker thread
 // runs the continuous-batching loop (ServeEngine, src/server/cuda_serve.zig);
@@ -3046,7 +3045,7 @@ pub fn main(process_init: std.process.Init) !void {
         } else {
             // Metal serialises generation behind ServerState.generation_mutex, so
             // --parallel is how many requests may be in flight (one running, the
-            // rest queued), not how many decode at once. Only the CUDA serve path
+            // rest queued), not how many decode at once. The native CUDA/ROCm path
             // has real slots.
             log.info("Server mode — port {d}, generation serialized, up to {d} request(s) in flight", .{ config.port, config.max_parallel });
 
@@ -3067,8 +3066,8 @@ pub fn main(process_init: std.process.Init) !void {
         return;
     }
 
-    // CUDA: NVIDIA / WSL2 backend. Placed before the Vulkan tail; the
-    // `return` makes the Vulkan code below comptime-unreachable on CUDA (same
+    // Native CUDA/ROCm backend. Placed before the Vulkan tail; the
+    // `return` makes the Vulkan code below comptime-unreachable here (same
     // pattern as the Metal block above), so it is never analyzed here.
     if (comptime gpu.is_cuda) {
         // Use the same resolved startup selection as Metal/Vulkan: explicit

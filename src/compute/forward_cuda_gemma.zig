@@ -1,8 +1,8 @@
-//! CUDA forward pass for the dense gemma4 transformer (Gemma 4 31B-it).
+//! Shared ROCm/CUDA forward pass for Gemma and Muse Glimmer transformers.
 //!
-//! Effort 22 — completes the 5/5 catalog on the 4090. Separate from
-//! forward_cuda.zig (qwen35/qwen36 hybrid-SSM family) because gemma4 is a plain
-//! transformer with a different per-layer geometry: sliding-window attention on
+//! Separate from forward_cuda.zig's Qwen execution path. The selected native C
+//! shim supplies AMD HIP or NVIDIA CUDA kernels; dense and MoE Gemma use this
+//! module. Gemma 4 31B has the following per-layer geometry: sliding attention on
 //! a period-6 pattern (5 SWA + 1 full), per-layer head dims (256 SWA / 512 full)
 //! and KV-head counts (16 SWA / 4 full), per-head Q/K RMS norm + per-head V RMS
 //! normalize, four norms per layer (pre/post attn + pre/post ffn), GeGLU FFN, a

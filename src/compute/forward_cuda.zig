@@ -1,10 +1,9 @@
-//! CUDA forward pass for the dense `qwen35` hybrid-SSM model (Qwen 3.5 9B).
+//! Shared ROCm/CUDA Qwen forward pass for dense, MoE and hybrid-SSM models.
 //!
-//! M2 bring-up — incremental greedy decode of a single token on NVIDIA. The CUDA
-//! backend modules (device/buffer/pipeline/command) and the kernel library
-//! (`src/shaders/cuda/kernels.cu`, NVRTC-compiled) are orchestrated here into a
-//! real forward pass. Weights upload VERBATIM-quantized (Q4_K/Q5_K/Q6_K/Q8_0
-//! blocks) via loader_cuda and are dequantized inside the DMMV kernels.
+//! Orchestrates the native device/buffer/pipeline/command modules through their
+//! shared C ABI: AMD HIP kernels on ROCm or NVIDIA NVRTC kernels on CUDA. Weights
+//! retain their GGUF quantization (Q4_K/Q5_K/Q6_K/Q8_0 blocks) during upload via
+//! loader_cuda and are dequantized inside the matrix-vector kernels.
 //!
 //! Layer schedule (qwen35, full_attention_interval=4): layer L is full attention
 //! when ((L+1) % 4 == 0) → L in {3,7,11,15,19,23,27,31}; the other 24 layers are

@@ -1,8 +1,8 @@
-//! CUDA buffer wrapper — device-local allocations with optional pinned staging.
+//! Shared CUDA/ROCm buffer wrapper with device allocations and pinned staging.
 //!
-//! Unlike Metal (Apple unified memory), CUDA device memory is NOT CPU-visible;
-//! host<->device transfers are explicit (`upload`/`download`), staged through
-//! pinned host memory. Mirrors src/metal/buffer.zig.
+//! Native buffers are exposed as opaque device pointers. Transfers use explicit
+//! `upload`/`download` operations through the selected CUDA or HIP C shim, rather
+//! than the Metal loader's zero-copy model mapping.
 //! @section CUDA Runtime
 const std = @import("std");
 const shim = @import("c.zig").shim;
