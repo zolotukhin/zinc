@@ -12,7 +12,7 @@ version in the [validation report](OPENCODE_RELEASE_VALIDATION.md).
 package dependencies and accepts the same arguments.
 
 The helper discovers `capabilities.chat_session_reuse` through `/health`
-before launching a task. When a Vulkan server advertises support, it gives
+before launching a task. When a Vulkan server advertises support for its attention-only active model, it gives
 that client run a fresh `session_id`, allowing later tool turns to reuse their
 matching prompt prefix. The key stays in the inline launch configuration;
 saved project files are unchanged. Older servers, other backends and failed
@@ -23,6 +23,11 @@ turn then uses full prefill. Changed prefixes, a different model or session,
 and an intervening request never justify reusing another request's GPU state.
 The evaluator only discovers this capability for its ZINC provider, leaving
 the llama.cpp comparison path unchanged.
+
+Recurrent/hybrid models currently do not advertise this automatic path. A
+R9700 Qwen control returned correct replies but its stored prefix and engine
+checkpoint positions disagreed, forcing full prefill. This negative control
+is retained; it is not a claim of successful hybrid cache reuse.
 
 ## Start the model server
 

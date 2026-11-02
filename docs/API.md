@@ -41,7 +41,7 @@ ZINC is still a local single-process engine:
 - Generation runs under one engine lock. Concurrent HTTP requests are accepted,
   but decode is serialized.
 - `/health` advertises `capabilities.chat_session_reuse` on Vulkan builds
-  with prompt reuse support. Clients can send a per-conversation `session_id` to reuse matching
+  with an attention-only active model. Clients can send a per-conversation `session_id` to reuse matching
   prefixes; absence or a false capability means clients should use full
   requests without assuming cache support. An intervening request or changed
   prefix falls back to full prefill.

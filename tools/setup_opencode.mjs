@@ -454,7 +454,7 @@ export async function sessionRuntimeConfig(
   // Explicit empty/null keys are an opt-out too. Preserve caller precedence.
   if (bodies.some((body) => body && Object.hasOwn(body, 'session_id'))) return live;
   try {
-    const response = await fetchImpl(`${provider.options.baseURL.slice(0, -3)}/health`, {
+    const response = await fetchImpl(provider.options.baseURL.replace(/\/v1\/?$/, '/health'), {
       headers: { authorization: `Bearer ${env.ZINC_API_KEY || 'local'}` },
       signal: AbortSignal.timeout(lookupTimeoutMs),
     });

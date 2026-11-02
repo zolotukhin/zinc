@@ -14,6 +14,7 @@ const tokenizer_mod = runtime.tokenizer_mod;
 const Model = runtime.Model;
 const memory_plan = @import("../gpu/memory_plan.zig");
 const tool_format = @import("tool_format.zig");
+const session_reuse_policy = @import("session_reuse_policy.zig");
 
 const log = std.log.scoped(.routes);
 const inference_timing_log = std.log.scoped(.forward);
@@ -615,6 +616,7 @@ fn buildHealthJson(
     server_state: *const ServerState,
     model_name: []const u8,
     memory_usage: model_manager_mod.ModelManager.MemoryUsage,
+    reuse_supported: bool,
     buf: []u8,
 ) ![]const u8 {
     const now = host_io.timestamp();
@@ -625,9 +627,7 @@ fn buildHealthJson(
         \\{{"status":"ok","model":"{s}","capabilities":{{"chat_session_reuse":{s}}},"active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
     , .{
         model_name,
-        // Vulkan preserves both attention KV and hybrid recurrent state.
-        // Other backends stay opt-out until their reuse path is qualified.
-        if (runtime.is_vulkan) "true" else "false",
+        if (reuse_supported) "true" else "false",
         snapshot.active_requests,
         snapshot.queued_requests,
         snapshot.uptime_seconds,
@@ -644,7 +644,10 @@ fn buildHealthJson(
 
 fn handleHealth(conn: *http.Connection, manager: *model_manager_mod.ModelManager, server_state: *const ServerState) !void {
     var buf: [1024]u8 = undefined;
-    const body = buildHealthJson(server_state, manager.activeDisplayName(), manager.currentMemoryUsage(), &buf) catch return error.BufferTooSmall;
+    // Advertise the existing ChatRequestBody.session_id -> handleChatCompletions
+    // -> ChatReuseCache path only for the active model's qualified state type.
+    const reuse_supported = if (comptime runtime.is_vulkan) manager.supportsChatSessionReuse() else false;
+    const body = buildHealthJson(server_state, manager.activeDisplayName(), manager.currentMemoryUsage(), reuse_supported, &buf) catch return error.BufferTooSmall;
     try conn.sendJson(200, body);
 }
 
@@ -6032,6 +6035,22 @@ test "supportsEnabledThinking requires tokenizer support and request flag" {
     try std.testing.expect(!supportsEnabledThinking(&plain_tok, true));
 }
 
+test "chat request session key reaches the existing resident-prefix cache contract" {
+    var parsed = try parseChatRequest(std.testing.allocator,
+        \\{"session_id":"opencode-wire","messages":[{"role":"user","content":"hello"}]}
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("opencode-wire", parsed.session_id);
+    var cache = ChatReuseCache.init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.store(parsed.session_id, "model.gguf", &.{ 1, 2, 3 }, 10);
+    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen(parsed.session_id, "model.gguf", &.{ 1, 2, 3, 4 }, 11));
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("another-client", "model.gguf", &.{ 1, 2, 3, 4 }, 12));
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen(parsed.session_id, "another-model.gguf", &.{ 1, 2, 3, 4 }, 13));
+    cache.clearLive();
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen(parsed.session_id, "model.gguf", &.{ 1, 2, 3, 4 }, 14));
+}
+
 test "ChatReuseCache reuses only the session resident in the engine" {
     // Generation is serialized behind one engine, so its KV — and on a hybrid
     // model its DeltaNet state — holds exactly one conversation. Both sessions
@@ -6139,7 +6158,7 @@ test "buildHealthJson includes request counts and uptime" {
         .context_bytes_per_token = 192 * 1024,
         .device_local_bytes = 21 * 1024 * 1024 * 1024,
         .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
-    }, &buf);
+    }, session_reuse_policy.canAdvertise(runtime.is_vulkan, 0), &buf);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"ok\"") != null);
     const health = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
     defer health.deinit();

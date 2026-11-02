@@ -185,6 +185,14 @@ pub const ModelManager = struct {
         return self.current;
     }
 
+    /// Capability for the currently loaded model, sampled under the model lock.
+    pub fn supportsChatSessionReuse(self: *ModelManager) bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        const current = self.current orelse return false;
+        return @import("session_reuse_policy.zig").canAdvertise(true, current.model.config.ssm_d_inner);
+    }
+
     /// Returns the human-readable name of the active model, or `"none"`.
     pub fn activeDisplayName(self: *ModelManager) []const u8 {
         self.state_mutex.lock();
