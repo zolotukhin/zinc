@@ -14,13 +14,13 @@ pub const commit = build_options.commit;
 pub const target = build_options.target;
 /// Active optimize mode, e.g. `ReleaseFast` or `Debug` (from `-Doptimize`).
 pub const optimize = build_options.optimize;
-/// GPU backend(s) compiled into this binary, e.g. `vulkan` or `metal`.
+/// Single GPU backend compiled into this binary, e.g. `vulkan`, `rocm`, or `metal`.
 pub const backend = build_options.backend;
 
 /// Write the full `zinc --version` report to `writer`.
 ///
-/// Emits the version, commit, target, optimize mode, and compiled-in backends,
-/// each on its own line.
+/// Emits the version, commit, target, optimize mode, and compiled-in backend,
+/// each on its own line. The `backends` output key is retained for compatibility.
 /// @param writer Destination writer that receives the formatted metadata block.
 /// @returns Propagates only the writer's own error if printing fails.
 pub fn writeVersion(writer: anytype) !void {

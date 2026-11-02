@@ -1,29 +1,30 @@
 # ZINC Technical Specification
 
-Last updated: 2026-04-17
+Last updated: 2026-11-02
 
 ZINC is a local-first LLM inference engine written primarily in Zig. It reads GGUF directly, runs single-model inference through a CLI and OpenAI-compatible HTTP API, and targets native consumer-GPU backends:
 
 - **Vulkan** on Linux for AMD RDNA3/RDNA4 and Intel Arc
-- **Metal** on macOS for Apple Silicon
+- **ROCm/HIP** on Linux for validated AMD targets (R9700 / `gfx1201`)
+- **Metal** on macOS for Apple Silicon (unsigned 0.1.0 preview)
 - **CUDA** on NVIDIA as an experimental opt-in backend
 
 This page is a living architecture document for the **current implementation**. Where the repository contains prototype code or forward-looking work, that is called out explicitly instead of being presented as already shipped behavior.
 
 ## 1. Current State At A Glance
 
-| Area | Current state |
-|------|---------------|
-| Backend selection | Compile-time: Linux builds the Vulkan path, macOS builds the Metal path |
-| Model format | Native GGUF parsing and loading |
-| Active model policy | One model loaded into runtime memory at a time |
-| Supported serving | CLI, built-in chat UI, `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/models/pull`, `/v1/models/activate`, `/v1/models/remove`, `/health` |
-| Concurrency model | HTTP is concurrent, but generation is still serialized behind one engine lock |
-| Scheduler status | `src/scheduler/*` contains groundwork for continuous batching and page allocation, but it is not the main serving hot path today |
-| KV cache | Vulkan uses a paged 16-token layout; Metal currently favors a contiguous fast path with the same conceptual interface |
-| Context planning | Runtime memory is budgeted through a shared planner; today's engine is still effectively tuned around a `4096` token context cap |
-| KV compression | Metal has a `q8_0` KV option in the runtime; TurboQuant is specified elsewhere but is not integrated into the main runtime yet |
-| Graph tooling | Decode graphs can be exported as JSON and DOT with per-op cost annotations |
+| Area                | Current state                                                                                                                                                           |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend selection   | One backend per binary: Vulkan by default on Linux, Metal on macOS; explicit `-Dbackend=rocm` or `-Dbackend=cuda` on Linux                                              |
+| Model format        | Native GGUF parsing and loading                                                                                                                                         |
+| Active model policy | One model loaded into runtime memory at a time                                                                                                                          |
+| Supported serving   | All four backends provide CLI and core HTTP inference. Browser UI and HTTP model management are Vulkan/Metal only; see [API coverage](/zinc/docs/api/#backend-coverage) |
+| Concurrency model   | Vulkan/Metal serialize generation; ROCm/CUDA batch decode on supported models, with a single-slot Gemma MoE path                                                        |
+| Scheduler status    | `src/server/cuda_serve.zig` uses the scheduler for native ROCm/CUDA serving; Vulkan/Metal retain their serialized model manager                                         |
+| KV cache            | Vulkan uses a paged 16-token layout; Metal currently favors a contiguous fast path with the same conceptual interface                                                   |
+| Context planning    | Vulkan/Metal size context from model and memory limits; ROCm/CUDA default to 2,048 tokens per slot. Exact qualified contexts are recorded per backend/model             |
+| KV compression      | Backend-specific storage; ROCm offers opt-in Q8 under documented constraints. The parsed `--kv-quant` compatibility flag does not enable TurboQuant                     |
+| Graph tooling       | Decode graphs can be exported as JSON and DOT with per-op cost annotations                                                                                              |
 
 ## 2. Design Goals
 
@@ -37,7 +38,7 @@ ZINC is optimized around a small number of strong constraints:
 
 That leads to a split architecture:
 
-- shared upper layers for tokenization, GGUF parsing, model catalog, HTTP routes, diagnostics, and memory planning
+- shared tokenization, GGUF metadata and model catalog; Vulkan/Metal share routes and model management, while ROCm/CUDA use native serving orchestration
 - backend-specific substrate for device discovery, buffers, pipeline compilation, command submission, and kernel code
 - model-family-specific decode planning driven from normalized GGUF metadata instead of hardcoded per-model scripts
 
@@ -52,6 +53,8 @@ CLI / HTTP server / chat UI
   -> backend runtime
        -> Vulkan: SPIR-V compute shaders, device-local VRAM, command buffers
        -> Metal:  MSL kernels, unified memory, Objective-C shim
+       -> ROCm:   HIP/hipRTC/hipBLAS, AMD kernels, native batched worker
+       -> CUDA:   CUDA/NVRTC/cuBLAS, experimental native worker
   -> sampling + streaming + health / memory reporting
 ```
 
@@ -64,15 +67,20 @@ The shared layers are centered in these files:
 - `src/model/tokenizer.zig` owns vocab, merges, chat templates, and thinking-toggle handling
 - `src/model/catalog.zig` defines the curated managed-model catalog
 - `src/model/managed.zig` handles downloads, cache layout, active selection, and fit checks
-- `src/server/routes.zig` serves the HTTP API and built-in chat UI
-- `src/gpu/memory_plan.zig` computes fixed and per-token runtime memory costs for both backends
+- `src/server/routes.zig` serves Vulkan/Metal HTTP and browser UI, and shares chat/tool parsing with ROCm/CUDA
+- `src/main.zig` implements ROCm/CUDA HTTP transport; `src/server/cuda_serve.zig` owns its GPU worker
+- `src/gpu/memory_plan.zig` computes Vulkan/Metal memory budgets and catalog estimates; native ROCm/CUDA forward paths also account for their own slot and scratch allocations
 
 ### 3.2 Backend-specific substrate
 
 The backend switch happens in `src/gpu/interface.zig` at compile time:
 
-- Linux => Vulkan backend
+- Linux => Vulkan by default; ROCm/HIP with `-Dbackend=rocm`, or experimental CUDA with `-Dbackend=cuda`
 - macOS => Metal backend
+
+`gpu.is_cuda` denotes the shared CUDA-family orchestration and is also true for
+ROCm. `gpu.is_rocm` distinguishes the HIP implementation. Names such as
+`forward_cuda.zig` and `CudaDevice` therefore appear in ROCm builds too.
 
 This keeps the inactive backend out of the build and lets the upper layers call one runtime interface without paying for a large runtime abstraction.
 
@@ -123,15 +131,25 @@ Key properties of the Metal path:
 
 On Apple Silicon, logits are CPU-visible through UMA, which simplifies sampling and debug readback compared with Vulkan.
 
-### 4.3 Shared Runtime Behavior
+### 4.3 ROCm and CUDA Paths
 
-Despite the backend split, both paths share the same user-facing model:
+ROCm uses `src/rocm/rocm_shim.c` and AMD HIP kernels behind the C ABI consumed
+by `src/cuda/`, `src/model/loader_cuda.zig` and `src/compute/forward_cuda*.zig`.
+The shared scheduler/worker is in `src/server/cuda_serve.zig`. CUDA supplies the
+NVIDIA implementation of that ABI and remains experimental.
 
-- same CLI entrypoint
-- same HTTP routes
-- same managed-model catalog and active-model selection
-- same tokenizer and chat template logic
-- same high-level concepts: prompt prefill, token-by-token decode, KV cache tracking, sampling, health reporting
+These builds compile embedded kernels at runtime with hipRTC or NVRTC; ROCm
+also uses hipBLAS and rocWMMA headers. They do not require Vulkan shaders or
+RADV settings. See [ROCm setup](/zinc/docs/rocm/) for dependencies and exact
+validated model, KV, prefill, MTP and concurrency settings.
+
+### 4.4 Shared Runtime Behavior
+
+The backends share a CLI entrypoint, GGUF metadata, tokenizer, catalog and
+high-level prefill/decode concepts. They have different memory planners and
+serving features. Vulkan/Metal provide browser chat and hot model management;
+ROCm/CUDA load one model at startup and expose core chat/completion endpoints.
+Use the [API matrix](/zinc/docs/api/#backend-coverage) for the contract.
 
 ## 5. Model Loading And Managed Models
 
@@ -184,7 +202,7 @@ The managed-model flow is backed by `src/model/managed.zig` and is used by both 
 - `zinc model active`
 - `zinc model rm <id>`
 
-The HTTP server exposes the same lifecycle through `/v1/models`, `/v1/models/pull`, `/v1/models/activate`, and `/v1/models/remove`.
+The Vulkan/Metal HTTP server exposes the same lifecycle through `/v1/models`, `/v1/models/pull`, `/v1/models/activate`, and `/v1/models/remove`.
 
 ### 5.5 One-Model-At-A-Time Policy
 
@@ -195,7 +213,8 @@ The runtime model manager (`src/server/model_manager.zig` and `src/server/model_
 - inference engine
 - memory-usage accounting
 
-Hot-swapping models is supported, but swaps are serialized with generation because the engine is not yet multi-tenant in the serving hot path.
+Vulkan/Metal hot model swaps are serialized with generation. ROCm/CUDA load
+their model at startup; the request `model` field does not hot-switch it.
 
 ## 6. Supported Model Families
 
@@ -213,8 +232,11 @@ At the execution-model level, that means ZINC handles:
 
 GGUFs may append NextN/MTP draft blocks to `block_count`. ZINC retains those
 tensors when loading the model but excludes the declared
-`nextn_predict_layers` from ordinary autoregressive inference; speculative MTP
-decoding is not enabled yet.
+`nextn_predict_layers` from the ordinary target-model layer count. Supported
+AMD Vulkan and ROCm Qwen paths can use those tensors for speculative MTP,
+verified against the full target model. Intel Vulkan defaults to ordinary
+decode after its correctness gate; experimental MTP requires explicit opt-in.
+See the backend validation reports and benchmark rows for the actual settings.
 
 The architecture-normalization layer is in `src/model/architecture.zig` and `src/model/config.zig`.
 
@@ -268,6 +290,7 @@ The runtime is centered around `InferenceEngine`:
 
 - `src/compute/forward.zig` for Vulkan
 - `src/compute/forward_metal.zig` for Metal
+- `src/compute/forward_cuda.zig` and `src/compute/forward_cuda_gemma.zig` for shared ROCm/CUDA execution
 
 The engine owns:
 
@@ -347,7 +370,9 @@ Examples:
 
 ### 8.6 Sampling
 
-The runtime supports:
+Vulkan/Metal support the sampling controls exposed by their runtime. The
+ROCm/CUDA transport currently uses greedy decoding and ignores request sampling
+controls. The Vulkan/Metal controls include:
 
 - greedy decoding
 - temperature
@@ -446,9 +471,12 @@ Metal keeps the same conceptual contract but currently favors a **contiguous fas
 
 Metal also includes a `q8_0` KV-cache option for model families where the quality/performance tradeoff is acceptable.
 
-### 10.3 Shared Memory Planner
+### 10.3 Vulkan/Metal Memory Planner
 
-`src/gpu/memory_plan.zig` is the shared source of truth for runtime memory budgeting. It splits memory into:
+`src/gpu/memory_plan.zig` supplies Vulkan/Metal runtime memory budgeting and
+catalog estimates. Native ROCm/CUDA slot, KV and scratch budgeting lives with
+its forward implementation; its lightweight health response does not expose
+the Vulkan/Metal memory breakdown. It splits memory into:
 
 - fixed runtime bytes
 - bytes per context token
@@ -467,12 +495,12 @@ This matters because the numbers shown by the CLI and server are intended to com
 
 ### 10.4 Current Context Policy
 
-Even though some GGUFs advertise much larger theoretical contexts, the current public runtime is still effectively planned around a `4096` token operating cap. That affects:
-
-- memory reservation
-- health reporting
-- managed-model fit estimates
-- practical serving behavior
+Context is a backend/model/memory decision, not a universal 4K cap.
+Vulkan/Metal auto-size it when `-c` is omitted or zero. ROCm/CUDA use 2,048 per
+slot in that case; larger windows require an explicit `-c` and sufficient
+memory for all slots. The [Intel validation report](/zinc/docs/intel-opencode-validation/)
+and [ROCm context guide](/zinc/docs/rocm-native-context/) record checked windows.
+A model's theoretical window is not a claim that every GPU/configuration fits it.
 
 ## 11. Serving Layer
 
@@ -485,24 +513,29 @@ The HTTP server is implemented in:
 - `src/server/model_manager_metal.zig`
 - `src/server/session.zig`
 
+The following endpoint table and rich introspection describe Vulkan/Metal.
+ROCm/CUDA transport lives in `src/main.zig`; its smaller endpoint set and
+different defaults are listed in [API coverage](/zinc/docs/api/#backend-coverage).
+
 ### 11.1 Current Endpoints
 
-| Method | Path | Status |
-|--------|------|--------|
-| `GET` | `/` and `/chat` | Built-in chat UI |
-| `GET` | `/health` | Implemented |
-| `GET` | `/v1/models` | Implemented |
-| `POST` | `/v1/models/pull` | Implemented |
-| `POST` | `/v1/models/activate` | Implemented |
-| `POST` | `/v1/models/remove` | Implemented |
-| `POST` | `/v1/chat/completions` | Implemented |
-| `POST` | `/v1/completions` | Implemented |
+| Method | Path                   | Status           |
+| ------ | ---------------------- | ---------------- |
+| `GET`  | `/` and `/chat`        | Built-in chat UI |
+| `GET`  | `/health`              | Implemented      |
+| `GET`  | `/v1/models`           | Implemented      |
+| `POST` | `/v1/models/pull`      | Implemented      |
+| `POST` | `/v1/models/activate`  | Implemented      |
+| `POST` | `/v1/models/remove`    | Implemented      |
+| `POST` | `/v1/chat/completions` | Implemented      |
+| `POST` | `/v1/completions`      | Implemented      |
 
 ZINC does **not** currently expose `/v1/embeddings`, so older drafts of this spec that listed it were ahead of the implementation.
 
 ### 11.2 Generation Concurrency
 
-The server accepts overlapping requests and reports queue depth, but generation is still serialized behind `ServerState.generation_mutex`.
+Vulkan/Metal accept overlapping requests and report queue depth, but generation
+is serialized behind `ServerState.generation_mutex`.
 
 That means:
 
@@ -511,7 +544,9 @@ That means:
 - `/health` remains useful during load
 - decode itself is still one-active-generation-at-a-time
 
-This is the most important serving limitation to understand today.
+ROCm/CUDA instead use `ServeEngine` with request slots and batched decode.
+Gemma MoE currently uses one slot, and single-sequence MTP requires one slot.
+These settings also affect KV allocation and memory fit.
 
 ### 11.3 Chat Template And Thinking Control
 
@@ -527,7 +562,11 @@ Managed catalog entries additionally carry a `thinking_stable` bit so the UI and
 
 ### 11.4 Session Reuse Cache
 
-The chat server now includes a small session reuse cache keyed by session id and model path. Its goal is to avoid redoing the full transcript prefill when a new request extends an already-known conversation prefix.
+The Vulkan chat server advertises prefix reuse only for an eligible active
+attention-only model. The cache is keyed by conversation and model; clients
+check `/health` capability before sending `session_id`. Changed prefixes or an
+intervening request can fall back to full prefill. ROCm/CUDA do not expose this
+session cache.
 
 This is **not** continuous batching, but it does give the server a concrete form of incremental prompt reuse.
 
@@ -561,20 +600,17 @@ These modules describe the intended shape of:
 - prefilling vs decoding phases
 - KV-page allocation
 
-But today they should be understood as **groundwork**, not as the main runtime scheduling mechanism used by the production server path.
-
-In other words:
-
-- ZINC already has serving
-- ZINC does not yet have full production continuous batching
-- the scheduler code exists to support that direction
+The native ROCm/CUDA `ServeEngine` uses request scheduling for admission,
+prefill, batched decode and slot release. Vulkan/Metal still use a serialized
+model manager and generation lock. Scheduler support therefore does not imply
+that every backend batches requests or shares the same paged-KV policy.
 
 ## 13. Deliberate Non-Claims And Near-Term Work
 
 The repository now has more real implementation detail than it did when this page was first written, but some areas are still explicitly incomplete:
 
 - no `/v1/embeddings` endpoint yet
-- no production continuous batching in the serving hot path yet
+- Vulkan/Metal generation remains serialized
 - no multi-GPU execution path
 - no fully integrated TurboQuant runtime yet, despite CLI parsing and graph/placeholders for it
 - Metal prefill is functional but still not the same thing as a separately optimized large-batch prefill kernel family
@@ -583,6 +619,7 @@ Those are active engineering directions, not hidden features.
 
 ## 14. Related Docs
 
+- [Backend selection](/zinc/docs/getting-started/#choose-your-backend) and [ROCm setup](/zinc/docs/rocm/)
 - [Running ZINC](/zinc/docs/running-zinc/) for CLI, server mode, and managed-model usage
 - [API Reference](/zinc/docs/api/) for HTTP request/response details
 - [Development Guide](/zinc/docs/development/) for build, test, graph export, and profiling workflow

@@ -3,7 +3,13 @@
 ZINC has a supported Linux ROCm backend for AMD GPUs. It reuses the CUDA-side
 model loader and scheduler behind the same C ABI, implemented with HIP, hipRTC,
 and hipBLAS. Vulkan and ROCm are independently supported AMD paths; select ROCm
-explicitly at build time.
+explicitly at build time. Each executable contains one backend; a Vulkan
+binary does not use ROCm, and a ROCm binary does not require Vulkan, Mesa RADV,
+`glslc`, or `RADV_PERFTEST`. Use `zinc --version` to identify the build.
+
+For the broader AMD Vulkan path and Intel Arc, use
+[Getting started](GETTING_STARTED.md#choose-your-backend). Current ROCm evidence
+covers the R9700 (`gfx1201`); it does not qualify every RDNA3/RDNA4 card.
 
 For prebuilt packages, see the [binary release guide](https://zolotukhin.ai/zinc/docs/binary-releases/).
 They remove the Zig/source-build requirement. HIP still compiles embedded kernels
@@ -36,9 +42,15 @@ Install the ROCm HIP development files that provide `amdhip64`, `hiprtc`, and
 ```bash
 ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
 
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
+./zig-out/bin/zinc --check
 ./zig-out/bin/zinc --version
 ```
+
+To restrict the process to a GPU on a multi-GPU machine, set
+`ROCR_VISIBLE_DEVICES=<device-index>` before starting it. The native HIP device
+list is separate from `vulkaninfo` indices. ROCm currently ignores ZINC's `-d`
+option and chooses the best visible native device; inspect `zinc --check` after
+setting visibility. Vulkan's `RADV_PERFTEST=coop_matrix` has no effect here.
 
 The executable records the toolkit's `lib` directory as a runtime search path.
 The standard `/opt/rocm` installation needs no `LD_LIBRARY_PATH` setup. If you
@@ -48,7 +60,7 @@ that toolkit's `lib` directory to `LD_LIBRARY_PATH`.
 Run a GGUF directly:
 
 ```bash
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
+./zig-out/bin/zinc \
   -m /path/to/Qwen3.8-27B-Q4_K_M.gguf \
   --chat --prompt "Explain why fair LLM benchmarks need a warmup." -n 96
 ```
@@ -81,10 +93,25 @@ R9700 with Qwen 3.8 27B Q4_K_M, single-slot serving measures 64-73 tok/s decode
 on the suite prompts against 32 tok/s with `ZINC_MTP=0` (llama.cpp HIP: 29 tok/s),
 at 50-65% acceptance of three drafts.
 
-Start the OpenAI-compatible server:
+### HTTP API coverage
+
+Start the OpenAI-compatible server with an explicit context and slot count.
+The ROCm default is **2,048 tokens per slot**, including when `-c 0` is passed;
+it does not use Vulkan/Metal's automatic context sizing. Set `stream` explicitly
+in requests: ROCm defaults to SSE, while Vulkan/Metal defaults to JSON.
+
+The shared chat/tool parser supports native Qwen and Gemma tool formats.
+ROCm generation is greedy: `temperature` and `top_p` do not change sampling.
+`GET /v1/models` returns the loaded model, not the managed catalog. Choose a
+model at process startup; request `model` fields do not hot-switch it.
+Browser UI, HTTP model downloads/activation/removal, chat `session_id` reuse,
+and client-provided `stop` strings are not implemented on this server.
+See the [API matrix](API.md#backend-coverage) for endpoint and default differences.
+
+Start the server:
 
 ```bash
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
+./zig-out/bin/zinc \
   -m /path/to/Qwen3.8-27B-Q4_K_M.gguf \
   --parallel 1 --context 2048 --port 9090
 ```
@@ -311,8 +338,8 @@ quality checks.
 
 - `hipErrorNoBinaryForGpu`: verify hipRTC receives the detected `gfx*` target and
   that the installed ROCm release supports it.
-- No device or the wrong device: set `ROCR_VISIBLE_DEVICES` and pass `-d 0` after
-  visibility filtering.
+- No device or the wrong device: set `ROCR_VISIBLE_DEVICES` before starting
+  ZINC and verify the native target with `--check`. The ROCm build ignores `-d`.
 - Missing shared library: register `/opt/rocm/lib` with the dynamic linker or set
   `LD_LIBRARY_PATH`.
 - Performance drift: stop other GPU processes, discard at least one warmup, and
