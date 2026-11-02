@@ -5,12 +5,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import referencePin from '../config/benchmark-reference.json' with { type: 'json' };
 import policy from '../config/release/targets.json' with { type: 'json' };
-import { gemmaModelId, gemmaWorkloads } from './gemma_rocm_workloads.mjs';
+import { gemmaModelId, gemmaWorkloadsForModel } from './gemma_rocm_workloads.mjs';
 import { requestDigest } from './merge_matched_mtp.mjs';
 import { createStats, mergeArtifacts, requireObservedMtp } from './performance_suite.mjs';
 import { requireBenchmarkReference } from './benchmark_speculation.mjs';
 
-const modelPin = policy.models.find((model) => model.id === gemmaModelId);
 const digest = (value) => /^[a-f0-9]{64}$/.test(value ?? '');
 const requireValue = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -30,13 +29,19 @@ const harnessFiles = [
 
 export function validateGemmaHarness(report, commit) {
   requireValue(/^[a-f0-9]{40}$/.test(commit ?? ''), 'Supply the full frozen harness commit');
+  const sources = report.harness_sha256 ?? {};
+  const expected = sources['tools/benchmark_reference.mjs']
+    ? [...harnessFiles, 'tools/benchmark_reference.mjs']
+    : harnessFiles;
   requireValue(
-    Object.keys(report.harness_sha256 ?? {})
-      .sort()
-      .join() === [...harnessFiles].sort().join(),
+    report.schema_version !== 'zinc-gemma-vulkan-v1' || expected.length === 11,
+    'Vulkan campaigns must freeze the latest-reference checker',
+  );
+  requireValue(
+    Object.keys(sources).sort().join() === [...expected].sort().join(),
     'Harness sources are incomplete',
   );
-  for (const name of harnessFiles) {
+  for (const name of expected) {
     const source = execFileSync('git', ['show', `${commit}:${name}`]);
     requireValue(
       createHash('sha256').update(source).digest('hex') === report.harness_sha256[name],
@@ -46,8 +51,17 @@ export function validateGemmaHarness(report, commit) {
 }
 
 export function validateGemmaReport(report) {
+  const vulkan = report.schema_version === 'zinc-gemma-vulkan-v1';
+  const backend = vulkan ? 'vulkan' : 'rocm';
+  const modelId = report.model?.id;
   requireValue(
-    report.schema_version === 'zinc-gemma-rocm-v1' &&
+    (vulkan ? [gemmaModelId, 'gemma4-31b-q4k-m'] : [gemmaModelId]).includes(modelId),
+    'Unknown Gemma model',
+  );
+  const modelPin = policy.models.find((model) => model.id === modelId);
+  const workloads = gemmaWorkloadsForModel(modelId);
+  requireValue(
+    report.schema_version === `zinc-gemma-${backend}-v1` &&
       report.passed === true &&
       !report.error &&
       report.cleanup === 'no GPU process remains',
@@ -60,8 +74,7 @@ export function validateGemmaReport(report) {
   );
   requireValue(report.release_qualification === false, 'A benchmark cannot qualify a release');
   requireValue(
-    report.model?.id === gemmaModelId &&
-      report.model.sha256 === modelPin.sha256 &&
+    report.model.sha256 === modelPin.sha256 &&
       report.model.size_bytes === modelPin.size_bytes &&
       report.model.sliding_window === modelPin.sliding_window,
     'Model identity differs',
@@ -84,18 +97,38 @@ export function validateGemmaReport(report) {
   );
   const settings = report.settings;
   requireValue(
-    settings?.backend === 'rocm' &&
+    settings?.backend === backend &&
       settings.context === 4096 &&
       settings.slots === 1 &&
-      settings.kv_cache === 'f32' &&
+      settings.kv_cache === (vulkan ? 'f16' : 'f32') &&
       settings.mtp === 'off' &&
-      settings.prefill === 'default-serial' &&
+      settings.prefill === (vulkan ? 'backend-default' : 'default-serial') &&
       settings.prompt_cache === false &&
       settings.temperature === 0 &&
       settings.top_p === 1 &&
       settings.seed === 0,
     'Controlled settings differ',
   );
+  if (vulkan) {
+    requireValue(['rdna', 'intel'].includes(report.target), 'Unknown Vulkan target');
+    requireValue(
+      report.kernel_reference?.passed === true && report.kernel_reference.cases === 376,
+      'Full shader reference checks are required',
+    );
+    requireValue(
+      typeof report.hardware?.gpu === 'string' &&
+        typeof report.hardware?.driver === 'string' &&
+        typeof report.hardware?.os === 'string' &&
+        (report.target === 'intel' ? /Intel/i : /AMD|Radeon/i).test(report.hardware.gpu),
+      'Selected GPU evidence is missing',
+    );
+    requireValue(
+      report.latest_reference_check?.commit === referencePin.commit &&
+        Date.parse(report.latest_reference_check.checked_at) >= Date.parse(report.started_at) &&
+        Date.parse(report.latest_reference_check.checked_at) <= Date.parse(report.completed_at),
+      'The reference was not checked against current upstream',
+    );
+  }
   requireValue(
     [settings.rounds, settings.runs, settings.warmup].every(Number.isSafeInteger) &&
       settings.rounds >= 3 &&
@@ -145,8 +178,8 @@ export function validateGemmaReport(report) {
     'Reference totals differ',
   );
   requireValue(
-    report.scenarios?.length === gemmaWorkloads.length &&
-      gemmaWorkloads.every(
+    report.scenarios?.length === workloads.length &&
+      workloads.every(
         (scenario) =>
           report.scenarios.find((row) => row.id === scenario.id)?.request_sha256 ===
           requestDigest(scenario.body),
@@ -155,10 +188,10 @@ export function validateGemmaReport(report) {
   );
   requireValue(
     report.samples?.length ===
-      2 * gemmaWorkloads.length * settings.rounds * (settings.runs + settings.warmup),
+      2 * workloads.length * settings.rounds * (settings.runs + settings.warmup),
     'Sample matrix is incomplete',
   );
-  for (const scenario of gemmaWorkloads) {
+  for (const scenario of workloads) {
     const counts = [];
     for (const engine of ['zinc', 'llama']) {
       const rows = report.samples.filter(
@@ -210,8 +243,10 @@ export function validateGemmaReport(report) {
 
 export function mergeGemmaReport(existing, report, evidenceUrl) {
   validateGemmaReport(report);
-  const target = existing.targets.find((target) => target.id === 'rdna-rocm');
-  const previous = target?.models.find((model) => model.id === gemmaModelId);
+  const modelId = report.model.id;
+  const targetId = report.schema_version === 'zinc-gemma-vulkan-v1' ? report.target : 'rdna-rocm';
+  const target = existing.targets.find((target) => target.id === targetId);
+  const previous = target?.models.find((model) => model.id === modelId);
   requireValue(previous, 'Published Gemma model is missing');
   const { measurement_history: history = [], ...old } = previous;
   const sameCampaign =
@@ -231,7 +266,7 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
       library_sha256: report.reference.library_sha256,
     },
   };
-  const scenarios = gemmaWorkloads.map(({ body, ...scenario }) => ({
+  const scenarios = gemmaWorkloadsForModel(modelId).map(({ body, ...scenario }) => ({
     ...scenario,
     measured_at: report.completed_at,
     zinc: createStats(
@@ -261,7 +296,7 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
           notes: [
             ...new Set([
               ...target.methodology.notes,
-              'Gemma 26B-A4B was revalidated with default serial prefill, six complete CLI reference continuations and eighteen HTTP/recovery continuations. Its new off/off measurements use nine measured requests per workload and engine.',
+              `${previous.label ?? modelId} was revalidated with ${report.settings.backend} defaults, six complete CLI reference continuations and eighteen HTTP/recovery continuations. Its new off/off measurements use nine measured requests per workload and engine.`,
             ]),
           ],
         },
@@ -274,10 +309,14 @@ export function mergeGemmaReport(existing, report, evidenceUrl) {
             correctness_review: null,
             measurement_history: sameCampaign ? history : [...history, old],
             server_context_tokens: 4096,
-            server_kv_cache: { zinc: 'f32', llama_cpp: 'f32' },
+            server_kv_cache: {
+              zinc: report.settings.kv_cache,
+              llama_cpp: report.settings.kv_cache,
+            },
             revalidation_evidence: {
               url: evidenceUrl,
-              prefill: 'serial',
+              prefill: report.settings.prefill === 'default-serial' ? 'serial' : 'backend-default',
+              backend: report.settings.backend,
               exact_cli_tokens: 96,
               http_full_continuations: 18,
               release_qualification: false,
@@ -313,7 +352,12 @@ if (import.meta.main) {
   validateGemmaHarness(report, commit);
   report.harness_source_commit = commit;
   const name =
-    report.completed_at.slice(0, 19).replaceAll(':', '-') + '-gemma-rocm-revalidated.json';
+    report.completed_at.slice(0, 19).replaceAll(':', '-') +
+    '-' +
+    (report.target ?? 'rdna-rocm') +
+    '-' +
+    report.model.id +
+    '-revalidated.json';
   const url = '/zinc/benchmarks/' + name;
   const siteFile = 'site/src/data/zinc-performance.json';
   const result = mergeGemmaReport(JSON.parse(await readFile(siteFile, 'utf8')), report, url);
@@ -330,6 +374,6 @@ if (import.meta.main) {
   );
   await writeFile(siteFile, JSON.stringify(result, null, 2) + '\n');
   console.log(
-    'Published revalidated ROCm Gemma measurements; original caution remains in measurement history.',
+    `Published revalidated ${report.target ?? 'rdna-rocm'} ${report.model.id} measurements; original caution remains in measurement history.`,
   );
 }

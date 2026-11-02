@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import policy from '../config/release/targets.json';
 import reference from '../config/benchmark-reference.json';
-import { gemmaModelId, gemmaWorkloads } from './gemma_rocm_workloads.mjs';
+import { gemmaModelId, gemmaWorkloads, gemmaWorkloadsForModel } from './gemma_rocm_workloads.mjs';
 import { requestDigest } from './merge_matched_mtp.mjs';
 import { mergeGemmaReport, validateGemmaReport } from './merge_gemma_rocm.mjs';
 import { overallRatio, qualityStatus, rowsFor } from '../site/src/lib/benchmark-view';
@@ -93,6 +93,37 @@ function fixture(): any {
   };
 }
 
+function vulkanFixture(modelId = gemmaModelId, target = 'rdna'): any {
+  const report = fixture();
+  const model = policy.models.find((model) => model.id === modelId)!;
+  report.schema_version = 'zinc-gemma-vulkan-v1';
+  report.target = target;
+  report.model = {
+    id: model.id,
+    sha256: model.sha256,
+    size_bytes: model.size_bytes,
+    sliding_window: model.sliding_window,
+  };
+  report.settings = {
+    ...report.settings,
+    backend: 'vulkan',
+    kv_cache: 'f16',
+    prefill: 'backend-default',
+  };
+  report.hardware = {
+    gpu: target === 'rdna' ? 'AMD Radeon AI PRO R9700' : 'Intel Arc Pro',
+    os: 'Linux',
+    driver: 'Mesa',
+  };
+  report.kernel_reference = { passed: true, cases: 376 };
+  report.latest_reference_check = { commit: reference.commit, checked_at: '2026-11-02T05:00:01Z' };
+  report.scenarios = gemmaWorkloadsForModel(modelId).map((scenario) => ({
+    id: scenario.id,
+    request_sha256: requestDigest(scenario.body),
+  }));
+  return report;
+}
+
 test('Gemma publication requires full reference, recovery and repeated benchmark gates', () => {
   expect(() => validateGemmaReport(fixture())).not.toThrow();
 });
@@ -103,6 +134,90 @@ test('Python JSON key ordering does not change the reference policy', () => {
     report.correctness[key] = Object.fromEntries(Object.entries(report.correctness[key]).sort());
   }
   expect(() => validateGemmaReport(report)).not.toThrow();
+});
+
+for (const target of ['rdna', 'intel'])
+  for (const modelId of [gemmaModelId, 'gemma4-31b-q4k-m']) {
+    test(`Vulkan ${target} ${modelId} needs the full current-reference matrix`, () => {
+      expect(() => validateGemmaReport(vulkanFixture(modelId, target))).not.toThrow();
+    });
+  }
+
+for (const [name, mutate] of [
+  [
+    'missing shader checks',
+    (r: any) => {
+      delete r.kernel_reference;
+    },
+  ],
+  [
+    'incomplete shader checks',
+    (r: any) => {
+      r.kernel_reference.cases = 256;
+    },
+  ],
+  [
+    'wrong physical GPU',
+    (r: any) => {
+      r.hardware.gpu = 'Intel Arc Pro';
+    },
+  ],
+  [
+    'unverified latest reference',
+    (r: any) => {
+      delete r.latest_reference_check;
+    },
+  ],
+  [
+    'stale latest-reference check',
+    (r: any) => {
+      r.latest_reference_check.commit = '0'.repeat(40);
+    },
+  ],
+  [
+    'different KV storage',
+    (r: any) => {
+      r.settings.kv_cache = 'f32';
+    },
+  ],
+] as const)
+  test(`Vulkan publication rejects ${name}`, () => {
+    const report = vulkanFixture();
+    mutate(report);
+    expect(() => validateGemmaReport(report)).toThrow();
+  });
+
+test('Vulkan replacements retire only their own model and hardware cautions', () => {
+  const existing: any = {
+    correctness_review: { affected_model_rows: 4 },
+    targets: ['rdna', 'intel'].map((id) => ({
+      id,
+      methodology: { notes: [] },
+      models: [gemmaModelId, 'gemma4-31b-q4k-m'].map((modelId) => ({
+        id: modelId,
+        label: modelId,
+        generated_at: '2026-09-24T00:00:00Z',
+        correctness_review: { tone: 'caution', note: 'Old sliding-window implementation.' },
+        scenarios: [],
+      })),
+    })),
+  };
+  const result = mergeGemmaReport(existing, vulkanFixture('gemma4-31b-q4k-m'), '/vulkan.json');
+  expect(result.correctness_review.affected_model_rows).toBe(3);
+  expect(
+    result.targets
+      .find((t: any) => t.id === 'intel')
+      .models.every((m: any) => m.correctness_review.tone === 'caution'),
+  ).toBe(true);
+  const target = result.targets.find((t: any) => t.id === 'rdna');
+  const dense = target.models.find((m: any) => m.id === 'gemma4-31b-q4k-m');
+  expect(dense.correctness_review).toBeNull();
+  expect(dense.server_kv_cache).toEqual({ zinc: 'f16', llama_cpp: 'f16' });
+  expect(dense.measurement_history[0].correctness_review.tone).toBe('caution');
+  expect(dense.revalidation_evidence.prefill).toBe('backend-default');
+  expect(
+    overallRatio(rowsFor(target, 'core', 'off').find((row: any) => row.model.id === dense.id)!),
+  ).not.toBeNull();
 });
 
 const failures: [string, (report: any) => void][] = [

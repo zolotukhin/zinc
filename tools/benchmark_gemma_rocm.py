@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Revalidate Gemma MoE defaults, then measure matched ROCm servers on a GPU worker."""
+"""Revalidate Gemma defaults, then measure matched ROCm or Vulkan servers on a GPU worker."""
 import argparse
 import datetime
 import json
@@ -20,7 +20,7 @@ HARNESS_FILES = (
     "tools/benchmark_matched_mtp.py", "tools/parse_mtp_sample.mjs",
     "tools/performance_suite.mjs", "tools/benchmark_speculation.mjs",
     "tools/release_gpu.py", "tools/release_lib.py", "config/benchmark-reference.json",
-    "config/release/targets.json",
+    "config/release/targets.json", "tools/benchmark_reference.mjs",
 )
 
 
@@ -44,9 +44,10 @@ def correctness(args, work, env, model_pin):
     ]
     oracle_env = {**env, "RADV_PERFTEST": "coop_matrix"}
     oracle_args = ["--device", args.oracle_device, "-ngl", "999", "-t", "4", "-tb", "4", "--spec-type", "none", "--no-cache-prompt"]
+    device = getattr(args, "zinc_device", 0)
     print("Correctness: six complete CLI continuations, including three beyond the sliding window", flush=True)
     samples = gpu.inference_parity(args.zinc_tree, args.oracle, args.model,
-                                   4096, 0, oracle_args, work, oracle_env, prompts=prompts)
+                                   4096, device, oracle_args, work, oracle_env, prompts=prompts)
     cases = []
     for index, (rendered, expected) in enumerate(samples):
         prompt_file = work / f"prompt-{index}.txt"
@@ -60,7 +61,7 @@ def correctness(args, work, env, model_pin):
                       "reference_text": expected["content"], "validated_text": expected.get("validated_content"),
                       "comparison": expected["comparison"]})
     print("Correctness: complete HTTP continuations, cancellation and context/error recovery", flush=True)
-    gpu.api_checks(args.zinc_tree, args.model, 4096, 0, work, env, False, samples)
+    gpu.api_checks(args.zinc_tree, args.model, 4096, device, work, env, False, samples)
     return {"passed": True, "oracle_backend": "Vulkan", "generation": policy()["reference"]["generation"],
             "agreement_policy": policy()["reference"]["agreement"],
             "reference_agreement": reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=6),
@@ -76,7 +77,10 @@ def main():
     parser.add_argument("--oracle", type=Path, required=True, help="Vulkan reference bin directory")
     parser.add_argument("--llama-source", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--device", type=int, required=True, help="Physical ROCr ordinal")
+    parser.add_argument("--model-id", choices=(MODEL_ID, "gemma4-31b-q4k-m"), default=MODEL_ID)
+    parser.add_argument("--backend", choices=("rocm", "vulkan"), default="rocm")
+    parser.add_argument("--target", choices=("rdna", "intel"), default="rdna")
+    parser.add_argument("--device", type=int, required=True, help="Physical ROCr ordinal or Vulkan index")
     parser.add_argument("--oracle-device", required=True)
     parser.add_argument("--reservation", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -86,15 +90,22 @@ def main():
     args = parser.parse_args()
     if not sys.platform.startswith("linux") or min(args.rounds, args.runs, args.warmup) < 1:
         parser.error("run on the remote Linux GPU worker with positive repetition counts")
+    if args.backend == "rocm" and (args.target != "rdna" or args.model_id != MODEL_ID):
+        parser.error("the ROCm protocol currently covers RDNA Gemma MoE only")
+    if args.backend == "vulkan" and args.oracle_device != f"Vulkan{args.device}":
+        parser.error("the Vulkan reference must select the same physical device")
+    args.zinc_device = 0 if args.backend == "rocm" else args.device
+    kv = "f32" if args.backend == "rocm" else "f16"
     for name in ("zinc_tree", "zinc_source", "llama_bin", "oracle", "llama_source", "model", "reservation", "output"):
         setattr(args, name, getattr(args, name).resolve())
     install_signal_handlers()
     signal.signal(signal.SIGHUP, interrupted)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    report = {"schema_version": "zinc-gemma-rocm-v1", "started_at": now(), "passed": False,
+    report = {"schema_version": f"zinc-gemma-{args.backend}-v1", "started_at": now(), "passed": False,
+              "target": "rdna-rocm" if args.backend == "rocm" else args.target,
               "release_qualification": False, "samples": [],
-              "settings": {"backend": "rocm", "context": 4096, "slots": 1, "kv_cache": "f32",
-                           "mtp": "off", "prefill": "default-serial", "prompt_cache": False,
+              "settings": {"backend": args.backend, "context": 4096, "slots": 1, "kv_cache": kv,
+                           "mtp": "off", "prefill": "default-serial" if args.backend == "rocm" else "backend-default", "prompt_cache": False,
                            "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
                            "temperature": 0, "top_p": 1, "seed": 0}}
     def save():
@@ -102,24 +113,41 @@ def main():
     save()
     try:
         env = gpu.packaged_environment()
-        env.update(ROCR_VISIBLE_DEVICES=str(args.device), OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="4",
-                   ZINC_MTP="0", ZINC_KV_CACHE="f32", ZINC_KV_F16="0", ZINC_KV_Q8="0", ZINC_PROMPT_CACHE="0")
+        env.update(OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="4", ZINC_MTP="0",
+                   ZINC_KV_CACHE=kv, ZINC_KV_F16="0" if kv == "f32" else "1", ZINC_KV_Q8="0", ZINC_PROMPT_CACHE="0")
+        if args.backend == "rocm":
+            env["ROCR_VISIBLE_DEVICES"] = str(args.device)
+        else:
+            env["RADV_PERFTEST"] = "coop_matrix"
         pin = json.loads((ROOT / "config/benchmark-reference.json").read_text())["commit"]
+        latest = subprocess.check_output(["bun", str(ROOT / "tools/benchmark_reference.mjs"), "check"], text=True, timeout=60).strip()
+        assert latest == pin, "the performance reference is stale"
+        report["latest_reference_check"] = {"commit": latest, "checked_at": now()}
         report["reference"] = reference_identity(args.llama_bin, args.llama_source, env, pin)
         report["oracle"] = reference_identity(args.oracle, args.llama_source, env, pin)
         assert subprocess.run(["git", "-C", str(args.zinc_source), "diff", "--quiet", "HEAD", "--", "src", "build.zig", "build.zig.zon"]).returncode == 0, "ZINC native source is modified"
         zinc = args.zinc_tree / "bin/zinc"
         report["zinc"] = {"commit": subprocess.check_output(["git", "-C", str(args.zinc_source), "rev-parse", "HEAD"], text=True).strip(), "sha256": sha256(zinc)}
-        model_pin = next(model for model in policy()["models"] if model["id"] == MODEL_ID)
+        native_version = gpu.output([str(zinc), "--version"], env).strip()
+        assert report["zinc"]["commit"][:7] in native_version, "ZINC executable differs from its source"
+        report["zinc"]["version"] = native_version
+        model_pin = next(model for model in policy()["models"] if model["id"] == args.model_id)
         assert args.model.stat().st_size == model_pin["size_bytes"] and sha256(args.model) == model_pin["sha256"], "GGUF differs from pinned model"
         report["model"] = {key: model_pin[key] for key in ("id", "sha256", "size_bytes", "sliding_window")}
         report["harness_sha256"] = {name: sha256(ROOT / name) for name in HARNESS_FILES}
-        scenarios = run_json(["bun", str(ROOT / "tools/gemma_rocm_workloads.mjs")])
+        scenarios = run_json(["bun", str(ROOT / "tools/gemma_rocm_workloads.mjs"), args.model_id])
         report["scenarios"] = [{key: value for key, value in row.items() if key != "body"} | {"request_sha256": text_hash(json.dumps(row["body"], sort_keys=True))} for row in scenarios]
         save()
         with worker_reservation(args.reservation):
             idle()
             work = Path(tempfile.mkdtemp(prefix="gemma-rocm-work-", dir=args.output.parent))
+            if args.backend == "vulkan":
+                family = "rdna4" if args.target == "rdna" else "intel-xe2"
+                diagnostics = gpu.output([str(zinc), "--check", "-d", str(args.device)], env, timeout=360)
+                report["hardware"] = gpu.hardware_evidence(diagnostics, family, args.device)
+                print("Correctness: 376 shader/reference cases", flush=True)
+                gpu.kernel_reference(args.zinc_tree, args.oracle, args.llama_source, args.device, work, env)
+                report["kernel_reference"] = {"passed": True, "cases": 376}
             print("Correctness: twelve tokenizer corpus cases", flush=True)
             gpu.tokenizer_parity(args.zinc_tree, args.oracle, args.model, work, env)
             report["correctness"] = {**correctness(args, work, env, model_pin), "tokenizer_cases": len(gpu.CORPUS)}
@@ -131,11 +159,11 @@ def main():
                     idle()
                     port = gpu.free_port()
                     if engine == "zinc":
-                        command = [str(zinc), "-m", str(args.model), "-d", "0", "--context", "4096", "--parallel", "1", "--port", str(port)]
+                        command = [str(zinc), "-m", str(args.model), "-d", str(args.zinc_device), "--context", "4096", "--parallel", "1", "--port", str(port)]
                         active_env = env
                     else:
-                        command = [str(args.llama_bin / "llama-server"), "-m", str(args.model), "--device", "ROCm0", "-ngl", "999",
-                                   "--host", "127.0.0.1", "--port", str(port), "-c", "4096", "--parallel", "1", "-ctk", "f32", "-ctv", "f32",
+                        command = [str(args.llama_bin / "llama-server"), "-m", str(args.model), "--device", "ROCm0" if args.backend == "rocm" else args.oracle_device, "-ngl", "999",
+                                   "--host", "127.0.0.1", "--port", str(port), "-c", "4096", "--parallel", "1", "-ctk", kv, "-ctv", kv,
                                    "-b", "4096", "-ub", "1024", "--flash-attn", "on", "--spec-type", "none", "--no-cache-prompt", "-t", "4", "-tb", "4"]
                         active_env = gpu.reference_environment(args.llama_bin, env)
                     print(f"Benchmark round {round_index + 1}/{args.rounds}: {engine}, MTP off", flush=True)
