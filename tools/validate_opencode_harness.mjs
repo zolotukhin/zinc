@@ -167,9 +167,13 @@ test('protected feature acceptance', () => expect(answer).toBe(42));\n`,
         return new Response(null, { status: 404 });
       requests++;
       const body = await req.json();
-      if (typeof body.session_id === 'string' && /^opencode-[a-f0-9-]{36}$/.test(body.session_id))
-        reuseKeys.add(body.session_id);
-      else invalidReuseKeys++;
+      // Legacy OpenCode makes auxiliary title requests outside the primary
+      // agent. Only its actual tool-bearing conversation needs the reuse key.
+      if (body.tools?.length) {
+        if (typeof body.session_id === 'string' && /^opencode-[a-f0-9-]{36}$/.test(body.session_id))
+          reuseKeys.add(body.session_id);
+        else invalidReuseKeys++;
+      }
       if (name === 'api-error')
         return Response.json(
           {
