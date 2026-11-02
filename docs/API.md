@@ -19,23 +19,25 @@ Each executable contains one backend. Check `zinc --version` before selecting
 an interface or copying server settings. Vulkan is the Linux default; ROCm/HIP
 is a separate AMD build, Metal is a macOS preview, and CUDA is experimental.
 
-| Feature                             | Vulkan / Metal                                | ROCm / experimental CUDA                                        |
-| ----------------------------------- | --------------------------------------------- | --------------------------------------------------------------- |
-| `POST /v1/chat/completions`         | JSON or SSE; JSON by default                  | JSON or SSE; SSE by default                                     |
-| `POST /v1/completions`              | Raw text, JSON only                           | Raw text, JSON or SSE; SSE by default                           |
-| Chat `temperature` / `top_p`        | Applied                                       | Ignored; greedy decoding                                        |
-| Chat function tools                 | Supported model templates                     | Shared parser; supported model templates                        |
-| Chat token limit                    | `max_completion_tokens` or `max_tokens`       | Same aliases; defaults to CLI `-n` (256 if omitted)             |
-| Generation concurrency              | Serialized; requests queue                    | Batched decode for supported models; Gemma MoE uses one slot    |
-| Default context                     | Sized to GPU memory                           | 2,048 tokens per slot; `-c 0` also means 2,048                  |
-| `GET /v1/models`                    | Managed catalog, fit and install state        | Loaded model only, with per-slot context                        |
-| HTTP model pull / activate / remove | Supported                                     | Unavailable (404)                                               |
-| Request `model` field               | Can activate an installed managed model       | Does not change the loaded model                                |
-| Browser UI at `/` or `/chat`        | Included                                      | Unavailable (404)                                               |
-| Chat `session_id` reuse             | Advertised only for eligible Vulkan models    | Unavailable; full prefill                                       |
-| Chat client `stop` strings          | Applied, alongside template markers           | Ignored; model/template markers only                            |
-| `GET /health`                       | Model, queue, uptime, memory and capabilities | Status, backend and context length; 503 after execution failure |
-| `GET /stats`, `POST /generate`      | Unavailable                                   | Native counters and completion alias                            |
+| Feature             | Vulkan / Metal                  | ROCm / CUDA                      |
+| ------------------- | ------------------------------- | -------------------------------- |
+| Chat responses      | JSON default; SSE optional      | SSE default; JSON optional       |
+| Raw responses       | JSON only                       | SSE default; JSON optional       |
+| Chat sampling       | Supported                       | Greedy                           |
+| Serving             | Serialized; requests queue      | Batched; Gemma MoE uses one slot |
+| Default context     | Auto-sized                      | 2,048 per slot                   |
+| Models              | Catalog and hot switching       | Startup model only               |
+| Browser chat        | Included                        | Unavailable                      |
+| Prefix reuse        | Eligible Vulkan models          | Unavailable                      |
+| Client stop strings | Applied                         | Ignored                          |
+| Health details      | Model, queue, uptime and memory | Status, backend and context      |
+
+Both chat APIs accept `max_completion_tokens` and `max_tokens`; tools depend on
+the model template. Vulkan/Metal default to 256 output tokens. ROCm/CUDA default
+to the CLI `-n` value (256 unless overridden), and `-c 0` still means a
+2,048-token context per slot. ROCm/CUDA's `model` field does not switch the
+startup model, and its model discovery lists that loaded model rather than the
+catalog. Native health returns 503 after GPU execution failure.
 
 ROCm setup, runtime dependencies and optional KV/MTP controls are documented in
 the [ROCm guide](ROCM.md). Vulkan and ROCm use independent device lists, driver
@@ -66,18 +68,21 @@ For portable clients, set `stream` explicitly, get the loaded model from
 
 ## Endpoints
 
-| Method | Path                   | Vulkan / Metal                      | ROCm / experimental CUDA |
-| ------ | ---------------------- | ----------------------------------- | ------------------------ |
-| POST   | `/v1/chat/completions` | Chat inference                      | Chat inference           |
-| POST   | `/v1/completions`      | Raw completion                      | Raw completion           |
-| GET    | `/v1/models`           | Managed catalog and runtime state   | Loaded model and context |
-| POST   | `/v1/models/pull`      | Download a compatible managed model | Unavailable              |
-| POST   | `/v1/models/activate`  | Activate an installed model         | Unavailable              |
-| POST   | `/v1/models/remove`    | Remove a cached model               | Unavailable              |
-| GET    | `/health`              | Runtime health and capabilities     | Native backend health    |
-| GET    | `/` or `/chat`         | Built-in browser UI                 | Unavailable              |
-| GET    | `/stats`               | Unavailable                         | Worker counters          |
-| POST   | `/generate`            | Unavailable                         | Alias of raw completion  |
+| Method | Path                   | Available on                        |
+| ------ | ---------------------- | ----------------------------------- |
+| POST   | `/v1/chat/completions` | All four backends                   |
+| POST   | `/v1/completions`      | All four backends                   |
+| GET    | `/v1/models`           | All four backends; different detail |
+| GET    | `/health`              | All four backends; different detail |
+| POST   | `/v1/models/pull`      | Vulkan / Metal                      |
+| POST   | `/v1/models/activate`  | Vulkan / Metal                      |
+| POST   | `/v1/models/remove`    | Vulkan / Metal                      |
+| GET    | `/` or `/chat`         | Vulkan / Metal                      |
+| GET    | `/stats`               | ROCm / CUDA                         |
+| POST   | `/generate`            | ROCm / CUDA; raw completion alias   |
+
+Unavailable endpoints return 404 on ROCm/CUDA. Set `stream` explicitly for both
+completion routes. The coverage matrix above describes their response defaults.
 
 ---
 

@@ -58,7 +58,7 @@ You can also load an existing file with `-m /path/to/model.gguf`.
 | ----------------------------------- | ------------------- | ----------------------------------------------------------------------------- |
 | AMD Radeon RDNA3 / RDNA4            | Vulkan              | [Linux Vulkan setup](https://zolotukhin.ai/zinc/docs/getting-started/)        |
 | AMD Radeon AI PRO R9700 (`gfx1201`) | ROCm/HIP            | [Validated ROCm setup](https://zolotukhin.ai/zinc/docs/rocm/)                 |
-| Apple Silicon                       | Metal               | [macOS](https://zolotukhin.ai/zinc/docs/getting-started/#macos-apple-silicon) |
+| Apple Silicon                       | Metal · preview     | [macOS](https://zolotukhin.ai/zinc/docs/getting-started/#macos-apple-silicon) |
 | Intel Arc Xe2 / Battlemage          | Vulkan              | [Intel guide](https://zolotukhin.ai/zinc/docs/intel-gpu-reference/)           |
 | NVIDIA RTX                          | CUDA · experimental | [Requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)        |
 
