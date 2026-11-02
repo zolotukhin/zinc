@@ -8,7 +8,7 @@ import benchmarkData from '../../data/zinc-performance.json';
 import {
   aggregate, backendLabel, barWidth, formatDate, formatNumber, formatRatio,
   hasMtpVariants, metric, overallRatio, phaseSeconds, platformLabel, promptParity,
-  qualityStatus, rateRatio, rowsFor, sampleCount, scenarioNames, scenarioOrder,
+  qualityStatus, rateRatio, rowNotes, rowsFor, sampleCount, scenarioNames, scenarioOrder,
   scenarios, sourceUrl,
 } from '../../lib/benchmark-view';
 
@@ -204,7 +204,7 @@ const jsonLd = {
                       const spec = row.zinc?.speculative_decoding;
                       const zincProvenance = row.provenance?.zinc;
                       const llamaProvenance = row.provenance?.llama_cpp;
-                      const warning = row.zinc?.unavailable_reason ?? row.baseline?.unavailable_reason;
+                      const evidenceNotes = rowNotes(row);
                       return (
                         <article class="model-card" data-bench-model={row.model.id}>
                           <div class="model-chart">
@@ -222,7 +222,7 @@ const jsonLd = {
                             })}
                             <div class="overall-result"><span>Overall</span><strong class={ratioTone(ratio)} data-overall>{formatRatio(ratio)}</strong></div>
                           </div>
-                          {(warning || parity === false || quality.tone === 'caution' || (ratio == null && !warning)) && <p class="row-note">{warning ? 'A measurement is unavailable. See the published data for the recorded failure.' : quality.tone === 'caution' ? `${quality.note} Excluded from comparison summaries.` : parity === false ? 'Different prompt token counts. Per-token rates are indicative; excluded from the overall comparison.' : 'Output budgets differ, a run stopped early, or phase telemetry is incomplete. Excluded from the overall comparison.'}{quality.tone === 'caution' && quality.source_url && <> <a href={quality.source_url}>Correctness investigation</a></>}</p>}
+                          {evidenceNotes.map((note) => <p class="row-note">{note.text}{note.href && <> <a href={note.href}>Correctness investigation</a></>}</p>)}
                           <details class="row-evidence">
                             <summary>Prompt, timings &amp; source</summary>
                             <div class="evidence-body">

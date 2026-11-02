@@ -11,6 +11,7 @@ import {
   promptParity,
   qualityStatus,
   rateRatio,
+  rowNotes,
   rowsFor,
   scenarioOrder,
 } from './benchmark-view';
@@ -124,6 +125,34 @@ test('a later correctness finding excludes every variant while preserving record
   // Restoring comparisons needs an explicit review of replacement measurements.
   expect(reviewedModels).toBe(5);
   expect(JSON.stringify(data)).toBe(before);
+});
+
+test('unavailable measurements retain their correctness note and investigation link', () => {
+  const reviewed = {
+    ...row(),
+    zinc: { unavailable_reason: 'Earlier run could not finish.' },
+    model: {
+      correctness_review: {
+        tone: 'caution',
+        note: 'Known incorrect prefill.',
+        source_url: '/zinc/docs/vulkan-gemma-sliding-window/',
+      },
+    },
+  };
+  expect(rowNotes(reviewed)).toHaveLength(2);
+  expect(rowNotes(reviewed)[0].text).toContain('unavailable');
+  expect(rowNotes(reviewed)[1]).toEqual({
+    text: 'Known incorrect prefill. Excluded from comparison summaries.',
+    href: '/zinc/docs/vulkan-gemma-sliding-window/',
+  });
+  // A positive model review must not suppress a separately flagged output.
+  expect(
+    qualityStatus({
+      ...row(),
+      model: { correctness_review: { tone: 'positive' } },
+      output_quality: { tone: 'caution', note: 'Repetitive output.' },
+    }).tone,
+  ).toBe('caution');
 });
 
 test('MTP off never silently displays an unpaired speculative measurement', () => {
