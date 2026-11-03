@@ -58,3 +58,7 @@ before publishing comparisons. This single-slot protocol also does not establish
 concurrent-client capacity or MTP-on performance; those need separate matched
 campaigns. Release candidate qualification remains a separate gate on the final
 packaged bytes.
+
+The [pipeline-loading investigation](VULKAN_PIPELINE_LOADING.md) records a
+controlled initialization A/B, including its separate driver-cache experiment
+and the unchanged inference throughput.
