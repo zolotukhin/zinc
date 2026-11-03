@@ -1177,6 +1177,22 @@ fn modelListSupport(entry: catalog_mod.CatalogEntry, support: ?*const ManagedGpu
     return catalog_mod.supportsProfileForBackend(entry, current.profile, managed_mod.catalog_backend) and fits;
 }
 
+fn writeModelQualificationJson(w: anytype, entry: catalog_mod.CatalogEntry, supported: ?bool) !void {
+    try w.writeAll("    \"supported_on_current_gpu\": ");
+    if (supported) |value| {
+        try w.writeAll(if (value) "true" else "false");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n    \"tested_backend\": ");
+    if (entry.tested_backend) |backend| {
+        try writeJsonString(w, @tagName(backend));
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n");
+}
+
 /// Output the full catalog as pretty-printed JSON.
 /// When `support` is null, GPU detection was unavailable; `fits_gpu` is null and `requires_offload_to_fit` is false.
 fn printManagedModelListJson(
@@ -1309,20 +1325,7 @@ fn printManagedModelListJson(
         try w.writeAll(if (entry.thinking_stable) "true" else "false");
         try w.writeAll(",\n");
 
-        try w.writeAll("    \"supported_on_current_gpu\": ");
-        if (supported_on_current_gpu) |supported| {
-            try w.writeAll(if (supported) "true" else "false");
-        } else {
-            try w.writeAll("null");
-        }
-        try w.writeAll(",\n");
-        try w.writeAll("    \"tested_backend\": ");
-        if (entry.tested_backend) |backend| {
-            try writeJsonString(w, @tagName(backend));
-        } else {
-            try w.writeAll("null");
-        }
-        try w.writeAll(",\n");
+        try writeModelQualificationJson(w, entry, supported_on_current_gpu);
 
         try w.writeAll("    \"tested_profiles\": [");
         for (entry.tested_profiles, 0..) |profile, pi| {
@@ -3502,6 +3505,45 @@ test "model-list support keeps unknown fit nullable without probing a GPU" {
     try std.testing.expectEqual(@as(?bool, null), modelListSupport(starter.*, &support, null));
     try std.testing.expectEqual(@as(?bool, false), modelListSupport(starter.*, &support, false));
     try std.testing.expectEqual(@as(?bool, managed_mod.catalog_backend == .vulkan), modelListSupport(starter.*, &support, true));
+}
+
+test "model-list JSON serializes backend scope and nullable support without loading a model" {
+    const allocator = std.testing.allocator;
+    const starter = catalog_mod.find("qwen3-0.6b-q8-0").?;
+    for ([_]?bool{ null, false, true }) |supported| {
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try output.writer.writeAll("{\n");
+        try writeModelQualificationJson(&output.writer, starter.*, supported);
+        try output.writer.writeAll("\"end\":true}");
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+        defer parsed.deinit();
+        const value = parsed.value.object.get("supported_on_current_gpu").?;
+        if (supported) |expected| {
+            try std.testing.expectEqual(expected, value.bool);
+        } else {
+            try std.testing.expect(value == .null);
+        }
+        try std.testing.expectEqualStrings("vulkan", parsed.value.object.get("tested_backend").?.string);
+    }
+    // No support snapshot means the full producer does only installation
+    // metadata checks, never a GPU probe or GGUF fit inspection.
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try printManagedModelListJson(&output.writer, null, null, allocator);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    defer parsed.deinit();
+    var found = false;
+    for (parsed.value.array.items) |row| {
+        try std.testing.expect(row.object.get("supported_on_current_gpu").? == .null);
+        if (std.mem.eql(u8, row.object.get("id").?.string, starter.id)) {
+            found = true;
+            try std.testing.expectEqualStrings("vulkan", row.object.get("tested_backend").?.string);
+            try std.testing.expect(!row.object.get("recommended_for_chat").?.bool);
+            try std.testing.expect(!row.object.get("thinking_stable").?.bool);
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parseArgs: raw flag" {
