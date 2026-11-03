@@ -83,6 +83,8 @@ jobs:
           PREVIEW_COMMIT: ${{ needs.prepare.outputs.commit }}
           VALIDATION_COMMIT: ${{ needs.prepare.outputs.validation_commit }}
           EXERCISE_MODELS: ${{ inputs.exercise_models }}
+          PREVIEW_RUN: ${{ inputs.preview_run }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           extra=()
           if [ "$EXERCISE_MODELS" = true ]; then extra+=(--exercise-models); fi

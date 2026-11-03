@@ -305,6 +305,16 @@ def aggregate(args):
         artifact = artifacts[spec["target"]]
         require(report.get("target") == spec["target"] and report.get("family") == spec["family"], "wrong GPU family or backend")
         require(report.get("archive_sha256") == artifact["sha256"] and report.get("binary_sha256") == artifact["binary_sha256"], "GPU tested different artifact bytes")
+        if "transport" in report:
+            from release_ssh import helper_digests
+            transport = report["transport"]
+            require(isinstance(transport, dict) and set(transport) == {"kind", "artifact_id", "artifact_digest", "controller_run", "controller_attempt", "validation_commit", "helpers_sha256", "cleanup"} and
+                    identifier == "vulkan-intel-xe2" and transport.get("kind") == "ssh" and transport.get("cleanup") is True and
+                    type(transport.get("artifact_id")) is int and transport["artifact_id"] > 0 and
+                    type(transport.get("controller_attempt")) is int and transport["controller_attempt"] > 0 and
+                    type(transport.get("controller_run")) is int and str(transport["controller_run"]) == str(data.get("candidate_run")) and
+                    transport.get("validation_commit") == data["commit"] and transport.get("helpers_sha256") == helper_digests() and isinstance(transport.get("artifact_digest"), str) and
+                    re.fullmatch(r"sha256:[0-9a-f]{64}", transport["artifact_digest"]), "invalid or stale SSH qualification provenance")
         checks = report.get("checks", {})
         require(report.get("options") == {"parallel": 1, "kv_cache": "backend-default", "mtp": "backend-default", "greedy": True}, "untested or missing runtime option policy")
         require(required_checks.issubset(checks) and all(value is True for value in checks.values()), "GPU checks failed or were skipped")

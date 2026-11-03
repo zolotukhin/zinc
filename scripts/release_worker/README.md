@@ -17,10 +17,15 @@ docker image inspect --format '{{.Id}}' zinc-release-worker:local
 
 Use that immutable image ID in the host configuration. Never give the worker the
 Docker socket, a privileged container, host networking, a host home directory,
-SSH keys or signing credentials. `launch.py` drops capabilities, prevents gaining
+operator SSH keys or signing credentials. `launch.py` drops capabilities, prevents gaining
 privileges, makes the image read-only and limits CPU, memory and process counts.
 The host PID namespace lets the existing GPU checks detect competing workloads;
 use a dedicated UID so it cannot signal services owned by other accounts.
+
+For Intel compute over SSH, use the separate `ssh-controller` mode described in
+[RELEASE_SSH_WORKER.md](../../docs/RELEASE_SSH_WORKER.md). It has no local GPU,
+host PID namespace or model/reference mounts. Its sole SSH key is restricted to
+the installed qualification agent; operator keys remain excluded.
 
 ## Administrator inputs
 

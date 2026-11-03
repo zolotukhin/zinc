@@ -37,8 +37,8 @@ def output(command, env=None, timeout=180):
 
 def packaged_environment():
     """Probe installed bytes without interactive model/library overrides."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("ZINC_") and
-            key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH")}
+    return {key: value for key, value in os.environ.items() if not key.startswith(("ZINC_", "GH_", "ACTIONS_")) and
+            key not in ("GITHUB_TOKEN", "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH")}
 
 
 def reference_environment(reference, env):

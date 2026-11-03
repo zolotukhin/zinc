@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 import release_gpu as gpu
+import release_ssh
 from release_lib import ROOT, GPU_PROFILE_TIMEOUT_MINUTES, install_signal_handlers, release_policy, require
 
 CHILD_CLEANUP_GRACE_SECONDS = 30
@@ -20,6 +21,14 @@ def check_group(role, directory, output):
     directory, output = Path(directory).resolve(), Path(output).resolve()
     # A previous report must never silently join this qualification attempt.
     output.mkdir(parents=True, exist_ok=False)
+    transport = release_ssh.transport_config()
+    if transport:
+        from release import verify_candidate
+        data = verify_candidate(directory)
+        require({p["id"] for p in profiles} == set(transport["profiles"]), "SSH assignment differs from the worker role")
+        for profile in profiles:
+            release_ssh.check(transport, "candidate", profile["id"], directory, output / (profile["id"] + ".json"), data["commit"])
+        return
     with tempfile.TemporaryDirectory(prefix="zinc-gpu-group-") as temporary:
         work = Path(temporary)
         for profile in profiles:

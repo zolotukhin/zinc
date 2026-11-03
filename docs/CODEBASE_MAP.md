@@ -218,6 +218,7 @@ dense FFN, and MoE branches live in the active backend's forward implementation.
 | Optimization harnesses                                            | `loops/`                                                                |
 | Binary release policy, packaging, GPU certification and promotion | `config/release/targets.json`, `tools/release*.py`, `docs/RELEASING.md` |
 | Verified installation and rollback                                | `scripts/install.sh`, `tools/release_test.py`                           |
+| Restricted Intel SSH qualification transport                      | `tools/release_ssh.py`, `docs/RELEASE_SSH_WORKER.md`                    |
 
 Treat implementation source and command `--help` output as authoritative for
 current environment flags, thresholds, supported formats, and benchmark cases.
