@@ -42,7 +42,8 @@ SSH invocation alive until it finishes.
 The report retains every measured request's prefill/decode rates and full HTTP
 latency. A separate warmed 16-token SSE probe measures time to first usable
 content for each workload and round. Startup measures time until health is
-ready, with OS caches retained; it is not a cold-disk claim. Linux process status
+ready, with OS caches retained; it is not a cold-disk claim. Health is polled
+every 500 ms, so sub-500 ms startup differences are unresolved. Linux process status
 and DRM fdinfo supply host RSS and observed GPU resident/allocated memory peaks.
 GPU peaks are sampled every 50 ms, and unavailable counters remain unknown.
 Client identifiers and PCI addresses are never published. The counter semantics

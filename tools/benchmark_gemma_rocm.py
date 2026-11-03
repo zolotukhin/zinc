@@ -74,7 +74,8 @@ def correctness(args, work, env, model_pin):
     return {"passed": True, "oracle_backend": "Vulkan", "generation": policy()["reference"]["generation"],
             "agreement_policy": policy()["reference"]["agreement"],
             "reference_agreement": reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(prompts)),
-            "cases": cases, "http_full_continuations": 3 * len(samples), "prefill_cancellation": prefill,
+            "cases": cases, "http_full_continuations": 3 * len(samples),
+            **({"prefill_cancellation": prefill} if check_prefill else {}),
             "http_after_cancellation": True, "http_after_context_error": True}
 
 

@@ -98,9 +98,12 @@ def stream_probe(port, body, timeout=600, clock=time.monotonic):
         while True:
             require(clock() - started < timeout, "streaming benchmark exceeded its deadline")
             raw = response.readline(1024 * 1024 + 1)
+            require(clock() - started < timeout, "streaming benchmark exceeded its deadline")
             if not raw:
                 break
             received += len(raw)
+            # Read one byte beyond the cap so an oversized line is rejected
+            # before a truncated SSE event can be parsed or accepted.
             require(received <= 1024 * 1024, "streaming benchmark exceeded its transcript limit")
             line = raw.decode("utf-8", errors="strict").rstrip("\r\n")
             if line.startswith(":"):

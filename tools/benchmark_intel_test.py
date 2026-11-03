@@ -13,6 +13,16 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def test_comparisons_require_both_measured_engines_and_ignore_warmups(self):
+        def sample(engine, complete=True, warmup=False):
+            return {"engine": engine, "scenario": "core", "warmup": warmup, "output_budget_complete": complete}
+        scenarios = [{"id": "core"}]
+        self.assertFalse(benchmark_intel.comparison_eligibility([], scenarios)["core"])
+        self.assertFalse(benchmark_intel.comparison_eligibility([sample("zinc")], scenarios)["core"])
+        both = [sample("zinc"), sample("llama")]
+        self.assertTrue(benchmark_intel.comparison_eligibility(both + [sample("zinc", False, True)], scenarios)["core"])
+        self.assertFalse(benchmark_intel.comparison_eligibility(both + [sample("llama", False)], scenarios)["core"])
+
     def test_generic_models_keep_short_checks_and_gemma_keeps_extended_windows(self):
         short = correctness_prompts({"id": "qwen35-9b-q4k-m"})
         windowed = correctness_prompts({"id": "gemma4-31b-q4k-m", "sliding_window": 1024})
@@ -86,6 +96,19 @@ class IntelMetricsTest(unittest.TestCase):
                        b'data: {"error":{"message":"failed"}}\n\n', b"x" * (1024 * 1024 + 1)):
             with self.subTest(size=len(frames)), self.assertRaises(ValueError):
                 self.probe(frames)
+
+    def test_a_terminator_received_after_the_deadline_cannot_pass(self):
+        frames = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
+        elapsed = [0]
+        class LateTerminator(io.BytesIO):
+            def readline(self, *args):
+                line = super().readline(*args)
+                if self.tell() == len(frames):
+                    elapsed[0] = 11
+                return line
+        with patch.object(benchmark_metrics.gpu, "request", return_value=LateTerminator(frames)):
+            with self.assertRaisesRegex(ValueError, "deadline"):
+                benchmark_metrics.stream_probe(1, {}, timeout=10, clock=lambda: elapsed[0])
 
     def test_native_baseline_requires_full_gpu_offload(self):
         self.assertEqual(benchmark_intel.native_gpu_layers("load: offloaded 65/65 layers to GPU"),

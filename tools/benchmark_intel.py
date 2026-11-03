@@ -38,6 +38,14 @@ def zinc_kv_storage(log):
     return "f16"
 
 
+def comparison_eligibility(samples, scenarios):
+    eligible = {}
+    for scenario in scenarios:
+        measured = [s for s in samples if s["scenario"] == scenario["id"] and not s["warmup"]]
+        eligible[scenario["id"]] = {s["engine"] for s in measured} == {"zinc", "llama"} and all(s["output_budget_complete"] for s in measured)
+    return eligible
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     required = next(p["models"] for p in policy()["gpu_profiles"] if p["id"] == "vulkan-intel-xe2")
@@ -61,6 +69,7 @@ def main():
     args.backend = "vulkan"
     os.umask(0o077)
     install_signal_handlers()
+    # The shared helper installs TERM/INT; SSH disconnects also need unwinding.
     signal.signal(signal.SIGHUP, interrupted)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = {"schema_version": "zinc-intel-performance-v1", "started_at": now(), "passed": False,
@@ -69,7 +78,8 @@ def main():
               "settings": {"backend": "vulkan", "target": "intel", "kv_cache": "f16", "mtp": "off", "slots": 1,
                            "prompt_cache": False, "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
                            "temperature": 0, "top_p": 1, "seed": 0, "context": "pinned model qualification limit",
-                           "ttft": "separate warmed 16-token streaming probe per workload/round", "startup": "observed model startup; OS caches are retained"}}
+                           "ttft": "separate warmed 16-token streaming probe per workload/round", "startup": "observed model startup; OS caches are retained",
+                           "startup_poll_interval_ms": 500}}
     def save():
         write_json(args.output, report)
     save()
@@ -154,10 +164,7 @@ def main():
                             process["memory"] = memory.snapshot()
                         idle()
                         save()
-                current["comparison_eligible"] = {
-                    row["id"]: all(s["output_budget_complete"] for s in current["samples"] if s["scenario"] == row["id"])
-                    for row in scenarios
-                }
+                current["comparison_eligible"] = comparison_eligibility(current["samples"], scenarios)
                 current["passed"] = True
                 save()
             require(reference_identity(args.llama_bin, args.llama_source, env, pin) == report["reference"], "performance reference changed")
