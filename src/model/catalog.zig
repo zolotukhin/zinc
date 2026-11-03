@@ -316,7 +316,7 @@ pub fn findForLoadedModel(managed_id: ?[]const u8, model_path: []const u8, displ
 /// @returns Catalog profile key that can be matched against `CatalogEntry.tested_profiles`.
 pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     return switch (config.vendor) {
-        .amd_rdna4 => if (config.vram_mb >= 28 * 1024) "amd-rdna4-32gb" else if (config.vram_mb >= 14 * 1024) "amd-rdna4-16gb" else "amd-rdna4-small",
+        .amd_rdna4 => rdna4VramProfile(@as(u64, config.vram_mb) * 1024 * 1024),
         .amd_rdna4_apu => "amd-rdna4-apu",
         .amd_rdna3 => if (config.vram_mb >= 14 * 1024) "amd-rdna3-16gb" else "amd-rdna3-small",
         .amd_other => "amd-other",
@@ -325,6 +325,18 @@ pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
         .intel_arc => "intel-arc",
         .unknown => "unknown",
     };
+}
+
+fn rdna4VramProfile(total_vram_bytes: u64) []const u8 {
+    // Preserve the existing Vulkan sizing buckets across native ROCm probes.
+    // These are catalog fit classes, not certificates for additional boards;
+    // release qualification separately checks the actual GPU and archive.
+    return if (total_vram_bytes >= 28 * 1024 * 1024 * 1024)
+        "amd-rdna4-32gb"
+    else if (total_vram_bytes >= 14 * 1024 * 1024 * 1024)
+        "amd-rdna4-16gb"
+    else
+        "amd-rdna4-small";
 }
 
 /// Return the catalog profile string for Apple Silicon Metal devices.
@@ -338,12 +350,7 @@ pub fn profileForMetal() []const u8 {
 pub fn profileForRocm(arch: []const u8, total_vram_bytes: u64) []const u8 {
     const base = arch[0 .. std.mem.indexOfScalar(u8, arch, ':') orelse arch.len];
     if (std.mem.eql(u8, base, "gfx1200") or std.mem.eql(u8, base, "gfx1201")) {
-        return if (total_vram_bytes >= 28 * 1024 * 1024 * 1024)
-            "amd-rdna4-32gb"
-        else if (total_vram_bytes >= 14 * 1024 * 1024 * 1024)
-            "amd-rdna4-16gb"
-        else
-            "amd-rdna4-small";
+        return rdna4VramProfile(total_vram_bytes);
     }
     return "amd-other";
 }
@@ -523,6 +530,22 @@ test "ROCm profiles use AMD gfx identity and total VRAM rather than CUDA or free
     try std.testing.expectEqualStrings("amd-rdna4-small", profileForRocm("gfx1200", 8 * 1024 * 1024 * 1024));
     for ([_][]const u8{ "gfx1100", "gfx1151", "gfx12010", "sm_120", "" }) |arch| {
         try std.testing.expectEqualStrings("amd-other", profileForRocm(arch, 32 * 1024 * 1024 * 1024));
+    }
+}
+
+test "ROCm and Vulkan retain identical RDNA4 sizing boundaries" {
+    const gib: u64 = 1024 * 1024 * 1024;
+    try std.testing.expectEqualStrings("amd-rdna4-small", profileForRocm("gfx1201", 14 * gib - 1));
+    try std.testing.expectEqualStrings("amd-rdna4-16gb", profileForRocm("gfx1201", 14 * gib));
+    try std.testing.expectEqualStrings("amd-rdna4-16gb", profileForRocm("gfx1201", 24 * gib));
+    try std.testing.expectEqualStrings("amd-rdna4-16gb", profileForRocm("gfx1201", 28 * gib - 1));
+    try std.testing.expectEqualStrings("amd-rdna4-32gb", profileForRocm("gfx1201", 28 * gib));
+    try std.testing.expectEqualStrings("amd-rdna4-32gb", profileForRocm("gfx1201", 32624 * 1024 * 1024));
+    var config = std.mem.zeroes(gpu_detect.GpuConfig);
+    config.vendor = .amd_rdna4;
+    for ([_]u32{ 14335, 14336, 24576, 28671, 28672, 32624 }) |mb| {
+        config.vram_mb = mb;
+        try std.testing.expectEqualStrings(profileForGpu(config), profileForRocm("gfx1201", @as(u64, mb) * 1024 * 1024));
     }
 }
 

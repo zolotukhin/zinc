@@ -59,7 +59,8 @@ in its [GPU specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-sp
 This classification does not qualify additional cards.
 
 GPU capability caches are separated by runtime backend and checked against a
-versioned backend field. Legacy files are ignored and regenerated. Models,
+versioned backend field. Legacy files are retained for rollback to older
+binaries; this runtime ignores them and creates its own cache. Models,
 active selection and download caches stay in their existing locations.
 
 Stable publication checks the starter's explicit Vulkan scope, both selected

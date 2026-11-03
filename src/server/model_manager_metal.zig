@@ -265,7 +265,7 @@ pub const ModelManager = struct {
         defer list.deinit(allocator);
 
         for (catalog_mod.entries) |entry| {
-            const tested_profile_match = catalog_mod.supportsProfileForBackend(entry, self.profile, .metal);
+            const tested_profile_match = catalog_mod.supportsProfileForBackend(entry, self.profile, managed_mod.catalog_backend);
             const installed = managed_mod.isInstalled(entry.id, allocator);
             const fit = managed_mod.describeFit(entry, self.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
                 .required_vram_bytes = entry.required_vram_bytes,
@@ -351,7 +351,7 @@ pub const ModelManager = struct {
             .required_vram_with_offload_bytes = catalog_mod.requiredVramWithOffload(entry),
             .fit_state = catalog_mod.fitState(entry, self.vram_budget_bytes),
         };
-        return catalog_mod.supportsProfileForBackend(entry, self.profile, .metal) and fit.fits_current_gpu;
+        return catalog_mod.supportsProfileForBackend(entry, self.profile, managed_mod.catalog_backend) and fit.fits_current_gpu;
     }
 
     /// Load the specified catalog model and make it the active inference target.
@@ -363,7 +363,7 @@ pub const ModelManager = struct {
     /// @note Caller must already hold the shared generation lock.
     pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool, force: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
-        if (!catalog_mod.supportsProfileForBackend(entry.*, self.profile, .metal)) {
+        if (!catalog_mod.supportsProfileForBackend(entry.*, self.profile, managed_mod.catalog_backend)) {
             // Untested GPU profile: require an explicit opt-in (parity with the
             // CLI `model use --force`). The VRAM fit check below still enforces
             // real capacity when the caller does opt in.

@@ -1170,6 +1170,13 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
+/// Keep unavailable GPU/fit evidence unknown in the JSON model listing.
+fn modelListSupport(entry: catalog_mod.CatalogEntry, support: ?*const ManagedGpuSupport, fits_gpu: ?bool) ?bool {
+    const current = support orelse return null;
+    const fits = fits_gpu orelse return null;
+    return catalog_mod.supportsProfileForBackend(entry, current.profile, managed_mod.catalog_backend) and fits;
+}
+
 /// Output the full catalog as pretty-printed JSON.
 /// When `support` is null, GPU detection was unavailable; `fits_gpu` is null and `requires_offload_to_fit` is false.
 fn printManagedModelListJson(
@@ -1213,10 +1220,7 @@ fn printManagedModelListJson(
             };
             break :blk fit.fits_current_gpu;
         } else null;
-        const supported_on_current_gpu: ?bool = if (support) |s|
-            catalog_mod.supportsProfileForBackend(entry, s.profile, managed_mod.catalog_backend) and fits_gpu.?
-        else
-            null;
+        const supported_on_current_gpu = modelListSupport(entry, support, fits_gpu);
 
         try w.writeAll("  {\n");
 
@@ -3488,6 +3492,16 @@ test "parseArgs: chat flag" {
     const config = try parseArgs(&args);
     try std.testing.expect(config.chat);
     try std.testing.expectEqualStrings("hi", config.prompt.?);
+}
+
+test "model-list support keeps unknown fit nullable without probing a GPU" {
+    const starter = catalog_mod.find("qwen3-0.6b-q8-0").?;
+    var profile = "amd-rdna4-32gb".*;
+    const support = ManagedGpuSupport{ .profile = &profile, .vram_budget_bytes = 32 * 1024 * 1024 * 1024, .from_cache = false };
+    try std.testing.expectEqual(@as(?bool, null), modelListSupport(starter.*, null, true));
+    try std.testing.expectEqual(@as(?bool, null), modelListSupport(starter.*, &support, null));
+    try std.testing.expectEqual(@as(?bool, false), modelListSupport(starter.*, &support, false));
+    try std.testing.expectEqual(@as(?bool, managed_mod.catalog_backend == .vulkan), modelListSupport(starter.*, &support, true));
 }
 
 test "parseArgs: raw flag" {

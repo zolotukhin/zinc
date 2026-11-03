@@ -271,6 +271,8 @@ pub fn resolveGpuProfileCachePath(device_index: u32, allocator: std.mem.Allocato
 fn gpuProfileCachePath(root: []const u8, backend: catalog.CatalogBackend, device_index: u32, allocator: std.mem.Allocator) ![]u8 {
     // Legacy files have no backend identity. Ignore them instead of reusing a
     // Vulkan device index or a stale NVIDIA profile from a ROCm invocation.
+    // Retain them for older installed binaries during an explicit rollback;
+    // this runtime never reads or overwrites the shared legacy filename.
     return try std.fmt.allocPrint(allocator, "{s}/gpu-profile-{s}-device-{d}.json", .{ root, @tagName(backend), device_index });
 }
 

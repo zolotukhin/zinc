@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const html = readFileSync(new URL('../src/server/chat.html', import.meta.url), 'utf8');
-const source = html.match(/function modelQualityHint\(model\) \{[\s\S]*?\n      \}/)?.[0];
+const source = html.match(/function\s+modelQualityHint\s*\(\s*model\s*\)\s*\{[^{}]*\}/)?.[0];
 if (!source) throw new Error('Chat model recommendation helper is missing');
 const hint = new Function(`return (${source});`)() as (model: Record<string, unknown>) => string;
 
