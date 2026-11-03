@@ -185,6 +185,12 @@ these checks after an environment change.
 
 ## Check configuration before dispatch
 
+Intel may use the [restricted SSH qualification path](RELEASE_SSH_WORKER.md)
+without Docker or a GitHub runner on the compute node. Its isolated controller
+fills the same required Intel role. This changes transport and the documented
+compute-account trust boundary; all package/model/reference gates remain
+mandatory. Provision the controller and pass full readiness before dispatch.
+
 From a current main checkout, use the maintainer's authenticated GitHub CLI:
 
 ```bash

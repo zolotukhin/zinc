@@ -20,13 +20,20 @@ def container_args(config):
     require(type(config["uid"]) is int and config["uid"] > 0 and type(config["gid"]) is int and config["gid"] > 0,
             "a dedicated non-root UID/GID is required")
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", config["image"]), "worker image must be an immutable local digest")
+    mode = config.get("mode", "gpu")
+    require(mode in ("gpu", "ssh-controller"), "unknown worker isolation mode")
+    controller = mode == "ssh-controller"
     command = ["docker", "run", "--rm", "--name", name, "--hostname", "zinc-release-worker",
                "--label", "org.zinc.release-worker=true", "--read-only", "--cap-drop=ALL",
-               "--security-opt=no-new-privileges", "--pid=host", "--user", f"{config['uid']}:{config['gid']}",
+               "--security-opt=no-new-privileges", "--user", f"{config['uid']}:{config['gid']}",
                "--pids-limit=768", "--memory=32g", "--memory-swap=32g", "--cpus=4", "--cpu-shares=256",
                "--shm-size=1g", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"]
-    require(isinstance(config["gpu_devices"], list) and config["gpu_devices"] and
-            set(config["gpu_devices"]).issubset({"/dev/kfd", "/dev/dri"}), "invalid GPU device access")
+    if controller:
+        require(config["gpu_devices"] == [] and config["gpu_groups"] == [], "SSH controllers cannot access a local GPU")
+    else:
+        command.append("--pid=host")
+        require(isinstance(config["gpu_devices"], list) and config["gpu_devices"] and
+                set(config["gpu_devices"]).issubset({"/dev/kfd", "/dev/dri"}), "invalid GPU device access")
     for device in config["gpu_devices"]:
         command.append("--device=" + device)
     for group in config["gpu_groups"]:
@@ -39,17 +46,20 @@ def container_args(config):
         source = str(Path(source).resolve())
         require(source.rstrip("/") not in ("", "/root", "/home", "/etc", "/proc", "/run", "/var/run", "/var/run/docker.sock", "/run/docker.sock"),
                 "broad host directories and daemon sockets cannot be mounted")
-        require(isinstance(destination, str) and re.fullmatch(r"/(?:runner|worker-reservation|worker-driver|models/[a-z0-9][a-z0-9.-]*/model\.gguf|reference/(?:source|vulkan|rocm)|opt/rocm|etc/zinc-worker|run/secrets/registration-token|usr/share/(?:libdrm|drirc\.d)|tmp/zinc-gpu-vulkan-[0-9]+\.lock)", destination),
+        layout = (r"/(?:runner|etc/zinc-worker|run/secrets/(?:registration-token|qualification-key|qualification-known-hosts))" if controller else
+                  r"/(?:runner|worker-reservation|worker-driver|models/[a-z0-9][a-z0-9.-]*/model\.gguf|reference/(?:source|vulkan|rocm)|opt/rocm|etc/zinc-worker|run/secrets/registration-token|usr/share/(?:libdrm|drirc\.d)|tmp/zinc-gpu-vulkan-[0-9]+\.lock)")
+        require(isinstance(destination, str) and re.fullmatch(layout, destination),
                 "mount destination is outside the worker layout")
         writable = destination in ("/runner", "/worker-reservation") or destination.startswith("/tmp/zinc-gpu-vulkan-")
         command.extend(["--mount", f"type=bind,source={source},target={destination}" + ("" if writable else ",readonly")])
     fixed_env = {
         "ZINC_RUNNER_REPOSITORY_URL": "https://github.com/" + config["repository"],
         "ZINC_RUNNER_NAME": name, "ZINC_RUNNER_LABELS": config["labels"],
-        "LD_LIBRARY_PATH": "/worker-driver:/opt/rocm/lib",
-        "VK_DRIVER_FILES": "/etc/zinc-worker/radeon_icd.json", "VK_ICD_FILENAMES": "/etc/zinc-worker/radeon_icd.json",
         "OMP_NUM_THREADS": "4", "OPENBLAS_NUM_THREADS": "4",
     }
+    if not controller:
+        fixed_env.update({"LD_LIBRARY_PATH": "/worker-driver:/opt/rocm/lib",
+                          "VK_DRIVER_FILES": "/etc/zinc-worker/radeon_icd.json", "VK_ICD_FILENAMES": "/etc/zinc-worker/radeon_icd.json"})
     for key, value in fixed_env.items():
         command.extend(["--env", key + "=" + value])
     return command + [config["image"]]

@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 import release_gpu as gpu
+import release_ssh
 from release_lib import (
     ROOT, archive_name, comparison_proves_ancestor, extract_archive, install_signal_handlers, policy,
     probe_binary, read_json, reference_agreement, require, sha256, source_sha,
@@ -135,6 +136,16 @@ def model_pins(profile, config):
 
 def check(args):
     profile = profile_for(args.profile)
+    transport = release_ssh.transport_config()
+    if transport:
+        actual = validation_identity(args.validation_commit)
+        archive = Path(args.directory) / archive_name(args.version, profile["target"])
+        expected = {"profile": profile["id"], "source_commit": source_sha(args.commit), "preview_version": args.version,
+                    "validation_source_commit": actual, "policy_sha256": sha256(ROOT / "config/release/targets.json"),
+                    "archive_sha256": sha256(archive)}
+        release_ssh.check(transport, "readiness", profile["id"], args.directory, args.output, actual,
+                          preview_run=os.environ["PREVIEW_RUN"], exercise_models=args.exercise_models, expected=expected)
+        return
     config_path = Path(os.environ["ZINC_RELEASE_WORKER_CONFIG"]).expanduser().resolve()
     require(ROOT not in config_path.parents, "worker configuration must be outside the checkout")
     config = gpu.worker_for_profile(read_json(config_path), profile["id"])

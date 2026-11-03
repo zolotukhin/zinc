@@ -177,6 +177,9 @@ jobs:
     # propagating a skip through the remaining qualification chain.
     if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.manifest.result == 'success' }}
     environment: release-workers
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.gpus) }}
@@ -199,6 +202,7 @@ jobs:
       - name: Test installed archives against pinned models and reference
         env:
           RELEASE_RUNNER_ROLE: ${{ matrix.runner_variable }}
+          GH_TOKEN: ${{ github.token }}
         run: python3 tools/release_gpu_group.py --directory candidate --role "$RELEASE_RUNNER_ROLE" --output reports
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

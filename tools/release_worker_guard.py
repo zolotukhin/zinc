@@ -35,13 +35,13 @@ def validate_context(policy, env):
     require(env.get("GITHUB_JOB") in rule.get("jobs", []), "job is not allowed")
 
 
-def owned_gpu_processes(run_id):
+def owned_gpu_processes(run_id, include_helpers=False):
     found = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
         try:
-            if entry.stat().st_uid != os.getuid() or (entry / "comm").read_text().strip() not in GPU_NAMES:
+            if entry.stat().st_uid != os.getuid() or (not include_helpers and (entry / "comm").read_text().strip() not in GPU_NAMES):
                 continue
             env = dict(item.split(b"=", 1) for item in (entry / "environ").read_bytes().split(b"\0") if b"=" in item)
             if env.get(b"GITHUB_RUN_ID") == run_id.encode():
@@ -53,9 +53,14 @@ def owned_gpu_processes(run_id):
     return found
 
 
-def cleanup(run_id):
-    owned = owned_gpu_processes(run_id)
+def cleanup(run_id, include_helpers=False):
+    # SSH assigns a separate 256-bit session marker, rather than a shared
+    # Actions run ID. Only that scope may include compiler/kernel helpers and
+    # detached descendants whose comm name is not one of the model servers.
+    if include_helpers and not re.fullmatch(r"9[0-9]{78}", run_id):
+        raise ValueError("helper cleanup requires a unique SSH session identity")
     for sig, delay in ((signal.SIGTERM, 3), (signal.SIGKILL, 1)):
+        owned = owned_gpu_processes(run_id, include_helpers)
         for pid, start in owned:
             try:
                 current = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
@@ -64,9 +69,9 @@ def cleanup(run_id):
             except (FileNotFoundError, ProcessLookupError):
                 pass
         deadline = time.monotonic() + delay
-        while owned_gpu_processes(run_id) and time.monotonic() < deadline:
+        while owned_gpu_processes(run_id, include_helpers) and time.monotonic() < deadline:
             time.sleep(0.1)
-    if owned_gpu_processes(run_id):
+    if owned_gpu_processes(run_id, include_helpers):
         raise ValueError("owned GPU processes did not stop")
     print("ZINC worker cleanup: no owned GPU process remains")
 

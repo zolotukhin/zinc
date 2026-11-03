@@ -33,6 +33,7 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
   expect(candidate.jobs.manifest.needs).toContain('sign');
   expect(candidate.jobs.hardware.needs).toContain('manifest');
   expect(candidate.jobs.hardware.environment).toBe('release-workers');
+  expect(candidate.jobs.hardware.permissions).toEqual({ contents: 'read', actions: 'read' });
   expect(
     candidate.jobs.hardware.steps.some((step: any) => step.with?.name === 'candidate-inputs'),
   ).toBe(true);
@@ -40,6 +41,10 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
     candidate.jobs.hardware.steps.some((step: any) => step.run?.includes('release_gpu_group.py')),
   ).toBe(true);
   expect(JSON.stringify(candidate.jobs.hardware)).not.toContain('zig.sh build');
+  expect(
+    candidate.jobs.hardware.steps.find((step: any) => step.run?.includes('release_gpu_group.py'))
+      .env.GH_TOKEN,
+  ).toBe('${{ github.token }}');
   expect(candidate.jobs.hardware.concurrency['cancel-in-progress']).toBe(false);
   expect(candidate.jobs.hardware['timeout-minutes']).toBe('${{ matrix.timeout_minutes }}');
   expect(candidate.jobs.certify.needs).toContain('hardware');

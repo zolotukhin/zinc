@@ -8,7 +8,7 @@ ARG RUNNER_UID=10001
 ARG RUNNER_GID=10001
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git python3 build-essential binutils procps \
+    ca-certificates curl git openssh-client python3 build-essential binutils procps \
     libicu74 liblttng-ust1 libssl3 libkrb5-3 zlib1g libunwind8 \
     libvulkan-dev vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
