@@ -60,6 +60,7 @@ src/
 ├── gpu/
 │   ├── interface.zig            # Compile-time Vulkan / Metal / ROCm / CUDA selection
 │   ├── memory_plan.zig          # Cross-backend memory planning
+│   ├── upload_plan.zig          # Bounded Vulkan staging windows and shared host tests
 │   ├── process_lock.zig         # Cross-process GPU reservation lock
 │   └── test_policy.zig          # Explicit opt-in for hardware unit tests
 ├── scheduler/

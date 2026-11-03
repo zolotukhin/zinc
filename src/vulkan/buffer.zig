@@ -279,6 +279,7 @@ test "invalid or empty buffer copies never allocate a Vulkan command" {
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 0, 17));
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 31, 4));
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, std.math.maxInt(u64), 0, 4));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 4, 4, std.math.maxInt(u64)));
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 17, 0, 0));
     try copyBufferRegion(undefined, undefined, &src, &dst, 16, 32, 0);
 }

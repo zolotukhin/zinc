@@ -62,3 +62,43 @@ packaged bytes.
 The [pipeline-loading investigation](VULKAN_PIPELINE_LOADING.md) records a
 controlled initialization A/B, including its separate driver-cache experiment
 and the unchanged inference throughput.
+
+## Recorded diagnostic and next bottlenecks
+
+The [seven-model GPU diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-03.json)
+uses ZINC archive `8ad0f016`, performance reference `2cbca389` and correctness
+oracle `5f436ddd` on Intel BMG G31 with Mesa 26.2.3. Both inference engines use
+Vulkan and fully offload the model to the same GPU. One round with one warmup
+and one measured request per workload establishes directions for optimization;
+it is not the default three-round headline campaign.
+
+Short-chat rates below are tokens per second. The linked record retains all
+four workloads, exact prompts, output counts, source and archive identities,
+memory samples, startup and streaming latency.
+
+| Model            | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode |
+| ---------------- | ------------ | ----------------- | ----------- | ---------------- |
+| Qwen 3.5 9B      | 395.5        | 182.1             | 64.1        | 68.3             |
+| Gemma 26B        | 66.7         | 217.6             | 63.9        | 81.5             |
+| Gemma 31B        | 52.7         | 47.7              | 19.6        | 21.9             |
+| Qwen 3.6 35B A3B | 99.3         | 190.0             | 87.0        | 89.8             |
+| Qwen 3.6 27B     | 144.7        | 45.5              | 21.5        | 24.2             |
+| Qwen 3.8 27B     | 148.0        | 45.5              | 21.5        | 24.3             |
+| Qwen 3 0.6B      | 246.9        | 2777.2            | 193.2       | 290.9            |
+
+The 376 numerical cases pass, as do all seven models' tokenizer, complete
+continuation and API recovery controls. The small starter naturally reaches EOS in the long-context
+workload, so that pair is retained but excluded from full-budget comparisons.
+The report therefore has a complete model matrix and an incomplete performance
+matrix. It does not establish that every model is suitable for coding tasks.
+
+Decode remains behind the native GPU reference on every model. Prefill is mixed:
+Gemma 26B's conservative serial path and the small starter are especially large
+gaps. Qualifying faster paths requires complete native continuations and recovery
+checks; isolated shader math agreement alone is insufficient. After a change
+passes those controls, repeat the matched three-round campaign before claiming
+a performance win.
+
+The [bounded-upload investigation](VULKAN_UPLOAD_STAGING.md) separately records
+the temporary-memory reduction and loading-time observations. Its A/B compares
+two ZINC packages and does not establish a speed advantage over llama.cpp.
