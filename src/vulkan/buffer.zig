@@ -239,7 +239,7 @@ pub fn copyBufferRegion(
         .flags = vk.c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = null,
     };
-    _ = vk.c.vkBeginCommandBuffer(cmd_buf, &begin_info);
+    if (vk.c.vkBeginCommandBuffer(cmd_buf, &begin_info) != vk.c.VK_SUCCESS) return error.BeginCommandBufferFailed;
 
     const region = vk.c.VkBufferCopy{
         .srcOffset = src_offset,
@@ -248,7 +248,7 @@ pub fn copyBufferRegion(
     };
     vk.c.vkCmdCopyBuffer(cmd_buf, src.handle, dst.handle, 1, &region);
 
-    _ = vk.c.vkEndCommandBuffer(cmd_buf);
+    if (vk.c.vkEndCommandBuffer(cmd_buf) != vk.c.VK_SUCCESS) return error.EndCommandBufferFailed;
 
     const submit_info = vk.c.VkSubmitInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -264,7 +264,8 @@ pub fn copyBufferRegion(
     result = vk.c.vkQueueSubmit(instance.compute_queue, 1, &submit_info, @as(vk.c.VkFence, null));
     if (result != vk.c.VK_SUCCESS) return error.QueueSubmitFailed;
 
-    _ = vk.c.vkQueueWaitIdle(instance.compute_queue);
+    // A reusable upload window must not be overwritten after a failed wait.
+    if (vk.c.vkQueueWaitIdle(instance.compute_queue) != vk.c.VK_SUCCESS) return error.QueueWaitFailed;
 }
 
 test "invalid or empty buffer copies never allocate a Vulkan command" {
