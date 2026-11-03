@@ -1,6 +1,7 @@
 """Regression tests for large evidence artifacts and privileged review input."""
 
 from pathlib import Path
+import random
 import unittest
 
 from review_context import build_review_context
@@ -79,6 +80,20 @@ class ReviewContextTests(unittest.TestCase):
         self.assertIn("1000 files", context)
         self.assertIn("Inventory truncated", context)
         self.assertIn("patches may be truncated or omitted", context)
+        inventory = context.split("Patches are ordered", 1)[0]
+        self.assertTrue(all(line.endswith("]") for line in inventory.splitlines() if line.startswith("- ")))
+
+    def test_mixed_priority_groups_never_exceed_the_whole_input_budget(self):
+        rng = random.Random(28)
+        for limit in (512, 768, 2048, 8192):
+            for cap in (128, 512, 120000):
+                for _ in range(10):
+                    paths = ("src/main.zig", "tests/recovery.test.ts", "docs/plan.md",
+                             "site/public/zinc/validation/run.json")
+                    diff = "".join(patch(path, "+data\n" * rng.randrange(1, 1500)) for path in paths)
+                    context = build_review_context(diff, limit=limit, per_file_limit=cap)
+                    self.assertLessEqual(len(context), limit)
+                    self.assertIn("patches may be truncated or omitted", context)
 
     def test_unusable_limits_fail_explicitly(self):
         for limit in (0, 511):
@@ -90,9 +105,15 @@ class ReviewContextTests(unittest.TestCase):
     def test_privileged_workflow_loads_helper_from_trusted_base_only(self):
         workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/pr-review.yml").read_text()
         checkout = workflow.split("- name: Review PR with GLM-5.2", 1)[0]
-        self.assertIn("ref: " + "$" + "{{ github.sha }}", checkout)
+        self.assertIn("repository: " + "$" + "{{ github.repository }}", checkout)
+        self.assertIn("ref: " + "$" + "{{ github.event.repository.default_branch }}", checkout)
+        self.assertIn("path: review-base", checkout)
         self.assertIn("persist-credentials: false", checkout)
         self.assertNotIn("head.sha", checkout)
+        self.assertNotIn("pull_request.base", checkout)
+        self.assertIn("python3 -I", workflow)
+        self.assertIn("working-directory: " + "$" + "{{ runner.temp }}", workflow)
+        self.assertIn("/review-base/tools/review_context.py", workflow)
         self.assertIn("build_review_context(diff)", workflow)
         self.assertNotIn("diff[:diff_limit]", workflow)
 

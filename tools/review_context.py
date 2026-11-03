@@ -34,6 +34,20 @@ def _bounded(text, limit, notice):
     return text[:limit - len(notice)] + notice
 
 
+def _bounded_inventory(text, limit):
+    if len(text) <= limit:
+        return text
+    notice = "\n[Inventory truncated; additional files exist in the full PR.]\n"
+    lines = []
+    used = len(notice)
+    for line in text.splitlines(keepends=True):
+        if used + len(line) > limit:
+            break
+        lines.append(line)
+        used += len(line)
+    return "".join(lines) + notice
+
+
 def _allocations(sizes, budget):
     """Retain small patches in full, then share the rest between larger ones."""
     assigned = [0] * len(sizes)
@@ -70,8 +84,7 @@ def build_review_context(diff, limit=120000, per_file_limit=120000):
     labels = ("code/config", "documentation", "generated/evidence")
     inventory = "Changed-file inventory: " + str(len(entries)) + " files in the full PR diff.\n"
     inventory += "".join(f"- {path} [{labels[priority]}]\n" for priority, path, _ in entries)
-    inventory = _bounded(inventory, min(16000, limit // 3),
-                         "\n[Inventory truncated; additional files exist in the full PR.]\n")
+    inventory = _bounded_inventory(inventory, min(16000, limit // 3))
     prefix = inventory + "\nPatches are ordered by review priority.\n\n"
     suffix = ("\nReview scope: patches may be truncated or omitted. Use the inventory to identify "
               "changed files; do not infer missing implementation or tests from omitted context.\n")
