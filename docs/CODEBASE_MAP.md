@@ -215,6 +215,7 @@ dense FFN, and MoE branches live in the active backend's forward implementation.
 | Exact-prefix cache parity                                         | `tools/validate_rocm_prompt_cache.mjs`                                                |
 | Model-specific projection pipeline selection                      | `src/compute/projection_specializations.zig`, `src/compute/dmmv.zig`                  |
 | Bounded Vulkan model uploads and byte-copy planning               | `src/model/loader.zig`, `src/vulkan/buffer.zig`, `src/gpu/upload_plan.zig`            |
+| CPU upload-copy fault injection                                   | `tools/vulkan_upload_copy_contract.zig`, `tools/upload_copy_contract.test.ts`         |
 | OpenCode setup, bounded tool hook, verified rounds                | `tools/setup_opencode.mjs`                                                            |
 | CPU OpenCode protocol and lifecycle                               | `tools/validate_opencode_harness.mjs`                                                 |
 | OpenCode preview CLI regressions                                  | `tools/setup_opencode_preview.test.ts`                                                |

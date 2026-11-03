@@ -695,7 +695,9 @@ pub fn load(
         } else {
             // Source and destination offsets advance together; the last window
             // copies its exact byte count instead of a padded staging capacity.
-            const window = &staging.?;
+            // The scan and upload use the same selection rules. Still fail
+            // explicitly if that invariant is broken rather than unwrapping null.
+            const window = if (staging) |*allocated_window| allocated_window else return error.NoStagingWindow;
             var chunks = try upload_plan.Chunks.init(tensor_size, window.size);
             while (chunks.next()) |chunk| {
                 const start: usize = @intCast(chunk.offset);

@@ -13,8 +13,21 @@ selection retain their existing behavior.
 
 The shared host tests reconstruct a tensor with surrounding guards and exercise
 empty, exact, partial and near-address-limit windows. A Linux contract rejects
-invalid and overflowing Vulkan copy ranges before any GPU call. Queue submission
-and wait failures propagate so a failed transfer cannot silently reuse staging.
+invalid and overflowing Vulkan copy ranges before any GPU call. Allocation,
+recording and submission failures return errors. A failed completion wait
+terminates the process without unwinding transfer resources: host/device OOM,
+device loss and other wait failures do not establish that the copy has finished.
+This prevents pending command, staging and destination buffers from being freed.
+The loader also reports a missing staging window explicitly if its selection
+invariant is ever broken.
+The [Vulkan wait contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueueWaitIdle.html)
+lists these distinct failure results; a wait error is not proof of completion.
+
+The CPU-only `upload-copy-contract` fixture replaces every Vulkan entrypoint
+it calls and never opens a GPU. It verifies exact offsets/bytes/guards on success,
+cleanup before submission, and process termination without resource cleanup for
+four completion-wait failures. Its subprocess assertions catch an unsafe return
+that would execute the command buffer or caller's buffer teardown defers.
 
 ## Intel measurements
 

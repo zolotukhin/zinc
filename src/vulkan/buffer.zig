@@ -193,8 +193,9 @@ pub const Buffer = struct {
 /// @param src Source buffer.
 /// @param dst Destination buffer.
 /// @param size Number of bytes to copy.
-/// @returns `error.AllocCmdBufFailed` or `error.QueueSubmitFailed` when command allocation or submission fails.
-/// @note This helper waits for the compute queue to go idle before returning.
+/// @returns An error if allocation, recording or submission fails.
+/// @note Completion-wait failures terminate the process without unwinding
+/// resources that the queue may still reference.
 pub fn copyBuffer(
     instance: *const Instance,
     cmd_pool: vk.c.VkCommandPool,
@@ -267,8 +268,15 @@ pub fn copyBufferRegion(
     result = vk.c.vkQueueSubmit(instance.compute_queue, 1, &submit_info, @as(vk.c.VkFence, null));
     if (result != vk.c.VK_SUCCESS) return error.QueueSubmitFailed;
 
-    // A reusable upload window must not be overwritten after a failed wait.
-    if (vk.c.vkQueueWaitIdle(instance.compute_queue) != vk.c.VK_SUCCESS) return error.QueueWaitFailed;
+    result = vk.c.vkQueueWaitIdle(instance.compute_queue);
+    if (result != vk.c.VK_SUCCESS) {
+        // A wait can fail with host/device OOM as well as device loss. It does
+        // not establish completion, so returning would free this command and
+        // unwind the caller's staging/destination/pool while they may be pending.
+        // Terminate without running those defers; process teardown owns recovery.
+        log.err("Vulkan upload completion failed ({d}); terminating with transfer resources retained", .{result});
+        std.process.exit(1);
+    }
 }
 
 test "invalid or empty buffer copies never allocate a Vulkan command" {
