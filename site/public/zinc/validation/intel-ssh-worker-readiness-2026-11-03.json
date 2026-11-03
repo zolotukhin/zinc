@@ -1,0 +1,328 @@
+{
+  "native_choices": {
+    "exact_tokens": 431,
+    "near_tie_tokens": 1,
+    "total_tokens": 432
+  },
+  "numerical_cases": 376,
+  "observed_at": "2026-11-03T04:26:48.728536+00:00",
+  "preview_workflow": "https://github.com/zolotukhin/zinc/actions/runs/41570296787",
+  "release_qualification": false,
+  "report": {
+    "archive_sha256": "5036befa82e97dc743add8bb74feac26bd15efda879b70e225cbca8f743402ca",
+    "cleanup": "no GPU process remains",
+    "hardware": {
+      "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+      "gpu": "Intel(R) Graphics (BMG G31)",
+      "os": "Linux 7.2.7-arch1-1"
+    },
+    "models": [
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 2048,
+        "id": "qwen3-0.6b-q8-0",
+        "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [
+                {
+                  "chosen_id": 3618,
+                  "logprob_gap": 0.015493392944335938,
+                  "position": 11,
+                  "rank": 2,
+                  "reference_id": 36337
+                }
+              ],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 47,
+          "near_tie_tokens": 1,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "prefill_cancellation": {
+          "passed": true,
+          "recovery_ms": 2413
+        },
+        "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen36-27b-q4k-m",
+        "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen35-9b-q4k-m",
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "gemma4-31b-q4k-m",
+        "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "sliding_window": 1024,
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        }
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "gemma4-26b-a4b-q4k-m",
+        "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "sliding_window": 1024,
+        "sliding_window_reference": {
+          "context": 4096,
+          "http_passed": true,
+          "maximum_prompt_tokens": 1139,
+          "minimum_prompt_tokens": 1136,
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "window_tokens": 1024
+        }
+      },
+      {
+        "agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "api_passed": true,
+        "context": 4096,
+        "id": "qwen38-27b-q4k-m",
+        "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+      }
+    ],
+    "models_exercised": true,
+    "passed": true,
+    "policy_sha256": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+    "preview_version": "0.1.0-dev.41570296787",
+    "profile": "vulkan-intel-xe2",
+    "reference": {
+      "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+      "device_backend": "vulkan",
+      "generation": {
+        "batch_size": 512,
+        "flash_attention": false,
+        "kv_cache": "f32",
+        "micro_batch": 1,
+        "parallel": 1
+      },
+      "library_sha256": {
+        "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+        "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+        "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+        "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+        "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+        "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+        "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+        "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+        "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+      },
+      "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+      "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+    },
+    "release_qualification": false,
+    "schema_version": "zinc-worker-readiness-v1",
+    "source_commit": "8ad0f016c119eb065e7e07798810e655df646138",
+    "transport": {
+      "artifact_digest": "sha256:4d30f6325b975da189832b002fdbdebec0faf74609cf0b007664d4d2ccb3f866",
+      "artifact_id": 13200674418,
+      "cleanup": true,
+      "controller_attempt": 1,
+      "controller_run": 41572358007,
+      "helpers_sha256": {
+        "release_ssh.py": "648d74bc0df39c2d78ff596cb02113747e740d7440f801764d97e5b37b5fc085",
+        "release_worker_guard.py": "8da0de076d0c0f886782757961c7ce433875bb7d023e9f75f43c6d8e143f1158"
+      },
+      "kind": "ssh",
+      "validation_commit": "8ad0f016c119eb065e7e07798810e655df646138"
+    },
+    "validation_helpers_sha256": {
+      "release.py": "24a4e29e6e4eef476f3fb5d84bab6ecdc8cfd943e6123a7fff9ecafa4a0528bf",
+      "release_gpu.py": "bc3c7506b703d289f7b03623c85ed77835330c0c2e5f031af7bd371b90948154",
+      "release_lib.py": "fbfd432c6932278d1573094e00ac1be7828d3e0fdd69894ca7ae11909ee40919",
+      "release_worker.py": "47279e56a235f94ecb76d9847344bd0df9328d226cd0e47ff096971632fc88b5"
+    },
+    "validation_source_commit": "8ad0f016c119eb065e7e07798810e655df646138"
+  },
+  "workflow": "https://github.com/zolotukhin/zinc/actions/runs/41572358007"
+}
