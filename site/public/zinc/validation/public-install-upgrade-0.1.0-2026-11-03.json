@@ -1,0 +1,73 @@
+{
+  "schema_version": "zinc-public-install-upgrade-v1",
+  "cpu_only": true,
+  "passed": true,
+  "backends": [
+    {
+      "backend": "vulkan",
+      "install_rc": true,
+      "upgrade_stable": true,
+      "rollback_rc": true,
+      "reinstall_stable": true,
+      "command_link": true,
+      "isolated_cache_sentinel_preserved": true,
+      "default_stable_selection": true,
+      "temporary_prefix_cleaned": true
+    },
+    {
+      "backend": "rocm",
+      "install_rc": true,
+      "upgrade_stable": true,
+      "rollback_rc": true,
+      "reinstall_stable": true,
+      "command_link": true,
+      "isolated_cache_sentinel_preserved": true,
+      "default_stable_selection": true,
+      "temporary_prefix_cleaned": true
+    }
+  ],
+  "checked_at_utc": "2026-11-03T23:21:41.611042+00:00",
+  "versions": [
+    {
+      "version": "0.1.0-rc.1",
+      "commit": "40d648f0b7d4dbcf219b0e72af215f7cdb2d880c",
+      "artifacts": [
+        {
+          "target": "linux-x86_64-vulkan",
+          "filename": "zinc-v0.1.0-rc.1-linux-x86_64-vulkan.tar.gz",
+          "sha256": "ceeb0e1a1c103fc87b0f8db76f332aa0cce37553a76a46aaa95bfb3bfaefbf44",
+          "binary_sha256": "28270a5ddec6cf6b042bf5d7f3c8af680f504e30dec224b99caca3a3d0857c62"
+        },
+        {
+          "target": "linux-x86_64-rocm",
+          "filename": "zinc-v0.1.0-rc.1-linux-x86_64-rocm.tar.gz",
+          "sha256": "8d289e4d8890e3c2f15afa075a68145e5b254af73fe2f131a9fdd7f05fa6305a",
+          "binary_sha256": "26368258c133fef99b06ac6468076e4f4bb73656e4aae8232c1dd899eb62d32b"
+        }
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "commit": "c3d4c0a23defa92b12394af09750554615b3cf41",
+      "artifacts": [
+        {
+          "target": "linux-x86_64-vulkan",
+          "filename": "zinc-v0.1.0-linux-x86_64-vulkan.tar.gz",
+          "sha256": "b203e3d408a374de56e114a16853af6fef294b75f064f75a8e41c0969ec27844",
+          "binary_sha256": "afe439ecf05bd1932b68f53a55ffb1b647c2a9e7a188cbb2c38bc3b9354d1810"
+        },
+        {
+          "target": "linux-x86_64-rocm",
+          "filename": "zinc-v0.1.0-linux-x86_64-rocm.tar.gz",
+          "sha256": "3e3b78ca71fc1859f39d71e5a97260486190bd4e4a35dafe1320efeb0caa0801",
+          "binary_sha256": "e3f3be8923d324b0e875834f125fa14aa4378f4185414fc0793efcb107e85a91"
+        }
+      ]
+    }
+  ],
+  "installer_sha256": "d7cfc1246876d6a66bb8332c02236b97a2f7193771217c1c1867502708ba1cda",
+  "published_bundle_files_verified": 9,
+  "publisher_run": 41720058647,
+  "inference_validation": "/zinc/validation/release-candidate-0.1.0-2026-11-03.json",
+  "scope": "CPU-only installation and pointer/cache-sentinel checks in isolated temporary prefixes; binaries first downloaded publicly and verified against the certified manifests."
+}

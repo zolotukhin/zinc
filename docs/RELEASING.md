@@ -2,8 +2,9 @@
 
 The 0.1.0 launch is Linux first: Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. It builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
-The first release is not published yet. Track the concrete remaining gates in
-[0.1.0 readiness](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md).
+[Linux 0.1.0 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0).
+The [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md)
+contains its exact-byte qualification and completed public-install checks.
 
 ## Version policy
 
@@ -272,7 +273,7 @@ its [protected publisher](https://github.com/zolotukhin/zinc/actions/runs/417123
 passes verification of the real public downloads and clean installation on
 both Linux backends.
 
-## Publication still required before 0.1.0
+## Published 0.1.0
 
 The Intel SSH endpoint/controller and R9700 worker are configured and have
 qualified the final Linux `0.1.0` in
@@ -283,10 +284,13 @@ retains the exact archive/model/reference identities and cleanup results.
 The [RC publication rehearsal](https://github.com/zolotukhin/zinc/actions/runs/41712364015)
 passes verification of its separate RC bytes and both public install jobs.
 The final bundle also passes independent provenance and stable catalog checks.
-Approve the [protected stable publisher](https://github.com/zolotukhin/zinc/actions/runs/41720058647),
-then verify stable public downloads, installation and isolated upgrade/rollback
-before closing issue #10. Metal stays an unsigned preview;
+The [protected stable publisher](https://github.com/zolotukhin/zinc/actions/runs/41720058647)
+passes publication and both public-install jobs. All nine anonymous downloads
+match the certified bundle. The [isolated upgrade/rollback report](/zinc/validation/public-install-upgrade-0.1.0-2026-11-03.json)
+also verifies RC-to-stable upgrades, rollback, reinstall, default stable
+selection, command links and cache sentinels on both backends. These complete
+the launch checks for issue #10. Metal stays an unsigned preview;
 the other hardware profiles can be qualified later. Broader optional-feature,
 memory-rejection and performance-regression qualification remains necessary
-before advertising those features. Merging implementation does not create a
-public 0.1.0 tag, release or issue closure.
+before advertising those features. Future releases follow the same
+candidate-to-publication process; existing published bytes are preserved.

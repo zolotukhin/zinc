@@ -17,7 +17,7 @@ keywords:
   - inference correctness
   - reproducible GPU releases
 excerpt: 'One refrigerator prompt led us through request-state bugs, GPU memory cliffs, real coding tasks, and a reference binary with the wrong revision. This is the road to ZINC’s first stable release.'
-seoDescription: 'Preparing ZINC 0.1.0 across Metal, Vulkan and ROCm: model correctness, bounded prefill, real OpenCode tasks and reproducible binary qualification.'
+seoDescription: 'How ZINC 0.1.0 reached a Linux Vulkan/ROCm release: model correctness, bounded prefill, real OpenCode tasks and exact-byte binary qualification.'
 draft: false
 ---
 
@@ -27,7 +27,7 @@ Both were answering the same refrigerator prompt, with the same model weights, g
 
 A short prompt had found a disagreement that a fluent paragraph could hide. Following it led through request history, memory allocation, the test harness and eventually the reference executable itself.
 
-We are still qualifying the release. The recent work has made the meaning of “stable” much more concrete.
+**November 3 update:** [ZINC 0.1.0 is available](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0) for Linux Vulkan and ROCm. Metal remains an unsigned preview. The work below made the meaning of “stable” much more concrete.
 
 ## A request can inherit more than conversation history
 
@@ -184,12 +184,12 @@ The R9700 now has an isolated non-root worker for both backends, sharing one GPU
 
 ## Where the road stands today
 
-The fresh Intel matrix now passes **203 of 203 API probes across all seven catalog models**. Both Gemmas and the four larger Qwens complete all three coding tasks: **18 of 18**, with independent tests, protected files, client exits and post-task native replays all passing. The 0.6B starter completes none, and the separate native-engine control also completes none. Its inference and API results remain useful qualification evidence; the [full model table](/zinc/docs/intel-opencode-validation/) makes the coding limit explicit.
+The recorded Intel OpenCode campaign passes **203 of 203 API probes across all seven catalog models**. Both Gemmas and the four larger Qwens complete all three coding tasks: **18 of 18**, with independent tests, protected files, client exits and post-task native replays all passing. The 0.6B starter completes none, and the separate native-engine control also completes none. Those client results belong to the archives and settings in the [full model table](/zinc/docs/intel-opencode-validation/), which makes the coding limit explicit.
 
-The latest automatic R9700 readiness runs also exercise the longer references: Vulkan checks seven models and matches all 432 short and extended choices exactly. ROCm checks six models, with 382 exact choices and two policy-qualified near-ties. Both retain HTTP checks, source identities and clean process shutdown. Earlier previews and their corrected reference-revision claims remain in the [release readiness plan](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md).
+The published `0.1.0` archives now share one frozen source, `c3d4c0a2`, and pass all three mandatory Linux profiles. R9700 Vulkan matches **432/432** short and extended native choices exactly; Intel Vulkan matches **431/432**; R9700 ROCm matches **382/384**. The three differing choices satisfy the unchanged near-tie policy, including the complete suffix and text checks. Both Gemmas cross their sliding window on every profile. The [unchanged release report](/zinc/validation/release-candidate-0.1.0-2026-11-03.json) retains archive, model, reference, numerical, HTTP/recovery and process-cleanup evidence.
 
-Those checks still cover different recorded archives. The final release needs one frozen candidate through all three Linux profiles, including the isolated Intel worker. The small starter needs its inference-promotion review, and publication needs a rehearsal with clean public downloads and installation. The release plan keeps those gates visible.
+The last part of shipping became another test. After protected publication, all nine anonymous downloads matched the certified bundle and both clean-install jobs passed. In isolated directories, the actual public archives then passed RC installation, stable upgrade, rollback to the RC, stable reinstall and default stable selection. Command links and cache sentinels survived the sequence, and the temporary prefixes were removed. The [installation report](/zinc/validation/public-install-upgrade-0.1.0-2026-11-03.json) records that CPU-only check separately from GPU inference qualification.
 
 The refrigerator prompt remains in the tests. So do the long request, the cancelled stream, the failed shorter coding trial and the old reference identity. Keeping those cases gives the next optimization something concrete to answer to.
 
-The first stable version will be ready when someone can download it, run it on a listed GPU, and get the behavior its report promises.
+There is now a permanent version to download, a listed GPU/model scope, and a report tied to the bytes users receive. The [installation guide](/zinc/docs/binary-releases/) is the starting point. Earlier failed trials and reference corrections remain in the [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md); Intel throughput remains an active optimization target beyond this first stable release.
