@@ -1,7 +1,7 @@
 //! Bound temporary model-upload memory without changing tensor bytes.
 //! @section Inference Runtime
 //!
-//! Plan exact byte windows for reusable staging, with overflow-safe bounds.
+//! Plan exact byte windows for reusable staging, including large offsets and tails.
 //! The host-only contracts run on every backend without opening a GPU.
 const std = @import("std");
 
@@ -32,11 +32,6 @@ pub const Chunks = struct {
         return chunk;
     }
 };
-
-/// Check bounds by subtraction so a corrupt offset cannot wrap the sum.
-pub fn rangeFits(capacity: u64, offset: u64, size: u64) bool {
-    return offset <= capacity and size <= capacity - offset;
-}
 
 test "upload staging is capped and small tensors do not reserve the full cap" {
     try std.testing.expectEqual(@as(u64, 0), stagingCapacity(0));
@@ -82,8 +77,4 @@ test "upload byte bounds do not overflow near the address-space limit" {
     try std.testing.expectEqual(Chunk{ .offset = 0, .size = maximum - 7 }, chunks.next().?);
     try std.testing.expectEqual(Chunk{ .offset = maximum - 7, .size = 7 }, chunks.next().?);
     try std.testing.expectEqual(null, chunks.next());
-    try std.testing.expect(rangeFits(16, 4, 12));
-    try std.testing.expect(rangeFits(16, 16, 0));
-    try std.testing.expect(!rangeFits(16, 17, 0));
-    try std.testing.expect(!rangeFits(maximum, maximum - 2, 4));
 }

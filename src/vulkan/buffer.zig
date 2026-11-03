@@ -215,8 +215,11 @@ pub fn copyBufferRegion(
     dst_offset: vk.c.VkDeviceSize,
     size: vk.c.VkDeviceSize,
 ) !void {
-    const upload_plan = @import("../gpu/upload_plan.zig");
-    if (!upload_plan.rangeFits(src.size, src_offset, size) or !upload_plan.rangeFits(dst.size, dst_offset, size))
+    // Keep this primitive self-contained: standalone Vulkan tools import this
+    // directory as a module and cannot reach the engine's upload planner.
+    // Short-circuit the offset checks before subtracting to avoid overflow.
+    if (src_offset > src.size or size > src.size - src_offset or
+        dst_offset > dst.size or size > dst.size - dst_offset)
         return error.BufferCopyOutOfBounds;
     if (size == 0) return;
     // Allocate one-shot command buffer
@@ -276,5 +279,6 @@ test "invalid or empty buffer copies never allocate a Vulkan command" {
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 0, 17));
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 31, 4));
     try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, std.math.maxInt(u64), 0, 4));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 17, 0, 0));
     try copyBufferRegion(undefined, undefined, &src, &dst, 16, 32, 0);
 }
