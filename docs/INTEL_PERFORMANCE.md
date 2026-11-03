@@ -16,8 +16,10 @@ performance uses the independently refreshed latest llama.cpp pin.
 For each model, both reusable servers use the same GGUF, context limit, F16 KV,
 one slot, disabled MTP and prompt caching, and identical request payloads. The
 default three rounds alternate engine order. Each workload gets one warmup and
-three measured requests per round. Incomplete generations, reduced prefill work,
-different prompt counts, and unstable repeated outputs fail the campaign.
+three measured requests per round. Natural early EOS remains in the report and
+excludes that workload from full-budget comparisons; finishing early is never
+counted as a speed win. Reduced prefill work, different prompt counts, invalid
+token accounting, and unstable repeated outputs fail the campaign.
 llama.cpp must report full GPU layer offload; ZINC must confirm F16 KV storage.
 
 Run the following **on the remote Intel worker**, with paths supplied by private
@@ -48,7 +50,9 @@ come from the [Linux DRM usage statistics documentation](https://docs.kernel.org
 
 A subset selected with `--models`, or fewer repetitions, is a diagnostic. Passing
 means that correctness and measurement contracts passed; it does not mean ZINC
-beat llama.cpp. Review all model/workload results, retained bytes and settings
+beat llama.cpp. `comparison_eligible` identifies workloads with complete output
+budgets on both engines; `complete_performance_matrix` requires them for all
+seven models. Review all model/workload results, retained bytes and settings
 before publishing comparisons. This single-slot protocol also does not establish
 concurrent-client capacity or MTP-on performance; those need separate matched
 campaigns. Release candidate qualification remains a separate gate on the final

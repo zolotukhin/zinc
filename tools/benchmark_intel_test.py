@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import benchmark_intel
 import benchmark_metrics
+import benchmark_matched_mtp
 from benchmark_gemma_rocm import correctness_prompts
 
 
@@ -98,6 +99,31 @@ class IntelMetricsTest(unittest.TestCase):
         for text in ("", "info: KV cache: 256 MB (f32)", "f16 model weights"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 benchmark_intel.zinc_kv_storage(text)
+
+    def test_natural_eos_is_retained_only_when_explicitly_requested_and_never_full_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            log = directory / "server.log"
+            log.write_text("")
+            body = {"choices": [{"message": {"content": "A complete short answer."}, "finish_reason": "stop"}]}
+            parsed = {"prefillTokens": 20, "promptTokens": 20, "generatedTokens": 12}
+            def request(*args, **kwargs):
+                return io.BytesIO(json.dumps(body).encode())
+            with patch.object(benchmark_matched_mtp.gpu, "request", side_effect=request), patch.object(benchmark_matched_mtp, "run_json", return_value=parsed):
+                child = Mock()
+                child.poll.return_value = None
+                args = ("llama", "off", child, 1, log, {"body": {}, "max_tokens": 16}, directory, 1)
+                with self.assertRaisesRegex(ValueError, "common output budget"):
+                    benchmark_matched_mtp.measure(*args)
+                sample = benchmark_matched_mtp.measure(*args, require_full_budget=False)
+                self.assertFalse(sample["output_budget_complete"])
+                self.assertEqual(sample["finish_reason"], "stop")
+                body["choices"][0]["finish_reason"] = "length"
+                parsed["generatedTokens"] = 16
+                self.assertTrue(benchmark_matched_mtp.measure(*args)["output_budget_complete"])
+                parsed["generatedTokens"] = 17
+                with self.assertRaisesRegex(ValueError, "invalid token accounting"):
+                    benchmark_matched_mtp.measure(*args, require_full_budget=False)
 
 
 if __name__ == "__main__":

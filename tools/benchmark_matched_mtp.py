@@ -35,7 +35,7 @@ def text_hash(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def measure(engine, mode, child, port, log, scenario, directory, number):
+def measure(engine, mode, child, port, log, scenario, directory, number, require_full_budget=True):
     offset = log.stat().st_size
     started = time.monotonic()
     with gpu.request(port, "/v1/chat/completions", scenario["body"], timeout=600) as response:
@@ -66,10 +66,13 @@ def measure(engine, mode, child, port, log, scenario, directory, number):
         raise ValueError("requested MTP mode did not match observed drafting telemetry")
     if not parsed.get("prefillTokens") or parsed["prefillTokens"] < parsed["promptTokens"] - 1:
         raise ValueError("prompt cache reduced measured prefill work")
-    if parsed["generatedTokens"] != scenario["max_tokens"] or choice.get("finish_reason") != "length":
+    complete = parsed["generatedTokens"] == scenario["max_tokens"] and choice.get("finish_reason") == "length"
+    if not (0 < parsed["generatedTokens"] <= scenario["max_tokens"]) or choice.get("finish_reason") not in ("length", "stop"):
+        raise ValueError("generation returned invalid token accounting or finish reason")
+    if require_full_budget and not complete:
         raise ValueError("generation did not reach the common output budget")
     return {**parsed, "totalLatencyMs": latency, "totalTps": (parsed["promptTokens"] + parsed["generatedTokens"]) / (latency / 1000), "content_sha256": text_hash(content),
-            "content_bytes": len(content.encode()), "finish_reason": choice.get("finish_reason")}
+            "content_bytes": len(content.encode()), "finish_reason": choice.get("finish_reason"), "output_budget_complete": complete}
 
 
 def main():

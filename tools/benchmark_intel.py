@@ -65,7 +65,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = {"schema_version": "zinc-intel-performance-v1", "started_at": now(), "passed": False,
               "release_qualification": False, "required_models": required, "selected_models": args.models,
-              "complete_model_matrix": False, "models": [],
+              "complete_model_matrix": False, "complete_performance_matrix": False, "models": [],
               "settings": {"backend": "vulkan", "target": "intel", "kv_cache": "f16", "mtp": "off", "slots": 1,
                            "prompt_cache": False, "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
                            "temperature": 0, "top_p": 1, "seed": 0, "context": "pinned model qualification limit",
@@ -140,7 +140,8 @@ def main():
                             for scenario in scenarios:
                                 for iteration in range(args.warmup + args.runs):
                                     number += 1
-                                    sample = measure(engine, "off", child, port, log, scenario, model_work, number)
+                                    # Natural EOS is retained as evidence, never a full-budget win.
+                                    sample = measure(engine, "off", child, port, log, scenario, model_work, number, require_full_budget=False)
                                     key = (engine, scenario["id"])
                                     require(identities.setdefault(key, sample["content_sha256"]) == sample["content_sha256"], "repeated complete outputs differ")
                                     observed = counts.setdefault(scenario["id"], [])
@@ -153,6 +154,10 @@ def main():
                             process["memory"] = memory.snapshot()
                         idle()
                         save()
+                current["comparison_eligible"] = {
+                    row["id"]: all(s["output_budget_complete"] for s in current["samples"] if s["scenario"] == row["id"])
+                    for row in scenarios
+                }
                 current["passed"] = True
                 save()
             require(reference_identity(args.llama_bin, args.llama_source, env, pin) == report["reference"], "performance reference changed")
@@ -160,7 +165,10 @@ def main():
             require(sha256(zinc) == report["zinc"]["sha256"], "ZINC binary changed")
             require(all(sha256(ROOT / name) == digest for name, digest in report["harness_sha256"].items()), "benchmark harness changed")
             idle()
-        report.update(passed=True, complete_model_matrix=set(args.models) == set(required), cleanup="no GPU process remains")
+        complete_models = set(args.models) == set(required)
+        report.update(passed=True, complete_model_matrix=complete_models,
+                      complete_performance_matrix=complete_models and all(all(m["comparison_eligible"].values()) for m in report["models"]),
+                      cleanup="no GPU process remains")
     except BaseException as error:
         report["error"] = str(error) if type(error) in (ValueError, AssertionError) else type(error).__name__
         raise
