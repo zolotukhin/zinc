@@ -244,7 +244,7 @@ automatically; inspect Actions runs before retrying to avoid duplicate candidate
 After workflows merge to main and infrastructure is configured:
 
 1. Run the configuration preflight above, then dispatch `release-candidate.yml` on main with an explicit nightly/RC version first. Preparation checks out the immutable dispatched workflow SHA. `main` selects that snapshot; an explicit older full SHA must be its ancestor and have identical release qualification inputs. Changed policy, build/installer inputs, toolchain pins, catalog, release helpers or validation code require a fresh candidate. Dirty source and incomplete hardware assignments fail before outputs/builds.
-2. Review all three Linux reports and model results. The small starter starts experimental. Promote its catalog status/tested profiles only after reviewing the R9700 and Intel Vulkan evidence. Stable publication requires catalog coverage for both selected roles (`amd-rdna4-32gb` and `intel-arc`); Apple-only or partial coverage cannot satisfy it. Adding a stable hardware role requires an explicit reviewed catalog mapping. All shipped model sizes must match the policy and default contexts must stay within the qualified limits. Promotion is a source change and needs another candidate.
+2. Review all three Linux reports and model results. The [starter review](STARTER_QUALIFICATION.md) promotes only Vulkan inference on R9700 and Intel, with chat/thinking recommendations disabled. Stable publication requires its explicit Vulkan backend scope and coverage for both selected roles (`amd-rdna4-32gb` and `intel-arc`); Apple-only or partial coverage cannot satisfy it. Adding a stable hardware role requires an explicit reviewed catalog mapping. All shipped model sizes must match the policy and default contexts must stay within the qualified limits. Catalog changes require a fresh candidate.
 3. Dispatch the final candidate with `version=0.1.0`. An RC cannot be renamed. Every final archive already embeds `0.1.0` and the full SHA.
 4. Review the `release-candidate` artifact: two Linux archives, policy, checksums, validation, generated notes, installer and offline provenance. Artifacts expire after 14 days; rebuild/requalify if unavailable.
 5. Dispatch `release.yml` on main with the successful manual candidate run ID. Preflight verifies workflow identity, source ancestry, provenance, complete model/report matrix and protected environment. Review its summary, then approve `release`.
@@ -271,4 +271,10 @@ publication and clean public-download/install rehearsal before 0.1.0.
 
 ## Qualification still required before 0.1.0
 
-Finish the Intel worker and complete all three selected Linux profiles on the final candidate, review/promote the starter, and rehearse protected publication/public installation. Metal stays an unsigned preview; the other hardware profiles can be qualified later. Broader optional-feature, memory-rejection and performance-regression qualification remains necessary before advertising those features. Merging implementation does not create a public 0.1.0 tag, release or issue closure.
+Finish the Intel SSH endpoint/controller and complete all three selected Linux
+profiles on a fresh final candidate with the reviewed catalog, then rehearse
+protected publication/public installation. Metal stays an unsigned preview;
+the other hardware profiles can be qualified later. Broader optional-feature,
+memory-rejection and performance-regression qualification remains necessary
+before advertising those features. Merging implementation does not create a
+public 0.1.0 tag, release or issue closure.

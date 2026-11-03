@@ -895,6 +895,12 @@
         return ICON_DEFAULT;
       }
 
+      function modelQualityHint(model) {
+        // Supported inference does not establish chat quality. Missing metadata
+        // from an older server is unknown, rather than a negative recommendation.
+        return model.recommended_for_chat === false ? ' \u00b7 Chat not recommended' : '';
+      }
+
       function renderModelPicker() {
         let html =
           '<div class="model-picker"><h2>Choose a model</h2><div class="picker-sub">Select a model to get started with ZINC</div><div class="model-grid">';
@@ -947,6 +953,7 @@
             vram +
             ' GB VRAM' +
             (m.thinking_stable ? ' \u00b7 Thinking' : '') +
+            modelQualityHint(m) +
             '</div>';
           html += '<span class="card-badge ' + badgeClass + '">' + badge + '</span>';
           html += '</div></div>';

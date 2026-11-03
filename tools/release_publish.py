@@ -101,6 +101,10 @@ def validate_catalog(catalog, release_version):
         if model["id"] == "qwen3-0.6b-q8-0" and "-" not in release_version.split("+")[0]:
             require(catalog_field(text, "status", r"\.[a-z_]+") == ".supported",
                     "stable release requires the starter model to be qualified and promoted in the catalog; first run a nightly/RC, review the evidence, then build a new final-version candidate")
+            require(catalog_field(text, "tested_backend", r"\.[a-z_]+") == ".vulkan" and
+                    catalog_field(text, "recommended_for_chat", r"true|false") == "false" and
+                    catalog_field(text, "thinking_stable", r"true|false") == "false",
+                    "starter qualification is Vulkan inference only; chat/thinking require separate reviewed evidence")
             profiles = [p["id"] for p in release_policy(policy())["gpu_profiles"] if model["id"] in p["models"]]
             require(profiles and all(p in STARTER_CATALOG_PROFILES for p in profiles),
                     "stable starter qualification needs an explicit catalog mapping for every selected profile")

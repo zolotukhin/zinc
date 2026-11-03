@@ -63,7 +63,15 @@ zinc --check
 zinc model list --all
 ```
 
-Follow the model/context table in that release's notes. The qualification policy includes a 639 MB Qwen3 0.6B Q8_0 starter for Vulkan and Qwen3.5 9B for ROCm. The small starter is experimental until hardware qualification is reviewed; stable publication is blocked until its catalog status is promoted in a new candidate. Larger Qwen and Gemma models need substantially more GPU memory.
+Follow the model/context table in that release's notes. The 639 MB Qwen3 0.6B
+Q8_0 starter has [reviewed Vulkan inference coverage](STARTER_QUALIFICATION.md)
+on R9700 and Intel Arc Pro B70 at 2,048 context tokens. Use it for a small
+installation check. It is not recommended for chat, reasoning or coding.
+Qwen3.5 9B is the starting chat model on either Linux backend and the smallest
+model that passed the recorded Intel coding tasks. Those client checks remain
+separate from release qualification. Larger Qwen and Gemma models need
+substantially more GPU memory. All three final-candidate profiles must still
+pass after the catalog promotion.
 
 Managed downloads use immutable upstream revisions and SHA256 pins. Models are downloaded separately. On Metal, use `zinc model pull <id>` and `--model-id <id>` so models stay in the managed cache.
 

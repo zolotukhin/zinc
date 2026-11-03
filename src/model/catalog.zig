@@ -13,6 +13,9 @@ pub const CatalogStatus = enum {
     deprecated,
 };
 
+/// Runtime backend scope for a catalog model, independent of its GPU profile.
+pub const CatalogBackend = enum { vulkan, metal, cuda, rocm };
+
 /// A single managed-model entry describing its identity, download location,
 /// hardware requirements, and tested GPU profiles.
 pub const CatalogEntry = struct {
@@ -42,6 +45,9 @@ pub const CatalogEntry = struct {
     thinking_stable: bool,
     status: CatalogStatus,
     tested_profiles: []const []const u8,
+    /// Scope the recorded GPU qualification to one backend when necessary.
+    /// A board's Vulkan qualification does not imply ROCm support.
+    tested_backend: ?CatalogBackend = null,
 };
 
 /// VRAM-fit assessment for a catalog entry against a specific GPU budget.
@@ -77,12 +83,13 @@ pub const entries = [_]CatalogEntry{
         .default_context_length = 2048,
         .recommended_for_chat = false,
         .thinking_stable = false,
-        // Keep experimental until the approved release profiles pass on packaged bytes.
+        // Packaged R9700/Intel Vulkan inference passes at 2K; see
+        // docs/STARTER_QUALIFICATION.md for exact archives and native controls.
+        // Both engines fail the bounded coding tasks. Keep chat/thinking off.
         // ROCm's hybrid forward path does not implement plain Qwen3.
-        // Inference qualification and real coding readiness are separate.
-        // Review the corrected client launch before recommending chat/agent use.
-        .status = .experimental,
-        .tested_profiles = &.{},
+        .status = .supported,
+        .tested_profiles = &.{ "amd-rdna4-32gb", "intel-arc" },
+        .tested_backend = .vulkan,
     },
     .{
         .id = "qwen38-27b-q4k-m",
@@ -325,6 +332,22 @@ pub fn profileForMetal() []const u8 {
     return apple_silicon_profile;
 }
 
+/// Derive a ROCm catalog profile from the native gfx target and total VRAM.
+/// Only the known RDNA4 targets are mapped; other AMD hardware stays unqualified.
+/// The fit budget may use free memory, but GPU identity must use total memory.
+pub fn profileForRocm(arch: []const u8, total_vram_bytes: u64) []const u8 {
+    const base = arch[0 .. std.mem.indexOfScalar(u8, arch, ':') orelse arch.len];
+    if (std.mem.eql(u8, base, "gfx1200") or std.mem.eql(u8, base, "gfx1201")) {
+        return if (total_vram_bytes >= 28 * 1024 * 1024 * 1024)
+            "amd-rdna4-32gb"
+        else if (total_vram_bytes >= 14 * 1024 * 1024 * 1024)
+            "amd-rdna4-16gb"
+        else
+            "amd-rdna4-small";
+    }
+    return "amd-other";
+}
+
 /// Shared GPU profile string used for all NVIDIA (CUDA) devices.
 pub const nvidia_cuda_profile = "nvidia-cuda";
 
@@ -344,6 +367,17 @@ pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
         if (std.mem.eql(u8, tested, profile)) return true;
     }
     return false;
+}
+
+/// Whether this entry's recorded qualification covers the selected backend.
+/// Explicit preview model loads still use the runtime's architecture checks.
+pub fn supportsBackend(entry: CatalogEntry, backend: CatalogBackend) bool {
+    return entry.tested_backend == null or entry.tested_backend.? == backend;
+}
+
+/// Require both the GPU profile and the backend of its qualification evidence.
+pub fn supportsProfileForBackend(entry: CatalogEntry, profile: []const u8, backend: CatalogBackend) bool {
+    return supportsBackend(entry, backend) and supportsProfile(entry, profile);
 }
 
 /// Return whether the model's VRAM requirement fits within the given budget
@@ -462,11 +496,34 @@ test "find returns known qwen3.6 entry" {
     try std.testing.expect(entry.status == .supported);
 }
 
-test "qualification starter stays experimental and is not a chat recommendation" {
+test "starter inference qualification stays Vulkan-only and is not a chat recommendation" {
     const entry = find("qwen3-0.6b-q8-0") orelse return error.TestExpectedEqual;
-    try std.testing.expect(entry.status == .experimental);
+    try std.testing.expect(entry.status == .supported);
     try std.testing.expect(!entry.recommended_for_chat);
     try std.testing.expect(!entry.thinking_stable);
+    try std.testing.expectEqual(@as(u32, 2048), entry.default_context_length);
+    try std.testing.expectEqual(@as(usize, 2), entry.tested_profiles.len);
+    try std.testing.expect(supportsProfile(entry.*, "amd-rdna4-32gb"));
+    try std.testing.expect(supportsProfile(entry.*, "intel-arc"));
+    try std.testing.expect(!supportsProfile(entry.*, apple_silicon_profile));
+    try std.testing.expect(supportsBackend(entry.*, .vulkan));
+    try std.testing.expect(supportsProfileForBackend(entry.*, "amd-rdna4-32gb", .vulkan));
+    try std.testing.expect(supportsProfileForBackend(entry.*, "intel-arc", .vulkan));
+    try std.testing.expect(!supportsProfileForBackend(entry.*, "amd-rdna4-16gb", .vulkan));
+    for ([_]CatalogBackend{ .metal, .cuda, .rocm }) |backend| {
+        try std.testing.expect(!supportsBackend(entry.*, backend));
+        try std.testing.expect(!supportsProfileForBackend(entry.*, "amd-rdna4-32gb", backend));
+    }
+}
+
+test "ROCm profiles use AMD gfx identity and total VRAM rather than CUDA or free memory" {
+    try std.testing.expectEqualStrings("amd-rdna4-32gb", profileForRocm("gfx1201", 32 * 1024 * 1024 * 1024));
+    try std.testing.expectEqualStrings("amd-rdna4-32gb", profileForRocm("gfx1201:sramecc-:xnack-", 32 * 1024 * 1024 * 1024));
+    try std.testing.expectEqualStrings("amd-rdna4-16gb", profileForRocm("gfx1201", 16 * 1024 * 1024 * 1024));
+    try std.testing.expectEqualStrings("amd-rdna4-small", profileForRocm("gfx1200", 8 * 1024 * 1024 * 1024));
+    for ([_][]const u8{ "gfx1100", "gfx1151", "gfx12010", "sm_120", "" }) |arch| {
+        try std.testing.expectEqualStrings("amd-other", profileForRocm(arch, 32 * 1024 * 1024 * 1024));
+    }
 }
 
 test "find returns qwen3.6 27b dense entry" {
@@ -637,23 +694,24 @@ test "qwen thinking stability flags track validated chat behavior" {
     try std.testing.expect(qwen36_dense.thinking_stable);
 }
 
-test "supported qwen catalog entries expose validated thinking toggles" {
-    // The chat UI only shows thinking when the active catalog entry marks it as
-    // stable. Keep every supported Qwen entry on the validated path.
+test "supported chat-recommended qwen entries expose validated thinking toggles" {
+    // A chat recommendation requires the existing validated thinking path.
+    // Inference-only entries carry a separate, narrower qualification.
     for (&entries) |entry| {
-        if (entry.status == .supported and std.mem.startsWith(u8, entry.family, "qwen")) {
+        if (entry.status == .supported and entry.recommended_for_chat and std.mem.startsWith(u8, entry.family, "qwen")) {
             try std.testing.expect(entry.thinking_stable);
         }
     }
 }
 
-test "supported catalog entries do not force-hide thinking metadata" {
-    // `supported` models are the default user-facing choices. If a future entry
-    // still needs the thinking toggle hidden, keep it experimental until chat
-    // behavior is validated and this invariant can stay true.
+test "inference support does not imply validated chat or thinking" {
+    // Successful native inference cannot promote a model's chat/thinking
+    // quality. Keep those recommendations tied to their own evidence.
     for (&entries) |entry| {
-        if (entry.status == .supported) {
-            try std.testing.expect(entry.thinking_stable);
+        if (entry.status == .supported and !entry.thinking_stable) {
+            // The starter's native inference checks pass even though its
+            // reasoning/coding outcomes do not justify recommendations.
+            try std.testing.expect(!entry.recommended_for_chat);
         }
     }
 }
