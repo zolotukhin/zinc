@@ -1,0 +1,57 @@
+{
+  "schema_version": "zinc-rocm-gemma-partial-tile-diagnostics-v1",
+  "release_qualification": false,
+  "scope": "Isolated GPU numerical negative controls and source-build validation. These diagnostic subsets are separate from the final benchmark and packaged model qualification.",
+  "baseline_commit": "d66fdff09758fcc5de6b5d25937dc83a9106ee3d",
+  "baseline_kernel_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+  "correctness_reference_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+  "q5_1_prototype": {
+    "cleanup": "no GPU process remains",
+    "completed": true,
+    "fixed": {
+      "exit": 0,
+      "expected_tail_failure": false,
+      "summary": [
+        "PASS 143 Q5_1 native-reference/route/tail/quantizer/guard cases"
+      ]
+    },
+    "fixed_kernel_source_sha256": "e360840b22de16e87f89cbc1946fbb278c1d910e3fbc999628e21342014440b8",
+    "old": {
+      "exit": 1,
+      "expected_tail_failure": true,
+      "summary": [
+        "K=704 M=17 variant=0 expected=-16.09375 actual=0",
+        "FAIL Q5_1 full native reference (including partial tile)"
+      ]
+    },
+    "old_kernel_source_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "test_source_sha256": "a24c9482889a6cd11b99d55f78de17d1dc9b6b21ee656b126cf68f9478b228e7"
+  },
+  "q8_0_and_full_matrix_prototype": {
+    "cleanup": "no GPU process remains",
+    "completed": true,
+    "fixed": {
+      "exit": 0,
+      "expected_tail_failure": false,
+      "summary": [
+        "PASS 305 ROCm partial-tile/native-reference/route/quantizer/guard cases"
+      ]
+    },
+    "fixed_kernel_source_sha256": "248394021a79e54b57727854c0c64adb8e6320fde193545ccdb6b761afa8237a",
+    "old": {
+      "exit": 1,
+      "expected_tail_failure": true,
+      "summary": [
+        "Q8_0 K=704 M=17 variant=0 expected=15.0625 actual=0",
+        "FAIL Q8_0 full native reference (including partial tile)"
+      ]
+    },
+    "old_kernel_source_sha256": "1468d6e13cabe5b2c86482855560e50ee400dd475cd29081db28b832cd3638af",
+    "test_source_sha256": "3f8bfcec28dfffc56c08d0db3c54d0de72eae56f5c7121df5513268a5ac345bf"
+  },
+  "qualified_source_campaign": "/zinc/benchmarks/2026-11-03T09-00-39-rdna-rocm-gemma4-26b-a4b-q4k-m-revalidated.json",
+  "notes": [
+    "The first 143-case fixture predates the Q8_0 extension. The later prototype runs 305 cases. Their observed fixture hashes are retained independently.",
+    "The full frozen source campaign additionally validates the current device-selecting fixture, full model continuations, recovery, and repeated server measurements."
+  ]
+}

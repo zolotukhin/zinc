@@ -1170,14 +1170,11 @@ pub const ForwardGemma = struct {
     /// [0..T-1] then decodeStep on the last. ADDITIVE: builds its own token-major
     /// scratch and never touches the single-token decode path.
     ///
-    /// Phase-1 scope is the DENSE gemma-31b (n_experts==0). Phase-2 cycle 1 adds
-    /// the 26b MoE: its ATTENTION block is the SAME structure as the dense model,
-    /// so it shares the batched attention path (GEMM Q/K/V/O + batched causal attn
-    /// + batched norm/RoPE/KV-write) — bit-identical to the per-token attentionLayer.
-    /// Its routed-expert FFN is still LOOPED per token (the existing single-token
-    /// moeFfnBlock, fed each token's hidden slice via an alias-swap) because the
-    /// FFN is position-independent → looping it is output-identical; full
-    /// batched-expert routing (group T tokens by expert) is a later cycle.
+    /// Dense and MoE Gemma share batched attention. MoE then runs its shared
+    /// expert, F32 router, grouped routed experts and residual combination over
+    /// the prompt rows. The serial-expert override isolates that FFN while
+    /// retaining batched attention; the ROCm serial-prefill override replaces
+    /// the whole path. Neither diagnostic reuses the other's norm scratch.
     pub fn prefillBatched(self: *ForwardGemma, tokens: []const u32) !u32 {
         if (tokens.len == 0) return error.EmptyPrompt;
         if (tokens.len > self.max_ctx) return error.ContextLengthExceeded;

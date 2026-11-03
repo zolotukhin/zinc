@@ -1,0 +1,294 @@
+{
+  "archive_sha256": "45f0b3300212e0f614c393f548845a5d35cf79b50c6e41cd5cb111653ca6266a",
+  "cleanup": "no GPU process remains",
+  "hardware": {
+    "driver": "ROCm 7.2.4",
+    "gpu": "AMD Radeon AI PRO R9700",
+    "os": "Linux 7.2.2-070202-generic"
+  },
+  "models": [
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "api_passed": true,
+      "context": 4096,
+      "id": "qwen38-27b-q4k-m",
+      "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+    },
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [
+              {
+                "chosen_id": 36337,
+                "logprob_gap": 0.032131314277648926,
+                "position": 11,
+                "rank": 2,
+                "reference_id": 3618
+              }
+            ],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 47,
+        "near_tie_tokens": 1,
+        "total_tokens": 48
+      },
+      "api_passed": true,
+      "context": 4096,
+      "id": "qwen36-35b-a3b-q4k-xl",
+      "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+    },
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "api_passed": true,
+      "context": 4096,
+      "id": "qwen36-27b-q4k-m",
+      "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+    },
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "api_passed": true,
+      "context": 4096,
+      "id": "qwen35-9b-q4k-m",
+      "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+    },
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "api_passed": true,
+      "bounded_prefill": {
+        "cases": 3,
+        "chunk_tokens": 16,
+        "passed": true,
+        "tokens": 48
+      },
+      "context": 4096,
+      "id": "gemma4-31b-q4k-m",
+      "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "sliding_window": 1024,
+      "sliding_window_reference": {
+        "context": 4096,
+        "http_passed": true,
+        "maximum_prompt_tokens": 1139,
+        "minimum_prompt_tokens": 1136,
+        "passed": true,
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [
+                {
+                  "chosen_id": 80288,
+                  "logprob_gap": 0.0398978590965271,
+                  "position": 11,
+                  "rank": 2,
+                  "reference_id": 35615
+                }
+              ],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 47,
+          "near_tie_tokens": 1,
+          "total_tokens": 48
+        },
+        "window_tokens": 1024
+      }
+    },
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "api_passed": true,
+      "context": 4096,
+      "id": "gemma4-26b-a4b-q4k-m",
+      "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+      "sliding_window": 1024,
+      "sliding_window_reference": {
+        "context": 4096,
+        "http_passed": true,
+        "maximum_prompt_tokens": 1139,
+        "minimum_prompt_tokens": 1136,
+        "passed": true,
+        "reference_agreement": {
+          "cases": [
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            },
+            {
+              "near_ties": [],
+              "tokens": 16
+            }
+          ],
+          "exact_tokens": 48,
+          "near_tie_tokens": 0,
+          "total_tokens": 48
+        },
+        "window_tokens": 1024
+      }
+    }
+  ],
+  "models_exercised": true,
+  "passed": true,
+  "policy_sha256": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+  "preview_version": "0.1.0-dev.41606559665",
+  "profile": "rocm-rdna4",
+  "reference": {
+    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "device_backend": "rocm",
+    "generation": {
+      "batch_size": 512,
+      "flash_attention": false,
+      "kv_cache": "f32",
+      "micro_batch": 1,
+      "parallel": 1
+    },
+    "library_sha256": {
+      "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+      "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+      "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+      "libggml-cpu.so": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+      "libggml-cpu.so.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+      "libggml-cpu.so.0.23.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+      "libggml-hip.so": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+      "libggml-hip.so.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+      "libggml-hip.so.0.23.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+      "libggml.so": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+      "libggml.so.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+      "libggml.so.0.23.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+      "libllama-common.so.0": "d734d118bbe2fcbb64fbdbc85f628fd60ebb2ec8948c04f0d348b40e6cf74eda",
+      "libllama-server-impl.so": "dc719a4a00985859a23827f16fdbc365752e100c2759139fed708dfbbfc97e96",
+      "libllama.so": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+      "libllama.so.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+      "libllama.so.0.4.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff"
+    },
+    "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+    "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+  },
+  "release_qualification": false,
+  "rocm_kernel_reference": {
+    "cases": 305,
+    "kernel_source_sha256": "248394021a79e54b57727854c0c64adb8e6320fde193545ccdb6b761afa8237a",
+    "passed": true,
+    "validator_source_sha256": "39a35b4beadbe69db7e2a0b1adad17b0e4ebf56fdfb94f9ad46f65a1d4aff3f1"
+  },
+  "schema_version": "zinc-worker-readiness-v1",
+  "source_commit": "c09401c9375372c3576d2c334c874c553b0ba37c",
+  "validation_helpers_sha256": {
+    "release.py": "f2a1fc05c0014f2c42338c2976b9e850f4a67f70a14ea557df69c4e57d0a33ab",
+    "release_gpu.py": "17aac052871327e7007f93ef918ecadb7c7ce0fc62c722a96d29ac3e9d0ff525",
+    "release_lib.py": "fbfd432c6932278d1573094e00ac1be7828d3e0fdd69894ca7ae11909ee40919",
+    "release_worker.py": "cffd6e7ca63a71627c07fe77c84b7c68dfa5b02873fa1f54a2265bdf59985388"
+  },
+  "validation_source_commit": "c09401c9375372c3576d2c334c874c553b0ba37c",
+  "binary_sha256": "d3778a1eda8f07fd8571fcb0fe66d0132417c85f7069f0b439d5dbfbb4d6ef3b",
+  "preview_run": 41606559665
+}

@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1042" viewBox="0 0 1080 1042" role="img" aria-labelledby="title desc">
-<title id="title">ZINC vs llama.cpp · Radeon AI PRO R9700 · ROCm / HIP</title>
-<desc id="desc">Quick-chat medians in tokens per second; higher is faster. Orange bars are ZINC, blue bars are llama.cpp. Both engines use the same GGUF and prompt with MTP off. Each phase uses one absolute scale across all models. A badge is ZINC speed divided by llama.cpp speed, not an end-to-end speedup. Mixed measurement dates and revisions are shown per model. Qwen 3.8 27B Dense: Nov 2, 2026; ZINC 34f33b900969; llama.cpp 785322d17f2d51e5185cf996a1f4e46d87640841. Gemma 4 31B: Sep 24, 2026; ZINC d7a5ed9bf0f8; llama.cpp 5f436dddb. Qwen 3.5 9B: Sep 23, 2026; ZINC 20c08b0a0c14; llama.cpp 5f436dddb. Muse Glimmer 30B: Sep 23, 2026; ZINC 547016dcebaa; llama.cpp 5f436dddb. Qwen 3.6 35B A3B: Sep 23, 2026; ZINC c50b4add3402; llama.cpp 5f436dddb. Gemma 4 26B-A4B MoE: Nov 2, 2026; ZINC 34f33b900969; llama.cpp 785322d17f2d51e5185cf996a1f4e46d87640841.</desc>
+<title id="title">ZINC vs llama.cpp · AMD Radeon AI PRO R9700 · ROCm / HIP</title>
+<desc id="desc">Quick-chat medians in tokens per second; higher is faster. Orange bars are ZINC, blue bars are llama.cpp. Both engines use the same GGUF and prompt with MTP off. Each phase uses one absolute scale across all models. A badge is ZINC speed divided by llama.cpp speed, not an end-to-end speedup. Mixed measurement dates and revisions are shown per model. Qwen 3.8 27B Dense: Nov 2, 2026; ZINC 34f33b900969; llama.cpp 785322d17f2d51e5185cf996a1f4e46d87640841. Gemma 4 31B: Sep 24, 2026; ZINC d7a5ed9bf0f8; llama.cpp 5f436dddb. Qwen 3.5 9B: Sep 23, 2026; ZINC 20c08b0a0c14; llama.cpp 5f436dddb. Muse Glimmer 30B: Sep 23, 2026; ZINC 547016dcebaa; llama.cpp 5f436dddb. Gemma 4 26B-A4B MoE: Nov 3, 2026; ZINC 65363680c9e9; llama.cpp 36ee3caf7aa2dcb0210bedab1b61ee9f269765d3. Qwen 3.6 35B A3B: Sep 23, 2026; ZINC c50b4add3402; llama.cpp 5f436dddb.</desc>
 <rect x="0.5" y="0.5" width="1079" height="1041" rx="16" fill="#ffffff" stroke="#d1d9e0"/>
 <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" fill="#1f2328" style="font-variant-numeric:tabular-nums">
 <text x="32" y="35" font-size="11" fill="#bc4c00" font-weight="700" letter-spacing="1.6">ZINC  /  BENCHMARKS</text>
 <text x="32" y="82" font-size="36" fill="#1f2328" font-weight="700" letter-spacing="-0.8">ZINC vs llama.cpp</text>
-<text x="32" y="113" font-size="18" fill="#59636e" >Radeon AI PRO R9700</text>
+<text x="32" y="113" font-size="18" fill="#59636e" >AMD Radeon AI PRO R9700</text>
 <text x="32" y="143" font-size="14" fill="#59636e" >ROCm / HIP · Quick chat · MTP off for both engines</text>
 <text x="1048" y="37" font-size="11" fill="#59636e" text-anchor="end" font-weight="600" letter-spacing="1.2">6 MODELS</text>
 <text x="32" y="188" font-size="11" fill="#59636e" font-weight="600" letter-spacing="1">MODEL / MEASURED</text>
@@ -31,11 +31,11 @@
 <text x="1012" y="239" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.08×</text>
 <text x="714" y="265" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="779" y="255" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="255" width="70.4" height="10" rx="3" fill="#bc4c00"/>
+<rect x="779" y="255" width="66.72" height="10" rx="3" fill="#bc4c00"/>
 <text x="1048" y="266" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">32.9</text>
 <text x="714" y="290" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="779" y="280" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="280" width="64.91" height="10" rx="3" fill="#2864b4"/>
+<rect x="779" y="280" width="61.51" height="10" rx="3" fill="#2864b4"/>
 <text x="1048" y="291" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">30.3</text>
 <text x="32" y="344" font-size="18" fill="#1f2328" font-weight="600">Gemma 4 31B</text>
 <text x="32" y="369" font-size="12.5" fill="#59636e" >Q4_K_M · Sep 24, 2026 · [2]</text>
@@ -53,11 +53,11 @@
 <text x="1012" y="339" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.04×</text>
 <text x="714" y="365" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="779" y="355" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="355" width="60.95" height="10" rx="3" fill="#bc4c00"/>
+<rect x="779" y="355" width="57.76" height="10" rx="3" fill="#bc4c00"/>
 <text x="1048" y="366" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">28.5</text>
 <text x="714" y="390" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="779" y="380" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="380" width="58.61" height="10" rx="3" fill="#2864b4"/>
+<rect x="779" y="380" width="55.54" height="10" rx="3" fill="#2864b4"/>
 <text x="1048" y="391" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">27.4</text>
 <rect x="12" y="411" width="1056" height="98" rx="8" fill="#f6f8fa"/>
 <text x="32" y="444" font-size="18" fill="#1f2328" font-weight="600">Qwen 3.5 9B</text>
@@ -76,11 +76,11 @@
 <text x="1012" y="439" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.19×</text>
 <text x="714" y="465" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="779" y="455" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="455" width="194.34" height="10" rx="3" fill="#bc4c00"/>
+<rect x="779" y="455" width="184.16" height="10" rx="3" fill="#bc4c00"/>
 <text x="1048" y="466" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">90.9</text>
 <text x="714" y="490" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="779" y="480" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="480" width="163.31" height="10" rx="3" fill="#2864b4"/>
+<rect x="779" y="480" width="154.76" height="10" rx="3" fill="#2864b4"/>
 <text x="1048" y="491" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">76.4</text>
 <text x="32" y="544" font-size="18" fill="#1f2328" font-weight="600">Muse Glimmer 30B</text>
 <text x="32" y="569" font-size="12.5" fill="#59636e" >Q4_K_M · Sep 23, 2026 · [4]</text>
@@ -98,57 +98,57 @@
 <text x="1012" y="539" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.09×</text>
 <text x="714" y="565" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="779" y="555" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="555" width="71.3" height="10" rx="3" fill="#bc4c00"/>
+<rect x="779" y="555" width="67.57" height="10" rx="3" fill="#bc4c00"/>
 <text x="1048" y="566" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">33.3</text>
 <text x="714" y="590" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="779" y="580" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="580" width="65.65" height="10" rx="3" fill="#2864b4"/>
+<rect x="779" y="580" width="62.21" height="10" rx="3" fill="#2864b4"/>
 <text x="1048" y="591" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">30.7</text>
 <rect x="12" y="611" width="1056" height="98" rx="8" fill="#f6f8fa"/>
-<text x="32" y="644" font-size="18" fill="#1f2328" font-weight="600">Qwen 3.6 35B A3B</text>
-<text x="32" y="669" font-size="12.5" fill="#59636e" >Q4_K_XL · Sep 23, 2026 · [5]</text>
+<text x="32" y="644" font-size="18" fill="#1f2328" font-weight="600">Gemma 4 26B-A4B MoE</text>
+<text x="32" y="669" font-size="12.5" fill="#59636e" >Q4_K_M · Nov 3, 2026 · [5]</text>
 <rect x="590" y="622" width="72" height="24" rx="6" fill="#fff1e5"/>
-<text x="626" y="639" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.07×</text>
+<text x="626" y="639" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.52×</text>
 <text x="328" y="665" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="393" y="655" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="393" y="655" width="86.83" height="10" rx="3" fill="#bc4c00"/>
-<text x="662" y="666" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">514.5</text>
+<rect x="393" y="655" width="200.38" height="10" rx="3" fill="#bc4c00"/>
+<text x="662" y="666" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">1187.3</text>
 <text x="328" y="690" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="393" y="680" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="393" y="680" width="81.31" height="10" rx="3" fill="#2864b4"/>
-<text x="662" y="691" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">481.8</text>
+<rect x="393" y="680" width="131.74" height="10" rx="3" fill="#2864b4"/>
+<text x="662" y="691" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">780.6</text>
 <rect x="976" y="622" width="72" height="24" rx="6" fill="#fff1e5"/>
-<text x="1012" y="639" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.28×</text>
+<text x="1012" y="639" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.25×</text>
 <text x="714" y="665" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="779" y="655" width="207" height="10" rx="3" fill="#e5eaf0"/>
 <rect x="779" y="655" width="207" height="10" rx="3" fill="#bc4c00"/>
-<text x="1048" y="666" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">96.8</text>
+<text x="1048" y="666" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">102.1</text>
 <text x="714" y="690" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="779" y="680" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="680" width="161.12" height="10" rx="3" fill="#2864b4"/>
-<text x="1048" y="691" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">75.3</text>
-<text x="32" y="744" font-size="18" fill="#1f2328" font-weight="600">Gemma 4 26B-A4B MoE</text>
-<text x="32" y="769" font-size="12.5" fill="#59636e" >Q4_K_M · Nov 2, 2026 · [1]</text>
-<rect x="590" y="722" width="72" height="24" rx="6" fill="#eaf2ff"/>
-<text x="626" y="739" font-size="15" fill="#2864b4" font-weight="700" text-anchor="middle">0.14×</text>
+<rect x="779" y="680" width="164.96" height="10" rx="3" fill="#2864b4"/>
+<text x="1048" y="691" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">81.4</text>
+<text x="32" y="744" font-size="18" fill="#1f2328" font-weight="600">Qwen 3.6 35B A3B</text>
+<text x="32" y="769" font-size="12.5" fill="#59636e" >Q4_K_XL · Sep 23, 2026 · [6]</text>
+<rect x="590" y="722" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="626" y="739" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.07×</text>
 <text x="328" y="765" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="393" y="755" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="393" y="755" width="18.76" height="10" rx="3" fill="#bc4c00"/>
-<text x="662" y="766" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">111.2</text>
+<rect x="393" y="755" width="86.83" height="10" rx="3" fill="#bc4c00"/>
+<text x="662" y="766" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">514.5</text>
 <text x="328" y="790" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="393" y="780" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="393" y="780" width="133.26" height="10" rx="3" fill="#2864b4"/>
-<text x="662" y="791" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">789.6</text>
+<rect x="393" y="780" width="81.31" height="10" rx="3" fill="#2864b4"/>
+<text x="662" y="791" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">481.8</text>
 <rect x="976" y="722" width="72" height="24" rx="6" fill="#fff1e5"/>
-<text x="1012" y="739" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.12×</text>
+<text x="1012" y="739" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.28×</text>
 <text x="714" y="765" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
 <rect x="779" y="755" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="755" width="194.66" height="10" rx="3" fill="#bc4c00"/>
-<text x="1048" y="766" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">91.0</text>
+<rect x="779" y="755" width="196.16" height="10" rx="3" fill="#bc4c00"/>
+<text x="1048" y="766" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">96.8</text>
 <text x="714" y="790" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
 <rect x="779" y="780" width="207" height="10" rx="3" fill="#e5eaf0"/>
-<rect x="779" y="780" width="174.28" height="10" rx="3" fill="#2864b4"/>
-<text x="1048" y="791" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">81.5</text>
+<rect x="779" y="780" width="152.68" height="10" rx="3" fill="#2864b4"/>
+<text x="1048" y="791" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">75.3</text>
 <path d="M32 810H1048" stroke="#d1d9e0"/>
 <text x="32" y="840" font-size="13" fill="#1f2328" font-weight="600">× = ZINC speed ÷ llama.cpp speed · Each column uses a shared absolute scale.</text>
 <text x="32" y="862" font-size="12.5" fill="#59636e" >Medians of repeated requests after warmup. Same model files, prompt tokens and reusable servers.</text>
@@ -157,7 +157,8 @@
 <text x="546" y="911" font-size="12" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[2] ZINC d7a5ed9bf / llama.cpp 5f436dddb</text>
 <text x="32" y="931" font-size="12" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[3] ZINC 20c08b0a0 / llama.cpp 5f436dddb</text>
 <text x="546" y="931" font-size="12" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[4] ZINC 547016dce / llama.cpp 5f436dddb</text>
-<text x="32" y="951" font-size="12" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[5] ZINC c50b4add3 / llama.cpp 5f436dddb</text>
+<text x="32" y="951" font-size="12" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[5] ZINC 65363680c / llama.cpp 36ee3caf7</text>
+<text x="546" y="951" font-size="12" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[6] ZINC c50b4add3 / llama.cpp 5f436dddb</text>
 <text x="32" y="976" font-size="14" fill="#1f2328" font-weight="600">All GPUs, workloads, matched MTP-on pairs, settings &amp; raw samples →</text>
 <text x="32" y="999" font-size="14" fill="#bc4c00" >zolotukhin.ai/zinc/benchmarks</text>
 </g></svg>

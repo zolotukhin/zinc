@@ -1,0 +1,772 @@
+{
+  "api": {
+    "checks": [
+      {
+        "ms": 362,
+        "name": "JSON/SSE parity at 1 output tokens",
+        "pass": true
+      },
+      {
+        "ms": 376,
+        "name": "JSON/SSE parity at 2 output tokens",
+        "pass": true
+      },
+      {
+        "ms": 395,
+        "name": "JSON/SSE parity at 7 output tokens",
+        "pass": true
+      },
+      {
+        "ms": 291,
+        "name": "JSON max_completion_tokens budget",
+        "pass": true
+      },
+      {
+        "ms": 290,
+        "name": "SSE max_completion_tokens budget",
+        "pass": true
+      },
+      {
+        "ms": 559,
+        "name": "Unicode JSON/SSE parity",
+        "pass": true
+      },
+      {
+        "ms": 413,
+        "name": "Unicode JSON/SSE parity at 1 output tokens",
+        "pass": true
+      },
+      {
+        "ms": 434,
+        "name": "Unicode JSON/SSE parity at 2 output tokens",
+        "pass": true
+      },
+      {
+        "ms": 434,
+        "name": "Unicode JSON/SSE parity at 3 output tokens",
+        "pass": true
+      },
+      {
+        "ms": 554,
+        "name": "JSON tool arguments and unique ID",
+        "pass": true
+      },
+      {
+        "ms": 230,
+        "name": "SSE tool arguments and unique ID",
+        "pass": true
+      },
+      {
+        "ms": 409,
+        "name": "JSON tool schema retains numbers booleans arrays objects and strings",
+        "pass": true
+      },
+      {
+        "ms": 406,
+        "name": "SSE tool schema retains numbers booleans arrays objects and strings",
+        "pass": true
+      },
+      {
+        "ms": 104,
+        "name": "Truncated tool calls remain text without an executable call",
+        "pass": true
+      },
+      {
+        "ms": 122,
+        "name": "Null assistant content and tool-result history",
+        "pass": true
+      },
+      {
+        "ms": 187,
+        "name": "tool_choice none",
+        "pass": true
+      },
+      {
+        "ms": 186,
+        "name": "Text content arrays",
+        "pass": true
+      },
+      {
+        "ms": 0,
+        "name": "Malformed JSON returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 0,
+        "name": "Invalid message content returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 0,
+        "name": "Empty messages returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 0,
+        "name": "Negative token budget returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 0,
+        "name": "Negative modern token budget returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 0,
+        "name": "Conflicting token budgets returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 7,
+        "name": "Context overflow returns HTTP 400",
+        "pass": true
+      },
+      {
+        "ms": 598,
+        "name": "Queued requests keep conversations separate",
+        "pass": true
+      },
+      {
+        "ms": 249,
+        "name": "Streaming cancellation releases the slot",
+        "pass": true
+      }
+    ],
+    "complete": true,
+    "passed": 26,
+    "total": 26
+  },
+  "archive_sha256": "62b82cd0446719d750e90bf0c8fee3ff45a92d6931b51d7e1dac8cebf730b7fc",
+  "binary_sha256": "51d0cc7f787320f78803cb8e387c9d8db1e87be339905c6be0f88f8b6a1352ca",
+  "cleanup": "no GPU process remains",
+  "client": {
+    "name": "OpenCode",
+    "version": "1.19.4"
+  },
+  "coding": [
+    {
+      "fixture": "rate-limiter-single",
+      "success": true,
+      "tests": {
+        "fail": 0,
+        "pass": 3
+      },
+      "duration_ms": 63974,
+      "tool_calls": 11,
+      "tool_counts": {
+        "bash": 3,
+        "edit": 1,
+        "read": 5,
+        "todowrite": 2
+      },
+      "file_writes": [
+        {
+          "file": "src/rate_limiter.mjs",
+          "tool": "edit"
+        }
+      ],
+      "test_commands": [
+        {
+          "command": "bun test",
+          "description": "",
+          "exit": 1
+        },
+        {
+          "command": "bun test",
+          "description": "",
+          "exit": 1
+        },
+        {
+          "command": "bun test",
+          "description": "",
+          "exit": 0
+        }
+      ],
+      "errors": [],
+      "failed_tools": 0,
+      "malformed_commands": [],
+      "malformed_json_lines": 0,
+      "timed_out": false,
+      "read_only_violations": [],
+      "unexpected_files": [],
+      "protocol_repair_events": 0,
+      "suppressed_content_events": 0,
+      "final_tokens": {
+        "cache": {
+          "read": 0,
+          "write": 0
+        },
+        "input": 4832,
+        "output": 274,
+        "reasoning": 0,
+        "total": 5106
+      }
+    },
+    {
+      "fixture": "cart-multi-file",
+      "success": true,
+      "tests": {
+        "fail": 0,
+        "pass": 3
+      },
+      "duration_ms": 44882,
+      "tool_calls": 10,
+      "tool_counts": {
+        "bash": 2,
+        "edit": 2,
+        "read": 4,
+        "todowrite": 2
+      },
+      "file_writes": [
+        {
+          "file": "src/pricing.mjs",
+          "tool": "edit"
+        },
+        {
+          "file": "src/cart.mjs",
+          "tool": "edit"
+        }
+      ],
+      "test_commands": [
+        {
+          "command": "bun test",
+          "description": "",
+          "exit": 1
+        },
+        {
+          "command": "bun test",
+          "description": "",
+          "exit": 0
+        }
+      ],
+      "errors": [],
+      "failed_tools": 0,
+      "malformed_commands": [],
+      "malformed_json_lines": 0,
+      "timed_out": false,
+      "read_only_violations": [],
+      "unexpected_files": [],
+      "protocol_repair_events": 0,
+      "suppressed_content_events": 0,
+      "final_tokens": {
+        "cache": {
+          "read": 0,
+          "write": 0
+        },
+        "input": 5194,
+        "output": 156,
+        "reasoning": 0,
+        "total": 5350
+      }
+    },
+    {
+      "fixture": "python-log-cli",
+      "success": true,
+      "tests": {
+        "fail": 0,
+        "pass": 4
+      },
+      "duration_ms": 31604,
+      "tool_calls": 6,
+      "tool_counts": {
+        "bash": 2,
+        "edit": 1,
+        "read": 2,
+        "todowrite": 1
+      },
+      "file_writes": [
+        {
+          "file": "src/report.py",
+          "tool": "edit"
+        }
+      ],
+      "test_commands": [
+        {
+          "command": "python3 -m unittest discover -s test -p \"*_test.py\"",
+          "description": "",
+          "exit": 1
+        },
+        {
+          "command": "python3 -m unittest discover -s test -p \"*_test.py\"",
+          "description": "",
+          "exit": 0
+        }
+      ],
+      "errors": [],
+      "failed_tools": 0,
+      "malformed_commands": [],
+      "malformed_json_lines": 0,
+      "timed_out": false,
+      "read_only_violations": [],
+      "unexpected_files": [],
+      "protocol_repair_events": 0,
+      "suppressed_content_events": 0,
+      "final_tokens": {
+        "cache": {
+          "read": 0,
+          "write": 0
+        },
+        "input": 4551,
+        "output": 251,
+        "reasoning": 0,
+        "total": 4802
+      }
+    }
+  ],
+  "controls": [
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 96,
+        "near_tie_tokens": 0,
+        "total_tokens": 96
+      },
+      "id": "projection-cache-off",
+      "overrides": {
+        "ZINC_PRE_DEQUANT": "0"
+      }
+    },
+    {
+      "agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 16,
+        "near_tie_tokens": 0,
+        "total_tokens": 16
+      },
+      "id": "serial-expert-isolation",
+      "overrides": {
+        "ZINC_GEMMA_MOE_PREFILL_SERIAL": "1"
+      }
+    }
+  ],
+  "correctness": {
+    "agreement_policy": {
+      "cases": 3,
+      "max_logprob_gap": 0.05,
+      "max_near_ties_per_case": 1,
+      "min_exact_fraction": 0.975,
+      "tokens_per_case": 16
+    },
+    "cases": [
+      {
+        "comparison": {
+          "near_ties": [],
+          "tokens": 16
+        },
+        "prompt": "<|turn>user\nWrite a long story about a lighthouse keeper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "prompt_tokens": 22,
+        "reference_ids": [
+          818,
+          9551,
+          1602,
+          711,
+          14778,
+          2178,
+          3324,
+          506,
+          5716,
+          529,
+          103592,
+          173928,
+          236793,
+          625,
+          11742,
+          993
+        ],
+        "reference_text": "The salt did not merely sit upon the skin of Elias Thorne; it lived there",
+        "validated_text": null,
+        "zinc_ids": [
+          818,
+          9551,
+          1602,
+          711,
+          14778,
+          2178,
+          3324,
+          506,
+          5716,
+          529,
+          103592,
+          173928,
+          236793,
+          625,
+          11742,
+          993
+        ]
+      },
+      {
+        "comparison": {
+          "near_ties": [],
+          "tokens": 16
+        },
+        "prompt": "<|turn>user\nExplain how a refrigerator works.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "prompt_tokens": 19,
+        "reference_ids": [
+          2021,
+          3050,
+          1217,
+          496,
+          41839,
+          4146,
+          236764,
+          506,
+          1346,
+          2132,
+          3210,
+          531,
+          13808,
+          563,
+          600,
+          5213
+        ],
+        "reference_text": "To understand how a refrigerator works, the most important thing to realize is that **",
+        "validated_text": null,
+        "zinc_ids": [
+          2021,
+          3050,
+          1217,
+          496,
+          41839,
+          4146,
+          236764,
+          506,
+          1346,
+          2132,
+          3210,
+          531,
+          13808,
+          563,
+          600,
+          5213
+        ]
+      },
+      {
+        "comparison": {
+          "near_ties": [],
+          "tokens": 16
+        },
+        "prompt": "<|turn>user\nList three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "prompt_tokens": 19,
+        "reference_ids": [
+          8291,
+          659,
+          1806,
+          3364,
+          6178,
+          529,
+          14561,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121
+        ],
+        "reference_text": "Here are three common uses of copper:\n\n1.  **Electrical Wiring:**",
+        "validated_text": null,
+        "zinc_ids": [
+          8291,
+          659,
+          1806,
+          3364,
+          6178,
+          529,
+          14561,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121
+        ]
+      },
+      {
+        "comparison": {
+          "near_ties": [],
+          "tokens": 16
+        },
+        "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: Write a long story about a lighthouse keeper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "prompt_tokens": 1139,
+        "reference_ids": [
+          818,
+          9551,
+          1602,
+          711,
+          14778,
+          2178,
+          3324,
+          506,
+          5716,
+          529,
+          103592,
+          173928,
+          236793,
+          625,
+          11742,
+          993
+        ],
+        "reference_text": "The salt did not merely sit upon the skin of Elias Thorne; it lived there",
+        "validated_text": null,
+        "zinc_ids": [
+          818,
+          9551,
+          1602,
+          711,
+          14778,
+          2178,
+          3324,
+          506,
+          5716,
+          529,
+          103592,
+          173928,
+          236793,
+          625,
+          11742,
+          993
+        ]
+      },
+      {
+        "comparison": {
+          "near_ties": [],
+          "tokens": 16
+        },
+        "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: Explain how a refrigerator works.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "prompt_tokens": 1136,
+        "reference_ids": [
+          236776,
+          41839,
+          4146,
+          684,
+          5213,
+          219656,
+          5387,
+          699,
+          506,
+          4888,
+          529,
+          506,
+          36316,
+          532,
+          36122,
+          625
+        ],
+        "reference_text": "A refrigerator works by **removing heat from the inside of the compartment and releasing it",
+        "validated_text": null,
+        "zinc_ids": [
+          236776,
+          41839,
+          4146,
+          684,
+          5213,
+          219656,
+          5387,
+          699,
+          506,
+          4888,
+          529,
+          506,
+          36316,
+          532,
+          36122,
+          625
+        ]
+      },
+      {
+        "comparison": {
+          "near_ties": [],
+          "tokens": 16
+        },
+        "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: List three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "prompt_tokens": 1136,
+        "reference_ids": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ],
+        "reference_text": "Three uses of copper are:\n\n1.  **Electrical Wiring:** Due to",
+        "validated_text": null,
+        "zinc_ids": [
+          19765,
+          6178,
+          529,
+          14561,
+          659,
+          236787,
+          108,
+          236770,
+          236761,
+          138,
+          1018,
+          109454,
+          80288,
+          53121,
+          18800,
+          531
+        ]
+      }
+    ],
+    "generation": {
+      "batch_size": 512,
+      "flash_attention": false,
+      "kv_cache": "f32",
+      "micro_batch": 1,
+      "parallel": 1
+    },
+    "http_after_cancellation": true,
+    "http_after_context_error": true,
+    "http_full_continuations": 18,
+    "oracle_backend": "Vulkan",
+    "passed": true,
+    "reference_agreement": {
+      "cases": [
+        {
+          "near_ties": [],
+          "tokens": 16
+        },
+        {
+          "near_ties": [],
+          "tokens": 16
+        },
+        {
+          "near_ties": [],
+          "tokens": 16
+        },
+        {
+          "near_ties": [],
+          "tokens": 16
+        },
+        {
+          "near_ties": [],
+          "tokens": 16
+        },
+        {
+          "near_ties": [],
+          "tokens": 16
+        }
+      ],
+      "exact_tokens": 96,
+      "near_tie_tokens": 0,
+      "total_tokens": 96
+    }
+  },
+  "hardware": {
+    "driver": "ROCm 7.2.4",
+    "gpu": "AMD Radeon AI PRO R9700",
+    "os": "Linux 7.2.2-070202-generic"
+  },
+  "kernel_reference": {
+    "cases": 305,
+    "kernel_source_sha256": "9b532981f9a81c54548bb7d1d2a78bba59e90cda42e0f9a425f0ad5bf0b3835b",
+    "passed": true,
+    "validator_source_sha256": "39a35b4beadbe69db7e2a0b1adad17b0e4ebf56fdfb94f9ad46f65a1d4aff3f1"
+  },
+  "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+  "oracle": {
+    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "library_sha256": {
+      "libggml-base.so": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0.10.0": "de19eedc75d0312bb25912e6500b2fc61ece0ddb48dbe9fd900ddce0b85fa179",
+      "libggml-base.so.0.22.0": "5796632ef4ce1bd6414b30ed20c94dd34f7c94d7c4edd219e15e1cb979d6ffbc",
+      "libggml-base.so.0.23.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+      "libggml-base.so.0.9.8": "b8edbe62608913eb9203f54a8fc3c8ee96945bdfa0d5f18bf75aa23dcc934093",
+      "libggml-cpu.so": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0.10.0": "ef16531bd77e10c08b99af1f180021d8b623972371eeedaa7a694486138f5d47",
+      "libggml-cpu.so.0.22.0": "8f76576286f65f4fba8c16b8d68f6b9cbf720d68473a9f0f30cad613b5507456",
+      "libggml-cpu.so.0.23.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+      "libggml-cpu.so.0.9.8": "50640c9a721a7d9a67345f48dcb567fffd3212f134c2613ff124d5260cda1282",
+      "libggml-vulkan.so": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0.10.0": "4d6a4b3d4a1be8e3654405d0f429a5573f549e99f88673fd4aa695123ee2da17",
+      "libggml-vulkan.so.0.22.0": "64faf40dd390eb9ca62b5774218792023d80ccc7bb90ea4a88d7ad265de961ea",
+      "libggml-vulkan.so.0.23.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+      "libggml-vulkan.so.0.9.8": "7aaf2ebb2431b9f23cd32c2ffd9146799bc8c8b923c1a5f2147ed65c94b77919",
+      "libggml.so": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0.10.0": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+      "libggml.so.0.22.0": "1d2656f21fe48a0403cc2ebafd6728fe801cf1617d555738da9156e285dd4704",
+      "libggml.so.0.23.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+      "libggml.so.0.9.8": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+      "libllama-common.so.0": "a9cee6058c9f29b6c7f8a18a1a62572c8482a4abc81e035c748d164d0e3c47dd",
+      "libllama-server-impl.so": "fc220891606241e87e51e745517e51dd9daeb6a69aac0eff4cedc714cd617ddd",
+      "libllama.so": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+      "libllama.so.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+      "libllama.so.0.0.50": "05bc7e842899f4fbaaa5834c3f315bdcda2a97a60298011bad35a52d2f9fbec2",
+      "libllama.so.0.0.513": "c825c8c348bf35c3464c286ce6112eddea12c3413e880a847e772b9ba883e6b1",
+      "libllama.so.0.3.0": "fdd8a86155128852a233c8705970da263cbaf153ebc45f70bb9e359b3e5f3993",
+      "libllama.so.0.4.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191"
+    },
+    "server_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+    "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f",
+    "version": "WARNING: radv is not a conformant Vulkan implementation, testing use only.\nversion: 0.4.0-dev (build 2530, commit 5f436dddb)\nbuilt with GNU 13.3.0 for Linux x86_64"
+  },
+  "passed": true,
+  "phase": "complete",
+  "release_qualification": false,
+  "schema_version": "zinc-rocm-gemma-archive-regression-v1",
+  "source_commit": "4db4a70bd8fcf120f8e1a48f37b28f8a0c8ca5d2",
+  "preview_run": 41607547761,
+  "settings": {
+    "kv_cache": "f32",
+    "mtp": "off",
+    "prompt_cache": false,
+    "greedy": true,
+    "qualification_context": 4096,
+    "coding_context": 8192,
+    "coding_max_tokens": 2048,
+    "coding_steps": 16,
+    "fixture_timeout_ms": 600000,
+    "fresh_server_per_fixture": true
+  }
+}

@@ -144,7 +144,7 @@ tokens per second, and each badge shows ZINC speed divided by llama.cpp speed.
     <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="assets/rocm-r9700-benchmark-mobile-dark.svg">
     <source media="(max-width: 767px)" srcset="assets/rocm-r9700-benchmark-mobile.svg">
     <source media="(prefers-color-scheme: dark)" srcset="assets/rocm-r9700-benchmark-dark.svg">
-    <img src="assets/rocm-r9700-benchmark.svg" alt="Six models on Radeon AI PRO R9700 with ROCm and MTP off for both engines. Paired bars show ZINC and llama.cpp tokens per second for prompt processing and generation. Per-model dates and builds are included; Gemma MoE prompt processing is slower in ZINC." width="100%">
+    <img src="assets/rocm-r9700-benchmark.svg" alt="Six models on Radeon AI PRO R9700 with ROCm and MTP off for both engines. Paired bars show ZINC and llama.cpp tokens per second for prompt processing and generation. Per-model dates and builds are included." width="100%">
   </picture>
 </a>
 
@@ -168,7 +168,7 @@ shown in the graphic. Regenerate all four variants from
 [matched 27B MTP comparison](docs/MATCHED_MTP_LLAMA_CPP.md) against current
 llama.cpp, including the output controls that still need investigation.
 The [fresh Gemma MoE measurements](docs/ROCM_GEMMA_MOE_PREFILL.md#fresh-r9700-measurements)
-include its checked serial prefill path and the resulting performance cost.
+include the partial-tile fix, full reference checks, and restored batched prefill.
 The [fresh Vulkan Gemma measurements](docs/VULKAN_GEMMA_SLIDING_WINDOW.md#fresh-vulkan-measurements)
 cover both Gemmas on AMD and Intel, with full reference/recovery checks and
 matched MTP-off server comparisons against the latest pre-campaign llama.cpp.

@@ -26,20 +26,91 @@ batched-attention scratch cannot substitute for the scalar scratch buffers.
 
 Batched Gemma MoE prefill is restored as the default. Set
 `ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL=0` for the retained serial control. The
-Q5_1 prototype matches all 96 native CLI choices over three short prompts and
+fixed source matches all 96 native CLI choices over three short prompts and
 three prompts beyond the 1,024-token window, plus 18 complete HTTP
 continuations before and after cancellation and context/error recovery.
 Reference prompts, tolerances and agreement limits are unchanged.
 
 `tools/validate_rocm_partial_tiles.c` adds 305 GPU cases against llama.cpp's
 native Q5_1/Q8_0 dequantizers. Tail-only weights make the old kernels return zero
-where the reference is nonzero; the fixed kernels pass. The matrix covers all
+where the reference is nonzero; the fixed kernels pass. The
+[negative-control records](/zinc/validation/rocm-gemma-partial-tiles-2026-11-03.json)
+retain both old failures and the separate prototype fixture hashes. The matrix covers all
 seven Q8_0 tile variants, three grouped Q5_1 variants, production widths,
 partial output rows and token tiles, nonzero offsets, expert routes, poisoned
 padding, output guards and quantizer row folding. CPU fixture checks run in the
 ordinary test suite. ROCm release qualification also requires the complete GPU
 matrix and verifies that the tested kernel source is embedded in the archive's
 executable. Passing source diagnostics alone does not qualify a release archive.
+
+## Fresh R9700 measurements
+
+The [November 3 complete report](/zinc/benchmarks/2026-11-03T09-00-39-rdna-rocm-gemma4-26b-a4b-q4k-m-revalidated.json)
+records ZINC and harness `65363680c9e9`, llama.cpp HIP `36ee3caf7aa2` verified
+as upstream HEAD before the campaign's build, and the separate Vulkan
+correctness oracle `5f436dddb440`. Both performance engines use ROCm, the same
+GGUF, F32 K/V, 4K context, one slot, prompt caching off and MTP off.
+The embedded-kernel gate passes all 305 cases; all 96 native choices and
+18 HTTP recovery continuations match. All 96 benchmark requests complete:
+72 measured and 24 discarded warmups, over three alternating engine rounds.
+
+| Workload          | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
+| ----------------- | -----------: | ----------------: | ----------: | ---------------: | ------: |
+| Quick chat        |     1,187.28 |            780.56 |      102.14 |            81.40 |   1.27× |
+| Coding review     |     2,895.47 |          1,857.46 |      100.16 |            77.08 |   1.31× |
+| Incident context  |     3,702.69 |          2,541.52 |       98.77 |            75.14 |   1.32× |
+| Long coding draft |     1,486.25 |            986.03 |      100.63 |            79.30 |   1.27× |
+
+Rates are median tokens per second over nine measured requests per cell.
+Overall is llama.cpp's combined prefill/decode phase time divided by ZINC's.
+ZINC leads prefill, decode and combined phase time in all four workloads.
+The incident-context prefill rate rises from 98.04 to 3,702.69 tok/s;
+the two campaigns retain their different reference revisions and dates.
+These are frozen source-build measurements, not stable-release qualification.
+The previous serial and historical unqualified batched measurements remain
+archived with their original settings and correctness findings.
+
+## Packaged regression sweep
+
+The [CI archive sweep](/zinc/validation/rocm-gemma-batched-package-sweep-2026-11-03.json)
+uses the exact ROCm archive from packaging run
+[41606559665](https://github.com/zolotukhin/zinc/actions/runs/41606559665),
+source `c09401c93753`, with native HIP correctness reference `5f436dddb440`.
+All six release models pass their tokenizer, reference continuation, HTTP and
+recovery checks. Across short and sliding-window continuations, **383/384 token
+choices are exact**. Qwen 3.6 MoE's remaining choice has a native log-probability
+gap of 0.0321, within the unchanged 0.05 allowance. Gemma 31B also passes all
+three forced 16-token prefill-chunk continuations. The 305 embedded-source
+numerical cases pass, and every owned GPU process is stopped afterward.
+This preview readiness report remains separate from final release certification.
+
+## Cache controls and actual OpenCode
+
+The [final-comment archive report](/zinc/validation/rocm-gemma-batched-opencode-2026-11-03.json)
+records packaging run
+[41607547761](https://github.com/zolotukhin/zinc/actions/runs/41607547761), source
+`4db4a70bd8fc`, and archive/binary/model/reference hashes. This archive also
+passes all 305 numerical cases, 96 exact default-cache continuation tokens and
+18 HTTP recovery continuations. Disabling the projection cache preserves all
+96 choices. The serial-expert diagnostic independently preserves the 16-token
+extended copper continuation.
+
+At **8K context**, the same archive passes **26/26 API checks** and all three
+core coding fixtures using **OpenCode 1.19.4**. Each fixture starts a fresh
+single-slot server, with F32 K/V, MTP and prompt caching off, thinking off,
+a 2,048-token output cap, 16 steps and a 600-second budget.
+
+| Fixture           | Independent tests | Tool calls | Seconds |
+| ----------------- | ----------------- | ---------: | ------: |
+| Rate limiter      | 3/3               |         11 |  63.974 |
+| Multi-file cart   | 3/3               |         10 |  44.882 |
+| Python NDJSON CLI | 4/4               |          6 |  31.604 |
+
+All ten independent tests pass. The runs record no API errors, failed tools,
+timeouts, malformed commands, protected-file changes, unexpected files,
+protocol repairs or suppressed content. Final input prompts contain
+4,551–5,194 tokens. These small fixture results retain their own client,
+context and budget; final multi-profile release qualification remains separate.
 
 ## November 2 serial fallback measurements
 
@@ -66,10 +137,11 @@ Rates are median tokens per second over nine measured requests per cell.
 Overall is llama.cpp's combined prefill/decode phase time divided by ZINC's;
 higher favors ZINC. The corrected serial path gives up substantial prefill
 speed. ZINC decodes faster in three workloads, while llama.cpp wins combined
-phase time in all four. These measurements replace the unqualified September
+phase time in all four. These measurements originally replaced the unqualified September
 rates on the dashboard and README chart. The complete September record and its
 correctness caution remain in `measurement_history` in the downloadable data.
-These serial measurements remain published until a new complete batched campaign passes all gates.
+The November 3 batched campaign supersedes these serial rates; the full serial
+record remains in measurement history.
 
 ## Revalidate a published measurement
 
@@ -79,9 +151,9 @@ continuations and eighteen complete HTTP continuations across initial requests,
 cancellation recovery and context/error recovery. Three prompts exceed the
 1,024-token sliding window. The numerical oracle uses Vulkan with serial
 prefill, F32 K/V and flash attention off; the performance baseline uses native
-HIP with batched prefill and flash attention on. Both reference builds must
-report the exact current performance-reference commit and their library hashes.
-The release reference pin remains separate.
+HIP with batched prefill and flash attention on. Both reference builds report their exact commits and library hashes. The
+correctness build may use the separate frozen release pin; performance uses
+the current pre-campaign upstream revision.
 
 After those checks, the runner alternates ZINC and llama.cpp server order for
 three rounds of all four canonical workloads. Each server stays loaded across
