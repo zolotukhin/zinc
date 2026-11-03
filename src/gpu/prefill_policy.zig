@@ -41,13 +41,6 @@ pub fn vulkanActivationQuantDefault(config: ModelConfig) bool {
     return config.architecture != .gemma or config.n_experts != 0;
 }
 
-/// ROCm Gemma MoE's batched path changes the first extended copper token by
-/// more than the reference near-tie allowance. Serial prefill retains all
-/// reference choices; keep the unqualified batched path behind an opt-in.
-pub fn rocmGemmaBatchedDefault(config: ModelConfig) bool {
-    return config.architecture != .gemma or config.n_experts == 0;
-}
-
 test "dense Gemma uses F32 prefill activations while other existing defaults remain" {
     var cfg = std.mem.zeroes(ModelConfig);
     cfg.architecture = .gemma;
@@ -60,16 +53,4 @@ test "dense Gemma uses F32 prefill activations while other existing defaults rem
     try std.testing.expect(vulkanActivationQuantDefault(cfg));
     cfg.architecture = .qwen35;
     try std.testing.expect(vulkanActivationQuantDefault(cfg));
-}
-
-test "ROCm Gemma MoE defaults to serial prefill while other model paths retain batching" {
-    var cfg = std.mem.zeroes(ModelConfig);
-    cfg.architecture = .gemma;
-    try std.testing.expect(rocmGemmaBatchedDefault(cfg));
-    cfg.n_experts = 128;
-    try std.testing.expect(!rocmGemmaBatchedDefault(cfg));
-    cfg.architecture = .muse_glimmer;
-    try std.testing.expect(rocmGemmaBatchedDefault(cfg));
-    cfg.architecture = .qwen35;
-    try std.testing.expect(rocmGemmaBatchedDefault(cfg));
 }

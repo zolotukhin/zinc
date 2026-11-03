@@ -11,23 +11,37 @@ reference. Disabling only Q8 projection prefill or F16 attention did not fix
 the continuation. Full serial prefill matched all 16 choices, including when
 prompt-internal tokens skipped the unused output head.
 
-ROCm Gemma MoE therefore uses serial prefill by default through the shared
-CLI/single-slot HTTP entrypoint. It selects that path before allocating batched
-scratch or executing a layer. Prompt positions remain absolute; only the final
-prompt token computes the next-token logits. Dense Gemma, Muse, Qwen and CUDA
-retain their existing routing.
+The November 3 investigation identified concrete faults in the accelerated
+path. The Q5_1 grouped WMMA kernels counted 128-column tiles with integer
+truncation, although the weight format requires only 32-column alignment.
+Gemma's 704-column expert down projection therefore lost its final 64 input
+columns. Q8_0 WMMA had the same defect for inputs such as the 2,112-column
+shared expert. Both now process the final partial tile and mask missing groups.
 
-`ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL=1` explicitly enables the unqualified batched
-path and logs a warning. It is outside the release correctness claim. More
-batched-stage isolation is needed before enabling it by default again; the
-serial control does not identify one particular batched kernel as the cause.
+The packed activation quantizer now zeros missing scale/sum headers and skips
+spare launch tiles beyond the packed allocation. Batched routing keeps its F32
+weights and activations even when the projection pre-dequantization cache is
+active. The serial-expert diagnostic also computes its own normalization;
+batched-attention scratch cannot substitute for the scalar scratch buffers.
 
-CPU policy tests guard the model boundary. Qualification still requires the
-three complete short continuations and three continuations beyond Gemma's
-1,024-token window, through CLI and HTTP, followed by request recovery. No
-reference tolerances, prompts or agreement limits were weakened.
+Batched Gemma MoE prefill is restored as the default. Set
+`ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL=0` for the retained serial control. The
+Q5_1 prototype matches all 96 native CLI choices over three short prompts and
+three prompts beyond the 1,024-token window, plus 18 complete HTTP
+continuations before and after cancellation and context/error recovery.
+Reference prompts, tolerances and agreement limits are unchanged.
 
-## Fresh R9700 measurements
+`tools/validate_rocm_partial_tiles.c` adds 305 GPU cases against llama.cpp's
+native Q5_1/Q8_0 dequantizers. Tail-only weights make the old kernels return zero
+where the reference is nonzero; the fixed kernels pass. The matrix covers all
+seven Q8_0 tile variants, three grouped Q5_1 variants, production widths,
+partial output rows and token tiles, nonzero offsets, expert routes, poisoned
+padding, output guards and quantizer row folding. CPU fixture checks run in the
+ordinary test suite. ROCm release qualification also requires the complete GPU
+matrix and verifies that the tested kernel source is embedded in the archive's
+executable. Passing source diagnostics alone does not qualify a release archive.
+
+## November 2 serial fallback measurements
 
 The November 2, 2026 revalidation passes **96/96 exact CLI token choices**,
 all **18 complete HTTP continuations** and twelve tokenizer cases. Extended
@@ -55,7 +69,7 @@ speed. ZINC decodes faster in three workloads, while llama.cpp wins combined
 phase time in all four. These measurements replace the unqualified September
 rates on the dashboard and README chart. The complete September record and its
 correctness caution remain in `measurement_history` in the downloadable data.
-The batched opt-in remains unqualified.
+These serial measurements remain published until a new complete batched campaign passes all gates.
 
 ## Revalidate a published measurement
 
@@ -84,7 +98,8 @@ the paths and observed device indices supplied by your environment:
 python3 tools/benchmark_gemma_rocm.py \
   --zinc-tree "$ZINC_PACKAGE" --zinc-source "$ZINC_SOURCE" \
   --llama-bin "$LLAMA_HIP_BIN" --oracle "$LLAMA_VULKAN_BIN" \
-  --llama-source "$LLAMA_SOURCE" --model "$GEMMA_GGUF" \
+  --llama-source "$LLAMA_SOURCE" --oracle-source "$LLAMA_VULKAN_SOURCE" \
+  --model "$GEMMA_GGUF" \
   --device "$ROCR_DEVICE" --oracle-device "$VULKAN_DEVICE" \
   --reservation "$GPU_RESERVATION" --output gemma-rocm.json
 ```
@@ -93,7 +108,8 @@ The reservation must be shared with other jobs using that physical GPU. The
 runner refuses a busy worker and stops every process group it starts, including
 on failure or cancellation. Its portable report contains hashes and public
 prompts; host paths and endpoints are excluded. This model-specific check does
-not qualify a stable release or validate the experimental batched path.
+not qualify a stable release. New batched campaigns also run the 305 embedded
+ROCm numerical checks before collecting performance samples.
 
 `bun tools/merge_gemma_rocm.mjs <report.json> <full-harness-commit>` verifies the
 frozen harness sources, all 96 exact CLI choices, recovery checks, payloads and

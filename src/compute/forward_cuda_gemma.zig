@@ -28,7 +28,6 @@ const gguf = @import("../model/gguf.zig");
 const loader = @import("../model/loader_cuda.zig");
 const memory_plan = @import("../gpu/memory_plan.zig");
 const bounded_prefill = @import("bounded_prefill.zig");
-const prefill_policy = @import("../gpu/prefill_policy.zig");
 
 const log = std.log.scoped(.cuda_fwd_gemma);
 const CudaBuffer = buffer.CudaBuffer;
@@ -964,8 +963,6 @@ pub const ForwardGemma = struct {
         // Gemma 26B decode by 2.3%, so ROCm Gemma MoE enables them by default while
         // retaining explicit `=0` fallbacks for diagnosis.
         const rocm_gemma_moe = is_rocm and d.n_experts > 0 and !d.is_muse;
-        if (rocm_gemma_moe and envFlag("ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL", false))
-            log.warn("Unqualified batched Gemma MoE prefill explicitly enabled", .{});
         self.fuse_norm_combine = envFlag("ZINC_MOE_NORM_COMBINE", rocm_gemma_moe);
         self.fuse_attn_moe_norm = envFlag("ZINC_ATTN_MOE_NORM", rocm_gemma_moe);
 
@@ -1185,8 +1182,11 @@ pub const ForwardGemma = struct {
         if (tokens.len == 0) return error.EmptyPrompt;
         if (tokens.len > self.max_ctx) return error.ContextLengthExceeded;
         if (is_rocm and self.d.n_experts > 0 and !self.d.is_muse and
-            !envFlag("ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL", prefill_policy.rocmGemmaBatchedDefault(self.model.config)))
+            !envFlag("ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL", true))
         {
+            // The corrected Q5_1/Q8_0 kernels retain partial 128-column tiles.
+            // This Gemma/Muse engine's guard applies only to Gemma MoE.
+            // Keep the serial opt-out for reference/performance diagnosis.
             // Decide before allocating batched scratch or executing a layer.
             // This entrypoint is shared by CLI and single-slot HTTP prefill;
             // preserve absolute positions and produce logits only for the tail.
@@ -1388,6 +1388,12 @@ pub const ForwardGemma = struct {
                     // isolates the batched MoE stages without changing attention.
                     self.waitPending();
                     const saved_hidden = self.hidden;
+                    // Batched attention writes its norms into batched scratch.
+                    // The single-token block must compute its own norms instead
+                    // of reusing the decode-only fused normalization buffers.
+                    const saved_fused_norm = self.fuse_attn_moe_norm;
+                    self.fuse_attn_moe_norm = false;
+                    defer self.fuse_attn_moe_norm = saved_fused_norm;
                     var t: u32 = 0;
                     while (t < T) : (t += 1) {
                         self.hidden = try buffer.aliasBuffer(&b.hidden, t * d.n_embd * f4, d.n_embd * f4);
@@ -4035,31 +4041,12 @@ pub const ForwardGemma = struct {
         const mv = MulVecBatchPush{ .row = d.n_embd, .total = T * d.n_embd, .scale = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(d.n_embd))) };
         cmd.dispatch(&self.pipes.mul_vec_scaled_batched, .{ ceilDiv(T * d.n_embd, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.router_in, &wrscale.gpu_buffer }, &mv, @sizeOf(MulVecBatchPush), 0);
         // Router logits [T, n_experts] = router_in[T, n_embd] · wrouter[n_experts, n_embd]^T.
+        // Expert selection depends on fine score differences. Keep the F32
+        // weights and inputs here; the Q8 projection cache must not narrow them.
+        // q8_f16_cache, act_f16 and f32_to_f16 still serve projections in
+        // gemmDispatchA and the dense FFN/attention paths; only routing skips them.
         const gp = GemmPush{ .M = d.n_experts, .K = d.n_embd, .T = T };
-        var used_cached_router = false;
-        router_cache: {
-            if (self.q8_f16_cache) |*cache| {
-                const key = @intFromPtr(wrouter.gpu_buffer.handle);
-                var w_f16_handle = if (cache.getPtr(key)) |cached| cached.handle else null;
-                if (w_f16_handle == null) {
-                    const bytes = @as(usize, d.n_experts) * d.n_embd * @sizeOf(u16);
-                    if (self.q8_f16_cache_bytes + bytes > self.q8_f16_cache_cap) break :router_cache;
-                    cache.ensureUnusedCapacity(1) catch break :router_cache;
-                    var cached = buffer.createBuffer(ctx, bytes) catch break :router_cache;
-                    const cvt_w = F32ToF16Push{ .N = d.n_experts * d.n_embd };
-                    cmd.dispatch(&self.pipes.f32_to_f16, .{ ceilDiv(cvt_w.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &wrouter.gpu_buffer, &cached }, &cvt_w, @sizeOf(F32ToF16Push), 0);
-                    w_f16_handle = cached.handle;
-                    cache.putAssumeCapacity(key, cached);
-                    self.q8_f16_cache_bytes += bytes;
-                }
-                const cvt_a = F32ToF16Push{ .N = T * d.n_embd };
-                cmd.dispatch(&self.pipes.f32_to_f16, .{ ceilDiv(cvt_a.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_in, &b.act_f16 }, &cvt_a, @sizeOf(F32ToF16Push), 0);
-                shim.cuda_cublas_hgemm(ctx, @intCast(d.n_experts), @intCast(T), @intCast(d.n_embd), w_f16_handle.?, b.act_f16.handle, b.router_logits.handle, 0.0);
-                used_cached_router = true;
-            }
-        }
-        if (!used_cached_router)
-            cmd.dispatch(&self.pipes.gemm_f32, .{ ceilDiv(d.n_experts, 64), ceilDiv(T, 64), 1 }, .{ 256, 1, 1 }, &.{ &wrouter.gpu_buffer, &b.router_in, &b.router_logits }, &gp, @sizeOf(GemmPush), 0);
+        cmd.dispatch(&self.pipes.gemm_f32, .{ ceilDiv(d.n_experts, 64), ceilDiv(T, 64), 1 }, .{ 256, 1, 1 }, &.{ &wrouter.gpu_buffer, &b.router_in, &b.router_logits }, &gp, @sizeOf(GemmPush), 0);
         // Per-token top-k softmax → routing table (one block per token).
         const tk = TopkPush{ .n_experts = d.n_experts, .k = d.n_experts_used };
         cmd.dispatch(&self.pipes.softmax_topk_batched, .{ T, 1, 1 }, .{ 64, 1, 1 }, &.{ &b.router_logits, &b.router_table }, &tk, @sizeOf(TopkPush), 0);

@@ -133,11 +133,10 @@ executing prompt layers. Absolute positions and KV history carry across chunks;
 reference/recovery checks and three OpenCode fixtures at 8K with a 600-second
 fixture budget. The required release model row stays at 4K/F32/single-slot.
 
-Gemma 26B-A4B uses serial prefill by default after the extended reference gate
-exposed a batched-path disagreement. The
-[Gemma MoE investigation](ROCM_GEMMA_MOE_PREFILL.md) records the controls and
-explicit batched opt-in. This trades prefill speed for the checked continuation;
-it does not change the default cache or weights.
+Gemma 26B-A4B uses batched prefill after correcting partial Q5_1/Q8_0 tiles
+and preserving F32 routing. The [Gemma MoE investigation](ROCM_GEMMA_MOE_PREFILL.md)
+records the cause, native-reference checks and retained serial control
+(`ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL=0`).
 
 Short dense hybrid Qwen CLI prompts use per-token prefill below 32 tokens;
 long prompts remain batched. Prepared MTP retains the batched hidden rows needed

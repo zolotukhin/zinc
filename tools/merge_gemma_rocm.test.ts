@@ -133,6 +133,49 @@ test('Gemma publication requires full reference, recovery and repeated benchmark
   expect(() => validateGemmaReport(fixture())).not.toThrow();
 });
 
+test('batched ROCm publication requires complete embedded-source numerical and hardware evidence', () => {
+  const report = fixture();
+  report.settings.prefill = 'default-batched';
+  report.hardware = { gpu: 'AMD Radeon AI PRO R9700', driver: 'ROCm', os: 'Linux' };
+  report.latest_reference_check = vulkanFixture().latest_reference_check;
+  report.harness_sha256 = {
+    'src/shaders/cuda/kernels.cu': 'a'.repeat(64),
+    'tools/validate_rocm_partial_tiles.c': 'b'.repeat(64),
+  };
+  report.kernel_reference = {
+    passed: true,
+    cases: 305,
+    kernel_source_sha256: 'a'.repeat(64),
+    validator_source_sha256: 'b'.repeat(64),
+  };
+  expect(() => validateGemmaReport(report)).not.toThrow();
+  const changes = [
+    (r: any) => {
+      delete r.kernel_reference;
+    },
+    (r: any) => {
+      r.kernel_reference.cases = 304;
+    },
+    (r: any) => {
+      r.kernel_reference.kernel_source_sha256 = 'c'.repeat(64);
+    },
+    (r: any) => {
+      delete r.harness_sha256['tools/validate_rocm_partial_tiles.c'];
+    },
+    (r: any) => {
+      delete r.hardware;
+    },
+    (r: any) => {
+      r.latest_reference_check.observed_head_at_run = 'c'.repeat(40);
+    },
+  ];
+  for (const change of changes) {
+    const invalid = structuredClone(report);
+    change(invalid);
+    expect(() => validateGemmaReport(invalid)).toThrow();
+  }
+});
+
 test('Python JSON key ordering does not change the reference policy', () => {
   const report = fixture();
   for (const key of ['generation', 'agreement_policy']) {

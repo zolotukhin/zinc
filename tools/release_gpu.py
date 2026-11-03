@@ -184,6 +184,33 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     require("PASS: 256 sliding-window/page/reference/guard/replay cases" in log.read_text(), "sliding-window reference suite was incomplete")
 
 
+def rocm_kernel_reference(tree, reference, checkout, device, work, env):
+    """Compile the archive's embedded hipRTC source, never a rebuilt engine."""
+    kernels = ROOT / "src/shaders/cuda/kernels.cu"
+    validator = ROOT / "tools/validate_rocm_partial_tiles.c"
+    require(kernels.read_bytes() in (tree / "bin/zinc").read_bytes(),
+            "packaged ROCm kernel source differs from the validation checkout")
+    rocm = Path("/opt/rocm")
+    includes = ["-I" + str(ROOT / "src/cuda"), "-I" + str(rocm / "include"), "-I" + str(checkout / "ggml/include")]
+    fixture, shim = work / "partial-tiles.o", work / "partial-tiles-shim.o"
+    executable = work / "validate-rocm-partial-tiles"
+    output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *includes,
+            "-c", str(validator), "-o", str(fixture)])
+    # Match the shim's normal build flags; strict warnings apply to the new
+    # independent validator without changing the production shim's policy.
+    output(["cc", "-std=c11", "-O2", "-D_POSIX_C_SOURCE=200809L", "-D__HIP_PLATFORM_AMD__=1", *includes,
+            "-c", str(ROOT / "src/rocm/rocm_shim.c"), "-o", str(shim)])
+    output(["cc", str(fixture), str(shim), "-L" + str(rocm / "lib"), "-Wl,-rpath," + str(rocm / "lib"),
+            "-L" + str(reference), "-Wl,-rpath," + str(reference),
+            "-lamdhip64", "-lhiprtc", "-lhipblas", "-lggml-base", "-lm", "-o", str(executable)])
+    log = work / "rocm-partial-tiles-reference.log"
+    with process([str(executable)], log, ROOT, {**reference_environment(reference, env), "ZINC_GPU": str(device)}) as child:
+        require(child.wait(timeout=600) == 0, "packaged ROCm numerical reference validation failed")
+    require("PASS 305 ROCm partial-tile/native-reference/route/quantizer/guard cases" in log.read_text().splitlines(),
+            "ROCm numerical reference suite was incomplete")
+    return {"passed": True, "cases": 305, "kernel_source_sha256": sha256(kernels), "validator_source_sha256": sha256(validator)}
+
+
 def tokenizer_parity(tree, reference, model, work, env):
     for index, text in enumerate(CORPUS):
         prompt = work / f"corpus-{index}.txt"
@@ -626,6 +653,10 @@ def main():
             if profile["target"].endswith("vulkan"):
                 print("Running 376 packaged shader/reference cases", flush=True)
                 kernel_reference(tree, reference, checkout, device, work, env)
+            rocm_kernels = None
+            if profile["target"].endswith("rocm"):
+                print("Running 305 packaged ROCm partial-tile/reference cases", flush=True)
+                rocm_kernels = rocm_kernel_reference(tree, reference, checkout, device, work, env)
             models = []
             for identifier in profile["models"]:
                 print(identifier + ": verifying pinned bytes and starting packaged tests", flush=True)
@@ -672,8 +703,10 @@ def main():
                                     "device_backend": reference_backend,
                                     **reference_snapshot},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup")}}
-            if profile["target"].endswith("vulkan"):
+            if profile["target"].endswith(("vulkan", "rocm")):
                 report["checks"]["kernel_reference"] = True
+            if rocm_kernels is not None:
+                report["rocm_kernel_reference"] = rocm_kernels
     # Release the reservation before recording successful cleanup.
     # Reports contain no machine identifiers, private paths, ports or URLs.
     write_json(args.output, report)

@@ -21,6 +21,8 @@ HARNESS_FILES = (
     "tools/performance_suite.mjs", "tools/benchmark_speculation.mjs",
     "tools/release_gpu.py", "tools/release_lib.py", "config/benchmark-reference.json",
     "config/release/targets.json", "tools/benchmark_reference.mjs",
+    "tools/validate_rocm_partial_tiles.c", "src/shaders/cuda/kernels.cu",
+    "src/rocm/rocm_shim.c", "src/cuda/cuda_shim.h",
 )
 
 
@@ -118,7 +120,7 @@ def main():
               "target": "rdna-rocm" if args.backend == "rocm" else args.target,
               "release_qualification": False, "samples": [],
               "settings": {"backend": args.backend, "context": 4096, "slots": 1, "kv_cache": kv,
-                           "mtp": "off", "prefill": "default-serial" if args.backend == "rocm" else "backend-default", "prompt_cache": False,
+                           "mtp": "off", "prefill": "default-batched" if args.backend == "rocm" else "backend-default", "prompt_cache": False,
                            "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
                            "temperature": 0, "top_p": 1, "seed": 0}}
     def save():
@@ -170,6 +172,13 @@ def main():
                 print("Correctness: 376 shader/reference cases", flush=True)
                 gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
                 report["kernel_reference"] = {"passed": True, "cases": 376}
+            else:
+                diagnostics = gpu.output([str(zinc), "--check"], env, timeout=360)
+                # R9700 protocol: verify the observed gfx1201 target and logical
+                # device zero after applying the physical ROCr visibility mask.
+                report["hardware"] = gpu.hardware_evidence(diagnostics, "gfx1201", 0)
+                print("Correctness: 305 embedded ROCm partial-tile/reference cases", flush=True)
+                report["kernel_reference"] = gpu.rocm_kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, 0, work, env)
             print("Correctness: twelve tokenizer corpus cases", flush=True)
             gpu.tokenizer_parity(args.zinc_tree, args.oracle, args.model, work, env)
             report["correctness"] = {**correctness(args, work, env, model_pin), "tokenizer_cases": len(gpu.CORPUS)}
