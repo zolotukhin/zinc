@@ -60,6 +60,7 @@ src/
 ├── gpu/
 │   ├── interface.zig            # Compile-time Vulkan / Metal / ROCm / CUDA selection
 │   ├── memory_plan.zig          # Cross-backend memory planning
+│   ├── upload_plan.zig          # Bounded Vulkan staging windows and shared host tests
 │   ├── process_lock.zig         # Cross-process GPU reservation lock
 │   └── test_policy.zig          # Explicit opt-in for hardware unit tests
 ├── scheduler/
@@ -213,6 +214,8 @@ dense FFN, and MoE branches live in the active backend's forward implementation.
 | ROCm packed matrix CPU/GPU and verifier row checks                | `tools/validate_rocm_q8_matvec.c`                                                     |
 | Exact-prefix cache parity                                         | `tools/validate_rocm_prompt_cache.mjs`                                                |
 | Model-specific projection pipeline selection                      | `src/compute/projection_specializations.zig`, `src/compute/dmmv.zig`                  |
+| Bounded Vulkan model uploads and byte-copy planning               | `src/model/loader.zig`, `src/vulkan/buffer.zig`, `src/gpu/upload_plan.zig`            |
+| CPU upload-copy fault injection                                   | `tools/vulkan_upload_copy_contract.zig`, `tools/upload_copy_contract.test.ts`         |
 | OpenCode setup, bounded tool hook, verified rounds                | `tools/setup_opencode.mjs`                                                            |
 | CPU OpenCode protocol and lifecycle                               | `tools/validate_opencode_harness.mjs`                                                 |
 | OpenCode preview CLI regressions                                  | `tools/setup_opencode_preview.test.ts`                                                |

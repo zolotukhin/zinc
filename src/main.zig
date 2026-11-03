@@ -156,6 +156,7 @@ comptime {
     _ = @import("runtime_assets.zig");
     _ = @import("regression_tests.zig");
     _ = @import("gpu/attention_window.zig");
+    _ = @import("gpu/upload_plan.zig");
     _ = @import("gpu/prefill_policy.zig");
     _ = prefill_policy;
     _ = @import("compute/bounded_prefill.zig");

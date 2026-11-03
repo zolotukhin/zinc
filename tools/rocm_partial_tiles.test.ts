@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// A cold compiler plus the fixture has bounded 30s/10s subprocess deadlines.
+// Bun's 5s default can expire during compilation on hosted macOS workers.
 test('ROCm native-reference GPU fixtures retain a decisive partial-tile signal', () => {
   const directory = mkdtempSync(join(tmpdir(), 'zinc-partial-tile-fixtures-'));
   try {
@@ -31,4 +33,4 @@ test('ROCm native-reference GPU fixtures retain a decisive partial-tile signal',
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-});
+}, 45_000);

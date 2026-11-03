@@ -751,6 +751,31 @@ pub fn build(b: *std.Build) void {
     check_tools_step.dependOn(&tokenize_bench.step);
     if (!is_macos) check_tools_step.dependOn(&hot_bench.step);
 
+    if (selected_backend == .vulkan) {
+        // CPU fault injection: exports fake Vulkan entrypoints and never creates
+        // an instance/device. Keep this fixture out of installed release builds.
+        const upload_contract_mod = createModule(b, .{
+            .root_source_file = b.path("tools/vulkan_upload_copy_contract.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const upload_vulkan_mod = createModule(b, .{
+            .root_source_file = b.path("src/vulkan/mod.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        configureVulkanModule(b, target, upload_vulkan_mod);
+        upload_contract_mod.addImport("vulkan", upload_vulkan_mod);
+        const upload_contract = addExecutable(b, .{
+            .name = "zinc-upload-copy-contract",
+            .root_module = upload_contract_mod,
+        });
+        b.step("upload-copy-contract", "Build the CPU-only Vulkan copy fault-injection fixture")
+            .dependOn(&b.addInstallArtifact(upload_contract, .{}).step);
+    }
+
     // Kernel-level check for the Q5_1 route-packed MoE down projection
     // (`zig build validate-moe-cols`). Runs the shader against a CPU Q5_1
     // dequant reference on synthetic weights, so a wrong kernel fails with the

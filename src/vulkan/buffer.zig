@@ -193,8 +193,9 @@ pub const Buffer = struct {
 /// @param src Source buffer.
 /// @param dst Destination buffer.
 /// @param size Number of bytes to copy.
-/// @returns `error.AllocCmdBufFailed` or `error.QueueSubmitFailed` when command allocation or submission fails.
-/// @note This helper waits for the compute queue to go idle before returning.
+/// @returns An error if allocation, recording or submission fails.
+/// @note Completion-wait failures terminate the process without unwinding
+/// resources that the queue may still reference.
 pub fn copyBuffer(
     instance: *const Instance,
     cmd_pool: vk.c.VkCommandPool,
@@ -202,6 +203,26 @@ pub fn copyBuffer(
     dst: *const Buffer,
     size: vk.c.VkDeviceSize,
 ) !void {
+    return copyBufferRegion(instance, cmd_pool, src, dst, 0, 0, size);
+}
+
+/// Copy a bounded region and wait before the caller reuses host staging memory.
+pub fn copyBufferRegion(
+    instance: *const Instance,
+    cmd_pool: vk.c.VkCommandPool,
+    src: *const Buffer,
+    dst: *const Buffer,
+    src_offset: vk.c.VkDeviceSize,
+    dst_offset: vk.c.VkDeviceSize,
+    size: vk.c.VkDeviceSize,
+) !void {
+    // Keep this primitive self-contained: standalone Vulkan tools import this
+    // directory as a module and cannot reach the engine's upload planner.
+    // Short-circuit the offset checks before subtracting to avoid overflow.
+    if (src_offset > src.size or size > src.size - src_offset or
+        dst_offset > dst.size or size > dst.size - dst_offset)
+        return error.BufferCopyOutOfBounds;
+    if (size == 0) return;
     // Allocate one-shot command buffer
     const alloc_info = vk.c.VkCommandBufferAllocateInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -214,6 +235,7 @@ pub fn copyBuffer(
     var cmd_buf: vk.c.VkCommandBuffer = null;
     var result = vk.c.vkAllocateCommandBuffers(instance.device, &alloc_info, &cmd_buf);
     if (result != vk.c.VK_SUCCESS) return error.AllocCmdBufFailed;
+    defer vk.c.vkFreeCommandBuffers(instance.device, cmd_pool, 1, &cmd_buf);
 
     const begin_info = vk.c.VkCommandBufferBeginInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -221,16 +243,16 @@ pub fn copyBuffer(
         .flags = vk.c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = null,
     };
-    _ = vk.c.vkBeginCommandBuffer(cmd_buf, &begin_info);
+    if (vk.c.vkBeginCommandBuffer(cmd_buf, &begin_info) != vk.c.VK_SUCCESS) return error.BeginCommandBufferFailed;
 
     const region = vk.c.VkBufferCopy{
-        .srcOffset = 0,
-        .dstOffset = 0,
+        .srcOffset = src_offset,
+        .dstOffset = dst_offset,
         .size = size,
     };
     vk.c.vkCmdCopyBuffer(cmd_buf, src.handle, dst.handle, 1, &region);
 
-    _ = vk.c.vkEndCommandBuffer(cmd_buf);
+    if (vk.c.vkEndCommandBuffer(cmd_buf) != vk.c.VK_SUCCESS) return error.EndCommandBufferFailed;
 
     const submit_info = vk.c.VkSubmitInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -246,6 +268,26 @@ pub fn copyBuffer(
     result = vk.c.vkQueueSubmit(instance.compute_queue, 1, &submit_info, @as(vk.c.VkFence, null));
     if (result != vk.c.VK_SUCCESS) return error.QueueSubmitFailed;
 
-    _ = vk.c.vkQueueWaitIdle(instance.compute_queue);
-    vk.c.vkFreeCommandBuffers(instance.device, cmd_pool, 1, &cmd_buf);
+    result = vk.c.vkQueueWaitIdle(instance.compute_queue);
+    if (result != vk.c.VK_SUCCESS) {
+        // A wait can fail with host/device OOM as well as device loss. It does
+        // not establish completion, so returning would free this command and
+        // unwind the caller's staging/destination/pool while they may be pending.
+        // Terminate without running those defers; process teardown owns recovery.
+        log.err("Vulkan upload completion failed ({d}); terminating with transfer resources retained", .{result});
+        std.process.exit(1);
+    }
+}
+
+test "invalid or empty buffer copies never allocate a Vulkan command" {
+    var src: Buffer = undefined;
+    src.size = 16;
+    var dst: Buffer = undefined;
+    dst.size = 32;
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 0, 17));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 31, 4));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, std.math.maxInt(u64), 0, 4));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 4, 4, std.math.maxInt(u64)));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 17, 0, 0));
+    try copyBufferRegion(undefined, undefined, &src, &dst, 16, 32, 0);
 }
