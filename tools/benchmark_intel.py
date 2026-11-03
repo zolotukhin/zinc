@@ -124,7 +124,7 @@ def main():
                         else:
                             command = [str(args.llama_bin / "llama-server"), "-m", str(args.model), "--device", args.oracle_device, "-ngl", "999", "--host", "127.0.0.1", "--port", str(port),
                                        "-c", str(args.context), "--parallel", "1", "-ctk", "f16", "-ctv", "f16", "-b", "4096", "-ub", "1024", "--flash-attn", "on",
-                                       "--spec-type", "none", "--no-cache-prompt", "-t", "4", "-tb", "4"]
+                                       "--spec-type", "none", "--no-cache-prompt", "-lv", "4", "-t", "4", "-tb", "4"]
                             active_env = gpu.reference_environment(args.llama_bin, env)
                         log = model_work / f"{round_index}-{engine}.log"
                         print(f"Benchmark {identifier}, round {round_index + 1}/{args.rounds}: {engine}", flush=True)
