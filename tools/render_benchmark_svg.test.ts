@@ -86,8 +86,10 @@ test('renderSvg draws one labelled pair per model and cites provenance', () => {
   const svg = renderSvg(artifact(), 'rdna-rocm');
   expect(svg.startsWith('<svg')).toBe(true);
   expect(svg).toContain('Radeon AI PRO R9700');
-  expect(svg).toContain('>150%<');
-  expect(svg).toContain('>105%<');
+  expect(svg).toContain('>1.50×<');
+  expect(svg).toContain('>1.05×<');
+  expect(svg).toContain('>150.0<');
+  expect(svg).toContain('>100.0<');
   expect(svg).toContain('ZINC abc123');
   expect(svg).toContain('llama.cpp def456');
   expect(svg).toContain('Fast Model');
@@ -107,21 +109,29 @@ test('a complete off-variant selects its own baseline as well as ZINC', () => {
   expect(fast.prefillPct).toBe(300);
 
   const svg = renderSvg(data, 'rdna-rocm');
-  expect(svg).toContain('>200%<');
-  expect(svg).not.toContain('>180%<');
+  expect(svg).toContain('>2.00×<');
+  expect(svg).not.toContain('>1.80×<');
   expect(svg).toContain('MTP off for both engines');
 });
 
 test('renderSvg keeps every bar and label inside the card', () => {
-  const svg = renderSvg(artifact(), 'rdna-rocm');
-  const cardRight = 1000;
-  for (const [, x, w] of [
-    ...svg.matchAll(/<rect x="([\d.]+)" y="\d+" width="([\d.]+)" height="17"/g),
-  ]) {
-    expect(Number(x) + Number(w)).toBeLessThanOrEqual(cardRight);
-  }
-  for (const [, x] of [...svg.matchAll(/<text x="([\d.]+)"[^>]*font-size="13.5"/g)]) {
-    expect(Number(x)).toBeLessThan(cardRight);
+  for (const layout of ['wide', 'compact']) {
+    for (const theme of ['light', 'dark']) {
+      const svg = renderSvg(artifact(), 'rdna-rocm', { layout, theme });
+      const [, width, height] = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
+      const bars = [
+        ...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g),
+      ];
+      expect(bars.length).toBeGreaterThan(16);
+      for (const [, x, y, w, h] of bars) {
+        expect(Number(x) + Number(w)).toBeLessThanOrEqual(Number(width));
+        expect(Number(y) + Number(h)).toBeLessThanOrEqual(Number(height));
+      }
+      for (const [, x, y] of svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)"/g)) {
+        expect(Number(x)).toBeLessThan(Number(width));
+        expect(Number(y)).toBeLessThan(Number(height));
+      }
+    }
   }
 });
 

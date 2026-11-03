@@ -135,12 +135,17 @@ on a 32GB ROCm card. Match the harness context to the server when changing it.
 
 ## Inspect the performance
 
-The chart compares eligible measurements on the same Radeon AI PRO R9700, with **ROCm on
-both ZINC and llama.cpp**. Both engines use the same GGUF files, prompt tokens,
-reusable servers, warmups, and repeat counts.
+Compare prompt processing and token generation on one **Radeon AI PRO R9700**,
+with **ROCm on both engines**. Orange is ZINC; blue is llama.cpp. Speeds are
+tokens per second, and each badge shows ZINC speed divided by llama.cpp speed.
 
 <a href="https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm">
-  <img src="assets/rocm-r9700-benchmark.svg" alt="Prompt processing and answer generation for ZINC and llama.cpp with matched MTP-off settings on the same Radeon AI PRO R9700 with ROCm" width="100%">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="assets/rocm-r9700-benchmark-mobile-dark.svg">
+    <source media="(max-width: 767px)" srcset="assets/rocm-r9700-benchmark-mobile.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/rocm-r9700-benchmark-dark.svg">
+    <img src="assets/rocm-r9700-benchmark.svg" alt="Six models on Radeon AI PRO R9700 with ROCm and MTP off for both engines. Paired bars show ZINC and llama.cpp tokens per second for prompt processing and generation. Per-model dates and builds are included; Gemma MoE prompt processing is slower in ZINC." width="100%">
+  </picture>
 </a>
 
 Speculative decoding is **off for both engines** in this chart. The
@@ -154,8 +159,11 @@ New campaigns [refresh and verify the latest llama.cpp](docs/BENCHMARKING.md#lat
 and measure **on/on and off/off**; older measurements retain their original
 build revisions and dates.
 
-The chart is generated from
-[`zinc-performance.json`](site/src/data/zinc-performance.json).
+The chart uses the same GGUF files, prompt tokens, reusable servers, warmups,
+and repeat counts for both engines. Dates and builds vary by model and are
+shown in the graphic. Regenerate all four variants from
+[`zinc-performance.json`](site/src/data/zinc-performance.json) with
+`bun tools/render_benchmark_svg.mjs --readme`.
 [Reproduce the suite](docs/BENCHMARKING.md), or read the
 [matched 27B MTP comparison](docs/MATCHED_MTP_LLAMA_CPP.md) against current
 llama.cpp, including the output controls that still need investigation.

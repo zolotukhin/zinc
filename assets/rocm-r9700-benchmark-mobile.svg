@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="1816" viewBox="0 0 420 1816" role="img" aria-labelledby="title desc">
+<title id="title">ZINC vs llama.cpp · Radeon AI PRO R9700 · ROCm / HIP</title>
+<desc id="desc">Quick-chat medians in tokens per second; higher is faster. Orange bars are ZINC, blue bars are llama.cpp. Both engines use the same GGUF and prompt with MTP off. Each phase uses one absolute scale across all models. A badge is ZINC speed divided by llama.cpp speed, not an end-to-end speedup. Mixed measurement dates and revisions are shown per model. Qwen 3.8 27B Dense: Nov 2, 2026; ZINC 34f33b900969; llama.cpp 785322d17f2d51e5185cf996a1f4e46d87640841. Gemma 4 31B: Sep 24, 2026; ZINC d7a5ed9bf0f8; llama.cpp 5f436dddb. Qwen 3.5 9B: Sep 23, 2026; ZINC 20c08b0a0c14; llama.cpp 5f436dddb. Muse Glimmer 30B: Sep 23, 2026; ZINC 547016dcebaa; llama.cpp 5f436dddb. Qwen 3.6 35B A3B: Sep 23, 2026; ZINC c50b4add3402; llama.cpp 5f436dddb. Gemma 4 26B-A4B MoE: Nov 2, 2026; ZINC 34f33b900969; llama.cpp 785322d17f2d51e5185cf996a1f4e46d87640841.</desc>
+<rect x="0.5" y="0.5" width="419" height="1815" rx="16" fill="#ffffff" stroke="#d1d9e0"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" fill="#1f2328" style="font-variant-numeric:tabular-nums">
+<text x="24" y="35" font-size="11" fill="#bc4c00" font-weight="700" letter-spacing="1.6">ZINC  /  BENCHMARKS</text>
+<text x="24" y="73" font-size="30" fill="#1f2328" font-weight="700" letter-spacing="-0.8">ZINC vs llama.cpp</text>
+<text x="24" y="101" font-size="16" fill="#59636e" >Radeon AI PRO R9700</text>
+<text x="24" y="126" font-size="12" fill="#59636e" >ROCm / HIP · Quick chat · MTP off for both engines</text>
+<text x="24" y="152" font-size="13" fill="#59636e" >Tokens/s · higher is faster</text>
+<path d="M24 176H396" stroke="#d1d9e0"/>
+<rect x="12" y="177" width="396" height="226" rx="8" fill="#f6f8fa"/>
+<text x="24" y="206" font-size="19" fill="#1f2328" font-weight="600">Qwen 3.8 27B Dense</text>
+<text x="24" y="228" font-size="12" fill="#59636e" >Q4_K_M · Nov 2, 2026 · [1]</text>
+<text x="24" y="260" font-size="14" fill="#1f2328" font-weight="600">Prompt processing</text>
+<rect x="324" y="246" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="263" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">2.05×</text>
+<text x="24" y="289" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="279" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="279" width="112.08" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="290" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">561.1</text>
+<text x="24" y="314" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="304" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="304" width="54.68" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="315" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">273.8</text>
+<text x="24" y="338" font-size="14" fill="#1f2328" font-weight="600">Token generation</text>
+<rect x="324" y="324" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="341" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.08×</text>
+<text x="24" y="367" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="357" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="357" width="83.33" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="368" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">32.9</text>
+<text x="24" y="392" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="382" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="382" width="76.82" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="393" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">30.3</text>
+<text x="24" y="434" font-size="19" fill="#1f2328" font-weight="600">Gemma 4 31B</text>
+<text x="24" y="456" font-size="12" fill="#59636e" >Q4_K_M · Sep 24, 2026 · [2]</text>
+<text x="24" y="488" font-size="14" fill="#1f2328" font-weight="600">Prompt processing</text>
+<rect x="324" y="474" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="491" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">2.00×</text>
+<text x="24" y="517" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="507" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="507" width="117.8" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="518" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">589.7</text>
+<text x="24" y="542" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="532" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="532" width="58.85" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="543" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">294.6</text>
+<text x="24" y="566" font-size="14" fill="#1f2328" font-weight="600">Token generation</text>
+<rect x="324" y="552" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="569" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.04×</text>
+<text x="24" y="595" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="585" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="585" width="72.14" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="596" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">28.5</text>
+<text x="24" y="620" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="610" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="610" width="69.37" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="621" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">27.4</text>
+<rect x="12" y="633" width="396" height="226" rx="8" fill="#f6f8fa"/>
+<text x="24" y="662" font-size="19" fill="#1f2328" font-weight="600">Qwen 3.5 9B</text>
+<text x="24" y="684" font-size="12" fill="#59636e" >Q4_K_M · Sep 23, 2026 · [3]</text>
+<text x="24" y="716" font-size="14" fill="#1f2328" font-weight="600">Prompt processing</text>
+<rect x="324" y="702" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="719" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.84×</text>
+<text x="24" y="745" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="735" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="735" width="245" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="746" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">1226.5</text>
+<text x="24" y="770" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="760" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="760" width="133.51" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="771" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">668.3</text>
+<text x="24" y="794" font-size="14" fill="#1f2328" font-weight="600">Token generation</text>
+<rect x="324" y="780" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="797" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.19×</text>
+<text x="24" y="823" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="813" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="813" width="230.01" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="824" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">90.9</text>
+<text x="24" y="848" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="838" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="838" width="193.29" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="849" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">76.4</text>
+<text x="24" y="890" font-size="19" fill="#1f2328" font-weight="600">Muse Glimmer 30B</text>
+<text x="24" y="912" font-size="12" fill="#59636e" >Q4_K_M · Sep 23, 2026 · [4]</text>
+<text x="24" y="944" font-size="14" fill="#1f2328" font-weight="600">Prompt processing</text>
+<rect x="324" y="930" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="947" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.76×</text>
+<text x="24" y="973" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="963" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="963" width="135.08" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="974" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">676.2</text>
+<text x="24" y="998" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="988" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="988" width="76.68" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="999" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">383.9</text>
+<text x="24" y="1022" font-size="14" fill="#1f2328" font-weight="600">Token generation</text>
+<rect x="324" y="1008" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="1025" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.09×</text>
+<text x="24" y="1051" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="1041" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1041" width="84.39" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="1052" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">33.3</text>
+<text x="24" y="1076" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="1066" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1066" width="77.7" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="1077" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">30.7</text>
+<rect x="12" y="1089" width="396" height="226" rx="8" fill="#f6f8fa"/>
+<text x="24" y="1118" font-size="19" fill="#1f2328" font-weight="600">Qwen 3.6 35B A3B</text>
+<text x="24" y="1140" font-size="12" fill="#59636e" >Q4_K_XL · Sep 23, 2026 · [5]</text>
+<text x="24" y="1172" font-size="14" fill="#1f2328" font-weight="600">Prompt processing</text>
+<rect x="324" y="1158" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="1175" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.07×</text>
+<text x="24" y="1201" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="1191" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1191" width="102.77" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="1202" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">514.5</text>
+<text x="24" y="1226" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="1216" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1216" width="96.24" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="1227" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">481.8</text>
+<text x="24" y="1250" font-size="14" fill="#1f2328" font-weight="600">Token generation</text>
+<rect x="324" y="1236" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="1253" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.28×</text>
+<text x="24" y="1279" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="1269" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1269" width="245" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="1280" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">96.8</text>
+<text x="24" y="1304" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="1294" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1294" width="190.69" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="1305" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">75.3</text>
+<text x="24" y="1346" font-size="19" fill="#1f2328" font-weight="600">Gemma 4 26B-A4B MoE</text>
+<text x="24" y="1368" font-size="12" fill="#59636e" >Q4_K_M · Nov 2, 2026 · [1]</text>
+<text x="24" y="1400" font-size="14" fill="#1f2328" font-weight="600">Prompt processing</text>
+<rect x="324" y="1386" width="72" height="24" rx="6" fill="#eaf2ff"/>
+<text x="360" y="1403" font-size="15" fill="#2864b4" font-weight="700" text-anchor="middle">0.14×</text>
+<text x="24" y="1429" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="1419" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1419" width="22.21" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="1430" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">111.2</text>
+<text x="24" y="1454" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="1444" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1444" width="157.72" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="1455" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">789.6</text>
+<text x="24" y="1478" font-size="14" fill="#1f2328" font-weight="600">Token generation</text>
+<rect x="324" y="1464" width="72" height="24" rx="6" fill="#fff1e5"/>
+<text x="360" y="1481" font-size="15" fill="#bc4c00" font-weight="700" text-anchor="middle">1.12×</text>
+<text x="24" y="1507" font-size="12" fill="#bc4c00" font-weight="600">ZINC</text>
+<rect x="89" y="1497" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1497" width="230.39" height="10" rx="3" fill="#bc4c00"/>
+<text x="396" y="1508" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">91.0</text>
+<text x="24" y="1532" font-size="12" fill="#2864b4" font-weight="600">llama.cpp</text>
+<rect x="89" y="1522" width="245" height="10" rx="3" fill="#e5eaf0"/>
+<rect x="89" y="1522" width="206.27" height="10" rx="3" fill="#2864b4"/>
+<text x="396" y="1533" font-size="16" fill="#1f2328" text-anchor="end" font-weight="600">81.5</text>
+<path d="M24 1544H396" stroke="#d1d9e0"/>
+<text x="24" y="1574" font-size="12" fill="#1f2328" font-weight="600">× = ZINC speed ÷ llama.cpp speed</text>
+<text x="24" y="1596" font-size="11.5" fill="#59636e" >Shared scale within each phase; medians after warmup.</text>
+<text x="24" y="1618" font-size="11.5" fill="#59636e" >Mixed measurement dates and revisions; sources by row:</text>
+<text x="24" y="1645" font-size="11.5" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[1] ZINC 34f33b900 / llama.cpp 785322d17</text>
+<text x="24" y="1665" font-size="11.5" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[2] ZINC d7a5ed9bf / llama.cpp 5f436dddb</text>
+<text x="24" y="1685" font-size="11.5" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[3] ZINC 20c08b0a0 / llama.cpp 5f436dddb</text>
+<text x="24" y="1705" font-size="11.5" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[4] ZINC 547016dce / llama.cpp 5f436dddb</text>
+<text x="24" y="1725" font-size="11.5" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">[5] ZINC c50b4add3 / llama.cpp 5f436dddb</text>
+<text x="24" y="1755" font-size="13" fill="#1f2328" font-weight="600">All workloads, settings &amp; raw samples →</text>
+<text x="24" y="1778" font-size="13" fill="#bc4c00" >zolotukhin.ai/zinc/benchmarks</text>
+</g></svg>
