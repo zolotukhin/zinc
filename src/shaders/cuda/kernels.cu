@@ -6638,6 +6638,9 @@ extern "C" __global__ void quantize_act_q8_0(const float* __restrict__ act,
     const unsigned c = (chunk_base >> 5) + wblk;
     const unsigned h = c >> 2;
     const unsigned g = c & 3u;
+    // The final launch can contain a spare 128-value tile. Do not write past
+    // the packed allocation; missing groups inside its last tile are zeroed.
+    if (h >= (pc.K + 127u) / 128u) return;
     unsigned char* out_base = out + ((size_t)h * pc.T + tok) * 144u;
 #else
     unsigned char* out_base = out + (size_t)tok * (pc.K / 32u) * 36u + (chunk_base / 32u) * 36u;
@@ -6662,7 +6665,11 @@ extern "C" __global__ void quantize_act_q8_0(const float* __restrict__ act,
     int q = max(-127, min(127, __float2int_rn(val * scale)));
 
     // Lane 0 writes the fp16 scale and sum.
+#ifdef ZINC_ROCM
+    if (wlane == 0) {
+#else
     if (wlane == 0 && k_idx < pc.K) {
+#endif
         unsigned short dh = zinc_float_to_half(d);
         unsigned short sh = zinc_float_to_half(sv);
 #ifdef ZINC_ROCM
@@ -7227,7 +7234,8 @@ __device__ __forceinline__ void zinc_gemm_q8_0_wmma_i8(
     const unsigned token_base = pc.x_offset / (pc.K * sizeof(float));
     const unsigned t0 = token_base + blockIdx.y * BT;
     const unsigned blocks_per_row = pc.K >> 5;
-    const unsigned nsuper = pc.K >> 7;
+    // Q8_0 rows also permit a partial 128-value tile (for example K=2112).
+    const unsigned nsuper = (pc.K + 127u) >> 7;
     const unsigned char* const a0 = a + pc.a_offset;
     float* const Xdf = (float*)(Xtile + 32u);
     half2* const Bds = (half2*)Btile;
@@ -7248,7 +7256,7 @@ __device__ __forceinline__ void zinc_gemm_q8_0_wmma_i8(
                 #pragma unroll
                 for (unsigned g = 0u; g < 4u; ++g) {
                     int q = 0;
-                    if (row < pc.M) {
+                    if (row < pc.M && sb * 4u + g < blocks_per_row) {
                         const unsigned char* blk = a0 +
                             ((size_t)row * blocks_per_row + sb * 4u + g) * 34u;
                         q = *(const int*)(blk + 2u + lane * 4u);
@@ -7263,7 +7271,7 @@ __device__ __forceinline__ void zinc_gemm_q8_0_wmma_i8(
             const unsigned r = r0 + wid * 8u + (lane >> 2);
             const unsigned row = m0 + r;
             const unsigned g = lane & 3u;
-            Xdf[r * X_STRIDE + g] = row < pc.M
+            Xdf[r * X_STRIDE + g] = row < pc.M && sb * 4u + g < blocks_per_row
                 ? __half2float(*(const half*)(a0 + ((size_t)row * blocks_per_row + sb * 4u + g) * 34u))
                 : 0.0f;
         }
@@ -7288,6 +7296,7 @@ __device__ __forceinline__ void zinc_gemm_q8_0_wmma_i8(
         const unsigned row_base = wid * 16u;
         #pragma unroll
         for (unsigned g = 0u; g < 4u; ++g) {
+            if (sb * 4u + g >= blocks_per_row) continue;
             const unsigned wr = row_base + (lane & 15u);
             const unsigned wk = (lane >> 4) * 2u;
             #pragma unroll
@@ -8000,7 +8009,9 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8(
     const unsigned m0 = blockIdx.x * BM;
     const unsigned t0 = blockIdx.y * BT;
     const unsigned blocks_per_row = pc.K >> 5;
-    const unsigned nsuper = pc.K >> 7;
+    // Q5_1 only requires 32-column alignment. Gemma's 704-wide expert has
+    // two blocks in its final 128-column tile; flooring here dropped 64 values.
+    const unsigned nsuper = (pc.K + 127u) >> 7;
     const unsigned char* const a0 = a + (size_t)expert * pc.expert_stride + pc.base;
     half2* const Xdm = (half2*)(Xtile + 32u);
     half2* const Bds = (half2*)Btile;
@@ -8021,7 +8032,7 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8(
             for (unsigned g = 0u; g < 4u; ++g) {
                 if (lane < 8u) {
                     unsigned packed_q = 0u;
-                    if (row < pc.M) {
+                    if (row < pc.M && sb * 4u + g < blocks_per_row) {
                         const unsigned char* blk = a0 +
                             ((size_t)row * blocks_per_row + sb * 4u + g) * 24u;
                         const unsigned qh = *(const unsigned*)(blk + 4u);
@@ -8045,7 +8056,7 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8(
             const unsigned r = r0 + wid * 8u + (lane >> 2);
             const unsigned row = m0 + r;
             const unsigned g = lane & 3u;
-            if (row < pc.M) {
+            if (row < pc.M && sb * 4u + g < blocks_per_row) {
                 const unsigned char* blk = a0 +
                     ((size_t)row * blocks_per_row + sb * 4u + g) * 24u;
                 Xdm[r * X_STRIDE + g] = *(const half2*)blk;
@@ -8078,6 +8089,7 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8(
         const unsigned row_base = wid * 16u;
         #pragma unroll
         for (unsigned g = 0u; g < 4u; ++g) {
+            if (sb * 4u + g >= blocks_per_row) continue;
             const unsigned wr = row_base + (lane & 15u);
             const unsigned wk = (lane >> 4) * 2u;
             const unsigned at_base = lane & 15u;
@@ -8149,7 +8161,7 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8_direct(
     const unsigned m0 = blockIdx.x * BM;
     const unsigned t0 = blockIdx.y * BT;
     const unsigned blocks_per_row = pc.K >> 5;
-    const unsigned nsuper = pc.K >> 7;
+    const unsigned nsuper = (pc.K + 127u) >> 7;
     const unsigned char* const a0 = a + (size_t)expert * pc.expert_stride + pc.base;
     half2* const Bds = (half2*)Btile;
 
@@ -8170,7 +8182,7 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8_direct(
             const unsigned sr = i >> 2;
             const unsigned g = i & 3u;
             const unsigned scale_row = m0 + sr;
-            Adm[i] = scale_row < pc.M
+            Adm[i] = scale_row < pc.M && sb * 4u + g < blocks_per_row
                 ? *(const half2*)(a0 + ((size_t)scale_row * blocks_per_row + sb * 4u + g) * 24u)
                 : __floats2half2_rn(0.0f, 0.0f);
         }
@@ -8197,6 +8209,7 @@ __device__ __forceinline__ void zinc_gemm_q5_1_experts_grouped_i8_direct(
 
         #pragma unroll
         for (unsigned g = 0u; g < 4u; ++g) {
+            if (sb * 4u + g >= blocks_per_row) continue;
             zinc_q51_direct_i32x8_t ci_frag[NFRAG];
             #pragma unroll
             for (unsigned jt = 0u; jt < NFRAG; ++jt) ci_frag[jt] = zinc_q51_direct_i32x8_t{};

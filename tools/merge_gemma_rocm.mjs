@@ -32,9 +32,20 @@ export function validateGemmaHarness(report, commit) {
   const sources = report.harness_sha256 ?? {};
   const expected = sources['tools/benchmark_reference.mjs']
     ? [...harnessFiles, 'tools/benchmark_reference.mjs']
-    : harnessFiles;
+    : [...harnessFiles];
+  if (
+    report.settings?.prefill === 'default-batched' ||
+    sources['tools/validate_rocm_partial_tiles.c']
+  ) {
+    expected.push(
+      'tools/validate_rocm_partial_tiles.c',
+      'src/shaders/cuda/kernels.cu',
+      'src/rocm/rocm_shim.c',
+      'src/cuda/cuda_shim.h',
+    );
+  }
   requireValue(
-    report.schema_version !== 'zinc-gemma-vulkan-v1' || expected.length === 11,
+    report.schema_version !== 'zinc-gemma-vulkan-v1' || sources['tools/benchmark_reference.mjs'],
     'Vulkan campaigns must freeze the latest-reference checker',
   );
   requireValue(
@@ -106,19 +117,36 @@ export function validateGemmaReport(report) {
       settings.slots === 1 &&
       settings.kv_cache === (vulkan ? 'f16' : 'f32') &&
       settings.mtp === 'off' &&
-      settings.prefill === (vulkan ? 'backend-default' : 'default-serial') &&
+      (vulkan
+        ? settings.prefill === 'backend-default'
+        : ['default-serial', 'default-batched'].includes(settings.prefill)) &&
       settings.prompt_cache === false &&
       settings.temperature === 0 &&
       settings.top_p === 1 &&
       settings.seed === 0,
     'Controlled settings differ',
   );
+  if (!vulkan && settings.prefill === 'default-batched') {
+    const kernels = report.kernel_reference;
+    requireValue(
+      kernels?.passed === true &&
+        kernels.cases === 305 &&
+        digest(kernels.kernel_source_sha256) &&
+        digest(kernels.validator_source_sha256) &&
+        kernels.kernel_source_sha256 === report.harness_sha256?.['src/shaders/cuda/kernels.cu'] &&
+        kernels.validator_source_sha256 ===
+          report.harness_sha256?.['tools/validate_rocm_partial_tiles.c'],
+      'Full embedded ROCm numerical reference checks are required',
+    );
+  }
   if (vulkan) {
     requireValue(['rdna', 'intel'].includes(report.target), 'Unknown Vulkan target');
     requireValue(
       report.kernel_reference?.passed === true && report.kernel_reference.cases === 376,
       'Full shader reference checks are required',
     );
+  }
+  if (vulkan || settings.prefill === 'default-batched') {
     requireValue(
       typeof report.hardware?.gpu === 'string' &&
         typeof report.hardware?.driver === 'string' &&

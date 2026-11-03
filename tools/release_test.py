@@ -455,6 +455,39 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(launched, list(markers) if missing is None else list(markers)[:list(markers).index(missing) + 1])
             self.assertEqual(reaped, launched)
 
+    def test_rocm_kernel_gate_rejects_wrong_embedded_source_failure_and_incomplete_success(self):
+        (self.root / "bin").mkdir()
+        binary = self.root / "bin/zinc"
+        binary.write_bytes(b"another archive's embedded kernels")
+        with patch.object(release_gpu, "output") as compile_tool, self.assertRaisesRegex(ValueError, "kernel source differs"):
+            release_gpu.rocm_kernel_reference(self.root, self.root, self.root, 3, self.root, {})
+        compile_tool.assert_not_called()
+        binary.write_bytes(b"binary prefix" + (ROOT / "src/shaders/cuda/kernels.cu").read_bytes() + b"\0suffix")
+        marker = "PASS 305 ROCm partial-tile/native-reference/route/quantizer/guard cases"
+        for status, text in ((1, marker), (0, "PASS 304 ROCm partial-tile/native-reference/route/quantizer/guard cases"), (0, marker)):
+            reaped = []
+            @contextlib.contextmanager
+            def child(command, log, cwd, env):
+                self.assertEqual(cwd, ROOT)
+                self.assertEqual(env["ZINC_GPU"], "3")
+                Path(log).write_text(text + "\n")
+                try:
+                    yield SimpleNamespace(wait=lambda timeout: status)
+                finally:
+                    reaped.append(True)
+            with self.subTest(status=status, text=text), patch.object(release_gpu, "output", return_value="") as compile_tool, \
+                    patch.object(release_gpu, "process", side_effect=child):
+                if status or text != marker:
+                    with self.assertRaisesRegex(ValueError, "reference validation failed|reference suite was incomplete"):
+                        release_gpu.rocm_kernel_reference(self.root, self.root, self.root, 3, self.root, {})
+                else:
+                    result = release_gpu.rocm_kernel_reference(self.root, self.root, self.root, 3, self.root, {})
+                    self.assertEqual(result, {"passed": True, "cases": 305,
+                        "kernel_source_sha256": sha256(ROOT / "src/shaders/cuda/kernels.cu"),
+                        "validator_source_sha256": sha256(ROOT / "tools/validate_rocm_partial_tiles.c")})
+            self.assertEqual(compile_tool.call_count, 3)
+            self.assertEqual(reaped, [True])
+
     def test_sliding_window_reference_measures_prompts_beyond_the_mask_boundary(self):
         samples = [("rendered prompt " + str(i), {"comparison": {"tokens": 16, "near_ties": []}}) for i in range(3)]
         for count in (1025, 1024):
@@ -1105,6 +1138,10 @@ class ReleaseTest(unittest.TestCase):
                                     "library_sha256": {"libggml-base.so": "d" * 64},
                                     "server_sha256": "b" * 64, "tokenizer_sha256": "c" * 64},
                       "checks": {name: True for name in ("package", "identity", "gpu", "model_hash", "tokenizer_parity", "inference_parity", "http", "cleanup", "kernel_reference")}}
+            if profile["target"].endswith("rocm"):
+                report["rocm_kernel_reference"] = {"passed": True, "cases": 305,
+                    "kernel_source_sha256": sha256(ROOT / "src/shaders/cuda/kernels.cu"),
+                    "validator_source_sha256": sha256(ROOT / "tools/validate_rocm_partial_tiles.c")}
             write_json(reports / (profile["id"] + ".json"), report)
         return directory, reports
 
@@ -1252,6 +1289,21 @@ class ReleaseTest(unittest.TestCase):
             change(data)
             write_json(path, data)
             with self.subTest(case=index), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
+
+    def test_aggregate_requires_complete_rocm_reference_evidence_from_this_candidate(self):
+        directory, reports = self.candidate()
+        path = reports / "rocm-rdna4.json"
+        saved = path.read_text()
+        for change in (lambda d: d.pop("rocm_kernel_reference"), lambda d: d["checks"].pop("kernel_reference"),
+                       lambda d: d["rocm_kernel_reference"].update(passed=False),
+                       lambda d: d["rocm_kernel_reference"].update(cases=304),
+                       lambda d: d["rocm_kernel_reference"].update(kernel_source_sha256="0" * 64),
+                       lambda d: d["rocm_kernel_reference"].update(validator_source_sha256="0" * 64)):
+            data = json.loads(saved)
+            change(data)
+            write_json(path, data)
+            with self.assertRaisesRegex(ValueError, "ROCm numerical reference checks"):
                 self.aggregate(directory, reports)
 
     def test_aggregate_requires_measured_prompt_cancellation_and_bounded_recovery(self):
@@ -1712,6 +1764,7 @@ class ReleaseTest(unittest.TestCase):
                         stack.enter_context(patch.object(release_worker, name, return_value=value))
                     stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
                     stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
+                    kernel_check = stack.enter_context(patch.object(release_gpu, "rocm_kernel_reference", return_value={"passed": True, "cases": 305}))
                     window_check = stack.enter_context(patch.object(release_gpu, "sliding_window_reference", return_value=sliding,
                         side_effect=ValueError("fixture long-window continuation differed") if failure == "sliding_window" else None))
                     if failure == "late_cleanup":
@@ -1742,6 +1795,7 @@ class ReleaseTest(unittest.TestCase):
                         # Exercise the real pin-to-execution wiring: all short
                         # probes pass, but a missing extended check must still fail this test.
                         window_check.assert_called_once()
+                        kernel_check.assert_called_once()
                         self.assertEqual(window_check.call_args.args[3], 2048)
                         self.assertEqual(window_check.call_args.args[-1], 1024)
                         self.assertEqual(report.call_args.args[1]["models"][0]["sliding_window_reference"], sliding)

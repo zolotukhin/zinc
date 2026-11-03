@@ -319,6 +319,12 @@ def aggregate(args):
         require(report.get("options") == {"parallel": 1, "kv_cache": "backend-default", "mtp": "backend-default", "greedy": True}, "untested or missing runtime option policy")
         require(required_checks.issubset(checks) and all(value is True for value in checks.values()), "GPU checks failed or were skipped")
         require(not spec["target"].endswith("vulkan") or checks.get("kernel_reference") is True, "missing packaged Vulkan numerical reference checks")
+        if spec["target"].endswith("rocm"):
+            kernels = report.get("rocm_kernel_reference") or {}
+            require(checks.get("kernel_reference") is True and kernels.get("passed") is True and kernels.get("cases") == 305 and
+                    kernels.get("kernel_source_sha256") == sha256(ROOT / "src/shaders/cuda/kernels.cu") and
+                    kernels.get("validator_source_sha256") == sha256(ROOT / "tools/validate_rocm_partial_tiles.c"),
+                    "missing or incomplete packaged ROCm numerical reference checks")
         profile = next(p for p in policy()["gpu_profiles"] if p["id"] == identifier)
         models = report.get("models", [])
         require(len(models) == len(profile["models"]) and {m.get("id") for m in models} == set(profile["models"]), "missing model correctness evidence")

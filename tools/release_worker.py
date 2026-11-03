@@ -190,6 +190,10 @@ def check(args):
                     stage = "kernel_reference"
                     idle()
                     gpu.kernel_reference(tree, reference, checkout, config["device"], work, env)
+                if profile["target"].endswith("rocm"):
+                    stage = "rocm_kernel_reference"
+                    idle()
+                    report["rocm_kernel_reference"] = gpu.rocm_kernel_reference(tree, reference, checkout, config["device"], work, env)
                 for model in report["models"]:
                     idle()
                     model_work = work / model["id"]
