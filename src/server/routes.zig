@@ -692,7 +692,7 @@ fn handleModels(
         const download_error = if (is_download_target) download.errorMessage() else "";
         const entry_context_length: u32 = if (entry.active) memory_usage.context_capacity_tokens else 0;
         try body.print(allocator,
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","context_length":{d},"display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"required_vram_with_offload_bytes":{d},"requires_offload_to_fit":{s},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","context_length":{d},"display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"required_vram_with_offload_bytes":{d},"requires_offload_to_fit":{s},"fit_source":"{s}","status":"{s}","recommended_for_chat":{s},"thinking_stable":{s},"supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
         , .{
             entry.id,
             ts,
@@ -713,6 +713,8 @@ fn handleModels(
             if (entry.requires_offload_to_fit) "true" else "false",
             fit_source,
             entry.status_label,
+            if (entry.recommended_for_chat) "true" else "false",
+            if (entry.thinking_stable) "true" else "false",
             if (entry.supports_thinking_toggle) "true" else "false",
             if (downloading) "true" else "false",
             download_phase,

@@ -966,14 +966,17 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
     }
 
     if (gpu.is_cuda) {
-        // CUDA/ROCm: probe the best visible native device and derive its catalog profile from
-        // the device name, and use free VRAM as the fit budget (mirrors the
-        // Metal branch's working-set budget). device_index is ignored here —
-        // initBest picks the highest-CC device (5090 over 4090).
+        // Probe the same native device as inference. ROCm derives an AMD
+        // profile from its gfx target, while CUDA uses the NVIDIA profile.
+        // Total VRAM identifies the board's tier; free VRAM is the fit budget.
         var device = try cuda_device_mod.CudaDevice.initBest(allocator);
         defer device.deinit();
 
-        const profile = catalog_mod.profileForCuda();
+        var arch_buf: [64]u8 = undefined;
+        const profile = if (comptime gpu.is_rocm)
+            catalog_mod.profileForRocm(device.arch(&arch_buf), device.totalMemory())
+        else
+            catalog_mod.profileForCuda();
         const vram_budget_bytes = blk: {
             const free = device.freeMemory();
             break :blk if (free > 0) free else device.totalMemory();
@@ -1062,7 +1065,8 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     var rendered_any = false;
     var any_requires_offload = false;
     for (catalog_mod.entries) |entry| {
-        const tested_profile_match = catalog_mod.supportsProfile(entry, support.profile);
+        const backend_qualified = catalog_mod.supportsBackend(entry, managed_mod.catalog_backend);
+        const tested_profile_match = catalog_mod.supportsProfileForBackend(entry, support.profile, managed_mod.catalog_backend);
         const installed = managed_mod.isInstalled(entry.id, allocator);
         const fit = managed_mod.describeFit(entry, support.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
             .required_vram_bytes = entry.required_vram_bytes,
@@ -1079,7 +1083,9 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
         rendered_any = true;
         if (supported_with_offload) any_requires_offload = true;
         const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
-        const status_label = if (supported_now)
+        const status_label = if (!backend_qualified)
+            "unqualified-backend"
+        else if (supported_now)
             @tagName(entry.status)
         else if (supported_with_offload)
             switch (entry.status) {
@@ -1097,7 +1103,11 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
             .fits_with_offload => "offload",
             .does_not_fit => "no",
         };
-        const notes = if (supported_with_offload)
+        const notes = if (!backend_qualified)
+            "qualified for another backend"
+        else if (!tested_profile_match)
+            "GPU profile is unqualified"
+        else if (supported_with_offload)
             "auto: MoE experts → host RAM (slower)"
         else if (fit.exact)
             "tested + exact fit"
@@ -1160,6 +1170,29 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
+/// Keep unavailable GPU/fit evidence unknown in the JSON model listing.
+fn modelListSupport(entry: catalog_mod.CatalogEntry, support: ?*const ManagedGpuSupport, fits_gpu: ?bool) ?bool {
+    const current = support orelse return null;
+    const fits = fits_gpu orelse return null;
+    return catalog_mod.supportsProfileForBackend(entry, current.profile, managed_mod.catalog_backend) and fits;
+}
+
+fn writeModelQualificationJson(w: anytype, entry: catalog_mod.CatalogEntry, supported: ?bool) !void {
+    try w.writeAll("    \"supported_on_current_gpu\": ");
+    if (supported) |value| {
+        try w.writeAll(if (value) "true" else "false");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n    \"tested_backend\": ");
+    if (entry.tested_backend) |backend| {
+        try writeJsonString(w, @tagName(backend));
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n");
+}
+
 /// Output the full catalog as pretty-printed JSON.
 /// When `support` is null, GPU detection was unavailable; `fits_gpu` is null and `requires_offload_to_fit` is false.
 fn printManagedModelListJson(
@@ -1203,6 +1236,7 @@ fn printManagedModelListJson(
             };
             break :blk fit.fits_current_gpu;
         } else null;
+        const supported_on_current_gpu = modelListSupport(entry, support, fits_gpu);
 
         try w.writeAll("  {\n");
 
@@ -1290,6 +1324,8 @@ fn printManagedModelListJson(
         try w.writeAll("    \"thinking_stable\": ");
         try w.writeAll(if (entry.thinking_stable) "true" else "false");
         try w.writeAll(",\n");
+
+        try writeModelQualificationJson(w, entry, supported_on_current_gpu);
 
         try w.writeAll("    \"tested_profiles\": [");
         for (entry.tested_profiles, 0..) |profile, pi| {
@@ -1484,7 +1520,7 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
             var support = try resolveManagedGpuSupport(config.gpuDevicePreference(), allocator);
             defer support.deinit(allocator);
 
-            if (!catalog_mod.supportsProfile(entry.*, support.profile)) {
+            if (!catalog_mod.supportsProfileForBackend(entry.*, support.profile, managed_mod.catalog_backend)) {
                 // A detected-but-untested GPU profile (e.g. a Strix Halo APU or a
                 // brand-new board) is a soft signal, not a hard incompatibility:
                 // `pull` only downloads weights, and activation is still worth
@@ -1494,8 +1530,8 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
                 var warn_writer = std.Io.File.stderr().writerStreaming(host_io.io, &warn_buffer);
                 const warn = &warn_writer.interface;
                 try warn.print(
-                    "warning: {s} has not been validated on this GPU profile ({s}).\n",
-                    .{ entry.display_name, support.profile },
+                    "warning: {s} has not been validated on this backend/GPU profile ({s}/{s}).\n",
+                    .{ entry.display_name, @tagName(managed_mod.catalog_backend), support.profile },
                 );
                 if (config.command == .model_use and !config.command_force) {
                     try warn.writeAll("Re-run with --force to activate it anyway, or run the file directly with -m <model.gguf>.\n");
@@ -3459,6 +3495,55 @@ test "parseArgs: chat flag" {
     const config = try parseArgs(&args);
     try std.testing.expect(config.chat);
     try std.testing.expectEqualStrings("hi", config.prompt.?);
+}
+
+test "model-list support keeps unknown fit nullable without probing a GPU" {
+    const starter = catalog_mod.find("qwen3-0.6b-q8-0").?;
+    var profile = "amd-rdna4-32gb".*;
+    const support = ManagedGpuSupport{ .profile = &profile, .vram_budget_bytes = 32 * 1024 * 1024 * 1024, .from_cache = false };
+    try std.testing.expectEqual(@as(?bool, null), modelListSupport(starter.*, null, true));
+    try std.testing.expectEqual(@as(?bool, null), modelListSupport(starter.*, &support, null));
+    try std.testing.expectEqual(@as(?bool, false), modelListSupport(starter.*, &support, false));
+    try std.testing.expectEqual(@as(?bool, managed_mod.catalog_backend == .vulkan), modelListSupport(starter.*, &support, true));
+}
+
+test "model-list JSON serializes backend scope and nullable support without loading a model" {
+    const allocator = std.testing.allocator;
+    const starter = catalog_mod.find("qwen3-0.6b-q8-0").?;
+    for ([_]?bool{ null, false, true }) |supported| {
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try output.writer.writeAll("{\n");
+        try writeModelQualificationJson(&output.writer, starter.*, supported);
+        try output.writer.writeAll("\"end\":true}");
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+        defer parsed.deinit();
+        const value = parsed.value.object.get("supported_on_current_gpu").?;
+        if (supported) |expected| {
+            try std.testing.expectEqual(expected, value.bool);
+        } else {
+            try std.testing.expect(value == .null);
+        }
+        try std.testing.expectEqualStrings("vulkan", parsed.value.object.get("tested_backend").?.string);
+    }
+    // No support snapshot means the full producer does only installation
+    // metadata checks, never a GPU probe or GGUF fit inspection.
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try printManagedModelListJson(&output.writer, null, null, allocator);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    defer parsed.deinit();
+    var found = false;
+    for (parsed.value.array.items) |row| {
+        try std.testing.expect(row.object.get("supported_on_current_gpu").? == .null);
+        if (std.mem.eql(u8, row.object.get("id").?.string, starter.id)) {
+            found = true;
+            try std.testing.expectEqualStrings("vulkan", row.object.get("tested_backend").?.string);
+            try std.testing.expect(!row.object.get("recommended_for_chat").?.bool);
+            try std.testing.expect(!row.object.get("thinking_stable").?.bool);
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parseArgs: raw flag" {

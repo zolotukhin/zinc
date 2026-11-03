@@ -1477,6 +1477,45 @@ class ReleaseTest(unittest.TestCase):
             release_publish.validate_catalog(unqualified, "0.1.0")
         release_publish.validate_catalog(self.starter_catalog(), "0.1.0")
 
+    def test_promoted_starter_matches_both_recorded_packaged_inference_results(self):
+        model = next(m for m in policy()["models"] if m["id"] == "qwen3-0.6b-q8-0")
+        public = ROOT / "site/public/zinc/validation"
+        rdna = read_json(public / "worker-readiness-window-gate-2026-11-02.json")
+        run = next(r["report"] for r in rdna["runs"] if r["report"]["profile"] == "vulkan-rdna4")
+        self.assertTrue(run["passed"] and run["models_exercised"])
+        amd = next(m for m in run["models"] if m["id"] == model["id"])
+        intel = read_json(public / "intel-opencode-packaged-default-2026-11-02.json")
+        xe2 = next(m for m in intel["native_defaults"] if m["id"] == model["id"])
+        self.assertTrue(xe2["passed"] and xe2["tokenizer_passed"] and xe2["http_passed"])
+        for row, sha, agreement in ((amd, "sha256", "agreement"), (xe2, "model_sha256", "reference_agreement")):
+            self.assertEqual(row[sha], model["sha256"])
+            self.assertEqual(row["context"], model["context"])
+            self.assertEqual((row[agreement]["exact_tokens"], row[agreement]["total_tokens"], row[agreement]["near_tie_tokens"]), (48, 48, 0))
+        self.assertFalse(intel["matrix_passed"])  # The recorded coding failures remain failures.
+        release_publish.validate_catalog((ROOT / "src/model/catalog.zig").read_text(), "0.1.0")
+
+    def test_stable_starter_cannot_expand_backend_or_chat_claims_without_review(self):
+        catalog = self.starter_catalog()
+        for changed in (catalog.replace('.tested_backend = .vulkan,', '.tested_backend = .rocm,', 1),
+                        catalog.replace('.tested_backend = .vulkan,', '', 1),
+                        catalog.replace('.recommended_for_chat = false,', '.recommended_for_chat = true,', 1),
+                        catalog.replace('.thinking_stable = false,', '.thinking_stable = true,', 1)):
+            with self.subTest(changed=changed[:80]), self.assertRaises(ValueError):
+                release_publish.validate_catalog(changed, "0.1.0")
+
+    def test_generated_notes_match_backend_default_kv_and_inference_only_starter(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.finalize(SimpleNamespace(directory=directory))
+        notes = (directory / "release-notes.md").read_text()
+        self.assertIn("each backend's default KV/MTP settings", notes)
+        self.assertIn("native reference uses F32 K/V", notes)
+        self.assertNotIn("one slot, f32 KV", notes)
+        self.assertIn("not recommended for chat, reasoning or coding", notes)
+        self.assertNotIn("qwen3-0.6b-q8-0 --chat", notes)
+        self.assertIn("qwen35-9b-q4k-m --chat", notes)
+
     def test_stable_starter_coverage_must_match_the_selected_linux_profiles(self):
         for profiles in ('', '"apple-silicon"', '"amd-rdna4-32gb"', '"intel-arc"', '"unknown-profile"',
                          '"amd-rdna4-32gb",\n // "intel-arc",\n'):

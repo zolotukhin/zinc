@@ -10,6 +10,9 @@ const catalog = @import("catalog.zig");
 const diagnostics = if (gpu.is_metal) @import("../diagnostics_metal.zig") else @import("../diagnostics.zig");
 const loader_mod = if (gpu.is_metal) @import("loader_metal.zig") else @import("loader.zig");
 
+/// The compiled runtime owns its own GPU-index namespace and capability cache.
+pub const catalog_backend: catalog.CatalogBackend = if (gpu.is_metal) .metal else if (gpu.is_rocm) .rocm else if (gpu.is_cuda) .cuda else .vulkan;
+
 /// Resolved cache and config directory paths for the current platform.
 pub const RuntimePaths = struct {
     cache_root: []u8,
@@ -258,11 +261,19 @@ pub fn resolveActiveConfigPath(allocator: std.mem.Allocator) ![]u8 {
 ///
 /// @param device_index Zero-based index of the GPU device; encoded in the filename.
 /// @param allocator Used to build the path; caller owns the returned slice.
-/// @returns Heap-allocated absolute path `<config_root>/gpu-profile-device-<device_index>.json`.
+/// @returns Heap-allocated absolute path `<config_root>/gpu-profile-<backend>-device-<device_index>.json`.
 pub fn resolveGpuProfileCachePath(device_index: u32, allocator: std.mem.Allocator) ![]u8 {
     const root = try resolveConfigRoot(allocator);
     defer allocator.free(root);
-    return try std.fmt.allocPrint(allocator, "{s}/gpu-profile-device-{d}.json", .{ root, device_index });
+    return try gpuProfileCachePath(root, catalog_backend, device_index, allocator);
+}
+
+fn gpuProfileCachePath(root: []const u8, backend: catalog.CatalogBackend, device_index: u32, allocator: std.mem.Allocator) ![]u8 {
+    // Legacy files have no backend identity. Ignore them instead of reusing a
+    // Vulkan device index or a stale NVIDIA profile from a ROCm invocation.
+    // Retain them for older installed binaries during an explicit rollback;
+    // this runtime never reads or overwrites the shared legacy filename.
+    return try std.fmt.allocPrint(allocator, "{s}/gpu-profile-{s}-device-{d}.json", .{ root, @tagName(backend), device_index });
 }
 
 /// Returns true if the model GGUF file exists in the local cache.
@@ -355,18 +366,29 @@ pub fn readCachedGpuProfile(device_index: u32, allocator: std.mem.Allocator) !?C
     const data = try host_io.readToEndAlloc(file, allocator, 4096);
     defer allocator.free(data);
 
-    const profile = extractJsonStringField(data, "profile") orelse return error.InvalidGpuProfileCache;
-    const device_name = extractJsonStringField(data, "device_name") orelse return error.InvalidGpuProfileCache;
-    const vram_budget_i64 = extractJsonI64Field(data, "vram_budget_bytes") orelse return error.InvalidGpuProfileCache;
-    const cached_at = extractJsonI64Field(data, "cached_at_unix") orelse 0;
-    if (vram_budget_i64 < 0) return error.InvalidGpuProfileCache;
+    return try parseGpuProfileCache(data, catalog_backend, allocator);
+}
 
-    return .{
-        .profile = try allocator.dupe(u8, profile),
-        .device_name = try allocator.dupe(u8, device_name),
-        .vram_budget_bytes = @intCast(vram_budget_i64),
-        .cached_at_unix = cached_at,
+const StoredGpuProfile = struct {
+    schema_version: u32,
+    backend: catalog.CatalogBackend,
+    profile: []const u8,
+    device_name: []const u8,
+    vram_budget_bytes: u64,
+    cached_at_unix: i64,
+};
+
+fn parseGpuProfileCache(data: []const u8, backend: catalog.CatalogBackend, allocator: std.mem.Allocator) !?CachedGpuProfile {
+    const parsed = std.json.parseFromSlice(StoredGpuProfile, allocator, data, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null, // Advisory metadata; malformed/legacy data needs a fresh probe.
     };
+    defer parsed.deinit();
+    const stored = parsed.value;
+    if (stored.schema_version != 2 or stored.backend != backend) return null;
+    const profile = try allocator.dupe(u8, stored.profile);
+    errdefer allocator.free(profile);
+    return .{ .profile = profile, .device_name = try allocator.dupe(u8, stored.device_name), .vram_budget_bytes = stored.vram_budget_bytes, .cached_at_unix = stored.cached_at_unix };
 }
 
 /// Persists a GPU capability profile to disk for the given device index.
@@ -396,14 +418,7 @@ pub fn writeCachedGpuProfile(
 
     var file_buffer: [2048]u8 = undefined;
     var file_writer = file.writerStreaming(host_io.io, &file_buffer);
-    try file_writer.interface.print(
-        \\{{"profile":"{s}","device_name":"{s}","vram_budget_bytes":{d},"cached_at_unix":{d}}}
-    , .{
-        profile,
-        device_name,
-        vram_budget_bytes,
-        host_io.timestamp(),
-    });
+    try std.json.Stringify.value(StoredGpuProfile{ .schema_version = 2, .backend = catalog_backend, .profile = profile, .device_name = device_name, .vram_budget_bytes = vram_budget_bytes, .cached_at_unix = host_io.timestamp() }, .{}, &file_writer.interface);
     try file_writer.interface.flush();
 }
 
@@ -1329,4 +1344,42 @@ test "readInstalledManifest tolerates old format without offloadable_vram_bytes"
     try std.testing.expectEqual(@as(u64, 5_650_000_000), manifest.size_bytes);
     try std.testing.expectEqual(@as(?u64, 6_442_450_944), manifest.required_vram_bytes);
     try std.testing.expectEqual(@as(?u64, null), manifest.offloadable_vram_bytes);
+}
+
+test "GPU capability caches separate runtime backends even at the same device index" {
+    var paths: [4][]u8 = undefined;
+    var allocated: usize = 0;
+    defer for (paths[0..allocated]) |path| std.testing.allocator.free(path);
+    const backends = [_]catalog.CatalogBackend{ .vulkan, .rocm, .cuda, .metal };
+    for (backends, 0..) |backend, i| {
+        paths[i] = try gpuProfileCachePath("/config", backend, 0, std.testing.allocator);
+        allocated += 1;
+    }
+    try std.testing.expectEqualStrings("/config/gpu-profile-rocm-device-0.json", paths[1]);
+    for (paths, 0..) |path, i| {
+        for (paths[i + 1 ..]) |other| try std.testing.expect(!std.mem.eql(u8, path, other));
+        try std.testing.expect(!std.mem.eql(u8, path, "/config/gpu-profile-device-0.json"));
+    }
+}
+
+test "GPU cache metadata rejects legacy and different backends and roundtrips quoted device names" {
+    const stored = StoredGpuProfile{ .schema_version = 2, .backend = .rocm, .profile = "amd-rdna4-32gb", .device_name = "Radeon \"quoted\" \\ device", .vram_budget_bytes = 30 * 1024 * 1024 * 1024, .cached_at_unix = 42 };
+    const data = try std.json.Stringify.valueAlloc(std.testing.allocator, stored, .{});
+    defer std.testing.allocator.free(data);
+    var cached = (try parseGpuProfileCache(data, .rocm, std.testing.allocator)) orelse return error.TestExpectedEqual;
+    defer cached.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(stored.profile, cached.profile);
+    try std.testing.expectEqualStrings(stored.device_name, cached.device_name);
+    try std.testing.expectEqual(stored.vram_budget_bytes, cached.vram_budget_bytes);
+    for ([_]catalog.CatalogBackend{ .vulkan, .cuda, .metal }) |backend| {
+        try std.testing.expect((try parseGpuProfileCache(data, backend, std.testing.allocator)) == null);
+    }
+    for ([_][]const u8{
+        "{\"profile\":\"nvidia-cuda\",\"device_name\":\"old\",\"vram_budget_bytes\":1,\"cached_at_unix\":42}",
+        "{\"schema_version\":1,\"backend\":\"rocm\",\"profile\":\"old\",\"device_name\":\"old\",\"vram_budget_bytes\":1,\"cached_at_unix\":42}",
+        "{partial",
+        "{}",
+    }) |invalid| {
+        try std.testing.expect((try parseGpuProfileCache(invalid, .rocm, std.testing.allocator)) == null);
+    }
 }

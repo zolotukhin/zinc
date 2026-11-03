@@ -404,8 +404,10 @@ def finalize(args):
                   ("Installer defaults: Metal on ARM64 macOS 15+, Vulkan on glibc Linux x86_64 (2.35+); ROCm is explicit (glibc 2.39+, ROCm 7.2.4)." if metal else
                    "This release is Linux x86_64 only: Vulkan on glibc 2.35+, or explicit ROCm on glibc 2.39+ with ROCm 7.2.4. Metal remains an unsigned preview, available through CPU packaging artifacts or source builds. RDNA3 and Strix Halo remain outside the qualified launch matrix."), "",
                   "The installer verifies and executes the new binary before atomic activation. To restore the previous install: `bash install.sh --rollback`. Models remain in their existing cache.", "",
-                  "For a first Vulkan run:", "", "```bash", "zinc model pull qwen3-0.6b-q8-0", 'zinc --model-id qwen3-0.6b-q8-0 --chat --prompt "Explain a ring buffer."', "```", "",
-                  "For ROCm, use `qwen35-9b-q4k-m` in both commands. Vulkan can also launch the browser UI with `zinc chat --model-id qwen3-0.6b-q8-0`.", "",
+                  "For a small Vulkan installation check:", "", "```bash", "zinc model pull qwen3-0.6b-q8-0", 'zinc --model-id qwen3-0.6b-q8-0 --prompt "The capital of France is"', "```", "",
+                  "The 0.6B starter is qualified for Vulkan inference at 2,048 context tokens. It is not recommended for chat, reasoning or coding. Qwen3.5 9B is the smallest model that passed the recorded Intel coding tasks; those client checks are separate from this candidate's inference qualification.", "",
+                  "For chat on either Linux backend:", "", "```bash", "zinc model pull qwen35-9b-q4k-m", 'zinc --model-id qwen35-9b-q4k-m --chat --prompt "Explain a ring buffer."', "```", "",
+                  "Vulkan can also launch the browser UI with `zinc chat --model-id qwen35-9b-q4k-m`. ROCm does not include the browser UI.", "",
                   "## Validated hardware and models", "", "Each row ran the exact archive bytes against the pinned llama.cpp reference, including tokenization, generation, streaming/cancellation, and the listed context limit.", "",
                   "| Profile | Hardware | Models (context tokens) |", "| --- | --- | --- |"])
     for report in validation["profiles"]:
@@ -413,7 +415,7 @@ def finalize(args):
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
     notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU memory. Intel Macs, musl, Linux ARM64 and native Windows have no 0.1.0 archive.", "",
                   "Vulkan includes the browser chat UI. ROCm exposes CLI/HTTP chat and completion routes; its standalone server has no built-in browser UI or hot model switching.", "",
-                  "Release checks use greedy decoding, one slot, f32 KV and each backend's default MTP setting. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
+                  "Release checks use greedy decoding, one slot and each backend's default KV/MTP settings. The pinned native reference uses F32 K/V. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
                   "Source-only experimental backends and development features are outside this binary support promise. See `release-policy.json` for model revisions, hashes, the pinned reference commit and mandatory profiles.", ""])
     (directory / "release-notes.md").write_text("\n".join(notes))
     print("Validated installer, policy and release notes frozen for attestation")

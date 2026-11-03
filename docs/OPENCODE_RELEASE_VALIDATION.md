@@ -317,8 +317,10 @@ executable identities below retain their original scope.
 The original required ROCm Gemma 31B allocation blocker is fixed. Gemma 26B
 now completes the core OpenCode sweep on ROCm; other Gemma/backend combinations
 need their own coding qualification.
-The tiny starter remains experimental; stable publication already rejects an
-unqualified starter.
+At that audit the tiny starter remained experimental. Its later
+[inference-only promotion review](STARTER_QUALIFICATION.md) covers Vulkan on
+R9700 and Intel; the recorded coding failures remain failures. Stable
+publication still requires a freshly qualified candidate.
 
 These runs cover one RDNA4 board. The required Apple families, other Linux GPU
 families, signed/notarized Mac delivery and protected release infrastructure
