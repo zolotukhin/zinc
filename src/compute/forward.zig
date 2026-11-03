@@ -2028,7 +2028,9 @@ pub const InferenceEngine = struct {
         const shexp_val = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_val;
         const d_inner_val = if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim;
         const max_k = @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val);
-        var dmmv = try DmmvDispatch.init(instance, &gpu_config, shader_dir, max_k, allocator);
+        var projection_demand: @import("dmmv.zig").ProjectionSpecializations = .{};
+        for (model.tensors.items) |tensor| projection_demand.includeTensor(tensor.info);
+        var dmmv = try DmmvDispatch.initWithSpecializations(instance, &gpu_config, shader_dir, max_k, projection_demand, allocator);
         errdefer dmmv.deinit();
 
         var elementwise = try ElementwiseDispatch.init(instance, shader_dir, allocator);
