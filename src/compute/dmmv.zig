@@ -18,6 +18,28 @@ const log = std.log.scoped(.dmmv);
 const descriptor_pool_max_sets: u32 = 256;
 const descriptors_per_set: u32 = 3;
 
+pub const ProjectionSpecializations = @import("projection_specializations.zig").ProjectionSpecializations;
+
+fn createProjectionSpecialization(
+    demand: ProjectionSpecializations,
+    width: u32,
+    instance: *const Instance,
+    spirv_path: []const u8,
+    binding_count: u32,
+    push_constant_size: u32,
+    spec_constants: []const pipeline_mod.SpecConst,
+    options: pipeline_mod.PipelineOptions,
+    allocator: std.mem.Allocator,
+) !?Pipeline {
+    if (!demand.needs(width)) return null;
+    return try pipeline_mod.createFromSpirvWithOptions(instance, spirv_path, binding_count, push_constant_size, spec_constants, options, allocator);
+}
+
+test "an unrelated specialization returns without opening a file or a GPU" {
+    const demand: ProjectionSpecializations = .{};
+    try std.testing.expectEqual(null, try createProjectionSpecialization(demand, 21504, undefined, "missing.spv", 0, 0, &.{}, .{}, std.testing.allocator));
+}
+
 // Leave room for other workgroup variables (including F32 subgroup sums).
 const shared_input_reserve_bytes: u32 = 1024;
 
@@ -959,6 +981,19 @@ pub const DmmvDispatch = struct {
         /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
+        // Standalone kernel benchmarks retain every supported specialization.
+        return initWithSpecializations(instance, gpu_config, shader_dir, max_k, .all(), allocator);
+    }
+
+    /// Initialize a loaded model with only its applicable fixed-K variants.
+    pub fn initWithSpecializations(
+        instance: *const Instance,
+        gpu_config: *const GpuConfig,
+        shader_dir: []const u8,
+        max_k: u32,
+        projection_demand: ProjectionSpecializations,
+        allocator: std.mem.Allocator,
+    ) !DmmvDispatch {
         const use_wave64 = gpu_config.wave_size == 64;
         const cache_k = try sharedInputCapacity(max_k, instance.device_props.limits.maxComputeSharedMemorySize);
 
@@ -1890,42 +1925,42 @@ pub const DmmvDispatch = struct {
         const geglu_q8_k5376_spec = [_]pipeline_mod.SpecConst{ .{ .id = 0, .value = 5376 }, .{ .id = 2, .value = 1 } };
         const geglu_q8_k5376_n64_spec = [_]pipeline_mod.SpecConst{ .{ .id = 0, .value = 5376 }, .{ .id = 1, .value = 64 }, .{ .id = 2, .value = 1 } };
         const geglu_q8_k5376_n8_spec = [_]pipeline_mod.SpecConst{ .{ .id = 0, .value = 5376 }, .{ .id = 1, .value = 8 }, .{ .id = 2, .value = 1 } };
-        const pipeline_mul_mm_q6k_full_dp4a_k12288 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k12288 = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=12288 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k12288 != null) {
             log.info("mul_mm_q6k_full_dp4a K=12288 pipeline loaded (Qwen3.5-9B dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k12288_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k12288_n64_ragged = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=12288 BN=64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k12288_n64_ragged != null) {
             log.info("mul_mm_q6k_full_dp4a K=12288 BN=64 ragged pipeline loaded (Qwen3.5-9B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k12288_n64_bk2_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k12288_n64_bk2_ragged = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=12288 BN=64 BK2 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k12288_n64_bk2_ragged != null) {
             log.info("mul_mm_q6k_full_dp4a K=12288 BN=64 BK2 ragged pipeline loaded (Qwen3.5-9B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BN=64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64 != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BN=64 pipeline loaded (Qwen dense-hybrid 27B 64-token dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bk2 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bk2 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BN=64 BK2 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bk2 != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BN=64 BK2 pipeline loaded (Qwen dense-hybrid 27B exact 64-token dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bk2_acc = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bk2_acc = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BN=64 BK2 accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -1941,21 +1976,21 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q6k_full_dp4a_n64_bm64_dynk != null) {
             log.info("mul_mm_q6k_full_dp4a BM64 N64 dynamic-K pipeline loaded (fallback tile for unlisted K)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k12288_n64_bm64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k12288_n64_bm64_ragged = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=12288 BM64 BN64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k12288_n64_bm64_ragged != null) {
             log.info("mul_mm_q6k_full_dp4a K=12288 BM64 BN64 ragged pipeline loaded (Qwen3.5-9B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64 != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 pipeline loaded (Qwen dense-hybrid 27B 64-aligned dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64_acc = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64_acc = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -1964,70 +1999,70 @@ pub const DmmvDispatch = struct {
         }
         var mul_mm_q6k_full_dp4a_mmq64_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const mul_mm_q6k_full_dp4a_mmq64_path = std.fmt.bufPrint(&mul_mm_q6k_full_dp4a_mmq64_path_buf, "{s}/mul_mm_q6k_full_dp4a_mmq64_n64_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_mmq64_acc = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_mmq64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_mmq64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_mmq64_acc = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_mmq64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_mmq64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 MMQ64 accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64_mmq64_acc != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 MMQ64 accumulate pipeline loaded (Qwen dense-hybrid 27B exact 64-token dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64_acc_interleaved = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_acc_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64_acc_interleaved = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_acc_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 interleaved accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64_bm64_acc_interleaved != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 interleaved accumulate pipeline loaded (Qwen dense-hybrid 27B exact 64-token dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_ragged = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BN=64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64_ragged != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BN=64 ragged pipeline loaded (Qwen dense-hybrid 27B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_ragged_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n64_ragged_bm64 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n64_ragged_bm64 != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BM64 BN64 ragged pipeline loaded (Qwen dense-hybrid 27B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k17408_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k17408_n40 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_17408_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=17408 BN=40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k17408_n40 != null) {
             log.info("mul_mm_q6k_full_dp4a K=17408 BN=40 pipeline loaded (Qwen dense-hybrid 27B 40-token dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k21504 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k21504 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=21504 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k21504 != null) {
             log.info("mul_mm_q6k_full_dp4a K=21504 pipeline loaded (Gemma 4 31B dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k21504_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k21504_n64_bm64 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q6k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=21504 BM64 BN64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k21504_n64_bm64 != null) {
             log.info("mul_mm_q6k_full_dp4a K=21504 BM64 BN64 pipeline loaded (Gemma 4 31B Q6_K dense-down 64-token prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k21504_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k21504_n64 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=21504 BN=64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k21504_n64 != null) {
             log.info("mul_mm_q6k_full_dp4a K=21504 BN=64 pipeline loaded (Gemma 4 31B Q6_K dense-down 64-token prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k21504_n8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n8, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k21504_n8 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n8, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=21504 BN=8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_k21504_n8 != null) {
             log.info("mul_mm_q6k_full_dp4a K=21504 BN=8 pipeline loaded (Gemma 4 31B dense-down ragged tail)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_k21504_n72 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n72_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_k21504_n72 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q6k_full_dp4a_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_21504_n72_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a K=21504 BN=72 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2050,21 +2085,21 @@ pub const DmmvDispatch = struct {
         }
         var mul_mm_q6k_full_dp4a_q8_1_bm64_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const mul_mm_q6k_full_dp4a_q8_1_bm64_path = std.fmt.bufPrint(&mul_mm_q6k_full_dp4a_q8_1_bm64_path_buf, "{s}/mul_mm_q6k_full_dp4a_q8_1_bm64_n64.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_q8_1_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_bm64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q6k_full_dp4a_q8_1_bm64_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a_q8_1 K=5120 BM64 BN64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_bm64 != null) {
             log.info("mul_mm_q6k_full_dp4a_q8_1 K=5120 BM64 BN64 pipeline loaded (Qwen dense-hybrid 27B SSM wqkv prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_q8_1_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_5120_n64_q6_q8_1_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_ragged = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q6k_full_dp4a_q8_1_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_5120_n64_q6_q8_1_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a_q8_1 K=5120 BN=64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n64_ragged != null) {
             log.info("mul_mm_q6k_full_dp4a_q8_1 K=5120 BN=64 ragged pipeline loaded (Qwen dense-hybrid 27B SSM wqkv prefill)", .{});
         }
-        const pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_dp4a_q8_1_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_5120_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full_dp4a_q8_1_k5120_n40 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q6k_full_dp4a_q8_1_path, 4, @sizeOf(MulMmQ6KDp4aPush), &spec_k_5120_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full_dp4a_q8_1 K=5120 BN=40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2127,21 +2162,21 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_n64 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8 BN=64 pipeline loaded (Gemma 31B 96-column dense gate+up prefill split)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full_dp4a_q8 K=5376 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8 K=5376 pipeline loaded (Gemma 4 31B dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n64_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376_n64 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n64_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full_dp4a_q8 K=5376 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376_n64 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8 K=5376 N64 pipeline loaded (Gemma 4 31B 64-token dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376_n8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n8_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_k5376_n8 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n8_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full_dp4a_q8 K=5376 N8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2158,35 +2193,35 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_gate_up_geglu_n1_dp4a_q8 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_n1_dp4a_q8 pipeline loaded (Gemma 4 31B single-token dense GEGLU)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096 = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=4096 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=4096 pipeline loaded (Qwen3.5-9B dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096_n64 = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=4096 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096_n64 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=4096 N64 pipeline loaded (Qwen3.5-9B 64-token dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64_gateup_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096_n64_ragged = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64_gateup_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=4096 N64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k4096_n64_ragged != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=4096 N64 ragged pipeline loaded (Qwen3.5-9B long dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 pipeline loaded (Qwen dense-hybrid 27B gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2202,35 +2237,35 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_n64_bm64_dynk != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 BM64 N64 dynamic-K pipeline loaded (fallback tile for unlisted K)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 BM64 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 BM64 N64 pipeline loaded (Qwen dense-hybrid 27B 64-token gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64_interleaved = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64_interleaved = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 BM64 N64 interleaved shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_bm64_interleaved != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 BM64 N64 interleaved pipeline loaded (Qwen dense-hybrid 27B 64-token gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 N64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 N64 ragged pipeline loaded (Qwen dense-hybrid 27B long gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged_bm64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 BM64 N64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n64_ragged_bm64 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 BM64 N64 ragged pipeline loaded (Qwen dense-hybrid 27B long gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n40, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_k5120_n40 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n40, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8 K=5120 N40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2264,56 +2299,56 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_n64 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 BN=64 pipeline loaded (Gemma 31B 96-column dense gate+up prefill split)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 K=5376 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 K=5376 pipeline loaded (Gemma 4 31B dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n64_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376_n64 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n64_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 K=5376 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376_n64 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 K=5376 N64 pipeline loaded (Gemma 4 31B 64-token dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376_n8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n8_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376_n8 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &geglu_q8_k5376_n8_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 K=5376 N8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1_k5376_n8 != null) {
             log.info("mul_mm_q4k_gate_up_geglu_full_dp4a_q8_1 K=5376 N8 pipeline loaded (Gemma 4 31B Q4_K-down ragged GEGLU tail)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096 = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=4096 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=4096 pipeline loaded (Qwen3.5-9B dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096_n64 = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=4096 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096_n64 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=4096 N64 pipeline loaded (Qwen3.5-9B 64-token dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64_gateup_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096_n64_ragged = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_4096_n64_gateup_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=4096 N64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k4096_n64_ragged != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=4096 N64 ragged pipeline loaded (Qwen3.5-9B long dense gate+up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 pipeline loaded (Qwen dense-hybrid 27B gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2329,35 +2364,35 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_n64_bm64_dynk != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 BM64 N64 dynamic-K pipeline loaded (fallback tile for unlisted K)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 BM64 N64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 BM64 N64 pipeline loaded (Qwen dense-hybrid 27B 64-token gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64_interleaved = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64_interleaved = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 BM64 N64 interleaved shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_bm64_interleaved != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 BM64 N64 interleaved pipeline loaded (Qwen dense-hybrid 27B 64-token gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 N64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 N64 ragged pipeline loaded (Qwen dense-hybrid 27B long gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged_bm64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_bm64_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 BM64 N64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n64_ragged_bm64 != null) {
             log.info("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 BM64 N64 ragged pipeline loaded (Qwen dense-hybrid 27B long gate/up prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n40, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_k5120_n40 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_gateup_dp4a_q8_1_path, 6, @sizeOf(MulMmQ4KGateUpDp4aQ8Push), &spec_k_5120_n40, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1 K=5120 N40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2383,14 +2418,14 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_full_dp4a != null) {
             log.info("mul_mm_q4k_full_dp4a pipeline loaded (int8 DP4a Qwen dense-hybrid 27B SSM z prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k2816_n8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_2816_n8, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k2816_n8 = createProjectionSpecialization(projection_demand, 2816, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_2816_n8, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=2816 BN=8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k2816_n8 != null) {
             log.info("mul_mm_q4k_full_dp4a K=2816 BN=8 pipeline loaded (Gemma 26B Q4_K LM-head decode)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k5376_n8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5376_n8, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k5376_n8 = createProjectionSpecialization(projection_demand, 5376, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5376_n8, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=5376 BN=8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2399,70 +2434,70 @@ pub const DmmvDispatch = struct {
         }
         var mul_mm_q4k_full_dp4a_bm64_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const mul_mm_q4k_full_dp4a_bm64_path = std.fmt.bufPrint(&mul_mm_q4k_full_dp4a_bm64_path_buf, "{s}/mul_mm_q4k_full_dp4a_bm64_n64_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k_full_dp4a_k5120_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k5120_n64_bm64 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5120_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=5120 BM64 BN64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k5120_n64_bm64 != null) {
             log.info("mul_mm_q4k_full_dp4a K=5120 BM64 BN64 pipeline loaded (Qwen dense-hybrid 27B SSM z prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k5120_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k5120_n64_ragged = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5120_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=5120 BN=64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k5120_n64_ragged != null) {
             log.info("mul_mm_q4k_full_dp4a K=5120 BN=64 ragged pipeline loaded (Qwen dense-hybrid 27B SSM z prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k5120_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5120_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k5120_n40 = createProjectionSpecialization(projection_demand, 5120, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_5120_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=5120 BN=40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k5120_n40 != null) {
             log.info("mul_mm_q4k_full_dp4a K=5120 BN=40 pipeline loaded (Qwen dense-hybrid 27B SSM z 40-token prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k12288 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k12288 = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=12288 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k12288 != null) {
             log.info("mul_mm_q4k_full_dp4a K=12288 pipeline loaded (Qwen3.5-9B dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k12288_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k12288_n64_ragged = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=12288 BN=64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k12288_n64_ragged != null) {
             log.info("mul_mm_q4k_full_dp4a K=12288 BN=64 ragged pipeline loaded (Qwen3.5-9B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bk2_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bk2_ragged = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=12288 BN=64 BK2 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bk2_ragged != null) {
             log.info("mul_mm_q4k_full_dp4a K=12288 BN=64 BK2 ragged pipeline loaded (Qwen3.5-9B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bm64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bm64_ragged = createProjectionSpecialization(projection_demand, 12288, instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_12288_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=12288 BM64 BN64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k12288_n64_bm64_ragged != null) {
             log.info("mul_mm_q4k_full_dp4a K=12288 BM64 BN64 ragged pipeline loaded (Qwen3.5-9B long dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BN=64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64 != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BN=64 pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down 64-token bodies)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bk2 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bk2 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BN=64 BK2 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bk2 != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BN=64 BK2 pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down exact 64-token body)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bk2_acc = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bk2_acc = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BN=64 BK2 accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2476,14 +2511,14 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_full_dp4a_n64_bm64_dynk != null) {
             log.info("mul_mm_q4k_full_dp4a BM64 N64 dynamic-K pipeline loaded (fallback tile for unlisted K)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64 != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down 64-aligned bodies)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64_acc = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64_acc = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_acc, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2492,56 +2527,56 @@ pub const DmmvDispatch = struct {
         }
         var mul_mm_q4k_full_dp4a_mmq64_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const mul_mm_q4k_full_dp4a_mmq64_path = std.fmt.bufPrint(&mul_mm_q4k_full_dp4a_mmq64_path_buf, "{s}/mul_mm_q4k_full_dp4a_mmq64_n64_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_mmq64_acc = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_mmq64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_mmq64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_mmq64_acc = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_mmq64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_mmq64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 MMQ64 accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64_mmq64_acc != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 MMQ64 accumulate pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down exact 64-token body)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64_acc_interleaved = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_acc_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64_acc_interleaved = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_acc_interleaved, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 interleaved accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64_bm64_acc_interleaved != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 interleaved accumulate pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down exact 64-token body)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_ragged = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_ragged = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BN=64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64_ragged != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BN=64 ragged pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down long bodies)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_ragged_bm64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n64_ragged_bm64 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_bm64_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n64_bk2_ragged, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 ragged shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n64_ragged_bm64 != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BM64 BN64 ragged pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down long bodies)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k17408_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k17408_n40 = createProjectionSpecialization(projection_demand, 17408, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_17408_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=17408 BN=40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k17408_n40 != null) {
             log.info("mul_mm_q4k_full_dp4a K=17408 BN=40 pipeline loaded (Qwen dense-hybrid 27B Q4_K dense-down 40-token bodies)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k21504 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_21504, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k21504 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_21504, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=21504 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k21504 != null) {
             log.info("mul_mm_q4k_full_dp4a K=21504 pipeline loaded (Gemma 4 31B dense-down prefill)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k21504_n64 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_21504_n64, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k21504_n64 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_21504_n64, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=21504 BN=64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q4k_full_dp4a_k21504_n64 != null) {
             log.info("mul_mm_q4k_full_dp4a K=21504 BN=64 pipeline loaded (Gemma 4 31B Q4_K dense-down 64-token bodies)", .{});
         }
-        const pipeline_mul_mm_q4k_full_dp4a_k21504_n8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_21504_n8, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_full_dp4a_k21504_n8 = createProjectionSpecialization(projection_demand, 21504, instance, mul_mm_q4k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_21504_n8, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_full_dp4a K=21504 BN=8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -2559,14 +2594,14 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q5k_full_dp4a != null) {
             log.info("mul_mm_q5k_full_dp4a pipeline loaded (int8 DP4a Qwen dense-hybrid 27B SSM out prefill)", .{});
         }
-        const pipeline_mul_mm_q5k_full_dp4a_k4096_bk2 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q5k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_4096_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q5k_full_dp4a_k4096_bk2 = createProjectionSpecialization(projection_demand, 4096, instance, mul_mm_q5k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_4096_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q5k_full_dp4a K=4096 BK2 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         if (pipeline_mul_mm_q5k_full_dp4a_k4096_bk2 != null) {
             log.info("mul_mm_q5k_full_dp4a K=4096 BK2 pipeline loaded (Qwen3.5-9B SSM Q5_K prefill)", .{});
         }
-        const pipeline_mul_mm_q5k_full_dp4a_k6144_n40 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q5k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_6144_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q5k_full_dp4a_k6144_n40 = createProjectionSpecialization(projection_demand, 6144, instance, mul_mm_q5k_full_dp4a_path, 4, @sizeOf(MulMmQ4KGateUpDp4aPush), &spec_k_6144_n40_bk2, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q5k_full_dp4a K=6144 BN=40 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

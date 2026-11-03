@@ -150,6 +150,7 @@ comptime {
     _ = @import("model/tokenizer.zig");
     _ = @import("compute/graph.zig");
     _ = @import("compute/launch_sizes.zig");
+    _ = @import("compute/projection_specializations.zig");
     _ = @import("compute/kv_storage.zig");
     _ = @import("build_info.zig");
     _ = @import("runtime_assets.zig");
