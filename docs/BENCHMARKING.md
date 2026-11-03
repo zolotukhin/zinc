@@ -129,6 +129,11 @@ record the performance baseline and correctness oracle separately. Publication
 replaces only a passing model's rows and preserves its complete old record and
 caution in measurement history.
 
+The [Intel Arc protocol](INTEL_PERFORMANCE.md) extends these correctness and
+matched-server checks to all seven Intel release models, with streaming
+first-content latency, startup, and process/GPU memory evidence. Both model
+inference engines use the Intel GPU; there is no CPU-only inference baseline.
+
 ### Controlled 27B campaign
 
 [`tools/benchmark_matched_mtp.py`](../tools/benchmark_matched_mtp.py) uses the

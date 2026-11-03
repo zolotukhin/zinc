@@ -203,22 +203,23 @@ dense FFN, and MoE branches live in the active backend's forward implementation.
 
 ### Tests and performance tooling
 
-| Area                                                              | Start here                                                              |
-| ----------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Zig regression tests                                              | `src/regression_tests.zig`                                              |
-| Integration and API tests                                         | `tests/`                                                                |
-| Microbenchmarks                                                   | `benchmarks/`, `src/bench_hot_decode.zig`                               |
-| Fair cross-backend suite                                          | `tools/performance_suite.mjs`                                           |
-| ROCm attention CPU/GPU reference checks                           | `tools/validate_rocm_attention.c`                                       |
-| ROCm packed matrix CPU/GPU and verifier row checks                | `tools/validate_rocm_q8_matvec.c`                                       |
-| Exact-prefix cache parity                                         | `tools/validate_rocm_prompt_cache.mjs`                                  |
-| OpenCode setup, bounded tool hook, verified rounds                | `tools/setup_opencode.mjs`                                              |
-| CPU OpenCode protocol and lifecycle                               | `tools/validate_opencode_harness.mjs`                                   |
-| OpenCode preview CLI regressions                                  | `tools/setup_opencode_preview.test.ts`                                  |
-| Optimization harnesses                                            | `loops/`                                                                |
-| Binary release policy, packaging, GPU certification and promotion | `config/release/targets.json`, `tools/release*.py`, `docs/RELEASING.md` |
-| Verified installation and rollback                                | `scripts/install.sh`, `tools/release_test.py`                           |
-| Restricted Intel SSH qualification transport                      | `tools/release_ssh.py`, `docs/RELEASE_SSH_WORKER.md`                    |
+| Area                                                              | Start here                                                                            |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Zig regression tests                                              | `src/regression_tests.zig`                                                            |
+| Integration and API tests                                         | `tests/`                                                                              |
+| Microbenchmarks                                                   | `benchmarks/`, `src/bench_hot_decode.zig`                                             |
+| Fair cross-backend suite                                          | `tools/performance_suite.mjs`                                                         |
+| ROCm attention CPU/GPU reference checks                           | `tools/validate_rocm_attention.c`                                                     |
+| ROCm packed matrix CPU/GPU and verifier row checks                | `tools/validate_rocm_q8_matvec.c`                                                     |
+| Exact-prefix cache parity                                         | `tools/validate_rocm_prompt_cache.mjs`                                                |
+| OpenCode setup, bounded tool hook, verified rounds                | `tools/setup_opencode.mjs`                                                            |
+| CPU OpenCode protocol and lifecycle                               | `tools/validate_opencode_harness.mjs`                                                 |
+| OpenCode preview CLI regressions                                  | `tools/setup_opencode_preview.test.ts`                                                |
+| Optimization harnesses                                            | `loops/`                                                                              |
+| Binary release policy, packaging, GPU certification and promotion | `config/release/targets.json`, `tools/release*.py`, `docs/RELEASING.md`               |
+| Verified installation and rollback                                | `scripts/install.sh`, `tools/release_test.py`                                         |
+| Restricted Intel SSH qualification transport                      | `tools/release_ssh.py`, `docs/RELEASE_SSH_WORKER.md`                                  |
+| Intel Arc GPU performance and memory measurements                 | `tools/benchmark_intel.py`, `tools/benchmark_metrics.py`, `docs/INTEL_PERFORMANCE.md` |
 
 Treat implementation source and command `--help` output as authoritative for
 current environment flags, thresholds, supported formats, and benchmark cases.

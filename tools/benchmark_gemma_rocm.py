@@ -36,36 +36,45 @@ def reference_identity(directory, source, env, pin):
     return {"commit": pin, "version": version.strip(), **gpu.reference_artifacts(directory)}
 
 
+def correctness_prompts(model_pin):
+    """Every model keeps short probes; sliding-window models also cross the mask."""
+    window = model_pin.get("sliding_window")
+    return gpu.PROMPTS + ([
+        "The following is reference filler.\n" + "word " * (window + 76)
+        + "\nIgnore the filler and answer this request: " + prompt for prompt in gpu.PROMPTS
+    ] if window else [])
+
+
 def correctness(args, work, env, model_pin):
     """Reuse release generation and agreement limits with the recorded oracle."""
-    prompts = gpu.PROMPTS + [
-        "The following is reference filler.\n" + "word " * (model_pin["sliding_window"] + 76)
-        + "\nIgnore the filler and answer this request: " + prompt for prompt in gpu.PROMPTS
-    ]
+    window = model_pin.get("sliding_window")
+    context = getattr(args, "context", 4096)
+    prompts = correctness_prompts(model_pin)
     oracle_env = {**env, "RADV_PERFTEST": "coop_matrix"}
     oracle_args = ["--device", args.oracle_device, "-ngl", "999", "-t", "4", "-tb", "4", "--spec-type", "none", "--no-cache-prompt"]
     device = getattr(args, "zinc_device", 0)
-    print("Correctness: six complete CLI continuations, including three beyond the sliding window", flush=True)
+    print("Correctness: " + str(len(prompts)) + " complete CLI continuations" + (", including sliding-window boundaries" if window else ""), flush=True)
     samples = gpu.inference_parity(args.zinc_tree, args.oracle, args.model,
-                                   4096, device, oracle_args, work, oracle_env, prompts=prompts)
+                                   context, device, oracle_args, work, oracle_env, prompts=prompts)
     cases = []
     for index, (rendered, expected) in enumerate(samples):
         prompt_file = work / f"prompt-{index}.txt"
         prompt_file.write_text(rendered)
         count = len(gpu.token_ids(gpu.output([str(args.zinc_tree / "bin/zinc-tokenize"), str(args.model), str(prompt_file)], env)))
         if index >= len(gpu.PROMPTS):
-            assert count > model_pin["sliding_window"] and count + 16 <= 4096, "extended prompt did not cross the sliding window"
+            assert count > window and count + 16 <= context, "extended prompt did not cross the sliding window"
         actual = gpu.cli_generated_ids((work / f"continuation-{index}.log").read_text())
         cases.append({"prompt": rendered, "prompt_tokens": count,
                       "reference_ids": gpu.reference_generated_ids(expected), "zinc_ids": actual,
                       "reference_text": expected["content"], "validated_text": expected.get("validated_content"),
                       "comparison": expected["comparison"]})
     print("Correctness: complete HTTP continuations, cancellation and context/error recovery", flush=True)
-    gpu.api_checks(args.zinc_tree, args.model, 4096, device, work, env, False, samples)
+    check_prefill = getattr(args, "backend", "vulkan") == "vulkan" and model_pin["id"] == "qwen36-35b-a3b-q4k-xl"
+    prefill = gpu.api_checks(args.zinc_tree, args.model, context, device, work, env, False, samples, check_prefill)
     return {"passed": True, "oracle_backend": "Vulkan", "generation": policy()["reference"]["generation"],
             "agreement_policy": policy()["reference"]["agreement"],
-            "reference_agreement": reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=6),
-            "cases": cases, "http_full_continuations": 18,
+            "reference_agreement": reference_agreement([expected["comparison"] for _, expected in samples], expected_cases=len(prompts)),
+            "cases": cases, "http_full_continuations": 3 * len(samples), "prefill_cancellation": prefill,
             "http_after_cancellation": True, "http_after_context_error": True}
 
 
