@@ -1,9 +1,11 @@
 # ZINC binary releases
 
-The first binary release is undergoing hardware qualification. There is no
-published binary download yet; [build from source](/zinc/docs/getting-started/)
-to use ZINC today. Published archives and their validation reports will appear
-on [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
+[Linux 0.1.0-rc.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0-rc.1)
+is available as a prerelease, with Vulkan and ROCm archives, checksums, an
+installer and signed provenance. All three mandatory GPU profiles pass on the
+[exact candidate bytes](/zinc/validation/release-candidate-0.1.0-rc.1-2026-11-03.json).
+The first stable `0.1.0` release is still undergoing qualification. Select the
+RC version explicitly when installing; it is not the default stable download.
 
 ## Choose an archive
 
@@ -27,23 +29,22 @@ An OS/ABI floor describes the executable's compatibility. Read each release's `v
 
 ## Install a published version
 
-Once the release is published, download `install.sh` from that release and
-inspect it before running it. For `v0.1.0`:
+Download `install.sh` from the published RC and inspect it before running it:
 
 ```bash
-curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0-rc.1/install.sh -o install.sh
 ```
 
 Then install:
 
 ```bash
-ZINC_VERSION=v0.1.0 bash install.sh
+ZINC_VERSION=v0.1.0-rc.1 bash install.sh
 ```
 
 On Linux this selects Vulkan. Choose ROCm explicitly:
 
 ```bash
-ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.0-rc.1 ZINC_BACKEND=rocm bash install.sh
 ```
 
 The installer checks the available archive list and every file, verifies architecture/runtime compatibility, and runs `--version` before activating the new installation. It needs Bash, curl, tar and standard system utilities; it does not need Zig, Python or a source checkout. Install GPU drivers first. Vulkan archives contain compiled SPIR-V; users do not need `glslc`. A Linux-only release cleanly rejects a Mac installation request before downloading an archive.
@@ -70,8 +71,8 @@ installation check. It is not recommended for chat, reasoning or coding.
 Qwen3.5 9B is the starting chat model on either Linux backend and the smallest
 model that passed the recorded Intel coding tasks. Those client checks remain
 separate from release qualification. Larger Qwen and Gemma models need
-substantially more GPU memory. All three final-candidate profiles must still
-pass after the catalog promotion.
+substantially more GPU memory. Stable publication requires all three
+final-candidate profiles, including the reviewed starter scope.
 
 Managed downloads use immutable upstream revisions and SHA256 pins. Models are downloaded separately. On Metal, use `zinc model pull <id>` and `--model-id <id>` so models stay in the managed cache.
 
@@ -89,12 +90,12 @@ Rollback switches the executable and matching shaders together. It does not move
 
 ## Verify a manual download
 
-Archive names include platform and backend, for example `zinc-v0.1.0-linux-x86_64-vulkan.tar.gz`. Download the archive and `SHA256SUMS.txt` from the same release. Check the selected entry with `sha256sum` on Linux or `shasum -a 256` on macOS, then extract into its own directory and keep `bin/` and `share/` together.
+Archive names include platform and backend, for example `zinc-v0.1.0-rc.1-linux-x86_64-vulkan.tar.gz`. Download the archive and `SHA256SUMS.txt` from the same release. Check the selected entry with `sha256sum` on Linux or `shasum -a 256` on macOS, then extract into its own directory and keep `bin/` and `share/` together.
 
 Each release also publishes `release-manifest.json`, `release-policy.json`, `validation.json` and `provenance.jsonl`. For independent provenance verification with the GitHub CLI:
 
 ```bash
-gh attestation verify zinc-v0.1.0-linux-x86_64-vulkan.tar.gz \
+gh attestation verify zinc-v0.1.0-rc.1-linux-x86_64-vulkan.tar.gz \
   --bundle provenance.jsonl --repo zolotukhin/zinc \
   --signer-workflow zolotukhin/zinc/.github/workflows/release-candidate.yml \
   --source-ref refs/heads/main --deny-self-hosted-runners

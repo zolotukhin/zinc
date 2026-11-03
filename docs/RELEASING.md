@@ -266,8 +266,11 @@ python3 -m unittest discover -s tools -p release_test.py
 ```
 
 The same contracts run through the normal Bun/Zig CI suite. These local
-fixtures test failure handling; the Linux RC still needs an actual protected
-publication and clean public-download/install rehearsal before 0.1.0.
+fixtures test failure handling. The first Linux RC is now
+[published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0-rc.1);
+its [protected publisher](https://github.com/zolotukhin/zinc/actions/runs/41712364015)
+passes verification of the real public downloads and clean installation on
+both Linux backends.
 
 ## Qualification still required before 0.1.0
 
@@ -277,8 +280,10 @@ qualified the common Linux `0.1.0-rc.1` in
 All three selected profiles pass on source `40d648f0`; the
 [candidate validation report](/zinc/validation/release-candidate-0.1.0-rc.1-2026-11-03.json)
 retains the exact archive/model/reference identities and cleanup results.
-Rehearse protected publication/public installation next. Build and
-qualify a separate final-version candidate with the reviewed catalog before
+The [RC publication rehearsal](https://github.com/zolotukhin/zinc/actions/runs/41712364015)
+passes verification of those unchanged bytes and both public install jobs.
+Qualify the [separate final-version candidate](https://github.com/zolotukhin/zinc/actions/runs/41712528792)
+with the reviewed catalog before
 stable publication. Metal stays an unsigned preview;
 the other hardware profiles can be qualified later. Broader optional-feature,
 memory-rejection and performance-regression qualification remains necessary
