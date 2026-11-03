@@ -1567,6 +1567,10 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("not recommended for chat, reasoning or coding", notes)
         self.assertNotIn("qwen3-0.6b-q8-0 --chat", notes)
         self.assertIn("qwen35-9b-q4k-m --chat", notes)
+        # Public notes are generated independently of the preparation brief;
+        # keep its known limitation and source-frozen evidence visible there.
+        self.assertIn("slower decode than llama.cpp on all seven models", notes)
+        self.assertIn("https://github.com/zolotukhin/zinc/blob/" + COMMIT + "/docs/INTEL_PERFORMANCE.md", notes)
 
     def test_stable_starter_coverage_must_match_the_selected_linux_profiles(self):
         for profiles in ('', '"apple-silicon"', '"amd-rdna4-32gb"', '"intel-arc"', '"unknown-profile"',
