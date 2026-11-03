@@ -24,7 +24,8 @@ see [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
 [Linux 0.1.0-rc.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0-rc.1)
 is available for Vulkan and ROCm; select that version explicitly when installing.
-The final 0.1.0 binaries are undergoing [qualification](docs/releases/0.1.0-plan.md).
+The final 0.1.0 candidate has passed [qualification](docs/releases/0.1.0-plan.md)
+and awaits protected publication.
 The commands below build from source.
 
 Install the [prerequisites for your GPU](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)

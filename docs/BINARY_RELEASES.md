@@ -4,7 +4,9 @@
 is available as a prerelease, with Vulkan and ROCm archives, checksums, an
 installer and signed provenance. All three mandatory GPU profiles pass on the
 [exact candidate bytes](/zinc/validation/release-candidate-0.1.0-rc.1-2026-11-03.json).
-The first stable `0.1.0` release is still undergoing qualification. Select the
+The final `0.1.0` candidate has also passed
+[qualification](/zinc/validation/release-candidate-0.1.0-2026-11-03.json) and
+awaits protected publication. Select the
 RC version explicitly when installing; it is not the default stable download.
 
 ## Choose an archive

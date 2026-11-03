@@ -272,19 +272,20 @@ its [protected publisher](https://github.com/zolotukhin/zinc/actions/runs/417123
 passes verification of the real public downloads and clean installation on
 both Linux backends.
 
-## Qualification still required before 0.1.0
+## Publication still required before 0.1.0
 
 The Intel SSH endpoint/controller and R9700 worker are configured and have
-qualified the common Linux `0.1.0-rc.1` in
-[candidate run 41705323449](https://github.com/zolotukhin/zinc/actions/runs/41705323449).
-All three selected profiles pass on source `40d648f0`; the
-[candidate validation report](/zinc/validation/release-candidate-0.1.0-rc.1-2026-11-03.json)
+qualified the final Linux `0.1.0` in
+[candidate run 41712528792](https://github.com/zolotukhin/zinc/actions/runs/41712528792).
+All three selected profiles pass on source `c3d4c0a2`; the
+[candidate validation report](/zinc/validation/release-candidate-0.1.0-2026-11-03.json)
 retains the exact archive/model/reference identities and cleanup results.
 The [RC publication rehearsal](https://github.com/zolotukhin/zinc/actions/runs/41712364015)
-passes verification of those unchanged bytes and both public install jobs.
-Qualify the [separate final-version candidate](https://github.com/zolotukhin/zinc/actions/runs/41712528792)
-with the reviewed catalog before
-stable publication. Metal stays an unsigned preview;
+passes verification of its separate RC bytes and both public install jobs.
+The final bundle also passes independent provenance and stable catalog checks.
+Approve the [protected stable publisher](https://github.com/zolotukhin/zinc/actions/runs/41720058647),
+then verify stable public downloads, installation and isolated upgrade/rollback
+before closing issue #10. Metal stays an unsigned preview;
 the other hardware profiles can be qualified later. Broader optional-feature,
 memory-rejection and performance-regression qualification remains necessary
 before advertising those features. Merging implementation does not create a
