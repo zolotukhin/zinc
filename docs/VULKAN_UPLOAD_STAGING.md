@@ -71,6 +71,19 @@ models' tokenizer, complete short/extended CLI and initial HTTP checks. Both
 Gemmas cross their 1,024-token sliding window. Of 432 native choices, 431 match
 exactly and one meets the unchanged near-tie policy. The evidence retains both
 exact archives, reference identities and the operator experiment sources.
-These checks cover initial HTTP continuations. Final candidate cancellation
-and recovery gates remain separate and must test the combined package on every
-mandatory Linux GPU profile.
+Those earlier checks cover initial HTTP continuations.
+
+The [fresh combined-preview sweep](/zinc/validation/intel-vulkan-upload-final-checks-2026-11-03.json)
+tests archive `dc24bbbc6f35` from
+[packaging run 41664659161](https://github.com/zolotukhin/zinc/actions/runs/41664659161),
+including the merged pipeline selection and the review fixes above. All seven
+Intel models pass 376 numerical cases, tokenizer parity, complete short and
+sliding-window continuations, HTTP, cancellation and context/error recovery.
+Of 432 native token choices, 431 match exactly; the remaining Qwen MoE choice
+has a 0.0155 log-probability gap within the unchanged 0.05 allowance. The flagship
+also passes active-prefill cancellation and recovers its slot in 2,406 ms.
+Every owned GPU process is stopped afterward. The downloadable report records
+archive, executable, model, reference and validation-source identities.
+
+This is preview readiness on one Intel GPU. Final release certification still
+requires one frozen candidate across all mandatory Linux profiles.
