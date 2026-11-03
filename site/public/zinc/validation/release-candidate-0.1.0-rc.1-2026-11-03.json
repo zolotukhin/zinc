@@ -1,0 +1,947 @@
+{
+  "commit": "40d648f0b7d4dbcf219b0e72af215f7cdb2d880c",
+  "manifest_sha256": "e1ef6a2832e59912a194885b7e6f49dc2fcbe3569ffe0e3c8785ad60abfa6aab",
+  "policy_sha256": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+  "profiles": [
+    {
+      "archive_sha256": "8d289e4d8890e3c2f15afa075a68145e5b254af73fe2f131a9fdd7f05fa6305a",
+      "binary_sha256": "26368258c133fef99b06ac6468076e4f4bb73656e4aae8232c1dd899eb62d32b",
+      "checks": {
+        "cleanup": true,
+        "gpu": true,
+        "http": true,
+        "identity": true,
+        "inference_parity": true,
+        "kernel_reference": true,
+        "model_hash": true,
+        "package": true,
+        "tokenizer_parity": true
+      },
+      "commit": "40d648f0b7d4dbcf219b0e72af215f7cdb2d880c",
+      "family": "gfx1201",
+      "hardware": {
+        "driver": "ROCm 7.2.4",
+        "gpu": "AMD Radeon Graphics",
+        "os": "Linux 7.2.2-070202-generic"
+      },
+      "models": [
+        {
+          "context": 4096,
+          "id": "qwen38-27b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+        },
+        {
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 36337,
+                    "logprob_gap": 0.032131314277648926,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 3618
+                  }
+                ],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+        },
+        {
+          "context": 4096,
+          "id": "qwen36-27b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+        },
+        {
+          "context": 4096,
+          "id": "qwen35-9b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+        },
+        {
+          "bounded_prefill": {
+            "cases": 3,
+            "chunk_tokens": 16,
+            "passed": true,
+            "tokens": 48
+          },
+          "context": 4096,
+          "id": "gemma4-31b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+          "sliding_window_reference": {
+            "context": 4096,
+            "http_passed": true,
+            "maximum_prompt_tokens": 1139,
+            "minimum_prompt_tokens": 1136,
+            "passed": true,
+            "reference_agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [
+                    {
+                      "chosen_id": 80288,
+                      "logprob_gap": 0.0398978590965271,
+                      "position": 11,
+                      "rank": 2,
+                      "reference_id": 35615
+                    }
+                  ],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 47,
+              "near_tie_tokens": 1,
+              "total_tokens": 48
+            },
+            "window_tokens": 1024
+          }
+        },
+        {
+          "context": 4096,
+          "id": "gemma4-26b-a4b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+          "sliding_window_reference": {
+            "context": 4096,
+            "http_passed": true,
+            "maximum_prompt_tokens": 1139,
+            "minimum_prompt_tokens": 1136,
+            "passed": true,
+            "reference_agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "window_tokens": 1024
+          }
+        }
+      ],
+      "options": {
+        "greedy": true,
+        "kv_cache": "backend-default",
+        "mtp": "backend-default",
+        "parallel": 1
+      },
+      "policy_sha256": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+      "profile": "rocm-rdna4",
+      "reference": {
+        "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "device_backend": "rocm",
+        "generation": {
+          "batch_size": 512,
+          "flash_attention": false,
+          "kv_cache": "f32",
+          "micro_batch": 1,
+          "parallel": 1
+        },
+        "library_sha256": {
+          "libggml-base.so": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+          "libggml-base.so.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+          "libggml-base.so.0.23.0": "01eef54c81383e0fe062bf224285243276d08e6f6d726fc7d5500f8bab26ac73",
+          "libggml-cpu.so": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+          "libggml-cpu.so.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+          "libggml-cpu.so.0.23.0": "d13d2c9dc5f6ebccc54640fec36f1cb4286fef54f1297052c896804e5bc6c67b",
+          "libggml-hip.so": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+          "libggml-hip.so.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+          "libggml-hip.so.0.23.0": "b8ea0b394e4812d799d56b2a00ae42deb4762999c8ee5fc387453af3e5d65f50",
+          "libggml.so": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+          "libggml.so.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+          "libggml.so.0.23.0": "b05f01c864ce007e5e9f1804cafeaaa5ed81b1482ea1aa556aecbcb1b645f417",
+          "libllama-common.so.0": "d734d118bbe2fcbb64fbdbc85f628fd60ebb2ec8948c04f0d348b40e6cf74eda",
+          "libllama-server-impl.so": "dc719a4a00985859a23827f16fdbc365752e100c2759139fed708dfbbfc97e96",
+          "libllama.so": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+          "libllama.so.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff",
+          "libllama.so.0.4.0": "2932cfcbe842146c831a7ed774225f28796fe766ad1242059b18efcf0a4919ff"
+        },
+        "server_sha256": "abfb9322807d5fd912607aba1aab6c59e1c7eb8b89b899176bff410eb22c25b7",
+        "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+      },
+      "rocm_kernel_reference": {
+        "cases": 305,
+        "kernel_source_sha256": "9b532981f9a81c54548bb7d1d2a78bba59e90cda42e0f9a425f0ad5bf0b3835b",
+        "passed": true,
+        "validator_source_sha256": "39a35b4beadbe69db7e2a0b1adad17b0e4ebf56fdfb94f9ad46f65a1d4aff3f1"
+      },
+      "schema_version": 1,
+      "target": "linux-x86_64-rocm",
+      "version": "0.1.0-rc.1"
+    },
+    {
+      "archive_sha256": "ceeb0e1a1c103fc87b0f8db76f332aa0cce37553a76a46aaa95bfb3bfaefbf44",
+      "binary_sha256": "28270a5ddec6cf6b042bf5d7f3c8af680f504e30dec224b99caca3a3d0857c62",
+      "checks": {
+        "cleanup": true,
+        "gpu": true,
+        "http": true,
+        "identity": true,
+        "inference_parity": true,
+        "kernel_reference": true,
+        "model_hash": true,
+        "package": true,
+        "tokenizer_parity": true
+      },
+      "commit": "40d648f0b7d4dbcf219b0e72af215f7cdb2d880c",
+      "family": "intel-xe2",
+      "hardware": {
+        "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+        "gpu": "Intel(R) Graphics (BMG G31)",
+        "os": "Linux 7.2.7-arch1-1"
+      },
+      "models": [
+        {
+          "context": 2048,
+          "id": "qwen3-0.6b-q8-0",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+        },
+        {
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "passed": true,
+          "prefill_cancellation": {
+            "passed": true,
+            "recovery_ms": 2405
+          },
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [
+                  {
+                    "chosen_id": 3618,
+                    "logprob_gap": 0.015493392944335938,
+                    "position": 11,
+                    "rank": 2,
+                    "reference_id": 36337
+                  }
+                ],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 47,
+            "near_tie_tokens": 1,
+            "total_tokens": 48
+          },
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+        },
+        {
+          "context": 4096,
+          "id": "qwen36-27b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+        },
+        {
+          "context": 4096,
+          "id": "qwen35-9b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+        },
+        {
+          "context": 4096,
+          "id": "gemma4-31b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+          "sliding_window_reference": {
+            "context": 4096,
+            "http_passed": true,
+            "maximum_prompt_tokens": 1139,
+            "minimum_prompt_tokens": 1136,
+            "passed": true,
+            "reference_agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "window_tokens": 1024
+          }
+        },
+        {
+          "context": 4096,
+          "id": "gemma4-26b-a4b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+          "sliding_window_reference": {
+            "context": 4096,
+            "http_passed": true,
+            "maximum_prompt_tokens": 1139,
+            "minimum_prompt_tokens": 1136,
+            "passed": true,
+            "reference_agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "window_tokens": 1024
+          }
+        },
+        {
+          "context": 4096,
+          "id": "qwen38-27b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+        }
+      ],
+      "options": {
+        "greedy": true,
+        "kv_cache": "backend-default",
+        "mtp": "backend-default",
+        "parallel": 1
+      },
+      "policy_sha256": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+      "profile": "vulkan-intel-xe2",
+      "reference": {
+        "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "device_backend": "vulkan",
+        "generation": {
+          "batch_size": 512,
+          "flash_attention": false,
+          "kv_cache": "f32",
+          "micro_batch": 1,
+          "parallel": 1
+        },
+        "library_sha256": {
+          "libggml-base.so": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-base.so.0.23.0": "411a0706b7a90d37fe20ab65e88ab83a70d64ed420e2613445cc818d4fe88fea",
+          "libggml-cpu.so": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-cpu.so.0.23.0": "441b077bdea867d421a8219dcb836e19aa6639f1a7b33a8e7ba6e9bf12af34ba",
+          "libggml-vulkan.so": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml-vulkan.so.0.23.0": "8f6a37171edd643934d381bc2da746077789375eb48bf898ceb89c3299dd39e5",
+          "libggml.so": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libggml.so.0.23.0": "cbae1c4774af07a35c96a33eb895b3efded8eb800926138f840b16658eb957a4",
+          "libllama-common.so": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-common.so.0.4.0": "d2982297510d1082d01567ee38bc699de2e1b40fa3650d8dbdee490c11a9b8b7",
+          "libllama-server-impl.so": "44473c918ececb2d13c405a04ce03b1946db668dd1e34f9107ff213d3cb7090e",
+          "libllama.so": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee",
+          "libllama.so.0.4.0": "63e183ed7b517c874148df9f18c8b042109ae2b7bab352409ba17b8d83f72fee"
+        },
+        "server_sha256": "37e428f918c0d29d95e0ff19cd9bb27fa41e8663186361c2fecab0ce1e5209a6",
+        "tokenizer_sha256": "2714f61923806658984c7ee685dd77da35264698232ddae3433d438de23d0ff9"
+      },
+      "schema_version": 1,
+      "target": "linux-x86_64-vulkan",
+      "transport": {
+        "artifact_digest": "sha256:ae6b1f0a8a266482baca7fc53c7a95c8153cca2959daf8cde057db5e64739374",
+        "artifact_id": 13265920478,
+        "cleanup": true,
+        "controller_attempt": 1,
+        "controller_run": 41705323449,
+        "helpers_sha256": {
+          "release_ssh.py": "648d74bc0df39c2d78ff596cb02113747e740d7440f801764d97e5b37b5fc085",
+          "release_worker_guard.py": "8da0de076d0c0f886782757961c7ce433875bb7d023e9f75f43c6d8e143f1158"
+        },
+        "kind": "ssh",
+        "validation_commit": "40d648f0b7d4dbcf219b0e72af215f7cdb2d880c"
+      },
+      "version": "0.1.0-rc.1"
+    },
+    {
+      "archive_sha256": "ceeb0e1a1c103fc87b0f8db76f332aa0cce37553a76a46aaa95bfb3bfaefbf44",
+      "binary_sha256": "28270a5ddec6cf6b042bf5d7f3c8af680f504e30dec224b99caca3a3d0857c62",
+      "checks": {
+        "cleanup": true,
+        "gpu": true,
+        "http": true,
+        "identity": true,
+        "inference_parity": true,
+        "kernel_reference": true,
+        "model_hash": true,
+        "package": true,
+        "tokenizer_parity": true
+      },
+      "commit": "40d648f0b7d4dbcf219b0e72af215f7cdb2d880c",
+      "family": "rdna4",
+      "hardware": {
+        "driver": "1.4.305 / radv / Mesa 25.0.7-0ubuntu0.24.04.2",
+        "gpu": "AMD Radeon Graphics (RADV GFX1201)",
+        "os": "Linux 7.2.2-070202-generic"
+      },
+      "models": [
+        {
+          "context": 2048,
+          "id": "qwen3-0.6b-q8-0",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+        },
+        {
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "passed": true,
+          "prefill_cancellation": {
+            "passed": true,
+            "recovery_ms": 599
+          },
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+        },
+        {
+          "context": 4096,
+          "id": "qwen36-27b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+        },
+        {
+          "context": 4096,
+          "id": "qwen35-9b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+        },
+        {
+          "context": 4096,
+          "id": "gemma4-31b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+          "sliding_window_reference": {
+            "context": 4096,
+            "http_passed": true,
+            "maximum_prompt_tokens": 1139,
+            "minimum_prompt_tokens": 1136,
+            "passed": true,
+            "reference_agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "window_tokens": 1024
+          }
+        },
+        {
+          "context": 4096,
+          "id": "gemma4-26b-a4b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+          "sliding_window_reference": {
+            "context": 4096,
+            "http_passed": true,
+            "maximum_prompt_tokens": 1139,
+            "minimum_prompt_tokens": 1136,
+            "passed": true,
+            "reference_agreement": {
+              "cases": [
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 48,
+              "near_tie_tokens": 0,
+              "total_tokens": 48
+            },
+            "window_tokens": 1024
+          }
+        },
+        {
+          "context": 4096,
+          "id": "qwen38-27b-q4k-m",
+          "passed": true,
+          "reference_agreement": {
+            "cases": [
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              },
+              {
+                "near_ties": [],
+                "tokens": 16
+              }
+            ],
+            "exact_tokens": 48,
+            "near_tie_tokens": 0,
+            "total_tokens": 48
+          },
+          "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+        }
+      ],
+      "options": {
+        "greedy": true,
+        "kv_cache": "backend-default",
+        "mtp": "backend-default",
+        "parallel": 1
+      },
+      "policy_sha256": "0fbeeda01efcab453a8584574bd24ce038c63056288f45a52f9d2df61b2c8fed",
+      "profile": "vulkan-rdna4",
+      "reference": {
+        "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "device_backend": "vulkan",
+        "generation": {
+          "batch_size": 512,
+          "flash_attention": false,
+          "kv_cache": "f32",
+          "micro_batch": 1,
+          "parallel": 1
+        },
+        "library_sha256": {
+          "libggml-base.so": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+          "libggml-base.so.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+          "libggml-base.so.0.10.0": "de19eedc75d0312bb25912e6500b2fc61ece0ddb48dbe9fd900ddce0b85fa179",
+          "libggml-base.so.0.22.0": "5796632ef4ce1bd6414b30ed20c94dd34f7c94d7c4edd219e15e1cb979d6ffbc",
+          "libggml-base.so.0.23.0": "d26b9805e3ad6889289efc4e4bafde5ba816c4409ee854d297938eca4f5a1e4d",
+          "libggml-base.so.0.9.8": "b8edbe62608913eb9203f54a8fc3c8ee96945bdfa0d5f18bf75aa23dcc934093",
+          "libggml-cpu.so": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+          "libggml-cpu.so.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+          "libggml-cpu.so.0.10.0": "ef16531bd77e10c08b99af1f180021d8b623972371eeedaa7a694486138f5d47",
+          "libggml-cpu.so.0.22.0": "8f76576286f65f4fba8c16b8d68f6b9cbf720d68473a9f0f30cad613b5507456",
+          "libggml-cpu.so.0.23.0": "d5e9689d383a88dd9e6030c7b2ad22a4fc02192ed058f7762c4db7e638f1fa83",
+          "libggml-cpu.so.0.9.8": "50640c9a721a7d9a67345f48dcb567fffd3212f134c2613ff124d5260cda1282",
+          "libggml-vulkan.so": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+          "libggml-vulkan.so.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+          "libggml-vulkan.so.0.10.0": "4d6a4b3d4a1be8e3654405d0f429a5573f549e99f88673fd4aa695123ee2da17",
+          "libggml-vulkan.so.0.22.0": "64faf40dd390eb9ca62b5774218792023d80ccc7bb90ea4a88d7ad265de961ea",
+          "libggml-vulkan.so.0.23.0": "c7a9dedb80018f5c3d7861a109dfc47f2473ad593aa22e5a788dad9fe0cb8c9f",
+          "libggml-vulkan.so.0.9.8": "7aaf2ebb2431b9f23cd32c2ffd9146799bc8c8b923c1a5f2147ed65c94b77919",
+          "libggml.so": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+          "libggml.so.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+          "libggml.so.0.10.0": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+          "libggml.so.0.22.0": "1d2656f21fe48a0403cc2ebafd6728fe801cf1617d555738da9156e285dd4704",
+          "libggml.so.0.23.0": "4966d375db5b5b9f443d676f0d23bcf2017eb54b165a547763d1893be2803680",
+          "libggml.so.0.9.8": "161af31f3eb2e37d21697fee7773cbcb272dc9607fa0a35a3bd75659a59dfc15",
+          "libllama-common.so.0": "a9cee6058c9f29b6c7f8a18a1a62572c8482a4abc81e035c748d164d0e3c47dd",
+          "libllama-server-impl.so": "fc220891606241e87e51e745517e51dd9daeb6a69aac0eff4cedc714cd617ddd",
+          "libllama.so": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+          "libllama.so.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191",
+          "libllama.so.0.0.50": "05bc7e842899f4fbaaa5834c3f315bdcda2a97a60298011bad35a52d2f9fbec2",
+          "libllama.so.0.0.513": "c825c8c348bf35c3464c286ce6112eddea12c3413e880a847e772b9ba883e6b1",
+          "libllama.so.0.3.0": "fdd8a86155128852a233c8705970da263cbaf153ebc45f70bb9e359b3e5f3993",
+          "libllama.so.0.4.0": "04e97bb575a121bb293236f41ad9496a89cae794c5db58592e52500ffca28191"
+        },
+        "server_sha256": "419d45247c77de32fdb1b9a92e1b48e041186eb9fa03d4ecbc9a647d4a9afc47",
+        "tokenizer_sha256": "ebd1797116c14e267a1c5314f35d85cc6bad4af332d2d5a6c61eeca68ef7785f"
+      },
+      "schema_version": 1,
+      "target": "linux-x86_64-vulkan",
+      "version": "0.1.0-rc.1"
+    }
+  ],
+  "schema_version": 1,
+  "status": "passed",
+  "version": "0.1.0-rc.1"
+}

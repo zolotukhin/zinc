@@ -272,8 +272,12 @@ publication and clean public-download/install rehearsal before 0.1.0.
 ## Qualification still required before 0.1.0
 
 The Intel SSH endpoint/controller and R9700 worker are configured and have
-passed preview readiness. Complete all three selected Linux profiles on one
-frozen RC, then rehearse protected publication/public installation. Build and
+qualified the common Linux `0.1.0-rc.1` in
+[candidate run 41705323449](https://github.com/zolotukhin/zinc/actions/runs/41705323449).
+All three selected profiles pass on source `40d648f0`; the
+[candidate validation report](/zinc/validation/release-candidate-0.1.0-rc.1-2026-11-03.json)
+retains the exact archive/model/reference identities and cleanup results.
+Rehearse protected publication/public installation next. Build and
 qualify a separate final-version candidate with the reviewed catalog before
 stable publication. Metal stays an unsigned preview;
 the other hardware profiles can be qualified later. Broader optional-feature,
