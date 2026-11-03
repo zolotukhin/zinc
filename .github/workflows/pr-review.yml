@@ -21,15 +21,33 @@ jobs:
       ZAI_BASE_URL: https://api.z.ai/api/coding/paas/v4
       ZAI_MODEL: glm-5.2
     steps:
+      # pull_request_target has secrets: use this repository's default branch,
+      # including for stacked PRs whose proposed base may be a feature branch.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.repository.default_branch }}
+          path: review-base
+          persist-credentials: false
       - name: Review PR with GLM-5.2
+        working-directory: ${{ runner.temp }}
+        env:
+          REVIEW_HELPER: ${{ github.workspace }}/review-base/tools/review_context.py
         run: |
-          python3 <<'PY'
+          python3 -I <<'PY'
+          import importlib.util
           import json
           import os
           import re
           import sys
           import urllib.error
           import urllib.request
+
+          # Isolated Python ignores workspace/PYTHONPATH imports. Load only this
+          # explicit helper from the trusted checkout, outside the working dir.
+          spec = importlib.util.spec_from_file_location("review_context", os.environ["REVIEW_HELPER"])
+          review_context = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(review_context)
 
           marker = "<!-- glm-code-review -->"
 
@@ -73,10 +91,9 @@ jobs:
               "User-Agent": "zinc-glm-review",
           }
           diff = request_text(diff_url, diff_headers)
-          diff_limit = 120000
-          truncated = len(diff) > diff_limit
-          if truncated:
-              diff = diff[:diff_limit]
+          # Published raw evidence may precede the implementation in GitHub's
+          # alphabetical diff. Bound individual patches after prioritizing code.
+          diff = review_context.build_review_context(diff)
 
           # Look up any existing review comment before calling GLM (not just
           # before posting, as before) so its prior findings can be handed
@@ -146,8 +163,6 @@ jobs:
               )
 
           user_prompt = "Review the following pull request diff.\n\n"
-          if truncated:
-              user_prompt += f"(Diff truncated to {diff_limit} characters for context limits.)\n\n"
           if previous_findings:
               user_prompt += (
                   "Findings from the previous review round, to check against the current diff:\n\n"
