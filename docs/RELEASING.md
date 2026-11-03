@@ -271,9 +271,11 @@ publication and clean public-download/install rehearsal before 0.1.0.
 
 ## Qualification still required before 0.1.0
 
-Finish the Intel SSH endpoint/controller and complete all three selected Linux
-profiles on a fresh final candidate with the reviewed catalog, then rehearse
-protected publication/public installation. Metal stays an unsigned preview;
+The Intel SSH endpoint/controller and R9700 worker are configured and have
+passed preview readiness. Complete all three selected Linux profiles on one
+frozen RC, then rehearse protected publication/public installation. Build and
+qualify a separate final-version candidate with the reviewed catalog before
+stable publication. Metal stays an unsigned preview;
 the other hardware profiles can be qualified later. Broader optional-feature,
 memory-rejection and performance-regression qualification remains necessary
 before advertising those features. Merging implementation does not create a
