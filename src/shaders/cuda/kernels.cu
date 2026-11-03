@@ -6650,7 +6650,8 @@ extern "C" __global__ void quantize_act_q8_0(const float* __restrict__ act,
     const unsigned wlane = tid & 31u;
 #endif
 
-    // Read element (zero-pad beyond K)
+    // The load itself stays masked for missing groups, including the final
+    // token's row. Zeroing their packed headers must not read beyond K.
     float val = (k_idx < pc.K) ? in[k_idx] : 0.0f;
 
     // Warp-reduce max_abs and the original-value sum.

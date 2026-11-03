@@ -174,6 +174,8 @@ def main():
                 report["kernel_reference"] = {"passed": True, "cases": 376}
             else:
                 diagnostics = gpu.output([str(zinc), "--check"], env, timeout=360)
+                # R9700 protocol: verify the observed gfx1201 target and logical
+                # device zero after applying the physical ROCr visibility mask.
                 report["hardware"] = gpu.hardware_evidence(diagnostics, "gfx1201", 0)
                 print("Correctness: 305 embedded ROCm partial-tile/reference cases", flush=True)
                 report["kernel_reference"] = gpu.rocm_kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, 0, work, env)

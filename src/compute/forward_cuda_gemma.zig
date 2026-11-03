@@ -1185,8 +1185,8 @@ pub const ForwardGemma = struct {
             !envFlag("ZINC_ROCM_GEMMA_MOE_BATCHED_PREFILL", true))
         {
             // The corrected Q5_1/Q8_0 kernels retain partial 128-column tiles.
-            // Batched prefill is the default again; keep this serial opt-out
-            // for independent reference and performance diagnosis.
+            // This Gemma/Muse engine's guard applies only to Gemma MoE.
+            // Keep the serial opt-out for reference/performance diagnosis.
             // Decide before allocating batched scratch or executing a layer.
             // This entrypoint is shared by CLI and single-slot HTTP prefill;
             // preserve absolute positions and produce logits only for the tail.
@@ -4043,6 +4043,8 @@ pub const ForwardGemma = struct {
         // Router logits [T, n_experts] = router_in[T, n_embd] · wrouter[n_experts, n_embd]^T.
         // Expert selection depends on fine score differences. Keep the F32
         // weights and inputs here; the Q8 projection cache must not narrow them.
+        // q8_f16_cache, act_f16 and f32_to_f16 still serve projections in
+        // gemmDispatchA and the dense FFN/attention paths; only routing skips them.
         const gp = GemmPush{ .M = d.n_experts, .K = d.n_embd, .T = T };
         cmd.dispatch(&self.pipes.gemm_f32, .{ ceilDiv(d.n_experts, 64), ceilDiv(T, 64), 1 }, .{ 256, 1, 1 }, &.{ &wrouter.gpu_buffer, &b.router_in, &b.router_logits }, &gp, @sizeOf(GemmPush), 0);
         // Per-token top-k softmax → routing table (one block per token).
