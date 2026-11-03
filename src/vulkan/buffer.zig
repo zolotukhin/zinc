@@ -202,6 +202,23 @@ pub fn copyBuffer(
     dst: *const Buffer,
     size: vk.c.VkDeviceSize,
 ) !void {
+    return copyBufferRegion(instance, cmd_pool, src, dst, 0, 0, size);
+}
+
+/// Copy a bounded region and wait before the caller reuses host staging memory.
+pub fn copyBufferRegion(
+    instance: *const Instance,
+    cmd_pool: vk.c.VkCommandPool,
+    src: *const Buffer,
+    dst: *const Buffer,
+    src_offset: vk.c.VkDeviceSize,
+    dst_offset: vk.c.VkDeviceSize,
+    size: vk.c.VkDeviceSize,
+) !void {
+    const upload_plan = @import("../gpu/upload_plan.zig");
+    if (!upload_plan.rangeFits(src.size, src_offset, size) or !upload_plan.rangeFits(dst.size, dst_offset, size))
+        return error.BufferCopyOutOfBounds;
+    if (size == 0) return;
     // Allocate one-shot command buffer
     const alloc_info = vk.c.VkCommandBufferAllocateInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -214,6 +231,7 @@ pub fn copyBuffer(
     var cmd_buf: vk.c.VkCommandBuffer = null;
     var result = vk.c.vkAllocateCommandBuffers(instance.device, &alloc_info, &cmd_buf);
     if (result != vk.c.VK_SUCCESS) return error.AllocCmdBufFailed;
+    defer vk.c.vkFreeCommandBuffers(instance.device, cmd_pool, 1, &cmd_buf);
 
     const begin_info = vk.c.VkCommandBufferBeginInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -224,8 +242,8 @@ pub fn copyBuffer(
     _ = vk.c.vkBeginCommandBuffer(cmd_buf, &begin_info);
 
     const region = vk.c.VkBufferCopy{
-        .srcOffset = 0,
-        .dstOffset = 0,
+        .srcOffset = src_offset,
+        .dstOffset = dst_offset,
         .size = size,
     };
     vk.c.vkCmdCopyBuffer(cmd_buf, src.handle, dst.handle, 1, &region);
@@ -247,5 +265,15 @@ pub fn copyBuffer(
     if (result != vk.c.VK_SUCCESS) return error.QueueSubmitFailed;
 
     _ = vk.c.vkQueueWaitIdle(instance.compute_queue);
-    vk.c.vkFreeCommandBuffers(instance.device, cmd_pool, 1, &cmd_buf);
+}
+
+test "invalid or empty buffer copies never allocate a Vulkan command" {
+    var src: Buffer = undefined;
+    src.size = 16;
+    var dst: Buffer = undefined;
+    dst.size = 32;
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 0, 17));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, 0, 31, 4));
+    try std.testing.expectError(error.BufferCopyOutOfBounds, copyBufferRegion(undefined, undefined, &src, &dst, std.math.maxInt(u64), 0, 4));
+    try copyBufferRegion(undefined, undefined, &src, &dst, 16, 32, 0);
 }

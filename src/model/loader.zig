@@ -638,6 +638,21 @@ pub fn load(
     const first_nextn_layer = config.n_layers;
     var skipped_nextn_bytes: u64 = 0;
 
+    // A full embedding/expert tensor can require hundreds of MiB of temporary
+    // pinned host memory. Reuse one bounded window for all device-local weights.
+    // Each transfer completes before that window is overwritten.
+    const upload_plan = @import("../gpu/upload_plan.zig");
+    var largest_device_tensor: u64 = 0;
+    for (gf.tensors.items) |tensor_info| {
+        if (skip_nextn and isAppendedNextnTensor(tensor_info.name, first_nextn_layer)) continue;
+        if (!shouldOffloadToHost(tensor_info.name)) largest_device_tensor = @max(largest_device_tensor, tensor_info.sizeBytes());
+    }
+    var staging: ?Buffer = if (largest_device_tensor != 0)
+        try Buffer.initStaging(instance, upload_plan.stagingCapacity(largest_device_tensor))
+    else
+        null;
+    defer if (staging) |*window| window.deinit();
+
     var total_vram: u64 = 0;
     var total_host_visible: u64 = 0;
     const load_arch_str = gf.getString("general.architecture") orelse "";
@@ -678,11 +693,16 @@ pub fn load(
             gpu_buf.upload(src_data);
             total_host_visible += tensor_size;
         } else {
-            // Device-local: stage in host memory, then GPU-side copy into VRAM.
-            var staging = try Buffer.initStaging(instance, tensor_size);
-            defer staging.deinit();
-            staging.upload(src_data);
-            try buffer_mod.copyBuffer(instance, cmd_pool.handle, &staging, &gpu_buf, tensor_size);
+            // Source and destination offsets advance together; the last window
+            // copies its exact byte count instead of a padded staging capacity.
+            const window = &staging.?;
+            var chunks = try upload_plan.Chunks.init(tensor_size, window.size);
+            while (chunks.next()) |chunk| {
+                const start: usize = @intCast(chunk.offset);
+                const size: usize = @intCast(chunk.size);
+                window.upload(src_data[start..][0..size]);
+                try buffer_mod.copyBufferRegion(instance, cmd_pool.handle, window, &gpu_buf, 0, chunk.offset, chunk.size);
+            }
             total_vram += tensor_size;
         }
 

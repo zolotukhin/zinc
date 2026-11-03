@@ -213,6 +213,7 @@ dense FFN, and MoE branches live in the active backend's forward implementation.
 | ROCm packed matrix CPU/GPU and verifier row checks                | `tools/validate_rocm_q8_matvec.c`                                                     |
 | Exact-prefix cache parity                                         | `tools/validate_rocm_prompt_cache.mjs`                                                |
 | Model-specific projection pipeline selection                      | `src/compute/projection_specializations.zig`, `src/compute/dmmv.zig`                  |
+| Bounded Vulkan model uploads and byte-copy planning               | `src/model/loader.zig`, `src/vulkan/buffer.zig`, `src/gpu/upload_plan.zig`            |
 | OpenCode setup, bounded tool hook, verified rounds                | `tools/setup_opencode.mjs`                                                            |
 | CPU OpenCode protocol and lifecycle                               | `tools/validate_opencode_harness.mjs`                                                 |
 | OpenCode preview CLI regressions                                  | `tools/setup_opencode_preview.test.ts`                                                |
