@@ -3,10 +3,12 @@
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
 import signal
+import statistics
 import sys
 import tempfile
 import time
@@ -46,6 +48,78 @@ def comparison_eligibility(samples, scenarios):
     return eligible
 
 
+def metric_comparison(rows, field, rounds, runs, higher_is_better=False, eligible=True, resolution=0):
+    """Compare every matched round; missing counters never become zero-byte wins."""
+    result = {"field": field, "higher_is_better": higher_is_better, "rounds": []}
+    for number in range(1, rounds + 1):
+        values = {engine: [] for engine in ("zinc", "llama")}
+        for row in rows:
+            if row.get("round") != number or row.get("engine") not in values:
+                continue
+            value = row
+            for part in field.split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+            if field.startswith("memory.observed_peak.gpu_") and not row.get("memory", {}).get("gpu_memory_available"):
+                value = None
+            values[row["engine"]].append(value)
+        paired = {engine: None for engine in values}
+        for engine, samples in values.items():
+            if len(samples) == runs and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in samples):
+                # Zero is meaningful for a memory counter, but invalid for a
+                # duration or throughput. Do not turn absent timing into a win.
+                if field.startswith("memory.") or all(v > 0 for v in samples):
+                    paired[engine] = statistics.median(samples)
+        zinc, llama = paired["zinc"], paired["llama"]
+        outcome, ratio = "unavailable", None
+        if eligible and zinc is not None and llama is not None:
+            if zinc == llama:
+                outcome, ratio = "tied", 1.0
+            else:
+                outcome = "better" if (zinc > llama) == higher_is_better else "worse"
+                denominator = llama if higher_is_better else zinc
+                if denominator > 0:
+                    ratio = (zinc if higher_is_better else llama) / denominator
+                if abs(zinc - llama) <= resolution:
+                    outcome = "unresolved"
+        result["rounds"].append({"round": number, "zinc": zinc, "llama": llama,
+                                 "zinc_advantage_ratio": ratio, "outcome": outcome})
+    outcomes = {row["outcome"] for row in result["rounds"]}
+    result["outcome"] = next(iter(outcomes)) if len(outcomes) == 1 else "mixed" if outcomes else "unavailable"
+    result["all_rounds_better"] = bool(outcomes) and outcomes == {"better"}
+    return result
+
+
+def performance_comparison(model, settings):
+    rounds, runs = settings["rounds"], settings["runs"]
+    dimensions = []
+    measured = [s for s in model["samples"] if s.get("warmup") is False]
+    eligible = comparison_eligibility(model["samples"], model["scenarios"])
+    for scenario in model["scenarios"]:
+        name = scenario["id"]
+        samples = [s for s in measured if s["scenario"] == name]
+        for field in ("prefillTps", "decodeTps", "totalLatencyMs"):
+            dimensions.append({"scenario": name, **metric_comparison(samples, field, rounds, runs,
+                higher_is_better=field.endswith("Tps"), eligible=eligible[name])})
+        streams = [s for s in model["stream_samples"] if s["scenario"] == name]
+        dimensions.append({"scenario": name, **metric_comparison(streams, "first_usable_content_ms", rounds, 1,
+            eligible=eligible[name])})
+    for field in ("startup_ms", "memory.observed_peak.host_peak_rss_bytes",
+                  "memory.observed_peak.gpu_resident_vram_bytes", "memory.observed_peak.gpu_total_vram_bytes"):
+        # Startup readiness is polled every 500 ms. An apparent difference
+        # within that resolution is unresolved, even when its raw ratio is >1.
+        dimensions.append({"scenario": None, **metric_comparison(model["processes"], field, rounds, 1,
+            resolution=settings.get("startup_poll_interval_ms", 500) if field == "startup_ms" else 0)})
+    complete_workloads = set(eligible) == {"core", "context-medium", "context-long", "decode-extended"}
+    matched_settings = (settings.get("backend") == "vulkan" and settings.get("target") == "intel"
+                        and settings.get("kv_cache") == "f16" and settings.get("mtp") == "off"
+                        and settings.get("slots") == 1 and settings.get("prompt_cache") is False)
+    headline = (model.get("passed") is True and matched_settings and complete_workloads
+                and rounds >= 3 and runs >= 3 and settings["warmup"] >= 1 and all(eligible.values()))
+    return {"scope": "observed matched single-slot MTP-off rounds; not concurrency or statistical confidence",
+            "headline_eligible": headline, "comparison_eligible": eligible, "dimensions": dimensions,
+            "all_dimensions_better": headline and bool(dimensions) and all(d["all_rounds_better"] for d in dimensions)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     required = next(p["models"] for p in policy()["gpu_profiles"] if p["id"] == "vulkan-intel-xe2")
@@ -75,6 +149,7 @@ def main():
     report = {"schema_version": "zinc-intel-performance-v1", "started_at": now(), "passed": False,
               "release_qualification": False, "required_models": required, "selected_models": args.models,
               "complete_model_matrix": False, "complete_performance_matrix": False, "models": [],
+              "all_models_all_dimensions_better": False, "hardware_unchanged": False,
               "settings": {"backend": "vulkan", "target": "intel", "kv_cache": "f16", "mtp": "off", "slots": 1,
                            "prompt_cache": False, "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
                            "temperature": 0, "top_p": 1, "seed": 0, "context": "pinned model qualification limit",
@@ -166,16 +241,24 @@ def main():
                         save()
                 current["comparison_eligible"] = comparison_eligibility(current["samples"], scenarios)
                 current["passed"] = True
+                current["performance_comparison"] = performance_comparison(current, report["settings"])
                 save()
             require(reference_identity(args.llama_bin, args.llama_source, env, pin) == report["reference"], "performance reference changed")
             require(reference_identity(args.oracle, args.oracle_source, env, policy()["reference"]["commit"]) == report["oracle"], "correctness oracle changed")
             require(sha256(zinc) == report["zinc"]["sha256"], "ZINC binary changed")
             require(all(sha256(ROOT / name) == digest for name, digest in report["harness_sha256"].items()), "benchmark harness changed")
             idle()
+            # Every new server loads the active driver again. A stack upgrade
+            # during the campaign invalidates a comparison just like changed
+            # executable bytes; keep upgrades between controlled campaigns.
+            report["hardware_after"] = gpu.hardware_evidence(gpu.output([str(zinc), "--check", "-d", str(args.device)], env, timeout=360), "intel-xe2", args.device)
+            require(report["hardware_after"] == report["hardware"], "GPU, kernel or Vulkan driver changed during the campaign")
+            report["hardware_unchanged"] = True
         complete_models = set(args.models) == set(required)
         report.update(passed=True, complete_model_matrix=complete_models,
                       complete_performance_matrix=complete_models and all(all(m["comparison_eligible"].values()) for m in report["models"]),
                       cleanup="no GPU process remains")
+        report["all_models_all_dimensions_better"] = complete_models and all(m["performance_comparison"]["all_dimensions_better"] for m in report["models"])
     except BaseException as error:
         report["error"] = str(error) if type(error) in (ValueError, AssertionError) else type(error).__name__
         raise

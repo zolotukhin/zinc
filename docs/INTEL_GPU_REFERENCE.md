@@ -47,17 +47,51 @@ The important inference split is not "gaming card versus pro card"; it is memory
 
 ## ZINC Support Status
 
+The stable [0.1.0 Linux release](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0)
+passed Intel Vulkan qualification for all seven pinned catalog models:
+
+- Qwen 3 0.6B Q8_0
+- Qwen 3.5 9B Q4_K_M
+- Qwen 3.6 27B Q4_K_M
+- Qwen 3.6 35B-A3B UD Q4_K_XL
+- Qwen 3.8 27B Q4_K_M
+- Gemma 4 26B-A4B MoE Q4_K_M
+- Gemma 4 31B Q4_K_M
+
+The [published validation](https://github.com/zolotukhin/zinc/releases/download/v0.1.0/validation.json)
+records the exact packaged bytes and all three qualified GPU profiles. The
+separate [November 2 OpenCode matrix](INTEL_OPENCODE_VALIDATION.md) passes
+203/203 API probes and 18/18 coding tasks across the six larger models on its
+recorded development archive. The starter passes API and native inference
+checks but fails its three coding tasks on both engines; it is not a coding
+recommendation. Qwen 3.8's passing Intel qualification uses ordinary decode;
+Intel MTP remains experimental.
+
+Support does not establish a performance win. The latest recorded
+[seven-model Intel diagnostic](INTEL_PERFORMANCE.md#recorded-diagnostic-and-next-bottlenecks)
+has ZINC behind llama.cpp on decode for every model, with mixed prefill results.
+It uses one measurement round and is not a headline campaign. Earlier benchmark
+rows below describe their own executables, settings and dates. New comparisons
+must refresh the upstream reference and pass the matched multi-round protocol.
+
+Native Intel compute through Level Zero/SYCL is a subsequent milestone, described
+in the [Intel work plan](INTEL_PERFORMANCE.md#native-intel-compute-after-the-vulkan-milestone).
+The Vulkan qualification does not qualify a native Intel backend or another
+Intel board.
+
+### Earlier bring-up failures
+
 The October release bring-up found a 27B prefill correctness issue in packaged
 preview `e7b3f755`. Its tiled and grouped attention kernels assume 64-lane
 subgroups, while the tested Xe2 driver exposes widths 16–32. A loaded pipeline
 was insufficient evidence because unsupported subgroup requests are optional
 in the pipeline factory. Dispatch now checks the subgroup capability and uses
 generic batched attention when 64 lanes are unavailable. This preserves the
-other accelerated prefill stages. Packaged preview `dbbfff54` now passes 84 kernel
-cases and four pinned model rows, including 27B. The `d611994a` preview passes
+other accelerated prefill stages. Packaged preview `dbbfff54` passed 84 kernel
+cases and four pinned model rows, including 27B. The `d611994a` preview passed
 five of the six required rows on one archive, including Gemma 31B. Gemma 26B's
-weights are now pinned and installed, but its continuation fails the unchanged
-native-reference policy. The full six-model archive remains unqualified. The
+weights were pinned and installed, but its continuation failed the unchanged
+native-reference policy. That six-model archive was not qualified. The
 [release readiness note](releases/0.1.0-plan.md) and
 [correctness evidence](/zinc/validation/intel-gemma-correctness-d611994a-2026-11-01.json)
 retain that failure and the diagnostic controls.
@@ -74,18 +108,9 @@ shader overlay and explicit flags. A later native build matches all 48 reference
 tokens with its defaults and no runtime overrides. Its actual OpenCode checks
 also exposed slow prefill and recovery after a client timeout; the
 [Intel coding and cancellation report](INTEL_OPENCODE_VALIDATION.md) records
-those failures and the recovery fix. A new packaged-default check and completed
-model coding checks remain separate gates. Historical performance rows below
+those failures and the recovery fix. Later packaged-default and completed
+coding checks are separate evidence, linked above. Historical performance rows below
 describe their recorded executables and settings.
-
-Intel Arc is a supported Linux Vulkan target in ZINC. The current public Intel benchmark artifact validates four managed catalog rows:
-
-- Qwen 3.5 9B Q4_K_M
-- Qwen3.6 35B-A3B UD Q4_K_XL
-- Gemma 4 31B Q4_K_M
-- Gemma 4 26B-A4B MoE Q4_K_M
-
-The benchmark target is an Intel Arc BMG G31-class Vulkan node. The headline rows are ahead of the same-machine llama.cpp baseline on prefill and decode, but this should still be read as "officially supported and measurable" rather than "fully optimized." The next Arc work is deeper prefill/attention tuning, cleaner server latency, and more coverage across consumer B-series SKUs.
 
 ## LLM Inference Analysis
 
