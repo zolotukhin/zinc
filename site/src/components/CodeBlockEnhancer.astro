@@ -29,7 +29,10 @@
     for (const candidate of candidates) {
       const match = String(candidate).match(/language-([a-z0-9_-]+)/i);
       if (match) return match[1].toLowerCase();
-      if (LABELS[String(candidate).toLowerCase()]) return String(candidate).toLowerCase();
+      const language = String(candidate).toLowerCase();
+      // Astro emits a bare data-language value. Mermaid has no toolbar label,
+      // but still needs recognition so its diagram stays outside code shells.
+      if (language === 'mermaid' || LABELS[language]) return language;
     }
 
     return '';
