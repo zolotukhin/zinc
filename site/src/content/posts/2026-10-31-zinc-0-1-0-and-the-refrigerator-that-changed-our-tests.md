@@ -27,7 +27,7 @@ Both were answering the same refrigerator prompt, with the same model weights, g
 
 A short prompt had found a disagreement that a fluent paragraph could hide. Following it led through request history, memory allocation, the test harness and eventually the reference executable itself.
 
-**November 3 update:** [ZINC 0.1.0 is available](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0) for Linux Vulkan and ROCm. Metal remains an unsigned preview. The work below made the meaning of “stable” much more concrete.
+**November 3 update:** [ZINC 0.1.0 is available](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0) for Linux Vulkan and ROCm. The [release announcement](/blog/2026-11-03-zinc-0-1-0-release-amd-intel-linux/) covers installation, model coverage and the final qualification results. Metal remains an unsigned preview. The work below made the meaning of “stable” much more concrete.
 
 ## A request can inherit more than conversation history
 

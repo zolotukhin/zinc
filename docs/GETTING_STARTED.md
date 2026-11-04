@@ -4,9 +4,9 @@ Build ZINC, download a model, and open a local chat. The default build uses
 Vulkan on Linux and Metal on Apple Silicon. AMD users can also choose the
 [ROCm backend](/zinc/docs/rocm/).
 
-For prebuilt archives and install/upgrade/rollback instructions, see
-[binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/). The 0.1.0 binary pipeline is
-undergoing qualification; the instructions below describe a source build.
+For the published 0.1.0 Linux archives and install/upgrade/rollback instructions,
+see [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/).
+The instructions below describe a source build.
 
 ## Choose your backend
 
