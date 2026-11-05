@@ -54,6 +54,7 @@ fn createQ8DecodePipeline(
     if (intel_rows) {
         const path = try std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_intel_rows.spv", .{shader_dir});
         if (pipeline_mod.createFromSpirvWithOptions(instance, path, 3, @sizeOf(DmmvPushConstants), spec_constants, options, allocator)) |pipeline| {
+            log.info("Q8_0 Intel row decode shader loaded (WG64, 32 lanes per row)", .{});
             return pipeline;
         } else |err| {
             // An older shader directory or unsupported driver must retain the
