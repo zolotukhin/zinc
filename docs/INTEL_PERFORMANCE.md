@@ -141,6 +141,13 @@ two ZINC packages and does not establish a speed advantage over llama.cpp.
    optimization must fix those failures before becoming a default. Reducing
    expert counts, enabling approximate activations or changing KV precision is
    not a matched performance improvement.
+   For the Q8 starter, run `tools/validate_q8_prefill.py` on the remote Intel
+   worker with `--zinc-tree`, `--worker-config` and `--output`. It compares the
+   complete vocabulary's batched logits with serial F32-activation prefill at
+   eleven token/tile boundaries, including 1, 31/32/33 and 95/96/97 tokens.
+   A silent fallback, missing comparison, nonfinite result or difference above
+   the existing 0.001 tolerance fails. This opt-in regression supplements the
+   native continuations and API recovery gates; it is not a throughput claim.
 4. Profile decode across the dense, hybrid and MoE models, then tune the hot
    matrix-vector, attention and submission paths. Validate shader math on the
    actual Intel GPU, complete native continuations, API recovery and both
