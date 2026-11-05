@@ -65,6 +65,10 @@ host peak RSS and observed resident/allocated VRAM. Each dimension retains the
 paired medians for every round. A losing round cannot disappear inside a pooled
 median, and unavailable counters remain unknown. Startup differences within the
 500 ms polling resolution are unresolved. Ties are not wins.
+Each round records its expected, observed and valid sample counts so missing,
+extra and invalid measurements can be distinguished. `measured_dimensions`
+counts dimensions with complete paired data across every round;
+`headline_eligible` also requires all dimensions to be measured.
 
 `all_models_all_dimensions_better` requires the complete seven-model matrix,
 all four full-budget workloads, at least three rounds with three measurements
