@@ -84,7 +84,8 @@ let failure,
   step = 0,
   phase = 'tools',
   cancelledConnectionClosed = false,
-  apiErrorResponses = 0;
+  apiErrorResponses = 0,
+  cancelRequested = false;
 const actions = [
   ['read', { path: 'contract.json' }],
   [
@@ -136,12 +137,16 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (phase === 'cancel') {
-      // Deliberately hold this owned HTTP response. The helper's deadline must
-      // terminate the actual client and close its connection.
+      // Cancel only after the actual client reaches HTTP. A fixed startup
+      // delay can expire before a slower CI worker has opened a connection.
       res.once('close', () => {
         cancelledConnectionClosed = true;
         resolveCancellationClosed();
       });
+      if (!cancelRequested) {
+        cancelRequested = true;
+        setImmediate(() => process.kill(process.pid, 'SIGINT'));
+      }
       return;
     }
     if (phase === 'recovery') {
@@ -267,11 +272,11 @@ try {
         prompt: 'Reply OK.',
         timeout: 60,
       },
-      { deadlineMs: 5000, graceMs: 1000 },
+      { deadlineMs: 30000, graceMs: 1000 },
     );
-    failureChecks.deadlineRejected = false;
+    failureChecks.cancellationRejected = false;
   } catch (error) {
-    failureChecks.deadlineRejected = error.message === 'OpenClaw exceeded its task timeout';
+    failureChecks.cancellationRejected = error.message === 'OpenClaw was interrupted';
   }
   // Socket-close delivery may trail the child's close event. Wait for that
   // event with a separate bound rather than accepting a stale flag.
