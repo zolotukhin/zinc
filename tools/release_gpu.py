@@ -196,7 +196,9 @@ def q8_decode_reference(tree, reference, checkout, device, work, env):
         require(child.wait(timeout=300) == 0, "packaged Q8 decode reference validation failed")
     require(re.findall(r"^PASS: 60 Q8 native-reference/offset/accumulation/guard cases$", log.read_text(), re.M) ==
             ["PASS: 60 Q8 native-reference/offset/accumulation/guard cases"], "Q8 decode reference suite was incomplete")
-    return {"passed": True, "cases": 60,
+    require(re.findall(r"^PASS: 30 Q8 identical-reduction pairs$", log.read_text(), re.M) ==
+            ["PASS: 30 Q8 identical-reduction pairs"], "Q8 identical-reduction reference suite was incomplete")
+    return {"passed": True, "cases": 60, "bitwise_pairs": 30,
             "validator_source_sha256": sha256(ROOT / "tools/validate_q8_decode.c"),
             "shared_fixture_source_sha256": sha256(ROOT / "tools/validate_dmmv_shared_cache.c"),
             "shader_sha256": {name: sha256(tree / "share/zinc/shaders" / (name + ".spv"))

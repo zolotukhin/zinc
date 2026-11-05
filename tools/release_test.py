@@ -460,9 +460,10 @@ class ReleaseTest(unittest.TestCase):
         shader_dir.mkdir(parents=True)
         for name in ("dmmv_q8_0", "dmmv_q8_0_intel_rows"):
             (shader_dir / (name + ".spv")).write_bytes(name.encode())
-        marker = "PASS: 60 Q8 native-reference/offset/accumulation/guard cases"
+        marker = "PASS: 60 Q8 native-reference/offset/accumulation/guard cases\nPASS: 30 Q8 identical-reduction pairs"
         for status, text in ((1, marker), (0, ""), (0, marker.replace("60", "59")),
-                             (0, marker + "\n" + marker), (0, marker)):
+                             (0, marker + "\n" + marker), (0, marker.replace("30", "29")),
+                             (0, marker.splitlines()[0]), (0, marker)):
             reaped = []
             @contextlib.contextmanager
             def child(command, log, cwd, env):
@@ -482,6 +483,7 @@ class ReleaseTest(unittest.TestCase):
                 else:
                     result = release_gpu.q8_decode_reference(self.root, self.root, self.root, 3, self.root, {})
                     self.assertEqual(result["cases"], 60)
+                    self.assertEqual(result["bitwise_pairs"], 30)
                     self.assertTrue(result["passed"])
                     self.assertEqual(result["shader_sha256"], {name: sha256(shader_dir / (name + ".spv"))
                                      for name in ("dmmv_q8_0", "dmmv_q8_0_intel_rows")})

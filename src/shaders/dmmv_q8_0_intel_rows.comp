@@ -1,14 +1,12 @@
 #version 460
 // Intel Xe2 Q8_0 DMMV: one 32-lane row per half of a 64-thread workgroup.
-// Sharing a row across 64 lanes underfilled short K and duplicated two rows
-// of accumulator/reduction state. Keep two output rows and the existing ABI.
-// Keep the existing two-row dispatch ABI and F32 activation arithmetic.
+// Retain the legacy SIMD32 reduction order. Combining blocks at stride 32
+// changed near-tie choices in the recurrent/MoE models despite small numerical
+// error; two stride-64 accumulators preserve the original two subgroup sums.
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_clustered : require
-#extension GL_KHR_shader_subgroup_shuffle : require
 
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const uint SPEC_M = 4096;
@@ -20,41 +18,46 @@ layout(push_constant) uniform PushConstants {
 layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
 layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_data[]; };
 layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
-shared float s_sums[4];
+
+float dot_q8_block(const uint qs_off, const uint x_base_v4) {
+    float block_sum = 0.0;
+    for (uint i = 0u; i < 8u; i++) {
+        const uint q = qs_off + i * 4u;
+        const ivec4 value = ivec4(int(int8_t(a_data[q])), int(int8_t(a_data[q + 1u])),
+                                  int(int8_t(a_data[q + 2u])), int(int8_t(a_data[q + 3u])));
+        block_sum += dot(vec4(value), x_data[x_base_v4 + i]);
+    }
+    return block_sum;
+}
 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
     const uint lane = tid & 31u;
     const uint row = gl_WorkGroupID.x * 2u + (tid >> 5u);
     const uint blocks = SPEC_BLOCKS_PER_ROW != 0u ? SPEC_BLOCKS_PER_ROW : K / 32u;
-    float sum = 0.0;
+    float low = 0.0;
+    float high = 0.0;
     if (row < M) {
-        for (uint block = lane; block < blocks; block += 32u) {
-            const uint offset = a_offset + (row * blocks + block) * 34u;
-            const float scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
-            float partial = 0.0;
-            for (uint i = 0u; i < 8u; i++) {
-                const uint q = offset + 2u + i * 4u;
-                const ivec4 value = ivec4(int(int8_t(a_data[q])), int(int8_t(a_data[q + 1u])),
-                                         int(int8_t(a_data[q + 2u])), int(int8_t(a_data[q + 3u])));
-                partial += dot(vec4(value), x_data[x_offset / 16u + block * 8u + i]);
+        for (uint block = lane; block < blocks; block += 64u) {
+            uint offset = a_offset + (row * blocks + block) * 34u;
+            float scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
+            low += scale * dot_q8_block(offset + 2u, x_offset / 16u + block * 8u);
+            if (block + 32u < blocks) {
+                offset += 32u * 34u;
+                scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
+                high += scale * dot_q8_block(offset + 2u, x_offset / 16u + (block + 32u) * 8u);
             }
-            sum += scale * partial;
         }
     }
-    // Sixteen-lane clusters work on both Intel SIMD16 and SIMD32. Only the
-    // SIMD16 case needs shared memory to combine a row's two clusters.
-    sum = subgroupClusteredAdd(sum, 16u);
-    if (gl_SubgroupSize >= 32u) {
-        sum += subgroupShuffleXor(sum, 16u);
-    } else {
-        if ((tid & 15u) == 0u) s_sums[tid >> 4u] = sum;
-        barrier();
-        sum = s_sums[(tid >> 5u) * 2u] + s_sums[(tid >> 5u) * 2u + 1u];
-    }
+    // The host requires full SIMD32 subgroups, one complete row per subgroup.
+    // Keep the legacy per-lane stride-64 accumulators and subgroupAdd order;
+    // merging low+high matches its two-subgroup result without an SLM barrier.
+    low = subgroupAdd(low);
+    high = subgroupAdd(high);
     if (lane == 0u && row < M) {
+        const float result = low + high;
         const uint output_index = y_offset / 4u + row;
-        if (acc_mode == 0u) y_data[output_index] = sum;
-        else y_data[output_index] += sum;
+        if (acc_mode == 0u) y_data[output_index] = result;
+        else y_data[output_index] += result;
     }
 }

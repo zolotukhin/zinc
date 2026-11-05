@@ -25,6 +25,8 @@ typedef struct { VkBuffer handle; VkDeviceMemory memory; void *data; size_t size
 typedef struct { uint32_t M, K, expert_stride, x_expert_stride, x_offset, y_offset; } MoePush;
 typedef struct { uint32_t M, K, a_offset, x_offset, y_offset, acc_mode; } F32Push;
 typedef struct { const char *shader; enum ggml_type type; } Kernel;
+#define ZINC_DMMV_TEST_ROWS 67
+#define ZINC_DMMV_BENCH_ROWS 256
 static VkInstance instance;
 static VkPhysicalDevice physical;
 static VkDevice device;
@@ -138,11 +140,11 @@ static VkShaderModule shader(const char *name) {
 static int compare_double(const void *a, const void *b) {
     double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y);
 }
-static void run_case_specialized(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench, uint32_t q8_blocks) {
+static void run_case_capture(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench, uint32_t q8_blocks, float *capture) {
     const int f32 = kernel.type == GGML_TYPE_F32;
     const int dense = f32 || kernel.type == GGML_TYPE_Q8_0;
     // Q8 reads vec4 inputs, so its nonzero X offset must remain 16-byte aligned.
-    const uint32_t M = bench ? 256 : 67, slots = dense ? 1 : 2, experts = 3, x_start = dense && !f32 ? 8 : 5, y_start = 7;
+    const uint32_t M = bench ? ZINC_DMMV_BENCH_ROWS : ZINC_DMMV_TEST_ROWS, slots = dense ? 1 : 2, experts = 3, x_start = dense && !f32 ? 8 : 5, y_start = 7;
     const uint32_t x_stride = separate_inputs ? K + 11 : 0;
     const size_t row_bytes = ggml_row_size(kernel.type, K);
     const uint32_t expert_stride = (uint32_t)((M * row_bytes + 255) / 256 * 256);
@@ -256,6 +258,7 @@ static void run_case_specialized(Kernel kernel, uint32_t K, uint32_t capacity, i
         }
         for (size_t i = 0; i < y_count; i++)
             if ((i < y_start || i >= y_start + slots * M) && y[i] != -999.25f) fail("output guard");
+        if (capture) memcpy(capture, y + y_start, slots * M * sizeof *capture);
     }
     qsort(times, repeats, sizeof times[0], compare_double);
     printf("PASS %-17s K=%5u SPEC_K=%5u stride=%5u acc=%d error=%.6g%s%.3f us\n",
@@ -267,6 +270,9 @@ static void run_case_specialized(Kernel kernel, uint32_t K, uint32_t capacity, i
     vkDestroyDescriptorSetLayout(device, set_layout, NULL);
     for (unsigned i = 0; i < 4; i++) free_buffer(b[i]);
     free(row); free(decoded);
+}
+static void run_case_specialized(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench, uint32_t q8_blocks) {
+    run_case_capture(kernel, K, capacity, separate_inputs, accumulate, bench, q8_blocks, NULL);
 }
 static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench) {
     run_case_specialized(kernel, K, capacity, separate_inputs, accumulate, bench, 0);
