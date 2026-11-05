@@ -230,19 +230,19 @@ try {
   const verified = await verifyFixture(project, fixture);
   const toolRequests = [...requests];
   const failureChecks = {};
+  let apiErrorEvidence;
   phase = 'error';
   try {
-    await runOpenClaw(
-      {
-        binary: opts.binary,
-        filename,
-        project,
-        model: 'zinc-protocol',
-        prompt: 'Reply OK.',
-        timeout: 30,
-      },
-      { deadlineMs: 15000 },
-    );
+    // Use the helper's normal outer deadline. Client startup precedes its
+    // 30-second task timer, particularly on smaller CI workers.
+    await runOpenClaw({
+      binary: opts.binary,
+      filename,
+      project,
+      model: 'zinc-protocol',
+      prompt: 'Reply OK.',
+      timeout: 30,
+    });
     failureChecks.apiErrorRejected = false;
   } catch (error) {
     const diagnostics = error.diagnostics;
@@ -250,6 +250,14 @@ try {
     try {
       report = JSON.parse(diagnostics?.stdout || '');
     } catch {}
+    apiErrorEvidence = {
+      responses: apiErrorResponses,
+      exitCode: diagnostics?.code,
+      signal: diagnostics?.signal,
+      reportedOk: report?.ok,
+      status: report?.status,
+      helperError: error.message,
+    };
     failureChecks.apiErrorRejected =
       apiErrorResponses > 0 &&
       Number.isInteger(diagnostics?.code) &&
@@ -311,6 +319,7 @@ try {
       Object.values(failureChecks).every(Boolean),
     requests: toolRequests,
     failureChecks,
+    apiErrorEvidence,
     verification: verified,
     toolSummary: client.report.toolSummary,
   };

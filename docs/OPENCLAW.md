@@ -11,17 +11,22 @@ That OpenClaw version requires Node **24.16 or newer in the 24.x line**, or
 and [one-shot command reference](https://docs.openclaw.ai/cli/agent).
 The helper itself uses only Node's standard library.
 
+The [AMD model acceptance report](OPENCLAW_AMD_VALIDATION.md) records the
+published binaries, actual file/tool outcomes, contexts and model-specific limits.
+
 ## Start ZINC
 
 Choose the [Linux release](BINARY_RELEASES.md) for Vulkan or ROCm. Start one
 model with enough context for the agent's instructions, tool schemas, source
-files and tool results. On a 32 GB GPU, Qwen3.5 9B is a practical starting point:
+files and tool results. On a 32 GB GPU, Qwen3.5 9B is a practical starting point.
+With the installed Vulkan binary:
 
 ```bash
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
+zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
 ```
 
-For an existing GGUF, use `-m /path/to/model.gguf`. Follow the
+For a checkout build, use `./zig-out/bin/zinc`. For an existing GGUF, use
+`-m /path/to/model.gguf`. Follow the
 [ROCm guide](ROCM.md) for that backend's model paths and device selection.
 Select your discrete GPU explicitly on systems with an integrated GPU too;
 check the server's device log before accepting a result.
