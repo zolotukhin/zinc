@@ -64,6 +64,12 @@ No gateway, messaging channel, background daemon, or delivery action is started.
 The preset omits bundled skills and the tool-search catalog to leave more of
 the context for code and tool results.
 
+For a checkout with the exact dependency tree used in AMD qualification, use
+`npm ci --prefix tools/openclaw-client` instead of a global install, then pass
+`--openclaw-bin tools/openclaw-client/node_modules/.bin/openclaw` to `check` and
+`run`. CI uses this locked client, including npm's integrity checks, in an
+isolated prefix. The ZINC runtime does not depend on these client packages.
+
 To connect to a different endpoint, supply its API base at setup time:
 
 ```bash
@@ -90,6 +96,8 @@ config and model, direct tools, the lean local-model prompt, and thinking off.
 Each task gets temporary client state. Exit failure, timeout, interruption,
 oversized diagnostics or an unsuccessful JSON task report makes the helper
 fail. It stops its process group and removes that state on completion.
+An interrupted evaluation also writes a partial summary and stops before
+starting another task.
 
 OpenClaw's successful task report means the client completed its run. Review
 the actual diff and run the project's acceptance command independently before

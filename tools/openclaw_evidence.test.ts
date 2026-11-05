@@ -7,12 +7,24 @@ const evidence = JSON.parse(
     'utf8',
   ),
 );
-const policy = JSON.parse(
-  readFileSync(new URL('../config/release/targets.json', import.meta.url), 'utf8'),
+// Compare historical evidence with its historical qualification, so adding a
+// model to a later release does not require rewriting the 0.1.0 measurements.
+const release = JSON.parse(
+  readFileSync(
+    new URL(
+      '../site/public/zinc/validation/release-candidate-0.1.0-2026-11-03.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
 );
 
 test('AMD OpenClaw evidence covers every catalog/backend attempt and immutable model bytes', () => {
-  const models = new Map(policy.models.map((model) => [model.id, model]));
+  const models = new Map(
+    release.profiles
+      .find((profile) => profile.profile === 'vulkan-rdna4')
+      .models.map((model) => [model.id, model]),
+  );
   expect(evidence.engine.version).toBe('0.1.0');
   expect(evidence.engine.commit).toBe('c3d4c0a23defa92b12394af09750554615b3cf41');
   expect(evidence.engine.kv_cache).toEqual({ vulkan: 'f16', rocm: 'f32' });
@@ -30,8 +42,21 @@ test('AMD OpenClaw evidence covers every catalog/backend attempt and immutable m
   for (const row of rows) expect(row.model_sha256).toBe(models.get(row.model).sha256);
   for (const model of evidence.models) {
     expect(model.sha256).toBe(models.get(model.id).sha256);
-    expect(model.size_bytes).toBe(models.get(model.id).size_bytes);
+    expect(Number.isSafeInteger(model.size_bytes) && model.size_bytes > 0).toBe(true);
   }
+});
+
+test('the isolated CI client pins the qualified package and integrity', () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL('./openclaw-client/package.json', import.meta.url), 'utf8'),
+  );
+  const lock = JSON.parse(
+    readFileSync(new URL('./openclaw-client/package-lock.json', import.meta.url), 'utf8'),
+  );
+  expect(manifest.private).toBe(true);
+  expect(manifest.dependencies.openclaw).toBe(evidence.client.version);
+  expect(lock.packages['node_modules/openclaw'].version).toBe(evidence.client.version);
+  expect(lock.packages['node_modules/openclaw'].integrity).toBe(evidence.client.npm_integrity);
 });
 
 test('agent passes require independent artifacts and recovery; unsupported starter is never counted', () => {

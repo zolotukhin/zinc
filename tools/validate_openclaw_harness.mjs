@@ -284,7 +284,7 @@ try {
     );
     failureChecks.cancellationRejected = false;
   } catch (error) {
-    failureChecks.cancellationRejected = error.message === 'OpenClaw was interrupted';
+    failureChecks.cancellationRejected = error.code === 'OPENCLAW_INTERRUPTED';
   }
   // Socket-close delivery may trail the child's close event. Wait for that
   // event with a separate bound rather than accepting a stale flag.

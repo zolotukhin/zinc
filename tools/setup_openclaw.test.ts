@@ -130,6 +130,31 @@ describe('OpenClaw project setup', () => {
     ])
       await expect(discoverServer({}, { fetchImpl })).rejects.toThrow('ZINC discovery');
   });
+  test('cancels oversized discovery during transfer, including multibyte bodies', async () => {
+    for (const declared of [false, true]) {
+      let pulls = 0,
+        cancelled = false;
+      const body = new ReadableStream({
+        pull(controller) {
+          pulls++;
+          controller.enqueue(new TextEncoder().encode('é'.repeat(300000)));
+          if (pulls === 20) controller.close();
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const fetchImpl = async (url: string) =>
+        url.endsWith('/health')
+          ? Response.json({ status: 'ok' })
+          : new Response(body, {
+              headers: declared ? { 'content-length': '12000000' } : {},
+            });
+      await expect(discoverServer({}, { fetchImpl })).rejects.toThrow('too large');
+      expect(cancelled).toBe(true);
+      expect(pulls).toBeLessThanOrEqual(3);
+    }
+  });
   test('preserves global and unrelated files, is idempotent, and requires explicit replacement', async () => {
     const project = await temp();
     await writeFile(path.join(project, 'openclaw.json'), 'keep global settings');

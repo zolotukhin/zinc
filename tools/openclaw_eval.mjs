@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import {
   buildConfig,
   discoverServer,
+  INTERRUPTED_CODE,
   runOpenClaw,
   validateClient,
   writeConfig,
@@ -82,6 +83,20 @@ export async function evaluate(
   );
   await validate({ binary, filename, project });
   const results = [];
+  const saveSummary = async (healthyAfter, extra = {}) => {
+    const summary = {
+      schema: 1,
+      client: 'OpenClaw',
+      model: server.model,
+      context: server.context,
+      results,
+      healthyAfter,
+      passed: healthyAfter === true && results.every((result) => result.passed),
+      ...extra,
+    };
+    await writeFile(path.join(directory, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
+    return summary;
+  };
   for (const [name, prompt] of [
     ['text', 'Reply with exactly ZINC_OPENCLAW_OK. Do not use any tools.'],
     ['workspace', TASK],
@@ -122,7 +137,11 @@ export async function evaluate(
     } catch (error) {
       await writeFile(
         path.join(directory, `${name}-failure-private.json`),
-        JSON.stringify({ message: error.message, diagnostics: error.diagnostics }, null, 2) + '\n',
+        JSON.stringify(
+          { message: error.message, code: error.code, diagnostics: error.diagnostics },
+          null,
+          2,
+        ) + '\n',
         { mode: 0o600 },
       );
       results.push({
@@ -133,7 +152,10 @@ export async function evaluate(
       });
       // Cancellation ends the suite too; starting a recovery task here would
       // create a new client while the parent is trying to retire this run.
-      if (error.message === 'OpenClaw was interrupted') throw error;
+      if (error.code === INTERRUPTED_CODE) {
+        await saveSummary(null, { interrupted: true });
+        throw error;
+      }
     }
   }
   const health = await discover({
@@ -144,17 +166,7 @@ export async function evaluate(
   })
     .then(() => true)
     .catch(() => false);
-  const summary = {
-    schema: 1,
-    client: 'OpenClaw',
-    model: server.model,
-    context: server.context,
-    results,
-    healthyAfter: health,
-    passed: health && results.every((result) => result.passed),
-  };
-  await writeFile(path.join(directory, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
-  return summary;
+  return saveSummary(health);
 }
 
 async function main() {

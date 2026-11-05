@@ -12,7 +12,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
@@ -20,10 +20,12 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24.22.2'
-      - name: Install the tested OpenClaw CLI
-        run: npm install --global openclaw@2026.11.1 --no-audit --no-fund
+      - name: Install the qualified OpenClaw dependency tree
+        # Keep upstream's required bundled-plugin setup, with every npm tarball
+        # integrity pinned by the lock captured during AMD qualification.
+        run: npm ci --prefix tools/openclaw-client --no-audit --no-fund
       - name: Check actual OpenClaw streaming tools without a model
-        run: node tools/validate_openclaw_harness.mjs --output "$RUNNER_TEMP/zinc openclaw ✓"
+        run: node tools/validate_openclaw_harness.mjs --openclaw-bin "$GITHUB_WORKSPACE/tools/openclaw-client/node_modules/.bin/openclaw" --output "$RUNNER_TEMP/zinc openclaw ✓"
 
   opencode_clients:
     name: OpenCode protocol (${{ matrix.version }})

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 export const CONFIG_NAME = 'openclaw.zinc.json';
 export const DEFAULT_BASE_URL = 'http://127.0.0.1:9090/v1';
+export const INTERRUPTED_CODE = 'OPENCLAW_INTERRUPTED';
 
 export function normalizeBaseUrl(value) {
   let url;
@@ -181,13 +182,37 @@ async function jsonRequest(url, { key, fetchImpl = fetch, timeout = 10000 } = {}
     throw new Error('ZINC discovery failed or timed out');
   }
   if (!response.ok) throw new Error(`ZINC discovery returned HTTP ${response.status}`);
-  let text;
+  const limit = 1024 * 1024;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('ZINC discovery returned an empty body');
+  let text,
+    tooLarge = false;
+  const chunks = [];
+  let bytes = 0;
   try {
-    text = await response.text();
+    if (Number(response.headers.get('content-length')) > limit) {
+      tooLarge = true;
+      await reader.cancel();
+      throw new Error();
+    }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        tooLarge = true;
+        await reader.cancel();
+        throw new Error();
+      }
+      chunks.push(value);
+    }
+    text = Buffer.concat(chunks, bytes).toString('utf8');
   } catch {
+    if (tooLarge) throw new Error('ZINC discovery response is too large');
     throw new Error('ZINC discovery body failed or timed out');
+  } finally {
+    reader.releaseLock();
   }
-  if (text.length > 1024 * 1024) throw new Error('ZINC discovery response is too large');
   try {
     return JSON.parse(text);
   } catch {
@@ -205,8 +230,8 @@ export async function discoverServer(
     jsonRequest(`${base.slice(0, -3)}/health`, { key, fetchImpl }),
     jsonRequest(`${base}/models`, { key, fetchImpl }),
   ]);
-  if (health.status !== 'ok') throw new Error('ZINC is not healthy');
-  if (!Array.isArray(listing.data) || !listing.data.length)
+  if (health?.status !== 'ok') throw new Error('ZINC is not healthy');
+  if (!Array.isArray(listing?.data) || !listing.data.length)
     throw new Error('ZINC discovery returned no models');
   const ids = new Set();
   for (const row of listing.data) {
@@ -362,9 +387,9 @@ async function clientCommand(
     stderr = '',
     failure,
     escalation;
-  const cancel = (reason) => {
+  const cancel = (message, code = 'OPENCLAW_OUTPUT_LIMIT') => {
     if (failure) return;
-    failure = reason;
+    failure = { message, code };
     stop('SIGTERM');
     escalation = setTimeout(() => stop('SIGKILL'), graceMs);
   };
@@ -378,8 +403,11 @@ async function clientCommand(
     if (stderr.length <= 4 * 1024 * 1024) stderr += text;
     if (stderr.length > 4 * 1024 * 1024) cancel('OpenClaw output exceeded the diagnostic limit');
   });
-  const timer = setTimeout(() => cancel('OpenClaw exceeded its task timeout'), deadlineMs);
-  const interrupt = () => cancel('OpenClaw was interrupted');
+  const timer = setTimeout(
+    () => cancel('OpenClaw exceeded its task timeout', 'OPENCLAW_TIMEOUT'),
+    deadlineMs,
+  );
+  const interrupt = () => cancel('OpenClaw was interrupted', INTERRUPTED_CODE);
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   try {
@@ -395,7 +423,8 @@ async function clientCommand(
     child.stdin.end(input);
     const result = await completion;
     if (failure) {
-      const error = new Error(failure);
+      const error = new Error(failure.message);
+      error.code = failure.code;
       error.diagnostics = { code: result.code, signal: result.signal, stdout, stderr };
       throw error;
     }

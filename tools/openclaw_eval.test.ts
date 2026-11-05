@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createFixture, evaluate, verifyFixture } from './openclaw_eval.mjs';
+import { INTERRUPTED_CODE } from './setup_openclaw.mjs';
 
 test('acceptance requires real code, exact readback and unchanged independent tests', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'zinc-openclaw-verification-'));
@@ -43,12 +44,19 @@ test('cancelling a task cannot start a subsequent recovery client', async () => 
           validate: async () => {},
           run: async () => {
             calls++;
-            throw new Error('OpenClaw was interrupted');
+            throw Object.assign(new Error('custom cancellation wording'), {
+              code: INTERRUPTED_CODE,
+            });
           },
         },
       ),
-    ).rejects.toThrow('interrupted');
+    ).rejects.toThrow('custom cancellation wording');
     expect(calls).toBe(1);
+    const report = JSON.parse(await readFile(path.join(root, 'trial/summary.json'), 'utf8'));
+    expect(report.interrupted).toBe(true);
+    expect(report.passed).toBe(false);
+    expect(report.healthyAfter).toBeNull();
+    expect(report.results).toHaveLength(1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
