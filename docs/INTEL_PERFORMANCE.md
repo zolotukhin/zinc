@@ -65,6 +65,10 @@ host peak RSS and observed resident/allocated VRAM. Each dimension retains the
 paired medians for every round. A losing round cannot disappear inside a pooled
 median, and unavailable counters remain unknown. Startup differences within the
 500 ms polling resolution are unresolved. Ties are not wins.
+Each round records its expected, observed and valid sample counts so missing,
+extra and invalid measurements can be distinguished. `measured_dimensions`
+counts dimensions with complete paired data across every round;
+`headline_eligible` also requires all dimensions to be measured.
 
 `all_models_all_dimensions_better` requires the complete seven-model matrix,
 all four full-budget workloads, at least three rounds with three measurements
@@ -86,8 +90,8 @@ and the unchanged inference throughput.
 
 ## Recorded diagnostic and next bottlenecks
 
-The [seven-model GPU diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-03.json)
-uses ZINC archive `8ad0f016`, performance reference `2cbca389` and correctness
+The [November 5 seven-model GPU diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-05.json)
+uses ZINC built from `c56d2888`, performance reference `8bed7cfb` and correctness
 oracle `5f436ddd` on Intel BMG G31 with Mesa 26.2.3. Both inference engines use
 Vulkan and fully offload the model to the same GPU. One round with one warmup
 and one measured request per workload establishes directions for optimization;
@@ -99,16 +103,21 @@ memory samples, startup and streaming latency.
 
 | Model            | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode |
 | ---------------- | ------------ | ----------------- | ----------- | ---------------- |
-| Qwen 3.5 9B      | 395.5        | 182.1             | 64.1        | 68.3             |
-| Gemma 26B        | 66.7         | 217.6             | 63.9        | 81.5             |
-| Gemma 31B        | 52.7         | 47.7              | 19.6        | 21.9             |
-| Qwen 3.6 35B A3B | 99.3         | 190.0             | 87.0        | 89.8             |
-| Qwen 3.6 27B     | 144.7        | 45.5              | 21.5        | 24.2             |
-| Qwen 3.8 27B     | 148.0        | 45.5              | 21.5        | 24.3             |
-| Qwen 3 0.6B      | 246.9        | 2777.2            | 193.2       | 290.9            |
+| Qwen 3.5 9B      | 384.9        | 182.0             | 63.9        | 68.1             |
+| Gemma 26B        | 66.6         | 217.3             | 63.8        | 81.2             |
+| Gemma 31B        | 52.8         | 47.7              | 19.6        | 21.9             |
+| Qwen 3.6 35B A3B | 99.7         | 190.7             | 87.1        | 89.6             |
+| Qwen 3.6 27B     | 143.7        | 45.4              | 21.5        | 24.3             |
+| Qwen 3.8 27B     | 147.1        | 45.3              | 21.5        | 24.2             |
+| Qwen 3 0.6B      | 246.1        | 2531.9            | 193.2       | 292.6            |
 
-The 376 numerical cases pass, as do all seven models' tokenizer, complete
-continuation and API recovery controls. The small starter naturally reaches EOS in the long-context
+The GPU, kernel and driver identities stayed unchanged throughout the run. The
+376 numerical cases pass. All seven models' tokenizer, complete native
+continuations and API recovery controls pass: 431 of 432 CLI choices are exact,
+with one qualified near tie on Qwen 35B. Both Gemma models cross their sliding
+windows. The [November 3 diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-03.json)
+remains frozen as historical evidence.
+The small starter naturally reaches EOS in the long-context
 workload, so that pair is retained but excluded from full-budget comparisons.
 The report therefore has a complete model matrix and an incomplete performance
 matrix. It does not establish that every model is suitable for coding tasks.
@@ -119,6 +128,42 @@ gaps. Qualifying faster paths requires complete native continuations and recover
 checks; isolated shader math agreement alone is insufficient. After a change
 passes those controls, repeat the matched three-round campaign before claiming
 a performance win.
+
+### Q8 starter prefill investigation
+
+The [targeted Q8 investigation](/zinc/validation/intel-q8-prefill-investigation-2026-11-05.json)
+compares packaged baseline `c56d2888` with the opt-in tiled path in `1a4c2fae`,
+using the same model, GPU, F16 KV and MTP-off requests. In one round with three
+measured requests, short-chat prefill rises from 246.8 to 1,908.7 tokens/s;
+decode stays near 193 tokens/s. llama.cpp `8bed7cfb` remains ahead at
+2,676.6 prefill and 287.0 decode tokens/s in that diagnostic.
+
+The tiled path passes all eleven F32-KV full-vocabulary checks with a maximum
+absolute difference of 0.000061. Its separate F16 native checks include three
+short and three extended prompts: 95/96 choices match exactly, with one
+qualified near tie. All eighteen complete HTTP continuations pass, including
+replays after cancellation and context errors. The old eligibility gate fails
+the numerical fixture by silently falling back to serial prefill; that negative
+control is retained in the report. The guarded default now requires Intel,
+the complete all-Q8 graph and its loaded F32-activation kernel. Setting
+`ZINC_INTEL_BATCHED_PREFILL=0` retains the serial control.
+
+A separate experimental decode shader reaches 227.9 tokens/s in that same
+short-chat diagnostic and passes its numerical/native controls. It is not part
+of the prefill default. The report retains that experiment's GLSL source,
+native-quantizer fixture and all treatments. Neither experiment establishes
+the three-round objective, and the starter still ends early on context-long.
+
+The [batch-size and decode follow-up](/zinc/validation/intel-q8-tuning-2026-11-05.json)
+keeps that decode control while testing 96-token, 384-token and monolithic
+prefill. The bounded 384-token path improves medium-context prefill from
+1,799.5 to 2,756.3 tokens/s and long-context prefill from 1,909.7 to 3,575.5.
+The long-context output still stops early and does not establish a full-budget
+win. Three native prompts beyond 1,100 tokens and all eighteen HTTP
+continuations pass for the larger batch, including cancellation/error replay.
+The Q8 default therefore uses 384 tokens; Gemma retains its independent tuning.
+The four-row decode layout adds no material gain in this diagnostic and remains
+an experiment.
 
 The [bounded-upload investigation](VULKAN_UPLOAD_STAGING.md) separately records
 the temporary-memory reduction and loading-time observations. Its A/B compares
@@ -135,12 +180,24 @@ two ZINC packages and does not establish a speed advantage over llama.cpp.
    the Intel worker. Keep its performance pin separate from the frozen native
    correctness oracle. Record the active kernel, firmware and Mesa stack before
    the campaign and retain that stack through each controlled comparison.
-3. Profile and correct the largest measured prefill gaps: the starter's serial
-   work, Gemma 26B's conservative path, and Qwen 35B's Intel prefill. Existing
+3. Continue tuning the starter after removing its serial fallback, then correct
+   Gemma 26B's conservative path and Qwen 35B's Intel prefill. Existing
    experimental batched paths have failed complete native continuations; an
    optimization must fix those failures before becoming a default. Reducing
    expert counts, enabling approximate activations or changing KV precision is
    not a matched performance improvement.
+   For the Q8 starter, run `tools/validate_q8_prefill.py` on the remote Intel
+   worker with `--zinc-tree`, `--worker-config` and `--output`. It compares the
+   complete vocabulary's batched logits with serial F32-activation/F32-KV prefill at
+   fourteen token/tile boundaries, including 1, 31/32/33, 95/96/97 and
+   383/384/385 tokens.
+   A silent fallback, missing comparison, nonfinite result or difference above
+   the existing 0.001 tolerance fails. A precision control at two tokens measured
+   0.003924 with F16 KV and 0.000033 with F32 KV: cache rounding magnifies small
+   summation-order differences. The numerical fixture keeps F32 KV and its
+   original tolerance; native continuations, chunk boundaries and API recovery
+   must separately pass with the F16 KV used for performance. This opt-in
+   regression is not a throughput claim.
 4. Profile decode across the dense, hybrid and MoE models, then tune the hot
    matrix-vector, attention and submission paths. Validate shader math on the
    actual Intel GPU, complete native continuations, API recovery and both

@@ -94,6 +94,27 @@ class IntelMetricsTest(unittest.TestCase):
         self.assertEqual(result["outcome"], "tied")
         self.assertFalse(result["all_rounds_better"])
 
+    def test_missing_counters_cannot_be_headline_eligible(self):
+        model, settings = self.campaign()
+        del model["processes"][0]["memory"]["observed_peak"]["gpu_resident_vram_bytes"]
+        result = benchmark_intel.performance_comparison(model, settings)
+        self.assertFalse(result["headline_eligible"])
+        self.assertEqual(result["measured_dimensions"], 19)
+        self.assertEqual(result["dimension_count"], 20)
+
+    def test_count_diagnostics_distinguish_missing_extra_and_invalid_samples(self):
+        zinc = {"round": 1, "engine": "zinc", "value": 1}
+        llama = {"round": 1, "engine": "llama", "value": 2}
+        cases = [([zinc], {"zinc": 1, "llama": 0}, {"zinc": 1, "llama": 0}),
+                 ([zinc, zinc, llama], {"zinc": 2, "llama": 1}, {"zinc": 2, "llama": 1}),
+                 ([{**zinc, "value": None}, llama], {"zinc": 1, "llama": 1}, {"zinc": 0, "llama": 1})]
+        for rows, observed, valid in cases:
+            with self.subTest(observed=observed, valid=valid):
+                result = benchmark_intel.metric_comparison(rows, "value", 1, 1)
+                self.assertEqual(result["outcome"], "unavailable")
+                self.assertEqual(result["rounds"][0]["sample_counts"], {"expected_per_engine": 1, **observed})
+                self.assertEqual(result["rounds"][0]["valid_sample_counts"], valid)
+
     def test_startup_differences_within_the_polling_resolution_are_unresolved(self):
         model, settings = self.campaign()
         for row in model["processes"]:

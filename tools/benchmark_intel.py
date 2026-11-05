@@ -63,12 +63,16 @@ def metric_comparison(rows, field, rounds, runs, higher_is_better=False, eligibl
                 value = None
             values[row["engine"]].append(value)
         paired = {engine: None for engine in values}
+        valid_counts = {}
         for engine, samples in values.items():
-            if len(samples) == runs and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in samples):
-                # Zero is meaningful for a memory counter, but invalid for a
-                # duration or throughput. Do not turn absent timing into a win.
-                if field.startswith("memory.") or all(v > 0 for v in samples):
-                    paired[engine] = statistics.median(samples)
+            # Zero is meaningful for memory, but invalid for timing/rates.
+            valid = [v for v in samples if type(v) in (int, float) and math.isfinite(v)
+                     and (v >= 0 if field.startswith("memory.") else v > 0)]
+            valid_counts[engine] = len(valid)
+            # Extra samples are retained but disqualify this round: choosing a
+            # convenient subset would permit cherry-picking a transient rerun.
+            if len(samples) == runs and len(valid) == runs:
+                paired[engine] = statistics.median(valid)
         zinc, llama = paired["zinc"], paired["llama"]
         outcome, ratio = "unavailable", None
         if eligible and zinc is not None and llama is not None:
@@ -82,7 +86,9 @@ def metric_comparison(rows, field, rounds, runs, higher_is_better=False, eligibl
                 if abs(zinc - llama) <= resolution:
                     outcome = "unresolved"
         result["rounds"].append({"round": number, "zinc": zinc, "llama": llama,
-                                 "zinc_advantage_ratio": ratio, "outcome": outcome})
+                                 "zinc_advantage_ratio": ratio, "outcome": outcome,
+                                 "sample_counts": {"expected_per_engine": runs, **{e: len(v) for e, v in values.items()}},
+                                 "valid_sample_counts": valid_counts})
     outcomes = {row["outcome"] for row in result["rounds"]}
     result["outcome"] = next(iter(outcomes)) if len(outcomes) == 1 else "mixed" if outcomes else "unavailable"
     result["all_rounds_better"] = bool(outcomes) and outcomes == {"better"}
@@ -113,10 +119,14 @@ def performance_comparison(model, settings):
     matched_settings = (settings.get("backend") == "vulkan" and settings.get("target") == "intel"
                         and settings.get("kv_cache") == "f16" and settings.get("mtp") == "off"
                         and settings.get("slots") == 1 and settings.get("prompt_cache") is False)
+    measured_dimensions = sum(bool(d["rounds"]) and all(r["zinc"] is not None and r["llama"] is not None
+                                                      for r in d["rounds"]) for d in dimensions)
     headline = (model.get("passed") is True and matched_settings and complete_workloads
-                and rounds >= 3 and runs >= 3 and settings["warmup"] >= 1 and all(eligible.values()))
+                and rounds >= 3 and runs >= 3 and settings["warmup"] >= 1 and all(eligible.values())
+                and bool(dimensions) and measured_dimensions == len(dimensions))
     return {"scope": "observed matched single-slot MTP-off rounds; not concurrency or statistical confidence",
             "headline_eligible": headline, "comparison_eligible": eligible, "dimensions": dimensions,
+            "measured_dimensions": measured_dimensions, "dimension_count": len(dimensions),
             "all_dimensions_better": headline and bool(dimensions) and all(d["all_rounds_better"] for d in dimensions)}
 
 
