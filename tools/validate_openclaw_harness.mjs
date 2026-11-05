@@ -76,6 +76,10 @@ await mkdir(root, { mode: 0o700 });
 const project = path.join(root, 'project'),
   fixture = await createFixture(project);
 const requests = [];
+let resolveCancellationClosed;
+const cancellationClosed = new Promise((resolve) => {
+  resolveCancellationClosed = resolve;
+});
 let failure,
   step = 0,
   phase = 'tools',
@@ -136,6 +140,7 @@ const server = createServer(async (req, res) => {
       // terminate the actual client and close its connection.
       res.once('close', () => {
         cancelledConnectionClosed = true;
+        resolveCancellationClosed();
       });
       return;
     }
@@ -268,7 +273,17 @@ try {
   } catch (error) {
     failureChecks.deadlineRejected = error.message === 'OpenClaw exceeded its task timeout';
   }
-  failureChecks.cancelledConnectionClosed = cancelledConnectionClosed;
+  // Socket-close delivery may trail the child's close event. Wait for that
+  // event with a separate bound rather than accepting a stale flag.
+  failureChecks.cancelledConnectionClosed =
+    cancelledConnectionClosed ||
+    (await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 2000);
+      cancellationClosed.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    }));
   phase = 'recovery';
   const recovered = await runOpenClaw({
     binary: opts.binary,
