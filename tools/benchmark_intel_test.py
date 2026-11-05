@@ -1,4 +1,5 @@
 """CPU fixtures for Intel measurement, never a GPU or a model load."""
+import copy
 import io
 import json
 from pathlib import Path
@@ -13,6 +14,108 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def campaign(self):
+        settings = {"rounds": 3, "runs": 3, "warmup": 1, "backend": "vulkan", "target": "intel",
+                    "kv_cache": "f16", "mtp": "off", "slots": 1, "prompt_cache": False,
+                    "startup_poll_interval_ms": 500}
+        model = {"passed": True, "samples": [], "stream_samples": [], "processes": [],
+                 "scenarios": [{"id": s} for s in ("core", "context-medium", "context-long", "decode-extended")]}
+        for number in range(1, 4):
+            for engine in ("zinc", "llama"):
+                better = engine == "zinc"
+                for scenario in model["scenarios"]:
+                    for warmup in (True, False, False, False):
+                        model["samples"].append({"engine": engine, "round": number, "scenario": scenario["id"],
+                            "warmup": warmup, "output_budget_complete": True, "prefillTps": 200 if better else 100,
+                            "decodeTps": 20 if better else 10, "totalLatencyMs": 100 if better else 200})
+                    model["stream_samples"].append({"engine": engine, "round": number, "scenario": scenario["id"],
+                        "first_usable_content_ms": 10 if better else 20})
+                model["processes"].append({"engine": engine, "round": number, "startup_ms": 1000 if better else 2000,
+                    "memory": {"gpu_memory_available": True, "observed_peak": {
+                        "host_peak_rss_bytes": 100 if better else 200,
+                        "gpu_resident_vram_bytes": 100 if better else 200,
+                        "gpu_total_vram_bytes": 100 if better else 200}}})
+        return model, settings
+
+    def test_all_dimension_claim_requires_every_matched_round_and_ignores_warmups(self):
+        model, settings = self.campaign()
+        for row in model["samples"]:
+            if row["warmup"]:
+                row.update(prefillTps=0, decodeTps=0, totalLatencyMs=float("nan"), output_budget_complete=False)
+        result = benchmark_intel.performance_comparison(model, settings)
+        self.assertTrue(result["headline_eligible"])
+        self.assertEqual(len(result["dimensions"]), 20)
+        self.assertTrue(result["all_dimensions_better"])
+        # A pooled median would hide a losing round behind two faster rounds.
+        for row in model["samples"]:
+            if row["engine"] == "zinc" and row["round"] == 3:
+                row["decodeTps"] = 5
+        result = benchmark_intel.performance_comparison(model, settings)
+        self.assertFalse(result["all_dimensions_better"])
+        decode = next(d for d in result["dimensions"] if d["scenario"] == "core" and d["field"] == "decodeTps")
+        self.assertEqual(decode["outcome"], "mixed")
+        self.assertEqual(decode["rounds"][2]["outcome"], "worse")
+
+    def test_unknown_memory_diagnostic_counts_or_wrong_settings_cannot_claim_all_dimensions(self):
+        original, settings = self.campaign()
+        for change in ("missing_memory", "unavailable_memory", "missing_round", "duplicate_sample", "early_eos",
+                       "one_round", "one_run", "wrong_kv", "mtp_on", "cached", "multiple_slots", "missing_workload", "failed_model"):
+            with self.subTest(change=change):
+                model, active = copy.deepcopy(original), dict(settings)
+                if change == "missing_memory":
+                    del model["processes"][0]["memory"]["observed_peak"]["gpu_resident_vram_bytes"]
+                elif change == "unavailable_memory":
+                    model["processes"][0]["memory"]["gpu_memory_available"] = False
+                elif change == "missing_round":
+                    model["stream_samples"] = [s for s in model["stream_samples"] if not (s["round"] == 3 and s["engine"] == "llama")]
+                elif change == "duplicate_sample":
+                    model["samples"].append(copy.deepcopy(model["samples"][1]))
+                elif change == "early_eos":
+                    model["samples"][1]["output_budget_complete"] = False
+                elif change == "one_round": active["rounds"] = 1
+                elif change == "one_run": active["runs"] = 1
+                elif change == "wrong_kv": active["kv_cache"] = "f32"
+                elif change == "mtp_on": active["mtp"] = "on"
+                elif change == "cached": active["prompt_cache"] = True
+                elif change == "multiple_slots": active["slots"] = 2
+                elif change == "missing_workload": model["scenarios"].pop()
+                elif change == "failed_model": model["passed"] = False
+                self.assertFalse(benchmark_intel.performance_comparison(model, active)["all_dimensions_better"])
+
+    def test_zero_unknown_and_nonfinite_values_do_not_invent_speedups(self):
+        for bad in (None, -1, 0, float("nan"), float("inf"), True):
+            with self.subTest(value=bad):
+                rows = [{"round": 1, "engine": "zinc", "value": bad}, {"round": 1, "engine": "llama", "value": 1}]
+                result = benchmark_intel.metric_comparison(rows, "value", 1, 1)
+                self.assertEqual(result["outcome"], "unavailable")
+                self.assertIsNone(result["rounds"][0]["zinc_advantage_ratio"])
+        rows = [{"round": 1, "engine": e, "memory": {"zero": 0}} for e in ("zinc", "llama")]
+        result = benchmark_intel.metric_comparison(rows, "memory.zero", 1, 1)
+        self.assertEqual(result["outcome"], "tied")
+        self.assertFalse(result["all_rounds_better"])
+
+    def test_startup_differences_within_the_polling_resolution_are_unresolved(self):
+        model, settings = self.campaign()
+        for row in model["processes"]:
+            row["startup_ms"] = 1000 if row["engine"] == "zinc" else 1200
+        result = benchmark_intel.performance_comparison(model, settings)
+        startup = next(d for d in result["dimensions"] if d["field"] == "startup_ms")
+        self.assertEqual(startup["outcome"], "unresolved")
+        self.assertGreater(startup["rounds"][0]["zinc_advantage_ratio"], 1)
+        self.assertFalse(result["all_dimensions_better"])
+
+    def test_retained_real_diagnostic_is_not_relabelled_as_a_decode_win(self):
+        path = Path(__file__).resolve().parents[1] / "site/public/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-03.json"
+        report = json.loads(path.read_text())["report"]
+        self.assertTrue(report["passed"])
+        for model in report["models"]:
+            with self.subTest(model=model["id"]):
+                result = benchmark_intel.performance_comparison(model, report["settings"])
+                self.assertFalse(result["headline_eligible"])
+                self.assertFalse(result["all_dimensions_better"])
+                core_decode = next(d for d in result["dimensions"] if d["scenario"] == "core" and d["field"] == "decodeTps")
+                self.assertEqual(core_decode["outcome"], "worse")
+
     def test_comparisons_require_both_measured_engines_and_ignore_warmups(self):
         def sample(engine, complete=True, warmup=False):
             return {"engine": engine, "scenario": "core", "warmup": warmup, "output_budget_complete": complete}
