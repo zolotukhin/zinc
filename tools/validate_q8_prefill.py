@@ -13,9 +13,18 @@ import tempfile
 
 import release_gpu as gpu
 from benchmark_matched_mtp import idle, interrupted
-from release_lib import install_signal_handlers, policy, require, sha256, worker_reservation, write_json
+from release_lib import install_signal_handlers, policy, sha256, worker_reservation, write_json
 
 PREFILL_TOKEN_COUNTS = (1, 2, 15, 16, 31, 32, 33, 95, 96, 97, 257, 383, 384, 385)
+
+
+class Q8RegressionError(ValueError):
+    """A static diagnostic owned by this validator, safe for public reports."""
+
+
+def require(condition, message):
+    if not condition:
+        raise Q8RegressionError(message)
 
 
 def validated_logits(log, tokens):
@@ -72,6 +81,7 @@ def main():
               "model_sha256": model_pin["sha256"], "binary_sha256": sha256(tree / "bin/zinc"),
               "q8_gemm_shader_sha256": sha256(tree / "share/zinc/shaders/mul_mm_q8_0.spv"),
               "cases": []}
+    active_count = None
     try:
         with worker_reservation(Path(worker["lock_directory"])):
             idle()
@@ -81,6 +91,7 @@ def main():
             # Exercise tile/chunk boundaries and a single-token dispatch.
             # Nonzero KV positions need the separate native/API gates.
             for count in PREFILL_TOKEN_COUNTS:
+                active_count = count
                 prompt = " ".join(["word"] * count)
                 prompt_file = work / f"prompt-{count}.txt"
                 prompt_file.write_text(prompt)
@@ -97,7 +108,22 @@ def main():
                 report["cases"].append(validated_logits(text, count))
                 idle()
                 write_json(output, report)
+            active_count = None
             report.update(passed=True, cleanup="no GPU process remains")
+    except BaseException as error:
+        # Keep completed cases and the boundary that failed. Unexpected process
+        # errors, including generic ValueError, can contain private worker
+        # paths/commands. Only this validator's static diagnostics are public.
+        report["passed"] = False
+        report.pop("cleanup", None)
+        report["failure"] = {
+            "prompt_tokens": active_count,
+            "error_type": type(error).__name__,
+            "reason": str(error) if type(error) is Q8RegressionError else type(error).__name__,
+        }
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            report["interrupted"] = True
+        raise
     finally:
         write_json(output, report)
 
