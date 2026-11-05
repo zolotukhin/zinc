@@ -19,26 +19,24 @@ const log = std.log.scoped(.dmmv);
 const descriptor_pool_max_sets: u32 = 256;
 const descriptors_per_set: u32 = 3;
 
-fn intelQ8RowDecodeEnabled(vendor: GpuVendor, subgroup_size: u32, setting: ?[]const u8) bool {
-    // The row reduction needs at least SIMD16. Keep earlier Arc generations
-    // and every other backend on the existing shader; =0 is the A/B control.
-    if (vendor != .intel_arc_xe2 or (subgroup_size != 16 and subgroup_size != 32)) return false;
+fn intelQ8RowDecodeEnabled(vendor: GpuVendor, can_require_simd16: bool, full_subgroups: bool, setting: ?[]const u8) bool {
+    // Enforce the reduction width rather than assuming the device's default
+    // equals the pipeline's width. =0 retains the original shader for A/B runs.
+    if (vendor != .intel_arc_xe2 or !can_require_simd16 or !full_subgroups) return false;
     return setting == null or !std.mem.eql(u8, setting.?, "0");
 }
 
-test "Intel Q8 row decode stays on qualified subgroup sizes and honors the control" {
-    for ([_]u32{ 16, 32 }) |subgroup_size| {
-        try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, subgroup_size, null));
-        try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, subgroup_size, "1"));
-        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, subgroup_size, "0"));
-    }
-    for ([_]u32{ 0, 1, 8, 15, 24, 48, 64, 128 }) |subgroup_size| {
-        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, subgroup_size, null));
+test "Intel Q8 row decode requires enforceable SIMD16 and honors the control" {
+    try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, true, true, null));
+    try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, true, true, "1"));
+    try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, true, true, "0"));
+    for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false } }) |caps| {
+        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, caps[0], caps[1], null));
     }
     for (std.enums.values(GpuVendor)) |vendor| {
         if (vendor == .intel_arc_xe2) continue;
-        try std.testing.expect(!intelQ8RowDecodeEnabled(vendor, 16, "1"));
-        try std.testing.expect(!intelQ8RowDecodeEnabled(vendor, 32, null));
+        try std.testing.expect(!intelQ8RowDecodeEnabled(vendor, true, true, "1"));
+        try std.testing.expect(!intelQ8RowDecodeEnabled(vendor, true, true, null));
     }
 }
 
@@ -53,8 +51,11 @@ fn createQ8DecodePipeline(
     var path_buf: [512]u8 = undefined;
     if (intel_rows) {
         const path = try std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_intel_rows.spv", .{shader_dir});
-        if (pipeline_mod.createFromSpirvWithOptions(instance, path, 3, @sizeOf(DmmvPushConstants), spec_constants, options, allocator)) |pipeline| {
-            log.info("Q8_0 Intel row decode shader loaded (WG64, 32 lanes per row)", .{});
+        var intel_options = options;
+        intel_options.required_subgroup_size = 16;
+        intel_options.require_full_subgroups = true;
+        if (pipeline_mod.createFromSpirvWithOptions(instance, path, 3, @sizeOf(DmmvPushConstants), spec_constants, intel_options, allocator)) |pipeline| {
+            log.info("Q8_0 Intel row decode shader loaded (WG64, required SIMD16)", .{});
             return pipeline;
         } else |err| {
             // An older shader directory or unsupported driver must retain the
@@ -1123,7 +1124,7 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
-        const intel_q8_rows = intelQ8RowDecodeEnabled(gpu_config.vendor, instance.caps.default_subgroup_size, host_io.getenv("ZINC_INTEL_Q8_DECODE"));
+        const intel_q8_rows = intelQ8RowDecodeEnabled(gpu_config.vendor, instance.caps.supportsRequiredSubgroupSize(16), instance.caps.compute_full_subgroups, host_io.getenv("ZINC_INTEL_Q8_DECODE"));
         const pipeline_q8_0 = createQ8DecodePipeline(instance, shader_dir, intel_q8_rows, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
