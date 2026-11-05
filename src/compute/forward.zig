@@ -29177,7 +29177,7 @@ pub const InferenceEngine = struct {
         const intel_batched_explicitly_off = intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "0");
         const intel_batched_requested = isIntelGpuVendor(self.gpu_config.vendor) and
             (intel_batched_explicitly_on or (!intel_batched_explicitly_off and (intel_gemma_chunk_default or intel_dense_q8_default)));
-        const intel_default_chunk_limit: u32 = if (intel_gemma_moe_default) self.gemmaPrefillDp4aMaxTokens() else 96;
+        const intel_default_chunk_limit = prefill_policy.intelBatchedPrefillChunkDefault(intel_gemma_moe_default, intel_dense_q8_default, self.gemmaPrefillDp4aMaxTokens());
         const chunk_limit = intelBatchedPrefillChunkLimit(self.gpu_config.vendor, intel_default_chunk_limit);
         if (intel_batched_requested and
             chunk_limit > 0 and

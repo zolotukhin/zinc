@@ -27,6 +27,23 @@ pub fn vulkanDenseQ8PrefillDefault(config: ModelConfig, intel: bool, push_descri
     return true;
 }
 
+/// Intel Q8 GEMM has no serial-shader column limit. A bounded 384-token
+/// batch avoids repeated graph submissions; the matched starter diagnostic
+/// improved medium/long prefill by 53%/87% over the 96-token control. Gemma's
+/// independent tuning override must not silently change this Q8 bound.
+pub fn intelBatchedPrefillChunkDefault(gemma_moe: bool, dense_q8: bool, gemma_limit: u32) u32 {
+    if (gemma_moe) return gemma_limit;
+    return if (dense_q8) 384 else 96;
+}
+
+test "Intel Q8 batching is bounded independently of Gemma precision tuning" {
+    for ([_]u32{ 64, 384, 4096 }) |gemma_limit| {
+        try std.testing.expectEqual(gemma_limit, intelBatchedPrefillChunkDefault(true, false, gemma_limit));
+        try std.testing.expectEqual(@as(u32, 384), intelBatchedPrefillChunkDefault(false, true, gemma_limit));
+        try std.testing.expectEqual(@as(u32, 96), intelBatchedPrefillChunkDefault(false, false, gemma_limit));
+    }
+}
+
 test "qualified Intel Q8 default requires every projection and preserves mixed-quant defaults" {
     var cfg = std.mem.zeroes(ModelConfig);
     cfg.architecture = .qwen2;

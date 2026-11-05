@@ -15,6 +15,8 @@ import release_gpu as gpu
 from benchmark_matched_mtp import idle, interrupted
 from release_lib import install_signal_handlers, policy, require, sha256, worker_reservation, write_json
 
+PREFILL_TOKEN_COUNTS = (1, 2, 15, 16, 31, 32, 33, 95, 96, 97, 257, 383, 384, 385)
+
 
 def validated_logits(log, tokens):
     # validate mode falls back silently when the model is ineligible. Requiring
@@ -78,7 +80,7 @@ def main():
             work = Path(tempfile.mkdtemp(prefix="q8-prefill-", dir=output.parent))
             # Exercise tile/chunk boundaries and a single-token dispatch.
             # Nonzero KV positions need the separate native/API gates.
-            for count in (1, 2, 15, 16, 31, 32, 33, 95, 96, 97, 257):
+            for count in PREFILL_TOKEN_COUNTS:
                 prompt = " ".join(["word"] * count)
                 prompt_file = work / f"prompt-{count}.txt"
                 prompt_file.write_text(prompt)

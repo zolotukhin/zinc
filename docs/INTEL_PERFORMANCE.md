@@ -129,6 +129,42 @@ checks; isolated shader math agreement alone is insufficient. After a change
 passes those controls, repeat the matched three-round campaign before claiming
 a performance win.
 
+### Q8 starter prefill investigation
+
+The [targeted Q8 investigation](/zinc/validation/intel-q8-prefill-investigation-2026-11-05.json)
+compares packaged baseline `c56d2888` with the opt-in tiled path in `1a4c2fae`,
+using the same model, GPU, F16 KV and MTP-off requests. In one round with three
+measured requests, short-chat prefill rises from 246.8 to 1,908.7 tokens/s;
+decode stays near 193 tokens/s. llama.cpp `8bed7cfb` remains ahead at
+2,676.6 prefill and 287.0 decode tokens/s in that diagnostic.
+
+The tiled path passes all eleven F32-KV full-vocabulary checks with a maximum
+absolute difference of 0.000061. Its separate F16 native checks include three
+short and three extended prompts: 95/96 choices match exactly, with one
+qualified near tie. All eighteen complete HTTP continuations pass, including
+replays after cancellation and context errors. The old eligibility gate fails
+the numerical fixture by silently falling back to serial prefill; that negative
+control is retained in the report. The guarded default now requires Intel,
+the complete all-Q8 graph and its loaded F32-activation kernel. Setting
+`ZINC_INTEL_BATCHED_PREFILL=0` retains the serial control.
+
+A separate experimental decode shader reaches 227.9 tokens/s in that same
+short-chat diagnostic and passes its numerical/native controls. It is not part
+of the prefill default. The report retains that experiment's GLSL source,
+native-quantizer fixture and all treatments. Neither experiment establishes
+the three-round objective, and the starter still ends early on context-long.
+
+The [batch-size and decode follow-up](/zinc/validation/intel-q8-tuning-2026-11-05.json)
+keeps that decode control while testing 96-token, 384-token and monolithic
+prefill. The bounded 384-token path improves medium-context prefill from
+1,799.5 to 2,756.3 tokens/s and long-context prefill from 1,909.7 to 3,575.5.
+The long-context output still stops early and does not establish a full-budget
+win. Three native prompts beyond 1,100 tokens and all eighteen HTTP
+continuations pass for the larger batch, including cancellation/error replay.
+The Q8 default therefore uses 384 tokens; Gemma retains its independent tuning.
+The four-row decode layout adds no material gain in this diagnostic and remains
+an experiment.
+
 The [bounded-upload investigation](VULKAN_UPLOAD_STAGING.md) separately records
 the temporary-memory reduction and loading-time observations. Its A/B compares
 two ZINC packages and does not establish a speed advantage over llama.cpp.
@@ -144,8 +180,8 @@ two ZINC packages and does not establish a speed advantage over llama.cpp.
    the Intel worker. Keep its performance pin separate from the frozen native
    correctness oracle. Record the active kernel, firmware and Mesa stack before
    the campaign and retain that stack through each controlled comparison.
-3. Profile and correct the largest measured prefill gaps: the starter's serial
-   work, Gemma 26B's conservative path, and Qwen 35B's Intel prefill. Existing
+3. Continue tuning the starter after removing its serial fallback, then correct
+   Gemma 26B's conservative path and Qwen 35B's Intel prefill. Existing
    experimental batched paths have failed complete native continuations; an
    optimization must fix those failures before becoming a default. Reducing
    expert counts, enabling approximate activations or changing KV precision is
@@ -153,7 +189,8 @@ two ZINC packages and does not establish a speed advantage over llama.cpp.
    For the Q8 starter, run `tools/validate_q8_prefill.py` on the remote Intel
    worker with `--zinc-tree`, `--worker-config` and `--output`. It compares the
    complete vocabulary's batched logits with serial F32-activation/F32-KV prefill at
-   eleven token/tile boundaries, including 1, 31/32/33 and 95/96/97 tokens.
+   fourteen token/tile boundaries, including 1, 31/32/33, 95/96/97 and
+   383/384/385 tokens.
    A silent fallback, missing comparison, nonfinite result or difference above
    the existing 0.001 tolerance fails. A precision control at two tokens measured
    0.003924 with F16 KV and 0.000033 with F32 KV: cache rounding magnifies small

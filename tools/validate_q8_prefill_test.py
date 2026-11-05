@@ -1,6 +1,6 @@
 import unittest
 
-from validate_q8_prefill import validated_logits
+from validate_q8_prefill import PREFILL_TOKEN_COUNTS, validated_logits
 
 
 def record(status="ok", maximum="0.000100", nonfinite=0, tolerance="0.001000", count=33):
@@ -9,6 +9,12 @@ def record(status="ok", maximum="0.000100", nonfinite=0, tolerance="0.001000", c
 
 
 class LogitRegression(unittest.TestCase):
+    def test_fixture_straddles_tile_and_both_intel_chunk_boundaries(self):
+        self.assertEqual(len(PREFILL_TOKEN_COUNTS), len(set(PREFILL_TOKEN_COUNTS)))
+        for boundary in (32, 96, 384):
+            self.assertTrue({boundary - 1, boundary, boundary + 1}.issubset(PREFILL_TOKEN_COUNTS))
+        self.assertTrue({1, 2}.issubset(PREFILL_TOKEN_COUNTS))
+
     def test_full_vocabulary_comparison_accepts_only_the_intended_boundary(self):
         self.assertEqual(validated_logits(record(), 33)["prompt_tokens"], 33)
         self.assertEqual(validated_logits(record(maximum="0"), 33)["maximum_absolute_logit_difference"], 0)
