@@ -99,11 +99,14 @@ def main():
                 report["cases"].append(validated_logits(text, count))
                 idle()
                 write_json(output, report)
+            active_count = None
             report.update(passed=True, cleanup="no GPU process remains")
     except BaseException as error:
         # Keep completed cases and the boundary that failed. Unexpected process
         # errors can contain private worker paths/commands, so retain their type
         # rather than copying their message into a publishable report.
+        report["passed"] = False
+        report.pop("cleanup", None)
         report["failure"] = {
             "prompt_tokens": active_count,
             "error_type": type(error).__name__,
