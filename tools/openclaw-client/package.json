@@ -1,0 +1,8 @@
+{
+  "name": "zinc-openclaw-client-check",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "openclaw": "2026.11.1"
+  }
+}

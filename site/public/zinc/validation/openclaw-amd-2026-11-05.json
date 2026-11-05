@@ -1,0 +1,1042 @@
+{
+  "schema": 1,
+  "measured_at": "2026-11-05T17:47:49.441392+00:00",
+  "scope": "Actual OpenClaw one-shot acceptance on AMD; bounded coding fixtures, not a throughput comparison or long-running soak",
+  "hardware": {
+    "gpu": "AMD Radeon AI PRO R9700",
+    "vram_gib": 32,
+    "os": "Ubuntu 24.04.3",
+    "kernel": "7.2.2-070202-generic",
+    "mesa": "25.0.7-0ubuntu0.24.04.2",
+    "rocm": "7.2.4"
+  },
+  "engine": {
+    "version": "0.1.0",
+    "commit": "c3d4c0a23defa92b12394af09750554615b3cf41",
+    "binaries": [
+      {
+        "backend": "vulkan",
+        "archive_sha256": "b203e3d408a374de56e114a16853af6fef294b75f064f75a8e41c0969ec27844",
+        "binary_sha256": "afe439ecf05bd1932b68f53a55ffb1b647c2a9e7a188cbb2c38bc3b9354d1810",
+        "identity": {
+          "commit": "c3d4c0a23defa92b12394af09750554615b3cf41",
+          "target": "x86_64-linux-gnu",
+          "optimize": "fast",
+          "backends": "vulkan"
+        }
+      },
+      {
+        "backend": "rocm",
+        "archive_sha256": "3e3b78ca71fc1859f39d71e5a97260486190bd4e4a35dafe1320efeb0caa0801",
+        "binary_sha256": "e3f3be8923d324b0e875834f125fa14aa4378f4185414fc0793efcb107e85a91",
+        "identity": {
+          "commit": "c3d4c0a23defa92b12394af09750554615b3cf41",
+          "target": "x86_64-linux-gnu",
+          "optimize": "fast",
+          "backends": "rocm"
+        }
+      }
+    ],
+    "parallel": 1,
+    "kv_cache": {
+      "vulkan": "f16",
+      "rocm": "f32"
+    }
+  },
+  "client": {
+    "name": "OpenClaw",
+    "version": "2026.11.1",
+    "source_commit": "4ffdd2047d192dd65554de3c8c46c0e0197c6e2a",
+    "npm_integrity": "sha512-2pSbt/taBKM/ofPXsiOEmVefgUdVHYRZOmcWNDyx67WUfeGFXqtfqLvtwYOiH4NcLolDSLMUgsno2oYhTVXptw==",
+    "node": "v24.22.2",
+    "node_archive_sha256": "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75",
+    "preset": {
+      "code_mode": "direct",
+      "local_model_lean": true,
+      "thinking": "off",
+      "bundled_skills": false,
+      "tool_search": false,
+      "output_tokens": 1536
+    }
+  },
+  "models": [
+    {
+      "id": "qwen3-0.6b-q8-0",
+      "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "size_bytes": 639446688
+    },
+    {
+      "id": "qwen38-27b-q4k-m",
+      "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+      "size_bytes": 17106775008
+    },
+    {
+      "id": "qwen36-35b-a3b-q4k-xl",
+      "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+      "size_bytes": 22360456160
+    },
+    {
+      "id": "qwen36-27b-q4k-m",
+      "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+      "size_bytes": 16817244384
+    },
+    {
+      "id": "qwen35-9b-q4k-m",
+      "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+      "size_bytes": 5680522464
+    },
+    {
+      "id": "gemma4-31b-q4k-m",
+      "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "size_bytes": 18323733440
+    },
+    {
+      "id": "gemma4-26b-a4b-q4k-m",
+      "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+      "size_bytes": 16868236288
+    }
+  ],
+  "matrix": [
+    {
+      "backend": "vulkan",
+      "model": "qwen35-9b-q4k-m",
+      "context": 16384,
+      "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 8.415
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 5,
+            "tools": [
+              "read",
+              "write",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 19.636
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.601
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "vulkan",
+      "model": "gemma4-26b-a4b-q4k-m",
+      "context": 16384,
+      "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.619
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 7,
+            "tools": [
+              "exec",
+              "read",
+              "write",
+              "edit"
+            ],
+            "failures": 0
+          },
+          "seconds": 29.818
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.409
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "vulkan",
+      "model": "gemma4-31b-q4k-m",
+      "context": 8192,
+      "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 28.651
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 5,
+            "tools": [
+              "read",
+              "edit",
+              "write",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 114.465
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 28.532
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "vulkan",
+      "model": "qwen3-0.6b-q8-0",
+      "context": 16384,
+      "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "availability": "served",
+      "acceptance_passed": false,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": false,
+          "toolSummary": null,
+          "seconds": 12.193
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": false,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": false,
+            "tests": false
+          },
+          "toolSummary": {
+            "calls": 4,
+            "tools": [
+              "apply_patch",
+              "read",
+              "process"
+            ],
+            "failures": 2,
+            "unresolvedError": {
+              "toolName": "process"
+            }
+          },
+          "seconds": 27.601
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": false,
+          "toolSummary": null,
+          "seconds": 11.629
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "vulkan",
+      "model": "qwen36-27b-q4k-m",
+      "context": 16384,
+      "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 13.66
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 6,
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 59.766
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 12.257
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "vulkan",
+      "model": "qwen36-35b-a3b-q4k-xl",
+      "context": 16384,
+      "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 9.537
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 6,
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 17.706
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.62
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "vulkan",
+      "model": "qwen38-27b-q4k-m",
+      "context": 16384,
+      "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 12.557
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 6,
+            "tools": [
+              "read",
+              "write",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 43.696
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 12.825
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "rocm",
+      "model": "qwen35-9b-q4k-m",
+      "context": 16384,
+      "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.149
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 5,
+            "tools": [
+              "read",
+              "write",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 17.559
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 6.888
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "rocm",
+      "model": "gemma4-26b-a4b-q4k-m",
+      "context": 16384,
+      "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 6.534
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 7,
+            "tools": [
+              "exec",
+              "read",
+              "write",
+              "edit"
+            ],
+            "failures": 0
+          },
+          "seconds": 18.803
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 6.082
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "rocm",
+      "model": "gemma4-31b-q4k-m",
+      "context": 8192,
+      "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 24.394
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 5,
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 100.391
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 24.428
+        }
+      ],
+      "allocation_failure_messages": 30
+    },
+    {
+      "backend": "rocm",
+      "model": "qwen3-0.6b-q8-0",
+      "context": 16384,
+      "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "availability": "unsupported_architecture",
+      "acceptance_passed": false,
+      "server_healthy_after": null,
+      "tasks": [],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "rocm",
+      "model": "qwen36-27b-q4k-m",
+      "context": 16384,
+      "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 11.018
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 6,
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 60.884
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 11.005
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "rocm",
+      "model": "qwen36-35b-a3b-q4k-xl",
+      "context": 16384,
+      "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.102
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 6,
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 18.731
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 6.867
+        }
+      ],
+      "allocation_failure_messages": 0
+    },
+    {
+      "backend": "rocm",
+      "model": "qwen38-27b-q4k-m",
+      "context": 16384,
+      "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+      "availability": "served",
+      "acceptance_passed": true,
+      "server_healthy_after": true,
+      "tasks": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 13.903
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 6,
+            "tools": [
+              "read",
+              "write",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 51.017
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 13.781
+        }
+      ],
+      "allocation_failure_messages": 0
+    }
+  ],
+  "counts": {
+    "attempted_backend_model_rows": 14,
+    "served_rows": 13,
+    "accepted_rows": 12,
+    "unsupported_rows": 1,
+    "completed_tasks": 39,
+    "passed_tasks": 36
+  },
+  "bounded_gemma31_rocm": {
+    "context": 8192,
+    "prefill_chunk": 128,
+    "allocation_failure_messages": 0,
+    "summary": {
+      "schema": 1,
+      "client": "OpenClaw",
+      "model": "gemma-4-31B-it-Q4_K_M.gguf",
+      "context": 8192,
+      "results": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 22.473
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": true,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "toolSummary": {
+            "calls": 5,
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "exec"
+            ],
+            "failures": 0
+          },
+          "seconds": 94.631
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 22.529
+        }
+      ],
+      "healthyAfter": true,
+      "passed": true
+    }
+  },
+  "starter_native_control": {
+    "engine": "llama.cpp",
+    "source_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "backend": "vulkan",
+    "full_gpu_offload": true,
+    "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+    "summary": {
+      "schema": 1,
+      "client": "OpenClaw",
+      "model": "qwen3-0.6b-q8-0",
+      "context": 16384,
+      "results": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 7.186
+        },
+        {
+          "name": "workspace",
+          "completed": true,
+          "passed": false,
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": false,
+            "tests": false
+          },
+          "toolSummary": {
+            "calls": 5,
+            "tools": [
+              "process",
+              "read",
+              "write",
+              "exec"
+            ],
+            "failures": 1,
+            "unresolvedError": {
+              "toolName": "process"
+            }
+          },
+          "seconds": 10.323
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 5.786
+        }
+      ],
+      "healthyAfter": true,
+      "passed": false
+    },
+    "observation": "Both engines fail the workspace task; native passes exact text, ZINC adds a period. This is a task control, not token equivalence or a latest-performance baseline."
+  },
+  "retained_context_failure": {
+    "model": "gemma4-26b-a4b-q4k-m",
+    "backend": "vulkan",
+    "context": 8192,
+    "preset": "coding with bundled skills and tool search",
+    "failure": "context_overflow",
+    "summary": {
+      "schema": 1,
+      "client": "OpenClaw",
+      "model": "gemma4-26b-a4b-q4k-m",
+      "context": 8192,
+      "results": [
+        {
+          "name": "text",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 9.162
+        },
+        {
+          "name": "workspace",
+          "completed": false,
+          "passed": false,
+          "seconds": 62.889
+        },
+        {
+          "name": "recovery",
+          "completed": true,
+          "passed": true,
+          "toolSummary": null,
+          "seconds": 9.13
+        }
+      ],
+      "healthyAfter": true,
+      "passed": false
+    }
+  },
+  "cpu_protocol": {
+    "kind": "cpu-scripted-protocol",
+    "clientVersion": "OpenClaw 2026.11.1 (4ffdd20)",
+    "passed": true,
+    "requests": [
+      {
+        "model": "zinc-protocol",
+        "stream": true,
+        "max_tokens": 1024,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "tools": [
+          "apply_patch",
+          "edit",
+          "exec",
+          "process",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "model": "zinc-protocol",
+        "stream": true,
+        "max_tokens": 1024,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool"
+        ],
+        "tools": [
+          "apply_patch",
+          "edit",
+          "exec",
+          "process",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "model": "zinc-protocol",
+        "stream": true,
+        "max_tokens": 1024,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "assistant",
+          "tool"
+        ],
+        "tools": [
+          "apply_patch",
+          "edit",
+          "exec",
+          "process",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "model": "zinc-protocol",
+        "stream": true,
+        "max_tokens": 1024,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "assistant",
+          "tool",
+          "assistant",
+          "tool"
+        ],
+        "tools": [
+          "apply_patch",
+          "edit",
+          "exec",
+          "process",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "model": "zinc-protocol",
+        "stream": true,
+        "max_tokens": 1024,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "assistant",
+          "tool",
+          "assistant",
+          "tool",
+          "assistant",
+          "tool"
+        ],
+        "tools": [
+          "apply_patch",
+          "edit",
+          "exec",
+          "process",
+          "read",
+          "write"
+        ]
+      }
+    ],
+    "failureChecks": {
+      "apiErrorRejected": true,
+      "cancellationRejected": true,
+      "cancelledConnectionClosed": true,
+      "recovery": true
+    },
+    "apiErrorEvidence": {
+      "responses": 1,
+      "exitCode": 1,
+      "signal": null,
+      "reportedOk": false,
+      "status": "error",
+      "helperError": "OpenClaw failed; inspect its task diagnostics"
+    },
+    "verification": {
+      "passed": true,
+      "checks": {
+        "contract.json": true,
+        "feature.test.mjs": true,
+        "receipt": true,
+        "tests": true
+      }
+    },
+    "toolSummary": {
+      "calls": 4,
+      "tools": [
+        "read",
+        "write",
+        "exec"
+      ],
+      "failures": 0
+    }
+  },
+  "final_gpu_process_counts": {
+    "zinc": 0,
+    "llama-server": 0,
+    "llama-cli": 0,
+    "llama-bench": 0
+  }
+}

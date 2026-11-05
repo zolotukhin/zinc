@@ -45,6 +45,9 @@ bun.lockb
 .env
 .env.*
 
+# Per-project OpenClaw endpoint configuration
+openclaw.zinc.json
+
 # Development release tooling
 __pycache__/
 *.pyc
