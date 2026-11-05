@@ -905,7 +905,7 @@ test "Vulkan Intel batched prefill keeps chunk override for fallback debugging" 
     try expectContainsNear(src, "fn gemmaPrefillDp4aMaxTokens", "if (self.isAmdRdna()) return gemma_prefill_dp4a_max_tokens_rdna;", 500);
     try expectContainsNear(src, "fn intelBatchedPrefillChunkLimit", "orelse return default_limit;", 500);
     try expectContainsNear(src, "fn intelBatchedPrefillChunkLimit", "if (std.mem.eql(u8, raw, \"0\")) return 0;", 700);
-    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine", "intelBatchedPrefillChunkLimit", 1800);
+    try expectContainsNear(src, "const intel_default_chunk_limit: u32 =", "intelBatchedPrefillChunkLimit(self.gpu_config.vendor, intel_default_chunk_limit)", 300);
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine", "const intel_gemma_moe_default", 1200);
     try expectContainsNear(src, "const intel_gemma_moe_default", "cfg.n_experts > 0", 300);
     try expectContainsNear(src, "const intel_gemma_moe_default", "gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor)", 500);

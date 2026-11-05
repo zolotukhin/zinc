@@ -90,8 +90,8 @@ and the unchanged inference throughput.
 
 ## Recorded diagnostic and next bottlenecks
 
-The [seven-model GPU diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-03.json)
-uses ZINC archive `8ad0f016`, performance reference `2cbca389` and correctness
+The [November 5 seven-model GPU diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-05.json)
+uses ZINC built from `c56d2888`, performance reference `8bed7cfb` and correctness
 oracle `5f436ddd` on Intel BMG G31 with Mesa 26.2.3. Both inference engines use
 Vulkan and fully offload the model to the same GPU. One round with one warmup
 and one measured request per workload establishes directions for optimization;
@@ -103,16 +103,21 @@ memory samples, startup and streaming latency.
 
 | Model            | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode |
 | ---------------- | ------------ | ----------------- | ----------- | ---------------- |
-| Qwen 3.5 9B      | 395.5        | 182.1             | 64.1        | 68.3             |
-| Gemma 26B        | 66.7         | 217.6             | 63.9        | 81.5             |
-| Gemma 31B        | 52.7         | 47.7              | 19.6        | 21.9             |
-| Qwen 3.6 35B A3B | 99.3         | 190.0             | 87.0        | 89.8             |
-| Qwen 3.6 27B     | 144.7        | 45.5              | 21.5        | 24.2             |
-| Qwen 3.8 27B     | 148.0        | 45.5              | 21.5        | 24.3             |
-| Qwen 3 0.6B      | 246.9        | 2777.2            | 193.2       | 290.9            |
+| Qwen 3.5 9B      | 384.9        | 182.0             | 63.9        | 68.1             |
+| Gemma 26B        | 66.6         | 217.3             | 63.8        | 81.2             |
+| Gemma 31B        | 52.8         | 47.7              | 19.6        | 21.9             |
+| Qwen 3.6 35B A3B | 99.7         | 190.7             | 87.1        | 89.6             |
+| Qwen 3.6 27B     | 143.7        | 45.4              | 21.5        | 24.3             |
+| Qwen 3.8 27B     | 147.1        | 45.3              | 21.5        | 24.2             |
+| Qwen 3 0.6B      | 246.1        | 2531.9            | 193.2       | 292.6            |
 
-The 376 numerical cases pass, as do all seven models' tokenizer, complete
-continuation and API recovery controls. The small starter naturally reaches EOS in the long-context
+The GPU, kernel and driver identities stayed unchanged throughout the run. The
+376 numerical cases pass. All seven models' tokenizer, complete native
+continuations and API recovery controls pass: 431 of 432 CLI choices are exact,
+with one qualified near tie on Qwen 35B. Both Gemma models cross their sliding
+windows. The [November 3 diagnostic](/zinc/validation/intel-vulkan-performance-diagnostic-2026-11-03.json)
+remains frozen as historical evidence.
+The small starter naturally reaches EOS in the long-context
 workload, so that pair is retained but excluded from full-budget comparisons.
 The report therefore has a complete model matrix and an incomplete performance
 matrix. It does not establish that every model is suitable for coding tasks.

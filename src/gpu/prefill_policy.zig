@@ -5,6 +5,7 @@
 //! Keep paths that change qualified continuations behind an explicit override.
 const std = @import("std");
 const ModelConfig = @import("../model/config.zig").ModelConfig;
+const GGMLType = @import("../model/gguf.zig").GGMLType;
 
 /// The dense Qwen2/3 Q8_0 path shares weights across prompt tokens using the
 /// existing F32-activation tiled GEMM. Do not broaden Intel's other prefill
@@ -14,6 +15,40 @@ pub fn vulkanDenseQ8PrefillCompatible(config: ModelConfig, push_descriptors: boo
     return config.architecture == .qwen2 and config.n_experts == 0 and
         config.ssm_d_inner == 0 and config.sliding_window_size == 0 and
         config.full_attn_interval <= 1 and push_descriptors and q8_gemm;
+}
+
+/// Limit the qualified Intel default to a complete Q8 graph: LM head plus
+/// seven attention/FFN projections. Mixed quantizations retain their existing
+/// defaults; a missing projection cannot silently establish eligibility.
+pub fn vulkanDenseQ8PrefillDefault(config: ModelConfig, intel: bool, push_descriptors: bool, q8_gemm: bool, types: []const GGMLType) bool {
+    if (!intel or config.n_layers == 0 or types.len != 8 or
+        !vulkanDenseQ8PrefillCompatible(config, push_descriptors, q8_gemm)) return false;
+    for (types) |quant| if (quant != .q8_0) return false;
+    return true;
+}
+
+test "qualified Intel Q8 default requires every projection and preserves mixed-quant defaults" {
+    var cfg = std.mem.zeroes(ModelConfig);
+    cfg.architecture = .qwen2;
+    cfg.n_layers = 28;
+    var types: [8]GGMLType = @splat(.q8_0);
+    try std.testing.expect(vulkanDenseQ8PrefillDefault(cfg, true, true, true, &types));
+    try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, false, true, true, &types));
+    try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, true, false, true, &types));
+    try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, true, true, false, &types));
+    try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, true, true, true, types[0..7]));
+    for (0..types.len) |index| {
+        for ([_]GGMLType{ .q4_k, .q6_k, .f16, .f32 }) |quant| {
+            types[index] = quant;
+            try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, true, true, true, &types));
+        }
+        types[index] = .q8_0;
+    }
+    cfg.n_layers = 0;
+    try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, true, true, true, &types));
+    cfg.n_layers = 28;
+    cfg.architecture = .qwen35;
+    try std.testing.expect(!vulkanDenseQ8PrefillDefault(cfg, true, true, true, &types));
 }
 
 test "dense Qwen Q8 prefill requires its exact graph and F32 activation kernel" {

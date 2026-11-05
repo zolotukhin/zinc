@@ -36,6 +36,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("zinc-tree", "worker-config", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--experimental-opt-in", action="store_true", help="exercise a pre-default experimental build")
     args = parser.parse_args()
     require(sys.platform == "linux", "run this regression on the remote Linux GPU worker")
     os.umask(0o077)
@@ -57,12 +58,15 @@ def main():
     # (two-token control: 0.003924 with F16 versus 0.000033 with F32). Keep the
     # same numerical tolerance; qualify actual F16 inference separately against
     # complete native continuations, chunk boundaries and API recovery.
-    env.update(ZINC_INTEL_BATCHED_PREFILL="1", ZINC_BATCHED_PREFILL="validate",
+    env.update(ZINC_BATCHED_PREFILL="validate",
                ZINC_MTP="0", ZINC_KV_CACHE="f32", ZINC_KV_F16="0", ZINC_KV_Q8="0",
                ZINC_PROMPT_CACHE="0")
+    if args.experimental_opt_in:
+        env["ZINC_INTEL_BATCHED_PREFILL"] = "1"
     report = {"schema_version": "zinc-q8-prefill-regression-v1", "passed": False,
               "release_qualification": False, "model": model_pin["id"],
               "kv_cache": "f32", "scope": "numerical; F16 native/API qualification is a separate gate",
+              "experimental_opt_in": args.experimental_opt_in,
               "model_sha256": model_pin["sha256"], "binary_sha256": sha256(tree / "bin/zinc"),
               "q8_gemm_shader_sha256": sha256(tree / "share/zinc/shaders/mul_mm_q8_0.spv"),
               "cases": []}

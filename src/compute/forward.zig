@@ -994,8 +994,8 @@ const LayerTensors = struct {
 fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     // Intel Arc can compile the serial Q4_K/Q6_K batch shaders, but the BMG
     // G31 path can still fence-fail under the full prefill graph. Keep the
-    // broad Intel path opt-in, but allow dense Gemma by default with the
-    // Intel chunking guard below; that is the supported Intel benchmark case.
+    // broad Intel path opt-in. Dense Gemma and the qualified all-Q8 dense
+    // Qwen graph use bounded batches by default.
     const vendor = engine.gpu_config.vendor;
     const is_amd = vendor == .amd_rdna3 or vendor == .amd_rdna4 or vendor == .amd_rdna4_apu;
     const is_intel = isIntelGpuVendor(vendor);
@@ -1009,7 +1009,8 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
             cfg.architecture == .gemma and
             cfg.n_experts == 0 and
             cfg.ssm_d_inner == 0;
-        if (intel_batched_explicitly_off or (!intel_batched_explicitly_on and !intel_dense_gemma_default)) return false;
+        if (intel_batched_explicitly_off or (!intel_batched_explicitly_on and !intel_dense_gemma_default and
+            !intelDenseQ8PrefillDefault(engine))) return false;
     }
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
@@ -1084,6 +1085,21 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
 
 fn isIntelGpuVendor(vendor: GpuVendor) bool {
     return vendor == .intel_arc_xe2 or vendor == .intel_arc;
+}
+
+fn intelDenseQ8PrefillDefault(engine: *const InferenceEngine) bool {
+    if (!isIntelGpuVendor(engine.gpu_config.vendor) or engine.model.config.n_layers == 0) return false;
+    if (engine.layer_tensors.len < engine.model.config.n_layers) return false;
+    const head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
+    for (engine.layer_tensors[0..engine.model.config.n_layers]) |lt| {
+        if (lt.attn_gate != null or lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+        const projections = [_]?*const LoadedTensor{ head, lt.attn_q, lt.attn_k, lt.attn_v, lt.attn_output, lt.ffn_gate, lt.ffn_up, lt.ffn_down };
+        var types: [projections.len]GGMLType = undefined;
+        for (projections, 0..) |tensor, index| types[index] = (tensor orelse return false).info.type_;
+        if (!prefill_policy.vulkanDenseQ8PrefillDefault(engine.model.config, true, engine.instance.push_descriptor_fn != null, engine.dmmv.pipeline_mul_mm_q8_0 != null, &types)) return false;
+    }
+    return true;
 }
 
 fn intelA3bPrefillEnabled(vendor: GpuVendor, setting: ?[]const u8) bool {
@@ -13987,7 +14003,7 @@ pub const InferenceEngine = struct {
         // The Q8_0 starter previously streamed its weights once per prompt
         // token. This tiled kernel retains F32 activations and does not assume
         // a subgroup width, so Intel can share weights across token columns.
-        const qwen_dense_q8_shape = tensor.info.type_ == .q8_0 and n_tokens > 0 and
+        const qwen_dense_q8_shape = isIntelGpuVendor(self.gpu_config.vendor) and tensor.info.type_ == .q8_0 and n_tokens > 0 and
             prefill_policy.vulkanDenseQ8PrefillCompatible(
                 cfg,
                 self.instance.push_descriptor_fn != null,
@@ -29128,7 +29144,8 @@ pub const InferenceEngine = struct {
     /// serial path). Set `ZINC_BATCHED_PREFILL=0` to force the serial fallback or
     /// `=validate` to run both paths and diff the last-token logits. Intel Arc
     /// Gemma uses the chunked batched path by default; Intel Qwen 3.6 A3B's
-    /// layer-major path requires ZINC_INTEL_A3B_PRODUCTION=1; other Intel models
+    /// layer-major path requires ZINC_INTEL_A3B_PRODUCTION=1. Qualified all-Q8
+    /// dense Qwen also uses bounded batches by default; other Intel graphs
     /// require `ZINC_INTEL_BATCHED_PREFILL=1` to opt in.
     /// @param state Decode state for the current request.
     /// @param prompt_tokens Tokenized prompt sequence to prefill.
@@ -29155,10 +29172,11 @@ pub const InferenceEngine = struct {
             cfg.ssm_d_inner == 0 and
             gemmaGroupedMoePrefillEnvEnabled(self.gpu_config.vendor);
         const intel_gemma_chunk_default = intel_dense_gemma_default or intel_gemma_moe_default;
+        const intel_dense_q8_default = intelDenseQ8PrefillDefault(self);
         const intel_batched_explicitly_on = intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "1");
         const intel_batched_explicitly_off = intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "0");
         const intel_batched_requested = isIntelGpuVendor(self.gpu_config.vendor) and
-            (intel_batched_explicitly_on or (!intel_batched_explicitly_off and intel_gemma_chunk_default));
+            (intel_batched_explicitly_on or (!intel_batched_explicitly_off and (intel_gemma_chunk_default or intel_dense_q8_default)));
         const intel_default_chunk_limit: u32 = if (intel_gemma_moe_default) self.gemmaPrefillDp4aMaxTokens() else 96;
         const chunk_limit = intelBatchedPrefillChunkLimit(self.gpu_config.vendor, intel_default_chunk_limit);
         if (intel_batched_requested and
