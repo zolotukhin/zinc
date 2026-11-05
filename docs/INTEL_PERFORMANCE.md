@@ -165,6 +165,35 @@ The Q8 default therefore uses 384 tokens; Gemma retains its independent tuning.
 The four-row decode layout adds no material gain in this diagnostic and remains
 an experiment.
 
+The [final packaged-default check](/zinc/validation/intel-q8-packaged-default-2026-11-05.json)
+tests the merged code without an experimental flag. Three rounds, each with
+one warmup and three measured requests per workload, retain 144 requests and
+36 streaming probes. Short-chat prefill improves from 246.31 to 1,912.45
+tokens/s, with HTTP latency falling from 729.20 to 528.00 ms. Decode stays at
+193.20 tokens/s. The newly built llama.cpp Vulkan reference, selected at
+`7d516e25` before that campaign, reaches 2,697.71 prefill and 288.15 decode
+tokens/s on the same workload. The starter's context-long output still ends
+early on both engines; the full performance objective remains unmet.
+
+All fourteen F32-KV full-vocabulary checks pass at the unchanged 0.001
+tolerance, with maximum difference 0.000061. Actual F16-KV inference matches
+all 96 native choices across short and >1,100-token prompts. The same package
+passes 376 native-reference kernel cases, eighteen full HTTP continuations
+with recovery, and the explicit serial-off control. Three active-prefill
+cancellations at 16K context recover in 2.21–2.23 seconds; each is followed by
+six complete native HTTP replays. The report retains the earlier unexercised
+short-context cancellation probe, exact artifact identities and raw samples.
+This validates the Q8 default; it does not replace a complete all-model campaign.
+
+The [seven-model packaged replay](/zinc/validation/intel-packaged-seven-model-replay-2026-11-05.json)
+separately runs that package on every qualified model. It reproduces all 432
+frozen qualified choices (431 primary native choices and one already qualified
+near-tie branch), plus 81 complete HTTP continuations before and after recovery.
+Both Gemma window sets, advertised context boundaries, chat streaming and
+Unicode checks pass. This reuses the complete frozen native oracle results;
+it is a fresh package replay, with the existing OpenCode coding results kept
+separate. Hardware and package identities remain unchanged through the run.
+
 The [bounded-upload investigation](VULKAN_UPLOAD_STAGING.md) separately records
 the temporary-memory reduction and loading-time observations. Its A/B compares
 two ZINC packages and does not establish a speed advantage over llama.cpp.
@@ -196,8 +225,10 @@ two ZINC packages and does not establish a speed advantage over llama.cpp.
    0.003924 with F16 KV and 0.000033 with F32 KV: cache rounding magnifies small
    summation-order differences. The numerical fixture keeps F32 KV and its
    original tolerance; native continuations, chunk boundaries and API recovery
-   must separately pass with the F16 KV used for performance. This opt-in
-   regression is not a throughput claim.
+   must separately pass with the F16 KV used for performance. This numerical
+   regression is not a throughput claim. A failed run retains completed cases,
+   the active token boundary and its failure reason; unexpected process errors
+   retain their type without publishing private worker paths or commands.
 4. Profile decode across the dense, hybrid and MoE models, then tune the hot
    matrix-vector, attention and submission paths. Validate shader math on the
    actual Intel GPU, complete native continuations, API recovery and both
