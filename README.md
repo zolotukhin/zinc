@@ -102,6 +102,19 @@ for checkpoints, memory needs, and the exact Muse Glimmer GGUF used in testing.
 
 ## Coding harnesses
 
+Connect **OpenClaw** with the [dedicated setup helper](tools/setup_openclaw.mjs):
+
+```bash
+npm install --global openclaw@2026.11.1
+node tools/setup_openclaw.mjs setup --project ../my-project
+node tools/setup_openclaw.mjs check --project ../my-project
+node tools/setup_openclaw.mjs run --project ../my-project -- "Fix the failing tests and run them."
+```
+
+Use Node 24.16+ in the 24.x line, or Node 26.1+, and start ZINC first. The
+[OpenClaw guide](https://zolotukhin.ai/zinc/docs/openclaw/) covers server contexts,
+isolated task state, endpoint discovery, and independent verification.
+
 Connect **OpenCode** to a running ZINC server with the
 [setup script](tools/setup_opencode.mjs). It creates a portable config, checks
 chat and streaming tool calls, and runs headless tasks:

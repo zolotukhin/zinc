@@ -14,6 +14,8 @@
     "bench:api": "bun tools/benchmark_api.mjs",
     "eval:opencode": "bun tools/opencode_eval.mjs",
     "setup:opencode": "bun tools/setup_opencode.mjs",
+    "setup:openclaw": "node tools/setup_openclaw.mjs",
+    "eval:openclaw": "node tools/openclaw_eval.mjs",
     "test:opencode-api": "bun tools/validate_opencode_api.mjs",
     "seo:ga4-snapshot": "node tools/analyze_ga4_snapshot.mjs",
     "seo:analyze": "node tools/analyze_seo_exports.mjs",
