@@ -987,16 +987,10 @@ const LayerTensors = struct {
     ssm_norm: ?*const LoadedTensor = null,
 };
 
-/// Gate for the Vulkan batched-prefill path. Mirrors the narrow slice
-/// the Metal `canUseBatchedPrefill` accepts: dense attention on every layer,
-/// dense FFN, Q4_K (or Q6_K) weights for the seven per-layer projections and
-/// the LM head, no biases, no attn gate, no post-attn / post-ffn norms, no
-/// sliding window, not MoE, not SSM, not Gemma, not gpt-oss. Q and K
-/// per-head RMS norms are supported.
-///
-/// Used by `prefillBatched` to decide whether to attempt the batched forward
-/// or fall back to `prefillBatch`. Until the batched body lands this just
-/// guards the env flag so enabling it on an unsupported model is a no-op.
+/// Gate for dense Vulkan batched prefill: Q4_K/Q6_K projections, or Intel
+/// dense Qwen Q8_0 with its F32-activation tiled kernel. Architecture and
+/// tensor guards below reject unsupported graph features before recording.
+/// Other architectures use their specialized paths or token-major fallback.
 fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     // Intel Arc can compile the serial Q4_K/Q6_K batch shaders, but the BMG
     // G31 path can still fence-fail under the full prefill graph. Keep the
@@ -1028,24 +1022,29 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.architecture != .gemma and full_attn_interval != 1) return false;
     if (cfg.architecture != .gemma and cfg.architecture != .muse_glimmer and cfg.sliding_window_size != 0) return false;
 
-    // Per-layer projections go through dispatchProjectionBatched →
-    // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
+    // Per-layer projections go through dispatchProjectionBatched. Q8_0 uses
+    // the tiled F32-activation GEMM instead of one DMMV dispatch per token.
     // The earlier "garbage output" regression on Q4_K_M checkpoints was
     // a sampler bug fixed in 419e929 (prefillBatched now dispatches GPU
     // argmax so sampleGreedy doesn't read a stale buffer), not a
     // forward-pass issue — the batched logits matched per-token at
     // max_abs_diff=0.000000.
     const isSupported = struct {
-        fn f(t: GGMLType) bool {
-            return t == .q4_k or t == .q6_k;
+        fn f(t: GGMLType, q8_gemm_available: bool) bool {
+            return t == .q4_k or t == .q6_k or (t == .q8_0 and q8_gemm_available);
         }
     }.f;
+    const q8_gemm_available = is_intel and prefill_policy.vulkanDenseQ8PrefillCompatible(
+        cfg,
+        engine.instance.push_descriptor_fn != null,
+        engine.dmmv.pipeline_mul_mm_q8_0 != null,
+    );
 
     // LM head goes through dispatchDmmvInner which accepts Q4_K / Q6_K.
     const lm_head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
     // The LM head goes through dispatchDmmvInner, which dispatches whatever
     // dmmv pipeline exists for the type (Q5_K included: Muse Glimmer).
-    if (!isSupported(lm_head.info.type_) and engine.dmmv.pipelineForType(lm_head.info.type_) == null) return false;
+    if (!isSupported(lm_head.info.type_, q8_gemm_available) and engine.dmmv.pipelineForType(lm_head.info.type_) == null) return false;
 
     for (0..cfg.n_layers) |i| {
         const lt = engine.layer_tensors[i];
@@ -1068,10 +1067,10 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
         const down = lt.ffn_down orelse return false;
         const required: [6]*const LoadedTensor = .{ q, k, o, gate, up, down };
         for (required) |t| {
-            if (!isSupported(t.info.type_)) return false;
+            if (!isSupported(t.info.type_, q8_gemm_available)) return false;
         }
         if (v_opt) |v_tensor| {
-            if (!isSupported(v_tensor.info.type_)) return false;
+            if (!isSupported(v_tensor.info.type_, q8_gemm_available)) return false;
         }
 
         // Reject packed Q+gate (Qwen3Next): attn_q row count == 2 * q_dim.
@@ -13985,7 +13984,16 @@ pub const InferenceEngine = struct {
             }
             return;
         }
-        if ((qwen_a3b_ssm_out_q8_shape or qwen_a3b_shared_q8_shape) and
+        // The Q8_0 starter previously streamed its weights once per prompt
+        // token. This tiled kernel retains F32 activations and does not assume
+        // a subgroup width, so Intel can share weights across token columns.
+        const qwen_dense_q8_shape = tensor.info.type_ == .q8_0 and n_tokens > 0 and
+            prefill_policy.vulkanDenseQ8PrefillCompatible(
+                cfg,
+                self.instance.push_descriptor_fn != null,
+                self.dmmv.pipeline_mul_mm_q8_0 != null,
+            );
+        if ((qwen_a3b_ssm_out_q8_shape or qwen_a3b_shared_q8_shape or qwen_dense_q8_shape) and
             (K & 31) == 0 and
             self.instance.push_descriptor_fn != null and
             self.dmmv.pipeline_mul_mm_q8_0 != null)
