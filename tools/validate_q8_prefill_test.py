@@ -58,6 +58,8 @@ class FailureReport(unittest.TestCase):
                 log.write_text("KV cache: f32\n" + record(count=count, status="exceeded" if phase == "case" and count == 2 else "ok"))
 
                 def wait(timeout):
+                    if phase == "external" and count == 2:
+                        raise failure
                     if phase == "case" and count == 2 and not isinstance(failure, ValueError):
                         raise failure
                     return 0
@@ -95,7 +97,7 @@ class FailureReport(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual([case["prompt_tokens"] for case in report["cases"]], [1])
         self.assertEqual(report["failure"], {
-            "prompt_tokens": 2, "error_type": "ValueError",
+            "prompt_tokens": 2, "error_type": "Q8RegressionError",
             "reason": "Q8 batched prefill differs from the serial full-vocabulary reference",
         })
 
@@ -105,6 +107,23 @@ class FailureReport(unittest.TestCase):
             "prompt_tokens": 2, "error_type": "TimeoutExpired", "reason": "TimeoutExpired",
         })
         self.assertNotIn("/private/worker", json.dumps(report))
+
+    def test_generic_value_error_does_not_publish_private_message(self):
+        report = self.run_failing_fixture(ValueError("/private/worker/command"), phase="external")
+        self.assertEqual(report["failure"], {
+            "prompt_tokens": 2, "error_type": "ValueError", "reason": "ValueError",
+        })
+        self.assertNotIn("/private/worker", json.dumps(report))
+
+    def test_interrupt_is_explicit_and_keeps_validation_incomplete(self):
+        for error in (KeyboardInterrupt(), SystemExit(130)):
+            with self.subTest(error=type(error).__name__):
+                report = self.run_failing_fixture(error, phase="external")
+                self.assertFalse(report["passed"])
+                self.assertTrue(report["interrupted"])
+                self.assertEqual([case["prompt_tokens"] for case in report["cases"]], [1])
+                self.assertEqual(report["failure"]["prompt_tokens"], 2)
+                self.assertEqual(report["failure"]["error_type"], type(error).__name__)
 
     def test_setup_failure_has_no_fabricated_token_boundary(self):
         report = self.run_failing_fixture(OSError("/private/worker/lock"), phase="setup")
