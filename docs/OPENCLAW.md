@@ -118,5 +118,5 @@ node tools/validate_openclaw_harness.mjs --openclaw-bin openclaw \
 ```
 
 It exercises fragmented tool arguments, correlated tool-result history, real
-file writes and command execution without loading a model. CI runs this check
+file writes, command execution, API errors, cancellation and recovery without loading a model. CI runs this check
 with the pinned client; it is deliberately separate from GPU/model evidence.

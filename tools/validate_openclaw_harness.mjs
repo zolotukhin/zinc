@@ -77,7 +77,10 @@ const project = path.join(root, 'project'),
   fixture = await createFixture(project);
 const requests = [];
 let failure,
-  step = 0;
+  step = 0,
+  phase = 'tools',
+  cancelledConnectionClosed = false,
+  apiErrorResponses = 0;
 const actions = [
   ['read', { path: 'contract.json' }],
   [
@@ -114,6 +117,32 @@ const server = createServer(async (req, res) => {
       body.messages.some((message) => message.role === 'developer')
     )
       throw new Error('Wrong model identity or unsupported developer role');
+    if (phase === 'error') {
+      apiErrorResponses++;
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: 'ZINC_PROTOCOL_EXPECTED_AUTH_FAILURE',
+            type: 'authentication_error',
+            code: 'invalid_api_key',
+          },
+        }),
+      );
+      return;
+    }
+    if (phase === 'cancel') {
+      // Deliberately hold this owned HTTP response. The helper's deadline must
+      // terminate the actual client and close its connection.
+      res.once('close', () => {
+        cancelledConnectionClosed = true;
+      });
+      return;
+    }
+    if (phase === 'recovery') {
+      response(res, body, { content: 'ZINC_PROTOCOL_RECOVERED' }, 'stop');
+      return;
+    }
     if (step > 0) {
       const call = body.messages
         .filter((message) => message.role === 'assistant')
@@ -189,6 +218,67 @@ try {
     timeout: 60,
   });
   const verified = await verifyFixture(project, fixture);
+  const toolRequests = [...requests];
+  const failureChecks = {};
+  phase = 'error';
+  try {
+    await runOpenClaw(
+      {
+        binary: opts.binary,
+        filename,
+        project,
+        model: 'zinc-protocol',
+        prompt: 'Reply OK.',
+        timeout: 30,
+      },
+      { deadlineMs: 15000 },
+    );
+    failureChecks.apiErrorRejected = false;
+  } catch (error) {
+    const diagnostics = error.diagnostics;
+    let report;
+    try {
+      report = JSON.parse(diagnostics?.stdout || '');
+    } catch {}
+    failureChecks.apiErrorRejected =
+      apiErrorResponses > 0 &&
+      Number.isInteger(diagnostics?.code) &&
+      diagnostics.code !== 0 &&
+      report?.ok === false;
+    await writeFile(
+      path.join(root, 'api-error-private.json'),
+      JSON.stringify({ report, diagnostics }, null, 2),
+      { mode: 0o600 },
+    );
+  }
+  phase = 'cancel';
+  try {
+    await runOpenClaw(
+      {
+        binary: opts.binary,
+        filename,
+        project,
+        model: 'zinc-protocol',
+        prompt: 'Reply OK.',
+        timeout: 60,
+      },
+      { deadlineMs: 5000, graceMs: 1000 },
+    );
+    failureChecks.deadlineRejected = false;
+  } catch (error) {
+    failureChecks.deadlineRejected = error.message === 'OpenClaw exceeded its task timeout';
+  }
+  failureChecks.cancelledConnectionClosed = cancelledConnectionClosed;
+  phase = 'recovery';
+  const recovered = await runOpenClaw({
+    binary: opts.binary,
+    filename,
+    project,
+    model: 'zinc-protocol',
+    prompt: 'Reply ZINC_PROTOCOL_RECOVERED.',
+    timeout: 30,
+  });
+  failureChecks.recovery = recovered.report.final?.trim() === 'ZINC_PROTOCOL_RECOVERED';
   const summary = {
     kind: 'cpu-scripted-protocol',
     clientVersion: version.stdout.trim(),
@@ -196,9 +286,11 @@ try {
       !failure &&
       verified.passed &&
       client.report.final?.trim() === 'ZINC_PROTOCOL_OK' &&
-      requests.length === 5 &&
-      requests.every((request) => request.stream === true),
-    requests,
+      toolRequests.length === 5 &&
+      toolRequests.every((request) => request.stream === true) &&
+      Object.values(failureChecks).every(Boolean),
+    requests: toolRequests,
+    failureChecks,
     verification: verified,
     toolSummary: client.report.toolSummary,
   };
