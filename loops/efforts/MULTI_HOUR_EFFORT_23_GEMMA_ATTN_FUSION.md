@@ -13,6 +13,7 @@
 Date opened: 2026-06-10. Pairs with `forward_cuda_gemma.zig` + `kernels.cu`.
 
 ## Why (the lever, already proven)
+
 gemma decode is **boost-saturated but launch-latency/occupancy bound** (NOT
 sync-bound — async is a proven NO-OP/regression, do not touch the command ring).
 The only lever is **fewer/fatter kernels**: collapse tiny per-layer dispatches so
@@ -20,6 +21,7 @@ the GPU is fed. Two fusions landed (~+4% and ~+6%, stacking to ~+7%). A handful
 of small dispatches remain.
 
 ## Targets (one per cycle, smallest-risk first)
+
 1. **Per-head V rms_norm (`rms_norm_noweight`) + KV-cache write.** V is normed
    (no weight, never roped) then written to the KV cache — two tiny launches.
    Fuse into one `rms_norm_kvwrite` kernel (norm per head_dim, write to kv_v at
@@ -31,16 +33,18 @@ of small dispatches remain.
    by `rms_norm_residual` (gemma FFN: pre-ffn norm → GeGLU → post-ffn fused).
 
 ## Hard rules (from memory — violating wastes the cycle)
+
 - **Build:** isolated caches ALWAYS — `ZIG_LOCAL_CACHE_DIR=/tmp/lc-$RANDOM
-  ZIG_GLOBAL_CACHE_DIR=/tmp/gc-$RANDOM ./scripts/zig.sh build cuda-dbg
-  -Dbackend=cuda -Dshaders=false`; verify the binary hash CHANGED.
+ZIG_GLOBAL_CACHE_DIR=/tmp/gc-$RANDOM ./scripts/zig.sh build cuda-dbg
+-Dbackend=cuda -Dshaders=false`; verify the binary hash CHANGED.
 - **Do NOT async gemma** (boost-saturated; regression). Fusion only.
-- **4090-pinned** (`GPU-e59a6fce-…`); isolated box dir (`~/zinc-e23`), never
+- **4090-pinned** (`${ZINC_GPU}`); isolated box dir (`~/zinc-e23`), never
   `~/workspace/zinc`; do not disturb the parallel 5090 work.
 - **Boost noise:** interleaved back-to-back A/B (NGEN≥160), same thermal state.
   Never claim a win from one boosted run.
 
 ## Validation contract (per cycle)
+
 - `scripts/validate_catalog.sh` → **5/5 token-correct** (the fused kernel must be
   bit-equivalent: token-identical to the pre-fusion path). Break correctness →
   REVERT, document, do not commit.
@@ -49,6 +53,7 @@ of small dispatches remain.
   Update the cycle log below. Negative result → revert + log it.
 
 ## Cycle log
+
 - **2026-06-11 — Target 1 DONE (V rms_norm+KV-write fuse + K KV-write fold). VALIDATED WIN, branch `perf/e23-vk-norm-fuse`, pushed (NOT main).**
   New kernel `rms_norm_kvwrite` (kernels.cu): per-head V plain-normalize (no
   weight) writing STRAIGHT into the V cache at `pos*kv_dim` — replaces the

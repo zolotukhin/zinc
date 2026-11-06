@@ -103,6 +103,38 @@ bun test loops/ tools/ site/src/ tests/chat_ui_markdown.test.ts
 
 If you changed build logic, Vulkan setup, shaders, or platform support, include the exact build command and platform you validated.
 
+## Privacy before publishing
+
+Keep credentials, worker endpoints, SSH aliases, personal home paths, GPU UUIDs,
+and device serials out of source, documentation, screenshots, and saved logs.
+Use environment variables and placeholders for worker configuration. Public
+project URLs, author credits, standard system paths, and loopback addresses are
+expected. Preserve benchmark results and provenance when removing machine details.
+
+Run the CPU-only check before committing:
+
+```bash
+python3 tools/check_repository_privacy.py
+python3 -m unittest discover -s tools -p test_repository_privacy.py
+```
+
+Optionally pass `--private-env .env` to check for configured host values locally;
+the checker never prints the values. CI also runs Gitleaks 8.30.1 on the public
+tree and Git history, including compressed evidence. Its exceptions cover named
+checksums and exact public model/benchmark labels, not whole evidence files.
+
+Review image pixels for terminal paths, addresses, and serial stickers. Strip
+photo metadata before adding images; this preserves JPEG pixels, orientation,
+color profiles, PNG pixels, and GIF animation:
+
+```bash
+python3 tools/image_metadata.py --write photo.jpg screenshot.png demo.gif
+```
+
+Deleting or sanitizing a file does not erase its previous copies from Git tags,
+history, forks, caches, or old site deployments. A history rewrite requires a
+separate coordinated migration because release attestations pin source commits.
+
 ## Reporting bugs well
 
 The fastest way to get help is to make the issue reproducible.

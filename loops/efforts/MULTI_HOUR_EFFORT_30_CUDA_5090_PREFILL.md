@@ -11,6 +11,7 @@ The single biggest cheap win of this effort is DONE and on main:
 `attention_causal_batched_v2`, default-on `ZINC_ATTN_V2`).** It fixed the naive
 uncoalesced pass-1 score loop (256 threads read 256 keys strided by kv_stride →
 ~32 uncoalesced txns/element). Measured on the 5090:
+
 - **gemma-31b (dense): +53% prefill (552→847 t/s), gap to llama 6.0×→3.9×** ← headline
 - gemma-26b (MoE): +7% (experts dilute it)
 - qwen: marginal (attention is a small fraction of SSM-heavy qwen prefill)
@@ -18,13 +19,15 @@ uncoalesced pass-1 score loop (256 threads read 256 keys strided by kv_stride �
 ## Measure-FIRST discipline (this is how the win was found — honor it)
 
 Phase-profile before optimizing. Tools already in the tree:
+
 - `ZINC_PREFILL_PROFILE=1` (qwen path, forward_cuda.zig) → `attn/ssm/ffn` split.
 - `ZINC_SSM_PROFILE=1` → SSM `scan` timing.
 - For gemma, add throwaway `waitPending`+`nanoTimestamp` phase timers (single
   stream → GPU order unchanged → reliable RELATIVE breakdown; revert, never commit).
-The BT=32 negative below was the ONE guess made without profiling — it was neutral.
+  The BT=32 negative below was the ONE guess made without profiling — it was neutral.
 
 ## Gemma-26b MoE prefill phase split (T=1042, post-v2): attn 312 / experts 264 / shared 133 / router 23 / combine 24 ms
+
 ## Qwen prefill: SSM dominates (qwen35-9b 52% / qwen36-27b 80% / a3b ~65%); the SCAN is cheap (5-9ms/layer) — the cost is the SSM PROJECTION GEMMs (all cuBLAS-eligible).
 
 ## Candidate levers (priority = EV × tractability). Pick ONE per cycle, profile-gate it.
@@ -52,13 +55,14 @@ The BT=32 negative below was the ONE guess made without profiling — it was neu
    it's a small fraction of the SSM — PROFILE its share first.
 4. **int8 MMQ TC GEMM** (LAST resort, hard, uncertain): the only lever left for
    the cuBLAS GEMM wall. Reads Q4_K nibbles as int8, Q8_1 activation, `mma.sync
-   s8.s8.s32` (2× TC rate). The correct-SASS CUBIN path exists + is integrated
+s8.s8.s32` (2× TC rate). The correct-SASS CUBIN path exists + is integrated
    (ZINC_PREFILL_MMA, output token-correct). BUT the Q4_K-asymmetric per-subblock
    store-rescale EPILOGUE TAX is STRUCTURAL (a prior microbench killed int8 to
    <1.3×). Only attempt with an isolated microbench gate (≥1.3× vs cuBLAS) BEFORE
    wiring. Multi-cycle.
 
 ## Dead ends — DO NOT re-litigate (all tested this effort, negative)
+
 - **FLASH-ATTENTION (`gemma_attention_flash`, query-tiled online-softmax)**: DEAD.
   Cycle-5's WIP builds but produces EMPTY output (crashes/deadlocks the GPU — a
   __syncthreads/OOB bug; it hung cycle-5 4.75h). Premise is marginal anyway: K/V
@@ -73,8 +77,9 @@ The BT=32 negative below was the ONE guess made without profiling — it was neu
 - **Prefill CUDA graphs / TC-default micro-opts / m128 / normf16 / FP8**: all prior negatives.
 
 ## HARD RULES (override the generic playbook)
-- **Pin the 5090**: `export CUDA_VISIBLE_DEVICES=GPU-5126d018-ec86-be8b-1bf5-b5ac323d3350`
-  and `ZINC_GPU=` the same. The 4090 (GPU-e59a6fce-…) may be used by other loops.
+
+- **Pin the 5090**: `export CUDA_VISIBLE_DEVICES=${ZINC_GPU}`
+  and `ZINC_GPU=` the same. The 4090 (${ZINC_GPU}) may be used by other loops.
 - **Box build dir `~/zinc-harvest`** (a full main checkout, NOT a git repo — rsync
   the WHOLE worktree `./ dest/` single-source, never multi-source+--delete which
   scrambles the tree). Build: `./scripts/zig.sh build -Dbackend=cuda -Dshaders=false -Doptimize=ReleaseFast`.
@@ -86,7 +91,7 @@ The BT=32 negative below was the ONE guess made without profiling — it was neu
   require the tokens to MATCH on ≥2 real prompts across gemma-26b + gemma-31b.
 - **A/B**: interleaved ABBA, ≥4 rounds, discard the cold first round; the box has
   ~±10% boost noise — require a consistent multi-round win. `Prefill complete: … tok/s` is on STDERR (2>&1). Models reload per process (gemma-31b 18GB ~90s).
-- **Git**: the main checkout `/Users/stepan/Workspace/zinc` may be owned by a
+- **Git**: the main checkout `${ZINC_WORKTREE}` may be owned by a
   parallel loop → `git checkout` can abort. Use `git worktree add` for all branch
   work; commit ONLY your scoped change to a `perf/e30-<target>` branch and push it
   (NEVER main). If a win, append a dated entry here + to `project_effort26_beat_llama` memory.
@@ -101,10 +106,11 @@ gemma-26b MoE +7%. This was the sole cheap win — a genuinely naive uncoalesced
 **THE LAST LEVER, decisively KILLED (int8-MMQ):** built the full Q4_K int8
 `mma.sync.m16n8k32.s8.s8.s32` GEMM microbench (`dbg_cuda gemm8`/`mma8`, harness on this
 branch's `src/dbg_cuda.zig`). Findings on the 5090 (M=K=4608):
+
 - NVRTC **compiles inline-PTX int8 mma correctly on sm_120** (no CUBIN gamble) and Blackwell
   delivers the **1.9× int8 TC rate** — both feared unknowns settled favorably.
 - **But int8/fp16 = 0.92–0.98× (SLOWER), correct to 0.38%** → dense Q4_K prefill is
-  **weight-traffic-bound**, so int8's 1.9× *compute* rate buys **0 wall-clock** (both read the
+  **weight-traffic-bound**, so int8's 1.9× _compute_ rate buys **0 wall-clock** (both read the
   same 0.5-byte Q4_K weight). int8-MMQ is DEAD. Reproduce: `dbg_cuda gemm8 4608 4608 512`.
 
 **Every other lever = dead** (see Dead-ends): flash (broken+L2-caches-KV), BT=32, qwen-attn
@@ -114,4 +120,5 @@ lever left is LESS weight traffic (lower-bit quant / different format), not a fa
 Residual awake-only idea: cuBLAS-per-MoE-expert (predicted-neg — experts already grouped-TC fp16).
 
 ## Cycle log
+
 (append dated one-liners per cycle: target, verdict, branch)

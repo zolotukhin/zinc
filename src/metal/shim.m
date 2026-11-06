@@ -1,6 +1,6 @@
 // ZINC Metal shim — thin C API wrapping Apple Metal framework.
 // This is the ONLY Objective-C file in the project. All Metal/ObjC calls are encapsulated here.
-// See specs/005-apple-silicon-inference/contracts/metal-shim-api.md for the contract.
+// See src/metal/shim.h for the C contract shared with Zig.
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include "shim.h"

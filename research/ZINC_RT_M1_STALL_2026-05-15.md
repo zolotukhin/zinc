@@ -17,7 +17,7 @@ Status: M1 to M2 migration, RDNA4 R9700 node.
 Remote node:
 
 ```text
-Linux hft 6.17.0-23-generic
+Linux <worker> 6.17.0-23-generic
 /sys/module/amdgpu/parameters/user_queue = -1
 T2 UMQ forced run: compute_userq_unavailable / compute_userq_slots_missing
 ```

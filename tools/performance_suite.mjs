@@ -1,3 +1,4 @@
+import { assertPublicArtifact } from './public_artifact_privacy.mjs';
 import { outputQualityStatus } from './benchmark_quality.mjs';
 import { checkBenchmarkReference } from './benchmark_reference.mjs';
 import {
@@ -4861,18 +4862,10 @@ async function main() {
       // selected rows with the new measurements.
       preserveMissingPhases: args.phase !== 'all' || args.models != null || args.scenarios != null,
     });
-    // Guard: never publish host/network info into the public site data. Scan for
-    // ACTUAL host indicators (hostnames, tailscale IPs, tailnet domains) — not a
-    // bare :port, which false-positives on numeric metric values (e.g. a decode_ms
-    // of 2222.06 serializes as ":2222" in compact JSON).
-    const leak = JSON.stringify(merged).match(
-      /puffalo|tailbe7bef|agent-zinc|127\.99\.\d+\.\d+|\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\.ts\.net/g,
-    );
-    if (leak) {
-      throw new Error(
-        `Refusing to write site data: host/network info present (${[...new Set(leak)].join(', ')}). Sanitize the artifact before publishing.`,
-      );
-    }
+    assertPublicArtifact(merged, {
+      ...(await readDotEnv(path.join(ROOT, '.env'))),
+      ...process.env,
+    });
     await writeJson(args.siteData, merged);
   }
 

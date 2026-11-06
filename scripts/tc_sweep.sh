@@ -27,16 +27,13 @@
 #    is the merge candidate, TC is the recommended fast prefill path.)
 #
 # Env: ZINC_TS (space list of prompt lengths, default "250 750 1500"),
-#      ZINC_ROUNDS (ABBA pairs, default 2), ZINC_GPU (default 4090),
+#      ZINC_ROUNDS (ABBA pairs, default 2), ZINC_GPU (4090 role; requires ZINC_GPU_4090),
 #      ZINC_MODEL (gguf, default gemma-4-31B dense — the clean beneficiary),
 #      ZINC_NGEN (default 8).
 set -u
-declare -A GPU_UUID=(
-  [5090]=GPU-5126d018-ec86-be8b-1bf5-b5ac323d3350
-  [4090]=GPU-e59a6fce-1961-bafe-927c-06c0149f2370
-)
-GPU=${ZINC_GPU:-4090}
-export CUDA_VISIBLE_DEVICES="${GPU_UUID[$GPU]}"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/cuda_target.sh"
+: "${ZINC_GPU:=4090}"
+zinc_select_cuda_device || exit 1
 MD=${ZINC_MODELS:-$HOME/workspace/models}
 MODEL=${ZINC_MODEL:-$MD/gemma-4-31B-it-Q4_K_M.gguf}
 TS=${ZINC_TS:-"250 750 1500"}
@@ -45,7 +42,7 @@ NGEN=${ZINC_NGEN:-8}
 DIR=$(cd "$(dirname "$0")/.." && pwd); cd "$DIR"
 ZBIN=$(ls -t .zig-cache/o/*/cuda-dbg 2>/dev/null | head -1)
 [ -x "$ZBIN" ] || { echo "no cuda-dbg binary (build first)"; exit 1; }
-echo "binary: $ZBIN   model: $(basename "$MODEL")   GPU: RTX $GPU   ABBA x$ROUNDS"
+echo "binary: $ZBIN   model: $(basename "$MODEL")   GPU: configured CUDA device   ABBA x$ROUNDS"
 
 pf_of() { sed -E 's/.* = ([0-9.]+) tok.*/\1/' <<<"$1"; }
 # A = f32 batched GEMM (byte-identical merge path), B = fp16 tensor-core GEMM

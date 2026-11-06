@@ -1,0 +1,34 @@
+title = "ZINC credential scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Named SHA256 provenance fields and tokenizer reference digests"
+regexTarget = "match"
+regexes = [
+  '''^token_hash["']\s*:\s*["'][a-fA-F0-9]{16}["']$''',
+  '''^(?:tokenizer_source_sha256|tokenizer_sha256|tokenizer_helper_sha256)["']\s*:\s*["'][a-fA-F0-9]{64}["']$''',
+  '''^(?:zinc-tokenize(?:-bench)?|tokenize(?:_bench)?|tokenizer\.zig|bench_tokenize\.zig|compare_tokenizers\.py|validate_opencode_api\.mjs)["']\s*:\s*["'][a-fA-F0-9]{64}["']$''',
+]
+
+[[rules.allowlists]]
+description = "These public model catalog IDs are not credentials"
+condition = "AND"
+paths = ['''(?:^|/)loops/optimize_gpu\.ts$''']
+regexTarget = "match"
+regexes = [
+  '''^key:\s*["'](?:qwen35-9b-q4k-m|qwen38-27b-q4k-m|qwen36-35b-a3b-q4k-xl|qwen36-27b-q4k-m)["']$''',
+]
+
+[[rules.allowlists]]
+description = "Public Metal benchmark shape labels"
+condition = "AND"
+paths = ['''(?:^|/)benchmarks/metal_q8_shapes\.zig$''']
+regexTarget = "match"
+regexes = [
+  '''^\.key\s*=\s*["'](?:lm_head_q4k_argmax|qwen35_9b_dense_gate_up_q4k|qwen27b_dense_gate_up_q4k|qwen27b_ssm_q6_qkv|qwen27b_lm_head_q6k|qwen35_9b_lm_head_q6k)["']$''',
+]

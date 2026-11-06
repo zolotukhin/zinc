@@ -75,6 +75,10 @@ jobs:
         working-directory: site
         run: bun run check:benchmarks
 
+      - name: Check article images and mobile tables
+        working-directory: site
+        run: bun run check:posts
+
       - name: Check output
         working-directory: site
         run: |
