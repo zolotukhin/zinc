@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { remoteZigToolchainDir } from '../tools/performance_suite.mjs';
+import { remoteZigToolchainDir } from './performance_suite.mjs';
 
 const root = resolve(import.meta.dir, '..');
 const version = readFileSync(join(root, '.zig-version'), 'utf8').trim();

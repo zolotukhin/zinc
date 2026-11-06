@@ -93,6 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Resolve the compiler from the source checked out immediately above.
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
