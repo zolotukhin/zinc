@@ -3,6 +3,9 @@
 # of gemma-31b (dense, the cuBLAS+round-trip path) and qwen35-9b to see where
 # prefill time actually goes: dequant_q4k_to_f16 (the round-trip) vs cublas_hgemm
 # vs f32_to_f16 vs attention/SSM/norms. Confirms whether the fused-GEMM is the lever.
+# Run on an authorized CUDA worker. Set ZINC_GPU to one device selector,
+# or set ZINC_GPU=4090/5090 with ZINC_GPU_4090/ZINC_GPU_5090 configured locally.
+# With no configured device this exits before launching any GPU workload.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib/cuda_target.sh"
 zinc_select_cuda_device || exit 1

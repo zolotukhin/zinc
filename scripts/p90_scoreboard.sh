@@ -3,6 +3,9 @@
 # One zinc process per run (long prompt -> prefill, then N_GEN decode), parse both.
 # Report p90 + median over RUNS. llama-bench at the matched pp<T>/tg<N_GEN>.
 # Line-buffered (stdbuf) so progress is visible live.
+# Run on an authorized CUDA worker. Set ZINC_GPU to one device selector,
+# or set ZINC_GPU=4090/5090 with ZINC_GPU_4090/ZINC_GPU_5090 configured locally.
+# With no configured device this exits before launching any GPU workload.
 set -u
 source "$(dirname "${BASH_SOURCE[0]}")/lib/cuda_target.sh"
 zinc_select_cuda_device || exit 1
