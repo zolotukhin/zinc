@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
+// Both packages are already declared and locked in site/package.json and site/bun.lock.
 import { chromium } from 'playwright';
 import axe from 'axe-core';
 
@@ -9,6 +10,7 @@ const dist = resolve(import.meta.dir, '../dist');
 const compilerVersion = (
   await Bun.file(resolve(import.meta.dir, '../../.zig-version')).text()
 ).trim();
+// Loopback-only fixture server for this browser check; not a production server.
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
@@ -179,6 +181,9 @@ try {
   }
   await page.goto(`${base}/zinc/docs/openclaw-amd-validation/`);
   const report = await page.locator('.doc-content').innerText();
+  const reportNav = page.locator('.doc-nav-panel a[href="/zinc/docs/openclaw-amd-validation/"]');
+  assert.equal(await reportNav.isVisible(), true);
+  assert.equal(await reportNav.getAttribute('aria-current'), 'page');
   assert.match(report, /task.failed/i);
   assert.match(report, /unsupported/i);
   assert.match(report, /Intel.*Metal/s);

@@ -69,7 +69,8 @@ jobs:
         working-directory: site
         run: bun test src/lib/benchmark-view.test.ts
 
-      - name: Install browser for benchmark checks
+      # Reuse the existing Playwright and axe-core dependencies in site/package.json.
+      - name: Install browser for rendered page checks
         working-directory: site
         run: bunx playwright install --with-deps chromium
 
