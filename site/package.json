@@ -13,6 +13,7 @@
     "preview": "astro preview",
     "check:benchmarks": "bun tools/check-benchmarks.ts",
     "check:posts": "bun tools/check-posts.ts",
+    "check:harnesses": "bun tools/check-coding-harnesses.ts",
     "astro": "astro"
   },
   "overrides": {

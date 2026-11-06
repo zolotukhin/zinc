@@ -13,6 +13,12 @@ export OPENAI_BASE_URL=http://localhost:8080/v1
 `zinc chat` defaults to port 9090 unless `-p` is provided. Vulkan/Metal builds
 open the built-in browser UI; ROCm/CUDA builds provide the HTTP API only.
 
+For coding agents, use the [OpenClaw setup guide](/zinc/docs/openclaw/) or
+[OpenCode setup guide](/zinc/docs/opencode/). Their helpers discover the loaded
+model and available context. Configure sufficient server context first; see
+the [OpenClaw AMD acceptance matrix](/zinc/docs/openclaw-amd-validation/) for
+tested models and backend-specific limits.
+
 ## Backend coverage
 
 Each executable contains one backend. Check `zinc --version` before selecting
