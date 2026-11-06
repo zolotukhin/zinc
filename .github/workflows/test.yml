@@ -96,7 +96,6 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.1
           use-cache: false
 
       - name: Install the release shader compiler and Vulkan headers
@@ -132,9 +131,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+      # setup-zig reads minimum_zig_version from the checked-out build.zig.zon.
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.1
           use-cache: false
       - uses: oven-sh/setup-bun@v2
         with:

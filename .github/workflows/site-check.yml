@@ -45,9 +45,9 @@ jobs:
         with:
           node-version-file: 'site/.node-version'
 
+      # setup-zig reads minimum_zig_version from the checked-out build.zig.zon.
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.1
           use-cache: false
 
       - name: Install headers for the native API layout probe

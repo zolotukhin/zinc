@@ -1377,7 +1377,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     '- VK_KHR_cooperative_matrix 16x16x16',
     '- RADV driver (Mesa), RADV_PERFTEST=coop_matrix',
     '- System glslc: shaderc 2023.8 (Ubuntu 24.04) — do NOT use newer versions',
-    '- Zig 0.17.0',
+    '- Zig 0.17.1',
     '',
     '## Current Build Output (last 3000 chars)',
     '```',
@@ -1435,7 +1435,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "2. Edit LOCAL source files only (this machine's working copy).",
     '3. The loop will rsync your changes and rebuild on the remote node.',
     '4. Do NOT modify .env, loops/, or files outside src/ and build.zig.',
-    '5. Zig 0.17.0 API: ArrayList is unmanaged (pass allocator to append/deinit),',
+    '5. Zig 0.17.1 API: ArrayList is unmanaged (pass allocator to append/deinit),',
     '   StringHashMap → use StringHashMapUnmanaged, File.stdout() not io.getStdOut(),',
     '   writer() takes a buffer arg, process.Child StdIo uses .Pipe not .pipe.',
     '6. GLSL shaders must compile with `glslc --target-env=vulkan1.3 -O`.',
@@ -2037,7 +2037,7 @@ async function main() {
     const zigVer = await ssh('zig version', 10_000);
     console.log(clr('1;32', `  Zig: ${zigVer}`));
   } catch {
-    console.error(clr('31', '  ❌ Zig not found on remote node. Install Zig 0.17.0.'));
+    console.error(clr('31', '  ❌ Zig not found on remote node. Install Zig 0.17.1.'));
     process.exit(1);
   }
 
