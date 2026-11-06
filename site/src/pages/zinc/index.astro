@@ -4,8 +4,10 @@ import Breadcrumbs from '../../components/Breadcrumbs.astro';
 import TerminalWindow from '../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import benchmarkData from '../../data/zinc-performance.json';
+import pinnedZigVersion from '../../../../.zig-version?raw';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const compilerVersion = pinnedZigVersion.trim();
 const breadcrumbItems = [{ name: 'Home', href: '/' }, { name: 'ZINC' }];
 const target = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
@@ -61,7 +63,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
         <a href="/zinc/docs/getting-started/" class="button primary">Get started <span aria-hidden="true">→</span></a>
         <a href="https://github.com/zolotukhin/zinc" class="button">View on GitHub <span aria-hidden="true">↗</span></a>
       </div>
-      <p class="build-note">One native binary · Zig 0.17 · MIT licensed</p>
+      <p class="build-note">One native binary · Zig {compilerVersion} · MIT licensed</p>
     </div>
     <div class="use-cases" aria-label="Ways to use ZINC">
       <a href="/zinc/docs/getting-started/#start-the-chat-ui">
@@ -87,7 +89,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
       <p>Follow the <a href="/zinc/docs/getting-started/">setup guide</a> to install the prerequisites for your GPU, then build and open a chat.</p>
-      <p>The default build selects Vulkan on Linux and Metal on macOS. Each binary contains one backend. The wrapper downloads and verifies Zig 0.17.1 when needed.</p>
+      <p>The default build selects Vulkan on Linux and Metal on macOS. Each binary contains one backend. The wrapper downloads and verifies Zig {compilerVersion} when needed.</p>
       <p>Prefer a download? <a href="https://github.com/zolotukhin/zinc/releases/tag/v0.1.0">Linux 0.1.0 is available</a> for Vulkan and ROCm. See <a href="/zinc/docs/binary-releases/">downloads, requirements and installation</a>.</p>
       <p class="setup-note">AMD with Vulkan: set <code>RADV_PERFTEST=coop_matrix</code> before the GPU check or chat. ROCm has its own <a href="/zinc/docs/rocm/">build instructions</a>.</p>
     </div>

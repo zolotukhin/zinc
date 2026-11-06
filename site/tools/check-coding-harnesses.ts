@@ -6,6 +6,9 @@ import axe from 'axe-core';
 
 // Exercise the built onboarding pages without starting a client or loading a model.
 const dist = resolve(import.meta.dir, '../dist');
+const compilerVersion = (
+  await Bun.file(resolve(import.meta.dir, '../../.zig-version')).text()
+).trim();
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
@@ -57,6 +60,11 @@ try {
         page.on('pageerror', (error) => errors.push(error.message));
         const response = await page.goto(`${base}/zinc/`);
         assert.equal(response?.status(), 200);
+        assert.equal(
+          await page.locator('.build-note').innerText(),
+          `One native binary · Zig ${compilerVersion} · MIT licensed`,
+          'The compiler badge must display the exact repository pin',
+        );
         const section = page.locator('[data-coding-harnesses]');
         assert.match(await section.innerText(), /OpenClaw or OpenCode/);
         assert.match(await section.innerText(), /existing project/);
