@@ -8,7 +8,7 @@ If you just want to run inference, see [Getting Started](/zinc/docs/getting-star
 
 | Tool                | Version               | What it does                                                                  |
 | ------------------- | --------------------- | ----------------------------------------------------------------------------- |
-| **Zig**             | 0.17.0                | Host compiler for all Zig source                                              |
+| **Zig**             | 0.17.1                | Host compiler for all Zig source                                              |
 | **Bun**             | 1.4.4 minimum         | TypeScript tests, package management, site scripts, and `bun fmt`             |
 | **glslc**           | Current LunarG SDK    | Shader compiler with `GL_EXT_integer_dot_product` support (Linux Vulkan only) |
 | **ROCm**            | Validated 7.2.4 stack | HIP/hipRTC/hipBLAS development files and rocWMMA headers (Linux ROCm only)    |
@@ -25,7 +25,7 @@ xcode-select --install
 On Linux with Vulkan (AMD or Intel Arc GPU):
 
 ```bash
-# Zig 0.17.0 is selected and downloaded by scripts/zig.sh when needed.
+# Zig 0.17.1 is selected and downloaded by scripts/zig.sh when needed.
 # Bun: https://bun.sh
 # Install glslc from the current LunarG Vulkan SDK.
 sudo apt install libvulkan-dev

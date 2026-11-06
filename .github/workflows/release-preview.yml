@@ -68,7 +68,7 @@ jobs:
           persist-credentials: false
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: '0.17.0'
+          version: '0.17.1'
           use-cache: false
       - name: Build, audit, package and install outside the checkout
         env:

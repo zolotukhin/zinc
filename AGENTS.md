@@ -74,7 +74,7 @@ Agent policy:
 
 ## Tech Stack
 
-- **Zig 0.17.0** — host code, build system
+- **Zig 0.17.1** — host code, build system
 - **Bun 1.4.4 minimum** — JavaScript tooling; `.bun-version` pins CI. Use `bun fmt` for supported files, with configuration in `bunfig.toml`. Do not add Prettier.
 - **GLSL 460** — compute shaders compiled to SPIR-V via `glslc` (Vulkan backend)
 - **MSL** — Metal Shading Language compute shaders (Apple Silicon backend)

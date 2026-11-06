@@ -252,7 +252,7 @@
     }
   },
   "toolchain": {
-    "zig": "0.17.0",
+    "zig": "0.17.1",
     "shaderc": "2025.2~rc1-1lunarg24.04-1",
     "vulkan_headers": {
       "commit": "409c16be502e39fe70dd6fe2d9ad4842ef2c9a53",

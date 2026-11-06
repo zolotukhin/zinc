@@ -33,7 +33,7 @@ and server commands; `zinc chat` does not provide a browser UI in that build.
 
 You need Git, the development files for your GPU backend, and Python 3 for the
 initial compiler download. `scripts/zig.sh` downloads and verifies the pinned
-**Zig 0.17.0** compiler when needed. A separate system Zig installation is
+**Zig 0.17.1** compiler when needed. A separate system Zig installation is
 optional.
 
 ### macOS (Apple Silicon)

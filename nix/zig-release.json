@@ -1,21 +1,21 @@
 {
-  "version": "0.17.0",
+  "version": "0.17.1",
   "platforms": {
     "x86_64-linux": {
-      "url": "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz",
-      "hash": "sha256-HL6d+fJ+a3jRTMvKQ7ZwOkBO957xxGPekB1/CI1OICY="
+      "url": "https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz",
+      "hash": "sha256-NYGGPjy8/Q/ODvxoLOfp6T2pZmipd3kdNWom0qfpsXo="
     },
     "aarch64-linux": {
-      "url": "https://ziglang.org/download/0.17.0/zig-aarch64-linux-0.17.0.tar.xz",
-      "hash": "sha256-no0RZh1K471XcCo4MngeI60VHd5XmOFqXM1QP2UjT/g="
+      "url": "https://ziglang.org/download/0.17.1/zig-aarch64-linux-0.17.1.tar.xz",
+      "hash": "sha256-oVRtVkbrGEQ3kY1mNcprdioOiJ6sCc73IO56HtP+d5U="
     },
     "x86_64-darwin": {
-      "url": "https://ziglang.org/download/0.17.0/zig-x86_64-macos-0.17.0.tar.xz",
-      "hash": "sha256-T5ocUmmqF+vaXm08K4nWy/NvfSsioDBumrmPJflVKcY="
+      "url": "https://ziglang.org/download/0.17.1/zig-x86_64-macos-0.17.1.tar.xz",
+      "hash": "sha256-mvB7IDGfvQyS7katI+gdangrGq6iz7jcv/NfHSx927c="
     },
     "aarch64-darwin": {
-      "url": "https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz",
-      "hash": "sha256-tgfpuSNHkKAIEWrlvbccYkO4S5+0KlOp5w/eQcBsU2o="
+      "url": "https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz",
+      "hash": "sha256-dfG8eh6YUvF+yaDBiV92fE7FbUa8ioNJIO7OHQNZ3Y0="
     }
   }
 }

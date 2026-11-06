@@ -9,7 +9,7 @@ and an OpenAI-compatible API in one native binary. Vulkan and Metal builds
 also include browser chat.
 
 [![Tests](https://github.com/zolotukhin/zinc/actions/workflows/test.yml/badge.svg)](https://github.com/zolotukhin/zinc/actions/workflows/test.yml)
-[![Zig 0.17.0](https://img.shields.io/badge/Zig-0.17.0-F7A41D?logo=zig&logoColor=white)](.zig-version)
+[![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [Get started](https://zolotukhin.ai/zinc/docs/getting-started/) ·
@@ -30,7 +30,7 @@ The commands below build from source.
 
 Install the [prerequisites for your GPU](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)
 first. The default build uses **Vulkan on Linux** and **Metal on macOS**.
-The build wrapper downloads and verifies **Zig 0.17.0** when needed; you do not
+The build wrapper downloads and verifies **Zig 0.17.1** when needed; you do not
 need to replace your system compiler. Python 3 is needed for that initial
 compiler download.
 

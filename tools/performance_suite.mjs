@@ -3715,7 +3715,7 @@ async function buildIntelConfig(args) {
   const remoteZig = envValue(dotEnv, 'ZINC_INTEL_ZIG_REMOTE');
   const remoteZigDir =
     envValue(dotEnv, 'ZINC_INTEL_ZIG_DIR', 'ZINC_INTEL_REMOTE_ZIG_DIR') ??
-    (remoteZig ? path.posix.dirname(remoteZig) : `${remoteHome}/.cache/zinc-toolchains/zig-0.17.0`);
+    (remoteZig ? path.posix.dirname(remoteZig) : `${remoteHome}/.cache/zinc-toolchains/zig-0.17.1`);
   const llamaDevice = envValue(dotEnv, 'ZINC_INTEL_LLAMA_DEVICE') ?? 'Vulkan0';
   const intelLlamaDeviceArgs = llamaDeviceArgs(llamaDevice);
   const remoteEnv = {

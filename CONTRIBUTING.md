@@ -26,7 +26,7 @@ If you want a good first issue, look for `good first issue` or `help wanted` lab
 
 Core tools:
 
-- Zig 0.17.0, pinned in `.zig-version` and selected by `scripts/zig.sh`
+- Zig 0.17.1, pinned in `.zig-version` and selected by `scripts/zig.sh`
 - Bun 1.4.4 or newer for tooling, tests, and `bun fmt`
 - Python 3 for the initial compiler download and release tooling
 - Backend dependencies from [Getting started](docs/GETTING_STARTED.md) or the [ROCm guide](docs/ROCM.md)
