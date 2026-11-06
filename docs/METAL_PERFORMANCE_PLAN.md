@@ -321,10 +321,11 @@ That is the local bottleneck until proven otherwise.
 ## Local llama.cpp Reference
 
 Measured on April 2, 2026 on the same M4 Max and the same GGUF model using the
-local Docker-provided `llama-server` binary:
+local Docker-provided `llama-server` wrapper. Set `DOCKER_LLAMA_SERVER` to
+that wrapper on the authorized Metal worker; its `--model-id` flag is wrapper-specific:
 
 ```bash
-/Users/zolotukhin/.docker/bin/inference/llama-server \
+"${DOCKER_LLAMA_SERVER}" \
   --model-id qwen36-35b-a3b-q4k-xl \
   --host 127.0.0.1 \
   --port 8089 \

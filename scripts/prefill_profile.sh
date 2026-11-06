@@ -4,8 +4,8 @@
 # prefill time actually goes: dequant_q4k_to_f16 (the round-trip) vs cublas_hgemm
 # vs f32_to_f16 vs attention/SSM/norms. Confirms whether the fused-GEMM is the lever.
 set -u
-GPU=GPU-e59a6fce-1961-bafe-927c-06c0149f2370
-export CUDA_VISIBLE_DEVICES=$GPU ZINC_GPU=$GPU
+source "$(dirname "${BASH_SOURCE[0]}")/lib/cuda_target.sh"
+zinc_select_cuda_device || exit 1
 ZBIN=$HOME/zinc-main-meas/zig-out/bin/zinc
 NSYS=/usr/local/cuda/bin/nsys
 WAIT_PID=${1:-0}

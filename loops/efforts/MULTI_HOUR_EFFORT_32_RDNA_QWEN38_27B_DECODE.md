@@ -5,7 +5,7 @@ Model `qwen38-27b-q4k-m` (Qwen3.8-27B Q4_K_M, `qwen35` dense hybrid: 64 layers,
 lm-head Q6_K 248320×5120). Per decoded token the GPU streams ~16.1 GB of
 weights plus ~0.3 GB of SSM state (48 layers × 3 MB read + 3 MB write).
 
-Node: `hft` (192.168.0.34:2223), Radeon AI PRO R9700 (RADV GFX1201, Mesa
+Node: the configured RDNA worker (${ZINC_HOST}:2223), Radeon AI PRO R9700 (RADV GFX1201, Mesa
 25.0.7), kernel 7.2.2. After the last reboot the discrete card is **Vulkan
 device 0** (`vulkaninfo --summary`: GPU0 = R9700, GPU1 = Raphael iGPU), so
 every run below passes `-d 0` / `--rdna-vk-device 0`. The card's sysfs
@@ -19,21 +19,21 @@ ms/tok), so DPM is not a lever here either.
 Suite server path (`tools/performance_suite.mjs --target rdna`, 96 greedy tokens,
 same prompt as the published site row):
 
-| path | prefill tok/s | decode tok/s |
-|---|---:|---:|
-| ZINC Vulkan, core (67-tok chat prompt) | 186.6 | **31.30** (32.0 ms/tok) |
-| ZINC Vulkan, decode-extended (256 tok) | 249 | 31.06 |
-| ZINC ROCm, core | 392 | 32.40 |
-| llama.cpp 9400c8946 llama-server (Vulkan0), core | 147 | 29.85 |
-| llama.cpp 9400c8946 `llama-bench -dev Vulkan0 tg96` | — | 30.10 |
+| path                                                | prefill tok/s |            decode tok/s |
+| --------------------------------------------------- | ------------: | ----------------------: |
+| ZINC Vulkan, core (67-tok chat prompt)              |         186.6 | **31.30** (32.0 ms/tok) |
+| ZINC Vulkan, decode-extended (256 tok)              |           249 |                   31.06 |
+| ZINC ROCm, core                                     |           392 |                   32.40 |
+| llama.cpp 9400c8946 llama-server (Vulkan0), core    |           147 |                   29.85 |
+| llama.cpp 9400c8946 `llama-bench -dev Vulkan0 tg96` |             — |                   30.10 |
 
-The published "48 tok/s" for this row is the suite's *end-to-end* figure
+The published "48 tok/s" for this row is the suite's _end-to-end_ figure
 (prompt + generated tokens over total wall-clock), not decode.
 
 Two harness gotchas found on the way:
 
 - The `llama-server` on the node's `PATH` (b96806d96) rejects `--device
-  Vulkan0`; the suite picks it first (`which llama-server`) and the whole
+Vulkan0`; the suite picks it first (`which llama-server`) and the whole
   baseline column comes back `unavailable_reason`. Pass
   `--rdna-llama-server /root/llama.cpp/build/bin/llama-server` (9400c8946).
 - The `zinc` CLI decodes this model at 28.3 tok/s while the server path does
@@ -50,7 +50,7 @@ Two harness gotchas found on the way:
   than ~60 tokens read ~0.8 ms/tok faster (early-burst boost), so the early
   30-token ablations over-stated the delta-net cost.
 - Dummy-dispatch slope: +48/+96/+192 tiny dispatch+barrier pairs per token
-  cost 2.5 µs each → dispatch overhead is *not* a lever on RADV for this
+  cost 2.5 µs each → dispatch overhead is _not_ a lever on RADV for this
   model (~675 dispatches/token ≈ 1.7 ms, and most cannot be removed).
 - In-place kernel ablations (skip conv / delta / gnorm; delta with loads,
   stores or reductions disabled) and cold-state re-dispatch slopes.
@@ -62,10 +62,10 @@ gnorm 0.3), attention 2.5, tail 1.7 (lm-head 628 GB/s).
 
 ## Landed (server path, 96 tokens, identical greedy output)
 
-| change | ms/tok | tok/s |
-|---|---:|---:|
-| baseline | 31.95 | 31.3 |
-| K-split fused RMS+alpha/beta (`rms_norm_dmmv_alpha_beta_ksplit`, k=10) | 31.6 | 31.65 |
+| change                                                                               |    ms/tok |    tok/s |
+| ------------------------------------------------------------------------------------ | --------: | -------: |
+| baseline                                                                             |     31.95 |     31.3 |
+| K-split fused RMS+alpha/beta (`rms_norm_dmmv_alpha_beta_ksplit`, k=10)               |      31.6 |    31.65 |
 | + NUM_ROWS=4 Q4_K/Q6_K DMMV for M == hidden_dim (`dmmv_q4k_rows4`, `dmmv_q6k_rows4`) | **31.15** | **32.1** |
 
 - **K-split alpha/beta.** The fused RMS+alpha+beta dispatch launched
@@ -88,19 +88,19 @@ gnorm 0.3), attention 2.5, tail 1.7 (lm-head 628 GB/s).
   disables). Measured windows: M=5120 only is best; extending to z (6144)
   or qkv (10240) / attn_q (12288) is flat-to-worse; the existing 8-row
   `dmmv_q6k_wide` on the same shapes is worse than 4 rows; a Q5_K 4-row
-  variant for `ssm_out` is *slower* than its 2-row kernel (rejected, not kept).
+  variant for `ssm_out` is _slower_ than its 2-row kernel (rejected, not kept).
 
 ## Rejected on this exact target (do not repeat without a new hypothesis)
 
-| attempt | result |
-|---|---|
+| attempt                                                                                                                    | result                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Per-head delta-net kernel (256 threads, whole 128×128 state in registers, coalesced 256 B rows, one `subgroupAdd` per row) | correct but +0.4 ms/tok vs cols8; in-context the kernel is bound by its 6 MB/layer of cold state traffic, not by latency or reductions |
-| Per-wave delta-net kernel (64 threads per 32 rows, no LDS/barriers) | same as per-head (32.4 ms/tok) |
-| Pooling all 64 layers' SSM state into one 192 MB allocation (TLB / small-page hypothesis) | no change on the server path |
-| DPM `high` on the R9700 | no change |
-| Dispatching the z projection next to delta-net (after conv, or after delta) so the two overlap | after-conv identical, after-delta −0.8% |
-| NUM_ROWS=2 / 4 for the fused gate+up+SwiGLU (spec-constant variants of the row1 kernel) | 31.2 / 31.55 vs 31.1 ms/tok for row1 — row1 stays |
-| NUM_ROWS=4 on qkv (M=10240) alone | flat |
+| Per-wave delta-net kernel (64 threads per 32 rows, no LDS/barriers)                                                        | same as per-head (32.4 ms/tok)                                                                                                         |
+| Pooling all 64 layers' SSM state into one 192 MB allocation (TLB / small-page hypothesis)                                  | no change on the server path                                                                                                           |
+| DPM `high` on the R9700                                                                                                    | no change                                                                                                                              |
+| Dispatching the z projection next to delta-net (after conv, or after delta) so the two overlap                             | after-conv identical, after-delta −0.8%                                                                                                |
+| NUM_ROWS=2 / 4 for the fused gate+up+SwiGLU (spec-constant variants of the row1 kernel)                                    | 31.2 / 31.55 vs 31.1 ms/tok for row1 — row1 stays                                                                                      |
+| NUM_ROWS=4 on qkv (M=10240) alone                                                                                          | flat                                                                                                                                   |
 
 Delta-net cost anatomy (per-head kernel, in context, 96 tokens): store ≈
 0.5 ms/tok, load ≈ 0.4 ms/tok, reductions ≈ 0.1 ms, plus ~0.7 ms/tok that

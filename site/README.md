@@ -50,6 +50,11 @@ browser.
 | `../src/**/*.zig`                | Source for the generated Zig API reference     |
 | `src/data/zinc-performance.json` | Published benchmark measurements               |
 
+Use the [blog guide](../writing/ZOLOTUKHIN_AI_BLOG_GUIDE.md) and
+[post template](../writing/ZOLOTUKHIN_AI_POST_TEMPLATE.md) for new posts. Published
+content lives in `src/content/posts/`; old implementation plans and duplicate
+drafts are available in Git history.
+
 The build needs the full repository, the pinned Zig toolchain, and the headers
 used by the native API layout probe. CI installs `libvulkan-dev` on Linux.
 Site build checks run when `site/`, `docs/`, or `src/` changes.

@@ -4,8 +4,8 @@
 # Report p90 + median over RUNS. llama-bench at the matched pp<T>/tg<N_GEN>.
 # Line-buffered (stdbuf) so progress is visible live.
 set -u
-GPU_UUID=${GPU_UUID:-GPU-e59a6fce-1961-bafe-927c-06c0149f2370}   # 4090
-export CUDA_VISIBLE_DEVICES=$GPU_UUID ZINC_GPU=$GPU_UUID
+source "$(dirname "${BASH_SOURCE[0]}")/lib/cuda_target.sh"
+zinc_select_cuda_device || exit 1
 ZBIN=${ZBIN:-$HOME/zinc-main-meas/zig-out/bin/zinc}
 MD=${MD:-$HOME/workspace/models}
 LB=${LB:-$HOME/workspace/llama.cpp/build/bin/llama-bench}
@@ -31,7 +31,7 @@ declare -A GGUF=(
 pctl() { local p=${1:-90}; sort -g | awk -v p="$p" '{a[++n]=$1} END{if(n==0){print"NA";exit} i=int((n-1)*p/100+0.5)+1; if(i>n)i=n; printf "%.1f",a[i]}'; }
 median() { sort -g | awk '{a[++n]=$1} END{if(n==0){print"NA";exit} if(n%2)printf"%.1f",a[(n+1)/2]; else printf"%.1f",(a[n/2]+a[n/2+1])/2}'; }
 
-echo "### p90 scoreboard GPU=$GPU_UUID RUNS=$RUNS N_GEN=$N_GEN $(date -u +%FT%TZ)"
+echo "### p90 scoreboard GPU=configured RUNS=$RUNS N_GEN=$N_GEN $(date -u +%FT%TZ)"
 printf '%-16s | %-22s | %-22s\n' "model" "ZINC prefill p90/med t/s" "ZINC decode p90/med t/s"
 declare -A ZTOK
 for name in "${NAMES[@]}"; do
