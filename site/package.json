@@ -12,6 +12,7 @@
     "build": "astro build && bun tools/protect-code-html.mjs",
     "preview": "astro preview",
     "check:benchmarks": "bun tools/check-benchmarks.ts",
+    "check:posts": "bun tools/check-posts.ts",
     "astro": "astro"
   },
   "overrides": {
