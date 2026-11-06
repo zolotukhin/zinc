@@ -139,6 +139,19 @@ To connect an app, set its OpenAI-compatible API base URL to
 `http://localhost:9090/v1` while the server is running. See the
 [API guide](/zinc/docs/api/) for requests, SDK examples, and backend limitations.
 
+## Connect a coding agent
+
+Follow the [OpenClaw setup guide](/zinc/docs/openclaw/) for one-shot coding
+tasks, or the [OpenCode setup guide](/zinc/docs/opencode/) for coding rounds
+with a project verification command. Both guides include a setup helper and
+context requirements. Stop the chat server before restarting it with the
+larger context required by your client.
+
+For OpenClaw, the [AMD acceptance report](/zinc/docs/openclaw-amd-validation/)
+records the tested models, actual file edits and test results, and limits on
+Vulkan and ROCm. Check that matrix before choosing a model; a successful config
+check alone does not establish coding ability.
+
 ## Use an existing GGUF
 
 ```bash

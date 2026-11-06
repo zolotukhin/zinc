@@ -13,6 +13,7 @@ on:
       - 'bunfig.toml'
       - 'scripts/zig.sh'
       - 'tools/setup_opencode.mjs'
+      - 'tools/setup_openclaw.mjs'
       - 'tools/benchmark_quality.mjs'
       - '.github/workflows/site-check.yml'
   pull_request:
@@ -26,6 +27,7 @@ on:
       - 'bunfig.toml'
       - 'scripts/zig.sh'
       - 'tools/setup_opencode.mjs'
+      - 'tools/setup_openclaw.mjs'
       - 'tools/benchmark_quality.mjs'
       - '.github/workflows/site-check.yml'
 
@@ -67,7 +69,8 @@ jobs:
         working-directory: site
         run: bun test src/lib/benchmark-view.test.ts
 
-      - name: Install browser for benchmark checks
+      # Reuse the existing Playwright and axe-core dependencies in site/package.json.
+      - name: Install browser for rendered page checks
         working-directory: site
         run: bunx playwright install --with-deps chromium
 
@@ -78,6 +81,10 @@ jobs:
       - name: Check article images and mobile tables
         working-directory: site
         run: bun run check:posts
+
+      - name: Check coding client onboarding and downloads
+        working-directory: site
+        run: bun run check:harnesses
 
       - name: Check output
         working-directory: site
@@ -91,4 +98,6 @@ jobs:
           test -f dist/robots.txt
           test -f dist/zinc/harnesses/setup-opencode.mjs
           cmp ../tools/setup_opencode.mjs dist/zinc/harnesses/setup-opencode.mjs
+          test -f dist/zinc/harnesses/setup-openclaw.mjs
+          cmp ../tools/setup_openclaw.mjs dist/zinc/harnesses/setup-openclaw.mjs
           echo "All checks passed."
