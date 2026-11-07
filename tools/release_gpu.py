@@ -90,15 +90,19 @@ def json_request(port, path, body=None):
         return json.load(response)
 
 
-def ready(child, port):
+def ready(child, port, poll_interval=0.5):
+    """Wait for ready health; finer polling retains the six-minute deadline."""
+    require(type(poll_interval) in (int, float) and 0 < poll_interval <= 360, "invalid health poll interval")
     deadline = time.monotonic() + 360
     while time.monotonic() < deadline:
         require(child.poll() is None, "server exited before becoming healthy")
         try:
-            json_request(port, "/health")
-            return
+            health = json_request(port, "/health")
+            if isinstance(health, dict) and health.get("status") == "ok":
+                return
         except (OSError, ValueError):
-            time.sleep(0.5)
+            pass
+        time.sleep(poll_interval)
     raise ValueError("server health timeout")
 
 

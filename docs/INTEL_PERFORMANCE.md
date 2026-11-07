@@ -43,7 +43,11 @@ The report retains every measured request's prefill/decode rates and full HTTP
 latency. A separate warmed 16-token SSE probe measures time to first usable
 content for each workload and round. Startup measures time until health is
 ready, with OS caches retained; it is not a cold-disk claim. Health is polled
-every 500 ms, so sub-500 ms startup differences are unresolved. Linux process status
+every 10 ms in new campaigns, so sub-10 ms startup differences are unresolved.
+Historical 500 ms samples retain their original resolution. A successful JSON
+response counts as ready only when its health status is `ok`; loading and malformed
+health replies keep polling within the unchanged six-minute startup deadline.
+Linux process status
 and DRM fdinfo supply host RSS and observed GPU resident/allocated memory peaks.
 GPU peaks are sampled every 50 ms, and unavailable counters remain unknown.
 Client identifiers and PCI addresses are never published. The counter semantics
@@ -64,7 +68,7 @@ HTTP latency and first usable streaming content for every workload, plus startup
 host peak RSS and observed resident/allocated VRAM. Each dimension retains the
 paired medians for every round. A losing round cannot disappear inside a pooled
 median, and unavailable counters remain unknown. Startup differences within the
-500 ms polling resolution are unresolved. Ties are not wins.
+recorded polling resolution are unresolved. Ties are not wins.
 Each round records its expected, observed and valid sample counts so missing,
 extra and invalid measurements can be distinguished. `measured_dimensions`
 counts dimensions with complete paired data across every round;
@@ -212,6 +216,35 @@ separate. Hardware and package identities remain unchanged through the run.
 The [bounded-upload investigation](VULKAN_UPLOAD_STAGING.md) separately records
 the temporary-memory reduction and loading-time observations. Its A/B compares
 two ZINC packages and does not establish a speed advantage over llama.cpp.
+
+### Q8 decode candidate: correctness and controlled timing
+
+The [November 7 development-candidate investigation](/zinc/validation/intel-q8-decode-investigation-2026-11-07.json)
+records the SIMD32 row-layout candidate in [PR #75](https://github.com/zolotukhin/zinc/pull/75), built with Zig 0.17.1 at
+`51dd99dd` (tree-identical to PR head `520b46e9`). It is separate from the
+published 0.1.0 archives. All seven models pass the resumed native/API replay:
+431 of 432 choices match the primary native sequence, with one already qualified
+near-tie branch. All 81 full HTTP continuations, both Gemma sliding-window sets,
+context boundaries, cancellation/error recovery, chat streaming and Unicode pass.
+The interrupted reports remain preserved. A fresh post-reboot run also passes
+376 base numerical cases and the expanded Q8 fixture's 180 cases / 90 bitwise
+pairs, with the package, shaders, oracle, kernel and Mesa identities unchanged.
+
+Three balanced-order rounds compare the same starter-model GGUF through reusable
+servers: the packaged legacy override, the packaged candidate default and
+freshly built llama.cpp Vulkan `9f0e5098`. F16 KV, MTP off, one slot and disabled
+prompt caching match throughout. The record retains 144 requests, 36 streaming
+probes and nine server lifetimes; candidate and legacy complete outputs match.
+Short-chat round-median decode rises from 192.94 to 250.91 tokens/s, about 30%,
+and HTTP latency falls from 529.16 to 412.78 ms. The native competitor remains
+ahead at 288.56 decode and 2,697.46 prefill tokens/s; candidate prefill is 1,978.22.
+
+This remains a one-model performance diagnostic. Natural EOS on context-long
+is retained and excluded from full-budget comparisons. Startup in this run used
+500 ms polling and remains unresolved at that resolution; the newer 10 ms
+measurement protocol does not relabel these samples. Actual OpenCode/OpenClaw
+acceptance and broader performance checks are separate gates before promoting
+the candidate. These results do not establish an all-model performance win.
 
 ## Work order after 0.1.0
 

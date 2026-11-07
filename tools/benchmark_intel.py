@@ -144,8 +144,8 @@ def performance_comparison(model, settings):
             eligible=eligible[name])})
     for field in ("startup_ms", "memory.observed_peak.host_peak_rss_bytes",
                   "memory.observed_peak.gpu_resident_vram_bytes", "memory.observed_peak.gpu_total_vram_bytes"):
-        # Startup readiness is polled every 500 ms. An apparent difference
-        # within that resolution is unresolved, even when its raw ratio is >1.
+        # Use the recorded resolution, including historical 500 ms campaigns.
+        # Finer polling in new runs cannot turn old coarse samples into wins.
         dimensions.append({"scenario": None, **metric_comparison(model["processes"], field, rounds, 1,
             resolution=settings.get("startup_poll_interval_ms", 500) if field == "startup_ms" else 0)})
     complete_workloads = (len(model["scenarios"]) == 4
@@ -244,7 +244,7 @@ def main():
                            "prompt_cache": False, "rounds": args.rounds, "runs": args.runs, "warmup": args.warmup,
                            "temperature": 0, "top_p": 1, "seed": 0, "context": "pinned model qualification limit",
                            "ttft": "separate warmed 16-token streaming probe per workload/round", "startup": "observed model startup; OS caches are retained",
-                           "startup_poll_interval_ms": 500}}
+                           "startup_poll_interval_ms": 10}}
     def save():
         write_json(args.output, report)
     save()
@@ -305,7 +305,7 @@ def main():
                         print(f"Benchmark {identifier}, round {round_index + 1}/{args.rounds}: {engine}", flush=True)
                         started = time.monotonic()
                         with gpu.process(command, log, args.zinc_source, active_env) as child, MemoryTracker(child.pid) as memory:
-                            gpu.ready(child, port)
+                            gpu.ready(child, port, poll_interval=report["settings"]["startup_poll_interval_ms"] / 1000)
                             process = {"engine": engine, "round": round_index + 1, "startup_ms": (time.monotonic() - started) * 1000}
                             if engine == "llama":
                                 process["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"))
