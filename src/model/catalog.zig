@@ -578,28 +578,20 @@ test "find returns qwen3.8 27b dense entry" {
     try std.testing.expect(supportsProfile(entry.*, apple_silicon_profile));
 }
 
-test "all seven qualified Intel Vulkan models remain selectable on a 32 GB board" {
+test "every managed model remains selectable on an Intel Vulkan 32 GB board" {
     // The CLI and model manager reject models without a matching profile even
     // when native inference qualification passed. Keep the complete 0.1.0 Intel
     // matrix available, including Qwen 3.8's ordinary-decode qualification.
     // See docs/INTEL_OPENCODE_VALIDATION.md for the frozen package evidence.
-    const qualified_ids = [_][]const u8{
-        "qwen3-0.6b-q8-0",
-        "qwen35-9b-q4k-m",
-        "qwen36-27b-q4k-m",
-        "qwen36-35b-a3b-q4k-xl",
-        "qwen38-27b-q4k-m",
-        "gemma4-26b-a4b-q4k-m",
-        "gemma4-31b-q4k-m",
-    };
-    for (qualified_ids) |id| {
-        const entry = find(id) orelse return error.TestExpectedEqual;
-        if (!supportsProfileForBackend(entry.*, "intel-arc", .vulkan)) {
-            std.debug.print("FAIL: qualified Intel Vulkan model '{s}' is unavailable in the catalog\n", .{id});
+    // Iterate the catalog so newly added models cannot evade this contract by
+    // being absent from a second, independently maintained list of model IDs.
+    for (entries) |entry| {
+        if (!supportsProfileForBackend(entry, "intel-arc", .vulkan)) {
+            std.debug.print("FAIL: managed Intel Vulkan model '{s}' is unavailable in the catalog\n", .{entry.id});
             return error.TestExpectedEqual;
         }
         try std.testing.expect(entry.status != .hidden and entry.status != .deprecated);
-        try std.testing.expect(fitState(entry.*, 32 * 1024 * 1024 * 1024) == .fits);
+        try std.testing.expect(fitState(entry, 32 * 1024 * 1024 * 1024) == .fits);
     }
 }
 

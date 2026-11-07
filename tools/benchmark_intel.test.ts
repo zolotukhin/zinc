@@ -1,9 +1,15 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { intelModelIds, intelWorkloads } from './intel_workloads.mjs';
 
-test('Intel matrix covers all seven release models using the four canonical workloads', () => {
-  expect(intelModelIds).toHaveLength(7);
+test('Intel matrix covers the entire managed catalog using the four canonical workloads', () => {
+  // The policy already drives the runner; compare it with the independent Zig
+  // catalog so a new managed model cannot silently escape Intel qualification.
+  const catalog = readFileSync(new URL('../src/model/catalog.zig', import.meta.url), 'utf8');
+  const catalogIds = [...catalog.matchAll(/^\s*\.id = "([^"]+)",\s*$/gm)].map((match) => match[1]);
+  expect(catalogIds.length).toBeGreaterThan(0);
+  expect([...intelModelIds].sort()).toEqual(catalogIds.sort());
   for (const id of intelModelIds) {
     const scenarios = intelWorkloads(id);
     expect(scenarios.map((row) => row.id)).toEqual([

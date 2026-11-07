@@ -80,6 +80,16 @@ subset, an early-EOS workload, an unknown memory counter or a faster pooled
 median cannot establish the full objective. Repeated observed improvements do
 not themselves establish statistical confidence or concurrent-client capacity.
 
+Model coverage is derived from completed results, including successful native
+inference checks, rather than the requested model list. Missing, duplicated or
+unfinished model rows cannot establish a complete matrix. The catalog and Intel
+policy are checked together in CI so a new managed model cannot silently escape
+qualification. Each measured baseline server must retain evidence of complete
+Vulkan GPU offload, and each ZINC server must confirm F16 KV. Cached comparison
+flags are recomputed from the samples. An all-model win also requires the
+recorded upstream HEAD check to match the performance reference and the hardware
+identity to remain unchanged through cleanup.
+
 New campaigns probe GPU, kernel and Vulkan driver identities again after all
 servers have stopped. A changed identity fails the campaign; `hardware_unchanged`
 records the successful end check. Stack upgrades belong between campaigns.
