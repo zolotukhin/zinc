@@ -184,6 +184,27 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     require("PASS: 256 sliding-window/page/reference/guard/replay cases" in log.read_text(), "sliding-window reference suite was incomplete")
 
 
+def q8_decode_reference(tree, reference, checkout, device, work, env):
+    """Keep the Intel row-layout proof in every future package qualification."""
+    executable = work / "validate-q8-decode"
+    output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_q8_decode.c"),
+            "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
+            "-lggml-base", "-lvulkan", "-lm", "-o", str(executable)])
+    log = work / "q8-decode-reference.log"
+    with process([str(executable)], log, work, {**reference_environment(reference, env),
+                 "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
+        require(child.wait(timeout=300) == 0, "packaged Q8 decode reference validation failed")
+    require(re.findall(r"^PASS: 180 Q8 native-reference/offset/accumulation/guard cases$", log.read_text(), re.M) ==
+            ["PASS: 180 Q8 native-reference/offset/accumulation/guard cases"], "Q8 decode reference suite was incomplete")
+    require(re.findall(r"^PASS: 90 Q8 identical-reduction pairs$", log.read_text(), re.M) ==
+            ["PASS: 90 Q8 identical-reduction pairs"], "Q8 identical-reduction reference suite was incomplete")
+    return {"passed": True, "cases": 180, "bitwise_pairs": 90,
+            "validator_source_sha256": sha256(ROOT / "tools/validate_q8_decode.c"),
+            "shared_fixture_source_sha256": sha256(ROOT / "tools/validate_dmmv_shared_cache.c"),
+            "shader_sha256": {name: sha256(tree / "share/zinc/shaders" / (name + ".spv"))
+                              for name in ("dmmv_q8_0", "dmmv_q8_0_intel_rows")}}
+
+
 def rocm_kernel_reference(tree, reference, checkout, device, work, env):
     """Compile the archive's embedded hipRTC source, never a rebuilt engine."""
     kernels = ROOT / "src/shaders/cuda/kernels.cu"
@@ -650,9 +671,13 @@ def main():
                 for executable in (tree / "bin/zinc", tree / "bin/zinc-tokenize"):
                     output(["codesign", "--verify", "--strict", str(executable)])
                     output(["spctl", "--assess", "--type", "execute", str(executable)], timeout=120)
+            q8_decode = None
             if profile["target"].endswith("vulkan"):
                 print("Running 376 packaged shader/reference cases", flush=True)
                 kernel_reference(tree, reference, checkout, device, work, env)
+                if profile["family"] == "intel-xe2":
+                    print("Running 60 packaged Q8 decode/reference cases", flush=True)
+                    q8_decode = q8_decode_reference(tree, reference, checkout, device, work, env)
             rocm_kernels = None
             if profile["target"].endswith("rocm"):
                 print("Running 305 packaged ROCm partial-tile/reference cases", flush=True)
@@ -707,6 +732,8 @@ def main():
                 report["checks"]["kernel_reference"] = True
             if rocm_kernels is not None:
                 report["rocm_kernel_reference"] = rocm_kernels
+            if q8_decode is not None:
+                report["q8_decode_reference"] = q8_decode
     # Release the reservation before recording successful cleanup.
     # Reports contain no machine identifiers, private paths, ports or URLs.
     write_json(args.output, report)

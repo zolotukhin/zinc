@@ -276,6 +276,7 @@ pub fn build(b: *std.Build) void {
     const shader_sources = .{
         "dmmv_q4k",
         "dmmv_q8_0",
+        "dmmv_q8_0_intel_rows",
         "dmmv_q8_0_batch",
         "dmmv_q8_0_kpar_batch",
         "dmmv_q8_0_wide",
