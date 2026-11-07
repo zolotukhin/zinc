@@ -130,6 +130,11 @@ def gpu_process_verification(model, rounds):
 
 def performance_comparison(model, settings):
     rounds, runs = settings["rounds"], settings["runs"]
+    # Every server carries its own resolution. Missing historical metadata is
+    # conservatively 500 ms, even when combined with a newer 10 ms campaign.
+    polls = [settings.get("startup_poll_interval_ms", 500)]
+    polls.extend(p.get("startup_poll_interval_ms", 500) for p in model["processes"])
+    startup_resolution = max(polls) if all(type(p) in (int, float) and 0 < p <= 360_000 for p in polls) else None
     dimensions = []
     measured = [s for s in model["samples"] if s.get("warmup") is False]
     eligible = comparison_eligibility(model["samples"], model["scenarios"])
@@ -147,7 +152,8 @@ def performance_comparison(model, settings):
         # Use the recorded resolution, including historical 500 ms campaigns.
         # Finer polling in new runs cannot turn old coarse samples into wins.
         dimensions.append({"scenario": None, **metric_comparison(model["processes"], field, rounds, 1,
-            resolution=settings.get("startup_poll_interval_ms", 500) if field == "startup_ms" else 0)})
+            eligible=field != "startup_ms" or startup_resolution is not None,
+            resolution=startup_resolution if field == "startup_ms" and startup_resolution is not None else 0)})
     complete_workloads = (len(model["scenarios"]) == 4
                           and set(eligible) == {"core", "context-medium", "context-long", "decode-extended"})
     matched_settings = (settings.get("backend") == "vulkan" and settings.get("target") == "intel"
@@ -159,13 +165,14 @@ def performance_comparison(model, settings):
     correct = isinstance(correctness, dict) and correctness.get("passed") is True
     gpu_verification = gpu_process_verification(model, rounds)
     gpu_verified = gpu_verification["passed"]
-    headline = (model.get("passed") is True and correct and gpu_verified and matched_settings and complete_workloads
+    headline = (model.get("passed") is True and correct and gpu_verified and matched_settings and startup_resolution is not None and complete_workloads
                 and rounds >= 3 and runs >= 3 and settings["warmup"] >= 1 and all(eligible.values())
                 and bool(dimensions) and measured_dimensions == len(dimensions))
     return {"scope": "observed matched single-slot MTP-off rounds; not concurrency or statistical confidence",
             "inference_correctness_verified": correct, "gpu_offload_verified": gpu_verified,
             "gpu_offload_verification": gpu_verification,
             "matched_settings_verified": matched_settings,
+            "startup_resolution_ms": startup_resolution,
             "headline_eligible": headline, "comparison_eligible": eligible, "dimensions": dimensions,
             "measured_dimensions": measured_dimensions, "dimension_count": len(dimensions),
             "all_dimensions_better": headline and bool(dimensions) and all(d["all_rounds_better"] for d in dimensions)}
@@ -305,8 +312,9 @@ def main():
                         print(f"Benchmark {identifier}, round {round_index + 1}/{args.rounds}: {engine}", flush=True)
                         started = time.monotonic()
                         with gpu.process(command, log, args.zinc_source, active_env) as child, MemoryTracker(child.pid) as memory:
-                            gpu.ready(child, port, poll_interval=report["settings"]["startup_poll_interval_ms"] / 1000)
-                            process = {"engine": engine, "round": round_index + 1, "startup_ms": (time.monotonic() - started) * 1000}
+                            gpu.ready(child, port, poll_interval=report["settings"]["startup_poll_interval_ms"] / 1000, require_ok=True)
+                            process = {"engine": engine, "round": round_index + 1, "startup_ms": (time.monotonic() - started) * 1000,
+                                       "startup_poll_interval_ms": report["settings"]["startup_poll_interval_ms"]}
                             if engine == "llama":
                                 process["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"))
                             else:

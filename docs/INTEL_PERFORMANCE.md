@@ -44,9 +44,15 @@ latency. A separate warmed 16-token SSE probe measures time to first usable
 content for each workload and round. Startup measures time until health is
 ready, with OS caches retained; it is not a cold-disk claim. Health is polled
 every 10 ms in new campaigns, so sub-10 ms startup differences are unresolved.
-Historical 500 ms samples retain their original resolution. A successful JSON
-response counts as ready only when its health status is `ok`; loading and malformed
-health replies keep polling within the unchanged six-minute startup deadline.
+Historical 500 ms samples retain their original resolution. The measurement
+includes health-request latency and the wait between polls; it remains observed
+HTTP readiness with retained OS caches. Each server records its polling interval,
+and a comparison uses the coarsest interval across both engines and all rounds.
+Missing historical per-server metadata defaults to 500 ms. Cross-protocol data
+cannot inherit the newer run's finer resolution. In these timing campaigns a
+successful JSON response counts as ready only when its health status is `ok`;
+loading and malformed replies keep polling within the six-minute startup deadline.
+Other release-helper callers retain their existing response contract and interval.
 Linux process status
 and DRM fdinfo supply host RSS and observed GPU resident/allocated memory peaks.
 GPU peaks are sampled every 50 ms, and unavailable counters remain unknown.

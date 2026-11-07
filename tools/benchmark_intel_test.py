@@ -37,9 +37,12 @@ class IntelMetricsTest(unittest.TestCase):
         with patch.object(benchmark_intel.gpu.time, "monotonic", side_effect=lambda: clock["now"]), \
              patch.object(benchmark_intel.gpu.time, "sleep", side_effect=sleep), \
              patch.object(benchmark_intel.gpu, "json_request", side_effect=[None, {}, {"status": "loading"}, {"status": "ok"}]) as health:
-            benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1)
+            benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1, require_ok=True)
         self.assertEqual(health.call_count, 4)
         self.assertEqual(clock["now"], 1.5)
+        with patch.object(benchmark_intel.gpu, "json_request", return_value={}), patch.object(benchmark_intel.gpu.time, "sleep") as sleep:
+            benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1)
+            sleep.assert_not_called()
 
     def test_health_timeout_and_dead_process_cannot_supply_readiness(self):
         with patch.object(benchmark_intel.gpu, "json_request") as health:
@@ -56,7 +59,8 @@ class IntelMetricsTest(unittest.TestCase):
              patch.object(benchmark_intel.gpu, "json_request", side_effect=unavailable) as health:
             with self.assertRaisesRegex(ValueError, "health timeout"):
                 benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1, poll_interval=0.01)
-        self.assertEqual(health.call_count, 3)
+        self.assertGreaterEqual(clock["now"], 360)
+        self.assertLess(clock["now"], 480)
 
     def test_invalid_health_polling_cannot_busy_loop_or_sleep_forever(self):
         for interval in (0, -1, True, float("nan"), float("inf"), 361):
@@ -70,12 +74,29 @@ class IntelMetricsTest(unittest.TestCase):
         def startup(active):
             return next(d for d in benchmark_intel.performance_comparison(model, active)["dimensions"] if d["field"] == "startup_ms")
         self.assertEqual(startup(settings)["outcome"], "unresolved")
+        for row in model["processes"]: row["startup_poll_interval_ms"] = 10
         self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "better")
+        model["processes"][0]["startup_poll_interval_ms"] = 500
+        self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "unresolved")
+        del model["processes"][0]["startup_poll_interval_ms"]
+        self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "unresolved")
+        model["processes"][0]["startup_poll_interval_ms"] = 10
         historical = dict(settings); historical.pop("startup_poll_interval_ms")
         self.assertEqual(startup(historical)["outcome"], "unresolved")
         for row in model["processes"]:
             if row["engine"] == "llama": row["startup_ms"] = 125
         self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "unresolved")
+
+    def test_invalid_recorded_startup_resolution_cannot_establish_a_win(self):
+        for invalid in (None, True, 0, -1, "10", float("nan"), float("inf"), 360_001):
+            with self.subTest(resolution=invalid):
+                model, settings = self.campaign()
+                model["processes"][0]["startup_poll_interval_ms"] = invalid
+                result = benchmark_intel.performance_comparison(model, settings)
+                self.assertFalse(result["headline_eligible"])
+                self.assertIsNone(result["startup_resolution_ms"])
+                startup = next(d for d in result["dimensions"] if d["field"] == "startup_ms")
+                self.assertEqual(startup["outcome"], "unavailable")
 
     def campaign(self):
         settings = {"rounds": 3, "runs": 3, "warmup": 1, "backend": "vulkan", "target": "intel",
