@@ -245,6 +245,21 @@ describe('OpenClaw per-run session reuse', () => {
       expect(value).not.toBe(original);
     }
   });
+  test('rechecks capability after a model or backend changes at the same endpoint', async () => {
+    let requests = 0;
+    const deps = capable({
+      fetchImpl: async () =>
+        Response.json({
+          status: 'ok',
+          capabilities: { chat_session_reuse: ++requests === 1 },
+        }),
+    });
+    const attention = runtime();
+    expect(await sessionRuntimeConfig(attention, 'loaded', deps)).not.toBe(attention);
+    const hybrid = config({ model: 'hybrid', apiKeyEnv: 'TEST_ZINC_KEY' });
+    expect(await sessionRuntimeConfig(hybrid, 'hybrid', deps)).toBe(hybrid);
+    expect(requests).toBe(2);
+  });
   test('retains full prefill for absent, false, malformed or unhealthy capabilities and discovery errors', async () => {
     for (const health of [
       null,

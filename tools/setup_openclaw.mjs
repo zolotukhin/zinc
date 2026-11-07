@@ -360,6 +360,8 @@ export async function sessionRuntimeConfig(
     if (params[key] && Object.hasOwn(params[key], 'session_id')) return config;
   }
   try {
+    // Check once per task, not per tool turn. Do not cache across tasks: the
+    // same endpoint can switch to a model/backend without qualified reuse.
     const base = normalizeBaseUrl(provider.baseUrl);
     const apiKey = provider.apiKey ?? 'zinc-local';
     if (typeof apiKey !== 'string') return config;
