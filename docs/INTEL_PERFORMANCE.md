@@ -87,7 +87,9 @@ policy are checked together in CI so a new managed model cannot silently escape
 qualification. A CPU-only Zig exporter reads the compiled catalog data, without
 source-text parsing or GPU initialization. Each measured baseline server must retain evidence of complete
 Vulkan GPU offload, and each ZINC server must confirm F16 KV. Cached comparison
-flags are recomputed from the samples. An all-model win also requires the
+flags are refreshed from the samples before deriving the campaign result. Extra
+or restarted servers remain in the evidence with an explicit ineligibility
+reason; warmup requests reuse the measured server. An all-model win also requires the
 recorded upstream HEAD check to match the performance reference and the hardware
 identity to remain unchanged through cleanup.
 These stricter summary gates apply to new campaigns; historical reports retain

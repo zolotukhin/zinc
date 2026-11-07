@@ -95,32 +95,37 @@ def metric_comparison(rows, field, rounds, runs, higher_is_better=False, eligibl
     return result
 
 
-def gpu_processes_verified(model, rounds):
+def gpu_process_verification(model, rounds):
     """Require recorded GPU offload for every measured server, not just labels."""
     expected = {(engine, number) for engine in ("zinc", "llama") for number in range(1, rounds + 1)}
     processes = model.get("processes", [])
+    result = {"passed": False, "expected_servers": len(expected), "observed_servers": len(processes), "reason": None}
+    def reject(reason):
+        result["reason"] = reason
+        return result
     # Warmup requests reuse the measured server. Extra/restarted servers are
     # separate attempts, not evidence that can be silently discarded.
     if len(processes) != len(expected):
-        return False
+        return reject("missing or extra measured-server records")
     seen = set()
     for process in processes:
         if type(process.get("round")) is not int:
-            return False
+            return reject("invalid server round")
         key = (process.get("engine"), process.get("round"))
         if key not in expected or key in seen:
-            return False
+            return reject("unexpected or duplicate engine/round record")
         seen.add(key)
         if key[0] == "zinc":
             if process.get("kv_cache") != "f16":
-                return False
+                return reject("ZINC server did not confirm F16 KV")
         else:
             offload = process.get("gpu_offload", {})
             if not (isinstance(offload, dict) and offload.get("backend") == "vulkan" and type(offload.get("offloaded")) is int
                     and type(offload.get("total")) is int and offload["offloaded"] > 0
                     and offload["offloaded"] == offload["total"]):
-                return False
-    return seen == expected
+                return reject("baseline server did not confirm complete Vulkan GPU offload")
+    result["passed"] = seen == expected
+    return result
 
 
 def performance_comparison(model, settings):
@@ -152,12 +157,14 @@ def performance_comparison(model, settings):
                                                       for r in d["rounds"]) for d in dimensions)
     correctness = model.get("correctness")
     correct = isinstance(correctness, dict) and correctness.get("passed") is True
-    gpu_verified = gpu_processes_verified(model, rounds)
+    gpu_verification = gpu_process_verification(model, rounds)
+    gpu_verified = gpu_verification["passed"]
     headline = (model.get("passed") is True and correct and gpu_verified and matched_settings and complete_workloads
                 and rounds >= 3 and runs >= 3 and settings["warmup"] >= 1 and all(eligible.values())
                 and bool(dimensions) and measured_dimensions == len(dimensions))
     return {"scope": "observed matched single-slot MTP-off rounds; not concurrency or statistical confidence",
             "inference_correctness_verified": correct, "gpu_offload_verified": gpu_verified,
+            "gpu_offload_verification": gpu_verification,
             "matched_settings_verified": matched_settings,
             "headline_eligible": headline, "comparison_eligible": eligible, "dimensions": dimensions,
             "measured_dimensions": measured_dimensions, "dimension_count": len(dimensions),
@@ -165,7 +172,7 @@ def performance_comparison(model, settings):
 
 
 def campaign_outcome(report):
-    """Derive coverage from completed results; requested models are not evidence."""
+    """Refresh model summaries and derive coverage from completed results."""
     # Neither CLI selection nor a narrowed report declaration can redefine
     # "all models"; the immutable campaign policy is the authority.
     required = next(profile["models"] for profile in policy()["gpu_profiles"] if profile["id"] == "vulkan-intel-xe2")
@@ -181,6 +188,9 @@ def campaign_outcome(report):
     # Recompute from the samples so stale per-model summary flags cannot turn
     # a missing, duplicated or losing model into an all-model win.
     comparisons = [performance_comparison(model, report["settings"]) for model in models] if complete else []
+    for model, comparison in zip(models, comparisons):
+        model["performance_comparison"] = comparison
+        model["comparison_eligible"] = comparison["comparison_eligible"]
     workloads = {"core", "context-medium", "context-long", "decode-extended"}
     hardware = report.get("hardware")
     stable_hardware = (report.get("hardware_unchanged") is True and isinstance(hardware, dict)

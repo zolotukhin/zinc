@@ -128,6 +128,16 @@ class IntelMetricsTest(unittest.TestCase):
                 "latest_reference_check": {"commit": "a" * 40, "observed_head": "a" * 40,
                                            "checked_at": "2026-11-07T00:00:00+00:00"}}
 
+    def test_extra_server_records_stay_visible_and_explain_why_the_campaign_is_ineligible(self):
+        model, settings = self.campaign()
+        model["processes"].append(copy.deepcopy(model["processes"][0]))
+        result = benchmark_intel.performance_comparison(model, settings)
+        self.assertEqual(result["gpu_offload_verification"], {
+            "passed": False, "expected_servers": 6, "observed_servers": 7,
+            "reason": "missing or extra measured-server records"})
+        self.assertFalse(result["headline_eligible"])
+        self.assertEqual(len(model["processes"]), 7)
+
     def test_all_models_win_is_derived_from_completed_models_not_the_requested_list(self):
         report = self.complete_campaign()
         self.assertEqual(benchmark_intel.campaign_outcome(report), {
@@ -183,6 +193,8 @@ class IntelMetricsTest(unittest.TestCase):
                 elif change == "null_reference_check": report["latest_reference_check"] = None
                 elif change == "wrong_settings": report["settings"]["kv_cache"] = "f32"
                 self.assertFalse(benchmark_intel.campaign_outcome(report)["all_models_all_dimensions_better"])
+                if change == "losing_model":
+                    self.assertFalse(report["models"][-1]["performance_comparison"]["all_dimensions_better"])
 
     def test_missing_counters_cannot_be_headline_eligible(self):
         model, settings = self.campaign()
