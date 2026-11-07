@@ -676,7 +676,7 @@ def main():
                 print("Running 376 packaged shader/reference cases", flush=True)
                 kernel_reference(tree, reference, checkout, device, work, env)
                 if profile["family"] == "intel-xe2":
-                    print("Running 60 packaged Q8 decode/reference cases", flush=True)
+                    print("Running 228 packaged Q8 decode/reference cases and 114 identical-reduction pairs", flush=True)
                     q8_decode = q8_decode_reference(tree, reference, checkout, device, work, env)
             rocm_kernels = None
             if profile["target"].endswith("rocm"):

@@ -73,6 +73,8 @@ int main(int argc, char **argv) {
     vkDestroyCommandPool(device, command_pool, NULL);
     vkDestroyDevice(device, NULL); vkDestroyInstance(instance, NULL); close(gpu_lock);
     ggml_quantize_free();
+    // --bench uses larger, cache-hot rows and its PASS totals are diagnostic.
+    // Release qualification runs without --bench and requires the exact totals.
     printf("PASS: %u Q8 native-reference/offset/accumulation/guard cases\n", cases);
     printf("PASS: %u Q8 identical-reduction pairs\n", identical_pairs);
     return 0;
