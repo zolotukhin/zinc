@@ -13,6 +13,8 @@ The helper itself uses only Node's standard library.
 
 The [AMD model acceptance report](OPENCLAW_AMD_VALIDATION.md) records the
 published binaries, actual file/tool outcomes, contexts and model-specific limits.
+For a complete Linux walkthrough, see
+[OpenCode and OpenClaw on AMD: R9700 and RX 9070 XT](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/).
 
 ## Start ZINC
 

@@ -7,6 +7,8 @@ It requires **Bun 1.4.4 or newer**. The client protocol is tested with
 **OpenCode 1.19.4 and 2.0.21**. Model coding results retain their actual client
 version in the [RDNA4 validation report](OPENCODE_RELEASE_VALIDATION.md) and
 [Intel model matrix](INTEL_OPENCODE_VALIDATION.md).
+The [AMD setup walkthrough](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/)
+connects OpenCode and OpenClaw, with R9700 evidence and RX 9070 XT memory guidance.
 
 [Download the standalone script](/zinc/harnesses/setup-opencode.mjs), or use
 `tools/setup_opencode.mjs` from a ZINC checkout. The downloaded script has no
