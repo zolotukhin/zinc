@@ -1,13 +1,17 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { intelModelIds, intelWorkloads } from './intel_workloads.mjs';
 
 test('Intel matrix covers the entire managed catalog using the four canonical workloads', () => {
-  // The policy already drives the runner; compare it with the independent Zig
-  // catalog so a new managed model cannot silently escape Intel qualification.
-  const catalog = readFileSync(new URL('../src/model/catalog.zig', import.meta.url), 'utf8');
-  const catalogIds = [...catalog.matchAll(/^\s*\.id = "([^"]+)",\s*$/gm)].map((match) => match[1]);
+  // Compile the actual data: source formatting and nonliteral IDs must not
+  // hide a model. The exporter only serializes constants, without GPU access.
+  const exported = spawnSync('./scripts/zig.sh', ['run', 'src/catalog_manifest.zig', '-lc'], {
+    cwd: new URL('..', import.meta.url),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  expect(exported.status, exported.stderr).toBe(0);
+  const catalogIds = JSON.parse(exported.stdout).map((entry: { id: string }) => entry.id);
   expect(catalogIds.length).toBeGreaterThan(0);
   expect([...intelModelIds].sort()).toEqual(catalogIds.sort());
   for (const id of intelModelIds) {
@@ -26,7 +30,7 @@ test('Intel matrix covers the entire managed catalog using the four canonical wo
     }
   }
   expect(() => intelWorkloads('unknown')).toThrow();
-});
+}, 120_000);
 
 test('Intel timing/memory and GPU-only-baseline failure contracts use CPU fixtures', () => {
   const result = spawnSync(

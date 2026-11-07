@@ -585,6 +585,9 @@ test "every managed model remains selectable on an Intel Vulkan 32 GB board" {
     // See docs/INTEL_OPENCODE_VALIDATION.md for the frozen package evidence.
     // Iterate the catalog so newly added models cannot evade this contract by
     // being absent from a second, independently maintained list of model IDs.
+    // This managed catalog is the Intel 32 GB qualification scope. Expanding
+    // it to larger or other-backend-only checkpoints requires an explicit
+    // matrix decision, rather than silently excluding them from this check.
     for (entries) |entry| {
         if (!supportsProfileForBackend(entry, "intel-arc", .vulkan)) {
             std.debug.print("FAIL: managed Intel Vulkan model '{s}' is unavailable in the catalog\n", .{entry.id});

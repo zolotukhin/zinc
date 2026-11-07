@@ -60,7 +60,7 @@ class IntelMetricsTest(unittest.TestCase):
     def test_unknown_memory_diagnostic_counts_or_wrong_settings_cannot_claim_all_dimensions(self):
         original, settings = self.campaign()
         for change in ("missing_memory", "unavailable_memory", "missing_round", "duplicate_sample", "early_eos",
-                       "one_round", "one_run", "wrong_kv", "mtp_on", "cached", "multiple_slots", "missing_workload", "failed_model"):
+                       "one_round", "one_run", "wrong_kv", "mtp_on", "cached", "multiple_slots", "missing_workload", "duplicate_workload", "failed_model"):
             with self.subTest(change=change):
                 model, active = copy.deepcopy(original), dict(settings)
                 if change == "missing_memory":
@@ -80,6 +80,7 @@ class IntelMetricsTest(unittest.TestCase):
                 elif change == "cached": active["prompt_cache"] = True
                 elif change == "multiple_slots": active["slots"] = 2
                 elif change == "missing_workload": model["scenarios"].pop()
+                elif change == "duplicate_workload": model["scenarios"].append(copy.deepcopy(model["scenarios"][0]))
                 elif change == "failed_model": model["passed"] = False
                 self.assertFalse(benchmark_intel.performance_comparison(model, active)["all_dimensions_better"])
 
@@ -133,7 +134,7 @@ class IntelMetricsTest(unittest.TestCase):
             "complete_model_matrix": True, "complete_performance_matrix": True,
             "all_models_all_dimensions_better": True})
         for change in ("missing_model", "duplicate_model", "extra_model", "failed_model", "failed_correctness",
-                       "missing_correctness", "subset_requested", "duplicate_request", "empty_required", "interrupted", "reported_error"):
+                       "missing_correctness", "subset_requested", "duplicate_request", "empty_required", "narrowed_scope", "interrupted", "reported_error"):
             with self.subTest(change=change):
                 active = copy.deepcopy(report)
                 if change == "missing_model": active["models"].pop()
@@ -145,6 +146,10 @@ class IntelMetricsTest(unittest.TestCase):
                 elif change == "subset_requested": active["selected_models"].pop()
                 elif change == "duplicate_request": active["selected_models"][-1] = active["selected_models"][0]
                 elif change == "empty_required": active.update(required_models=[], selected_models=[], models=[])
+                elif change == "narrowed_scope":
+                    active["required_models"].pop()
+                    active["selected_models"].pop()
+                    active["models"].pop()
                 elif change == "interrupted": active["passed"] = False
                 elif change == "reported_error": active["error"] = "interrupted after samples"
                 result = benchmark_intel.campaign_outcome(active)

@@ -99,6 +99,8 @@ def gpu_processes_verified(model, rounds):
     """Require recorded GPU offload for every measured server, not just labels."""
     expected = {(engine, number) for engine in ("zinc", "llama") for number in range(1, rounds + 1)}
     processes = model.get("processes", [])
+    # Warmup requests reuse the measured server. Extra/restarted servers are
+    # separate attempts, not evidence that can be silently discarded.
     if len(processes) != len(expected):
         return False
     seen = set()
@@ -141,7 +143,8 @@ def performance_comparison(model, settings):
         # within that resolution is unresolved, even when its raw ratio is >1.
         dimensions.append({"scenario": None, **metric_comparison(model["processes"], field, rounds, 1,
             resolution=settings.get("startup_poll_interval_ms", 500) if field == "startup_ms" else 0)})
-    complete_workloads = set(eligible) == {"core", "context-medium", "context-long", "decode-extended"}
+    complete_workloads = (len(model["scenarios"]) == 4
+                          and set(eligible) == {"core", "context-medium", "context-long", "decode-extended"})
     matched_settings = (settings.get("backend") == "vulkan" and settings.get("target") == "intel"
                         and settings.get("kv_cache") == "f16" and settings.get("mtp") == "off"
                         and settings.get("slots") == 1 and settings.get("prompt_cache") is False)
@@ -163,10 +166,14 @@ def performance_comparison(model, settings):
 
 def campaign_outcome(report):
     """Derive coverage from completed results; requested models are not evidence."""
-    required, selected, models = report["required_models"], report["selected_models"], report["models"]
+    # Neither CLI selection nor a narrowed report declaration can redefine
+    # "all models"; the immutable campaign policy is the authority.
+    required = next(profile["models"] for profile in policy()["gpu_profiles"] if profile["id"] == "vulkan-intel-xe2")
+    declared, selected, models = report["required_models"], report["selected_models"], report["models"]
     observed = [model.get("id") for model in models]
     complete = (report.get("passed") is True and report.get("error") is None
                 and bool(required) and len(set(required)) == len(required)
+                and len(declared) == len(required) and set(declared) == set(required)
                 and len(selected) == len(required) and set(selected) == set(required)
                 and len(observed) == len(required) and set(observed) == set(required)
                 and all(model.get("passed") is True and isinstance(model.get("correctness"), dict)
