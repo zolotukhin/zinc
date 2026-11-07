@@ -47,7 +47,10 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--bench")) bench = 1;
         else fail("unknown argument");
     }
-    const uint32_t widths[] = { 32, 64, 96, 1024, 2048, 3072, 4096, 5120, 6144, 8192, 12288, 17408, 21504 };
+    // Include the managed checkpoints' shared-expert K=512, Gemma K=2112/2816,
+    // and NextN K=10240, even when an MTP-off model replay skips the NextN block.
+    // The short widths and odd row count separately exercise tails and guards.
+    const uint32_t widths[] = { 32, 64, 96, 512, 1024, 2048, 2112, 2816, 3072, 4096, 5120, 6144, 8192, 10240, 12288, 17408, 21504 };
     init_gpu();
     VkPhysicalDeviceSubgroupProperties subgroup = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES };
     VkPhysicalDeviceProperties2 info = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup };
