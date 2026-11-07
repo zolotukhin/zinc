@@ -81,6 +81,8 @@ For OpenCode or OpenClaw on an RX 9070 XT, start with the smaller Qwen model rat
 
 These instructions target **Linux x86_64**. ZINC 0.1.0 ships separate Vulkan and ROCm executables; each binary contains one backend. The published AMD qualification covers the R9700. There is no native Windows ZINC 0.1.0 binary.
 
+The prebuilt Vulkan archive requires **glibc 2.35 or newer**; the ROCm archive requires **glibc 2.39 or newer**, in addition to its ROCm packages. Check the [binary runtime requirements](/zinc/docs/binary-releases/) before choosing an archive. AMD driver support for a distribution does not by itself establish compatibility with a particular ZINC binary.
+
 Download the versioned installer, inspect it, then install the Vulkan archive:
 
 ```bash
@@ -183,5 +185,23 @@ These bounded checks do not establish a long-running soak result or a universal 
 **The model talks about edits but makes none.** Inspect the files and run their tests. A fluent answer or zero exit status is insufficient. Start with Qwen 3.5 9B and a small task before moving to a larger model or repository.
 
 **The agent is slow between tool calls.** Watch prefill as well as decode. Every turn brings instructions, code and prior tool results back to the model. A fast tokens-per-second decode number says little about the wait to process a long prompt. Compare backends on the same card, model, context and task, and keep client/tool wall time separate from engine timings.
+
+## Common setup questions
+
+### Can I run OpenClaw on a Radeon AI PRO R9700?
+
+Yes. Published ZINC 0.1.0 Vulkan and ROCm binaries passed bounded OpenClaw 2026.11.1 tasks on a 32 GB Radeon AI PRO R9700 with six larger models. The tasks required real file edits, independently passing tests, intact protected files and recovery.
+
+### Can I use OpenCode or OpenClaw with an RX 9070 XT?
+
+The clients connect to an HTTP model server, so the integration is independent of the GPU vendor. The RX 9070 XT has 16 GB of VRAM, and Qwen 3.5 9B Q4_K_M is a smaller model to try with ZINC Vulkan. This guide does not certify that card: ZINC’s published AMD qualification is on the R9700.
+
+### Do OpenCode and OpenClaw need CUDA for AMD GPUs?
+
+No. ZINC runs the model through Vulkan or its separate ROCm backend. OpenCode and OpenClaw send API requests and execute tools; they do not need CUDA to connect to that server.
+
+### How much context should I allocate for a local coding agent?
+
+The Qwen examples use a 16,384-token server context and one slot. Tool schemas, source files, outputs and generated tokens share that capacity. Check that the model and cache fit your GPU, then use automatic context discovery in the client helper.
 
 The useful milestone is the first clean diff followed by a test command you ran yourself. From there, the R9700’s larger memory budget gives room to explore bigger models and histories. On an RX 9070 XT, keep that same verification loop while establishing your own card’s memory and model limits.
