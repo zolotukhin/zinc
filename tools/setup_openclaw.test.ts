@@ -11,6 +11,7 @@ import {
   normalizeBaseUrl,
   parseArgs,
   runOpenClaw,
+  sessionRuntimeConfig,
   validateClient,
   writeConfig,
 } from './setup_openclaw.mjs';
@@ -193,6 +194,134 @@ describe('OpenClaw project setup', () => {
   });
 });
 
+describe('OpenClaw per-run session reuse', () => {
+  const runtime = () => config({ model: 'loaded', apiKeyEnv: 'TEST_ZINC_KEY' });
+  const capable = (extra = {}) => ({
+    env: { TEST_ZINC_KEY: 'private-test-key' },
+    sessionId: () => 'test-run',
+    fetchImpl: async (url: string, options: any) => {
+      expect(url).toBe('http://127.0.0.1:9090/health');
+      expect(options.headers.authorization).toBe('Bearer private-test-key');
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      return Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } });
+    },
+    ...extra,
+  });
+  test('only injects into the qualified model, preserving configuration and environment references', async () => {
+    const original = runtime();
+    original.agents.defaults.models['zinc/loaded'].params.extraBody = { custom: 7 };
+    const before = JSON.stringify(original);
+    const value = await sessionRuntimeConfig(original, 'loaded', capable());
+    expect(value.agents.defaults.models['zinc/loaded'].params).toEqual({
+      temperature: 0,
+      maxTokens: 1024,
+      extraBody: { custom: 7, session_id: 'openclaw-test-run' },
+    });
+    expect(value.models.providers.zinc.apiKey).toBe('${TEST_ZINC_KEY}');
+    expect(JSON.stringify(value)).not.toContain('private-test-key');
+    expect(JSON.stringify(original)).toBe(before);
+    expect(await sessionRuntimeConfig(original, 'different', capable())).toBe(original);
+  });
+  test('retains full prefill for absent, false, malformed or unhealthy capabilities and discovery errors', async () => {
+    for (const health of [
+      null,
+      {},
+      { status: 'ok' },
+      { status: 'loading', capabilities: { chat_session_reuse: true } },
+      { status: 'ok', capabilities: { chat_session_reuse: false } },
+      { status: 'ok', capabilities: { chat_session_reuse: 'true' } },
+    ]) {
+      const original = runtime();
+      expect(
+        await sessionRuntimeConfig(
+          original,
+          'loaded',
+          capable({ fetchImpl: async () => Response.json(health) }),
+        ),
+      ).toBe(original);
+    }
+    for (const fetchImpl of [
+      async () => new Response('bad JSON'),
+      async () => new Response('', { status: 503 }),
+      async () => {
+        throw new Error('private endpoint detail');
+      },
+    ]) {
+      const original = runtime();
+      expect(await sessionRuntimeConfig(original, 'loaded', capable({ fetchImpl }))).toBe(original);
+    }
+  });
+  test('respects both body aliases and all explicit session opt-outs without querying health', async () => {
+    const forbidden = async () => {
+      throw new Error('health must not be queried');
+    };
+    for (const alias of ['extraBody', 'extra_body'])
+      for (const key of ['', null, 'caller-session']) {
+        const original = runtime();
+        original.agents.defaults.models['zinc/loaded'].params[alias] = { session_id: key };
+        let called = false;
+        expect(
+          await sessionRuntimeConfig(
+            original,
+            'loaded',
+            capable({
+              fetchImpl: async () => {
+                called = true;
+                return forbidden();
+              },
+            }),
+          ),
+        ).toBe(original);
+        expect(called).toBe(false);
+      }
+    const original = runtime();
+    const params = original.agents.defaults.models['zinc/loaded'].params;
+    params.extra_body = { custom: 7 };
+    const value = await sessionRuntimeConfig(original, 'loaded', capable());
+    expect(value.agents.defaults.models['zinc/loaded'].params.extra_body).toEqual({
+      custom: 7,
+      session_id: 'openclaw-test-run',
+    });
+    expect(value.agents.defaults.models['zinc/loaded'].params).not.toHaveProperty('extraBody');
+  });
+  test('does not repair malformed or ambiguous custom options', async () => {
+    for (const params of [
+      null,
+      [],
+      { extraBody: null },
+      { extra_body: [] },
+      { extraBody: {}, extra_body: {} },
+    ]) {
+      const original = runtime();
+      original.agents.defaults.models['zinc/loaded'].params = params;
+      expect(await sessionRuntimeConfig(original, 'loaded', capable())).toBe(original);
+    }
+    expect(await sessionRuntimeConfig(null, 'loaded', capable())).toBe(null);
+  });
+  test('has a control opt-out and creates fresh keys for separate runs', async () => {
+    for (const flag of ['0', 'false', 'unknown']) {
+      const original = runtime();
+      let called = false;
+      const deps = capable({
+        env: { ZINC_OPENCLAW_SESSION_REUSE: flag },
+        fetchImpl: async () => {
+          called = true;
+          throw new Error('unexpected health');
+        },
+      });
+      expect(await sessionRuntimeConfig(original, 'loaded', deps)).toBe(original);
+      expect(called).toBe(false);
+    }
+    const deps = capable({ sessionId: undefined });
+    const a = await sessionRuntimeConfig(runtime(), 'loaded', deps);
+    const b = await sessionRuntimeConfig(runtime(), 'loaded', deps);
+    const key = (value: any) =>
+      value.agents.defaults.models['zinc/loaded'].params.extraBody.session_id;
+    expect(key(a)).toMatch(/^openclaw-[0-9a-f-]{36}$/);
+    expect(key(a)).not.toBe(key(b));
+  });
+});
+
 async function fakeClient(source: string) {
   const project = await temp(),
     script = path.join(project, 'client.mjs');
@@ -214,6 +343,54 @@ async function fakeClient(source: string) {
 }
 
 describe('OpenClaw owned process and task result', () => {
+  test('uses a private temporary sibling config and removes it without changing the saved file', async () => {
+    const f = await fakeClient(
+      `import {readFileSync,statSync} from 'node:fs';let input='';for await(const s of process.stdin)input+=s;const args=process.argv.slice(2),filename=args[args.indexOf('--config')+1];console.log(JSON.stringify({ok:true,status:'ok',filename,config:JSON.parse(readFileSync(filename,'utf8')),mode:statSync(filename).mode&511}));`,
+    );
+    const original = config({ model: 'loaded', apiKeyEnv: 'TEST_ZINC_KEY' });
+    await writeConfig(f.project, original);
+    const result = await runOpenClaw(f.options, {
+      ...f.dependencies,
+      env: { ...process.env, TEST_ZINC_KEY: 'private-test-key' },
+      fetchImpl: async () =>
+        Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } }),
+    });
+    expect(path.dirname(result.report.filename)).toBe(f.project);
+    expect(result.report.filename).not.toBe(f.options.filename);
+    expect(result.report.mode).toBe(0o600);
+    expect(result.report.config.models.providers.zinc.apiKey).toBe('${TEST_ZINC_KEY}');
+    expect(
+      result.report.config.agents.defaults.models['zinc/loaded'].params.extraBody.session_id,
+    ).toMatch(/^openclaw-/);
+    await expect(stat(result.report.filename)).rejects.toThrow();
+    expect(JSON.parse(await readFile(f.options.filename, 'utf8'))).toEqual(original);
+    expect((await readdir(f.project)).sort()).toEqual([CONFIG_NAME, 'client.mjs'].sort());
+  });
+  test('removes per-run configs after a client failure, timeout or interruption', async () => {
+    for (const failure of ['exit', 'timeout', 'interrupt']) {
+      const f = await fakeClient(
+        failure === 'exit'
+          ? `process.exit(7)`
+          : `process.stdout.write('READY');setInterval(()=>{},1000);`,
+      );
+      await writeConfig(f.project, config({ model: 'loaded' }));
+      const spawnImpl = f.dependencies.spawnImpl;
+      const deps = {
+        ...f.dependencies,
+        deadlineMs: 300,
+        graceMs: 100,
+        fetchImpl: async () =>
+          Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } }),
+        spawnImpl: (binary: string, args: string[], options: any) => {
+          const child = spawnImpl(binary, args, options);
+          if (failure === 'interrupt') child.stdout.once('data', () => process.emit('SIGINT'));
+          return child;
+        },
+      };
+      await expect(runOpenClaw(f.options, deps)).rejects.toThrow();
+      expect((await readdir(f.project)).sort()).toEqual([CONFIG_NAME, 'client.mjs'].sort());
+    }
+  });
   test('passes stdin literally, uses one-shot flags, and removes isolated state', async () => {
     const f = await fakeClient(
       `let input='';for await(const text of process.stdin)input+=text;console.log(JSON.stringify({ok:true,status:'ok',input,args:process.argv.slice(2),state:process.env.OPENCLAW_STATE_DIR}));`,

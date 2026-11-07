@@ -48,7 +48,7 @@ node tools/setup_openclaw.mjs setup --project ../my-project
 node tools/setup_openclaw.mjs check --project ../my-project
 ```
 
-Or [download the standalone helper](/zinc/harnesses/setup-openclaw.mjs) and use
+Or [download the standalone helper](https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs) and use
 `node setup-openclaw.mjs` with the same arguments. The project directory must
 already exist. `check` runs the real OpenClaw config validator and verifies ZINC
 health, model identity and available context; it does not generate tokens or
@@ -98,6 +98,22 @@ oversized diagnostics or an unsuccessful JSON task report makes the helper
 fail. It stops its process group and removes that state on completion.
 An interrupted evaluation also writes a partial summary and stops before
 starting another task.
+
+The helper also queries ZINC's optional `chat_session_reuse` health capability
+before a run. On qualified attention-only Vulkan models, successive tool turns
+share a fresh per-task `session_id` so the server can reuse an exact prompt
+prefix. The key is supplied through OpenClaw's native extra-body parameter in a
+private temporary config beside the saved config. The original file and its
+environment-based key references are preserved; the temporary copy is removed
+when the client exits, including after a timeout or interruption. Separate tasks
+get separate keys. Hybrid recurrent models, ROCm, older servers and failed
+capability discovery retain full prefill.
+
+Set `ZINC_OPENCLAW_SESSION_REUSE=0` for an uncached client control. An explicit
+`session_id`, including an empty or null value, in the model's `extraBody` or
+`extra_body` parameters takes precedence. A cached task result is a separate
+measurement from a full-prefill benchmark; do not combine their timings into
+an engine speed claim.
 
 OpenClaw's successful task report means the client completed its run. Review
 the actual diff and run the project's acceptance command independently before
