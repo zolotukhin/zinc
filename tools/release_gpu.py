@@ -194,11 +194,11 @@ def q8_decode_reference(tree, reference, checkout, device, work, env):
     with process([str(executable)], log, work, {**reference_environment(reference, env),
                  "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged Q8 decode reference validation failed")
-    require(re.findall(r"^PASS: 60 Q8 native-reference/offset/accumulation/guard cases$", log.read_text(), re.M) ==
-            ["PASS: 60 Q8 native-reference/offset/accumulation/guard cases"], "Q8 decode reference suite was incomplete")
-    require(re.findall(r"^PASS: 30 Q8 identical-reduction pairs$", log.read_text(), re.M) ==
-            ["PASS: 30 Q8 identical-reduction pairs"], "Q8 identical-reduction reference suite was incomplete")
-    return {"passed": True, "cases": 60, "bitwise_pairs": 30,
+    require(re.findall(r"^PASS: 180 Q8 native-reference/offset/accumulation/guard cases$", log.read_text(), re.M) ==
+            ["PASS: 180 Q8 native-reference/offset/accumulation/guard cases"], "Q8 decode reference suite was incomplete")
+    require(re.findall(r"^PASS: 90 Q8 identical-reduction pairs$", log.read_text(), re.M) ==
+            ["PASS: 90 Q8 identical-reduction pairs"], "Q8 identical-reduction reference suite was incomplete")
+    return {"passed": True, "cases": 180, "bitwise_pairs": 90,
             "validator_source_sha256": sha256(ROOT / "tools/validate_q8_decode.c"),
             "shared_fixture_source_sha256": sha256(ROOT / "tools/validate_dmmv_shared_cache.c"),
             "shader_sha256": {name: sha256(tree / "share/zinc/shaders" / (name + ".spv"))

@@ -24,13 +24,17 @@ fn intelQ8RowDecodeEnabled(vendor: GpuVendor, legacy_subgroup_size: u32, can_req
     // equals the pipeline's width. =0 retains the original shader for A/B runs.
     // The new shader preserves the legacy SIMD32 sum order specifically.
     if (vendor != .intel_arc_xe2 or legacy_subgroup_size != 32 or !can_require_simd32 or !full_subgroups) return false;
-    return setting == null or !std.mem.eql(u8, setting.?, "0");
+    // Unknown values must not silently enable an experimental arithmetic path.
+    return setting == null or std.mem.eql(u8, setting.?, "1");
 }
 
 test "Intel Q8 row decode requires enforceable SIMD32 and honors the control" {
     try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, null));
     try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, "1"));
     try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, "0"));
+    for ([_][]const u8{ "", "false", "off", "true", "2", "01" }) |setting| {
+        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, setting));
+    }
     for ([_]u32{ 0, 8, 16, 64 }) |legacy_width| {
         try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, legacy_width, true, true, null));
     }

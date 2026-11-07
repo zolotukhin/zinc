@@ -7,6 +7,7 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : enable
 
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const uint SPEC_M = 4096;
@@ -38,14 +39,17 @@ void main() {
     float low = 0.0;
     float high = 0.0;
     if (row < M) {
-        for (uint block = lane; block < blocks; block += 64u) {
+        [[unroll]] for (uint block = lane; block < blocks; block += 64u) {
             uint offset = a_offset + (row * blocks + block) * 34u;
             float scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
-            low += scale * dot_q8_block(offset + 2u, x_offset / 16u + block * 8u);
+            // The legacy specialized loop fuses this update. Leaving a*b+c
+            // implicit changed fixed-128 results by one ULP on Xe2; fma keeps
+            // the same rounding as the legacy stride-64 accumulators.
+            low = fma(scale, dot_q8_block(offset + 2u, x_offset / 16u + block * 8u), low);
             if (block + 32u < blocks) {
                 offset += 32u * 34u;
                 scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
-                high += scale * dot_q8_block(offset + 2u, x_offset / 16u + (block + 32u) * 8u);
+                high = fma(scale, dot_q8_block(offset + 2u, x_offset / 16u + (block + 32u) * 8u), high);
             }
         }
     }

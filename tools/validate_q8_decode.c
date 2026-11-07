@@ -17,12 +17,12 @@
 
 static uint32_t identical_pairs;
 
-static void paired_case(uint32_t K, uint32_t blocks, int accumulate, int bench) {
+static void paired_case(uint32_t K, uint32_t blocks, int accumulate, int bench, uint32_t salt) {
     const Kernel legacy = { "dmmv_q8_0", GGML_TYPE_Q8_0 };
     const Kernel candidate = { "dmmv_q8_0_intel_rows", GGML_TYPE_Q8_0 };
     _Static_assert(ZINC_DMMV_BENCH_ROWS >= ZINC_DMMV_TEST_ROWS, "capture buffer covers both modes");
     float old_y[ZINC_DMMV_BENCH_ROWS], new_y[ZINC_DMMV_BENCH_ROWS];
-    const uint32_t seed = 0x6bd03917u ^ K ^ (blocks << 16) ^ ((uint32_t)accumulate << 30);
+    const uint32_t seed = 0x6bd03917u ^ K ^ (blocks << 16) ^ ((uint32_t)accumulate << 30) ^ salt;
     rng = seed;
     run_case_capture(legacy, K, K, accumulate, accumulate, bench, blocks, old_y);
     rng = seed;
@@ -54,13 +54,18 @@ int main(int argc, char **argv) {
     vkGetPhysicalDeviceProperties2(physical, &info);
     printf("Q8 legacy subgroup: %u; vendor: %04x\n", subgroup.subgroupSize, properties.vendorID);
     if (properties.vendorID != 0x8086 || subgroup.subgroupSize != 32) fail("paired Q8 qualification requires Intel legacy SIMD32");
-    for (unsigned s = 0; s < sizeof widths / sizeof widths[0]; s++)
-        for (int accumulate = 0; accumulate < 2; accumulate++)
-            paired_case(widths[s], 0, accumulate, bench);
-    // The production dispatcher also loads fixed 64/128-block variants.
-    for (uint32_t blocks = 64; blocks <= 128; blocks *= 2)
-        for (int accumulate = 0; accumulate < 2; accumulate++)
-            paired_case(blocks * 32, blocks, accumulate, bench);
+    // Salt zero retains the fixed-128 regression that exposed an unfused update.
+    // Additional deterministic inputs catch rounding differences hidden by one seed.
+    const uint32_t salts[] = { 0u, 0x9e3779b9u, 0xd1b54a35u };
+    for (unsigned seed = 0; seed < sizeof salts / sizeof salts[0]; seed++) {
+        for (unsigned s = 0; s < sizeof widths / sizeof widths[0]; s++)
+            for (int accumulate = 0; accumulate < 2; accumulate++)
+                paired_case(widths[s], 0, accumulate, bench, salts[seed]);
+        // The production dispatcher also loads fixed 64/128-block variants.
+        for (uint32_t blocks = 64; blocks <= 128; blocks *= 2)
+            for (int accumulate = 0; accumulate < 2; accumulate++)
+                paired_case(blocks * 32, blocks, accumulate, bench, salts[seed]);
+    }
     check(vkDeviceWaitIdle(device));
     vkDestroyCommandPool(device, command_pool, NULL);
     vkDestroyDevice(device, NULL); vkDestroyInstance(instance, NULL); close(gpu_lock);
