@@ -9,7 +9,7 @@ and an OpenAI-compatible API in one native binary. Vulkan and Metal builds
 also include browser chat.
 
 [![Tests](https://github.com/zolotukhin/zinc/actions/workflows/test.yml/badge.svg)](https://github.com/zolotukhin/zinc/actions/workflows/test.yml)
-[![Zig 0.17.0](https://img.shields.io/badge/Zig-0.17.0-F7A41D?logo=zig&logoColor=white)](.zig-version)
+[![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [Get started](https://zolotukhin.ai/zinc/docs/getting-started/) ·
@@ -30,7 +30,7 @@ The commands below build from source.
 
 Install the [prerequisites for your GPU](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)
 first. The default build uses **Vulkan on Linux** and **Metal on macOS**.
-The build wrapper downloads and verifies **Zig 0.17.0** when needed; you do not
+The build wrapper downloads and verifies **Zig 0.17.1** when needed; you do not
 need to replace your system compiler. Python 3 is needed for that initial
 compiler download.
 
@@ -101,6 +101,19 @@ See [model selection](https://zolotukhin.ai/zinc/docs/getting-started/#models-in
 for checkpoints, memory needs, and the exact Muse Glimmer GGUF used in testing.
 
 ## Coding harnesses
+
+Connect **OpenClaw** with the [dedicated setup helper](tools/setup_openclaw.mjs):
+
+```bash
+npm install --global openclaw@2026.11.1
+node tools/setup_openclaw.mjs setup --project ../my-project
+node tools/setup_openclaw.mjs check --project ../my-project
+node tools/setup_openclaw.mjs run --project ../my-project -- "Fix the failing tests and run them."
+```
+
+Use Node 24.16+ in the 24.x line, or Node 26.1+, and start ZINC first. The
+[OpenClaw guide](https://zolotukhin.ai/zinc/docs/openclaw/) covers server contexts,
+isolated task state, endpoint discovery, and independent verification.
 
 Connect **OpenCode** to a running ZINC server with the
 [setup script](tools/setup_opencode.mjs). It creates a portable config, checks

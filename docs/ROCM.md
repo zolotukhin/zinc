@@ -25,7 +25,7 @@ The current reference configuration is:
 - Linux kernel `7.2.2-070202-generic`
 - ROCm userspace `7.2.4`
 - Radeon AI PRO R9700 (`gfx1201`, wave32)
-- Zig `0.17.0`, pinned by `.zig-version` and selected by `scripts/zig.sh`
+- Zig `0.17.1`, pinned by `.zig-version` and selected by `scripts/zig.sh`
 - Qwen 3.5 9B, Qwen 3.6 35B-A3B, and Qwen 3.8 27B
 - Qwen 3.6 dense 27B at 4K in the [packaged prefill follow-up](ROCM_QWEN27_PREFILL.md)
 - Gemma 4 26B-A4B MoE and Gemma 4 31B

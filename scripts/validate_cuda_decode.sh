@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CUDA decode correctness regression harness for qwen35-9b on the puffalo NVIDIA box.
+# CUDA decode correctness regression harness for qwen35-9b on the <worker> NVIDIA box.
 #
 # Validates ZINC's forward_cuda (src/compute/forward_cuda.zig) token-for-token vs
 # llama.cpp CUDA across three independent angles, so perf changes (fast matvecs,

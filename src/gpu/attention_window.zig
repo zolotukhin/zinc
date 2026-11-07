@@ -15,7 +15,7 @@ pub fn forLayer(config: ModelConfig, layer_head_dim: u32) u32 {
         0;
 }
 
-/// `seq_len` includes the query token. The pinned llama.cpp STANDARD mask
+/// `seq_len` includes the query token. The pinned reference STANDARD mask
 /// excludes a key when query_position - key_position >= window_size.
 pub fn start(seq_len: u32, window_size: u32) u32 {
     return if (window_size > 0 and seq_len > window_size) seq_len - window_size else 0;

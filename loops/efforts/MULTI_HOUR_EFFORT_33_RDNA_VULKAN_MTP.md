@@ -1,21 +1,21 @@
 # Effort 33 — NextN/MTP speculative decoding on the Vulkan backend (R9700, Qwen 3.8 27B) — STATUS: LANDED, 32.9 → 55.5 tok/s SERVER DECODE (+69%), GREEDY OUTPUT BIT-IDENTICAL
 
 Follows [Effort 32](MULTI_HOUR_EFFORT_32_RDNA_QWEN38_27B_DECODE.md) (plain decode
-31.3 → 32.1 tok/s on the same card). Same node (`hft`, Radeon AI PRO R9700,
+31.3 → 32.1 tok/s on the same card). Same node (the configured RDNA worker, Radeon AI PRO R9700,
 RADV GFX1201, Mesa 25.0.7), same model (`Qwen3.8-27B-Q4_K_M.gguf`, 64 layers =
 48 DeltaNet + 16 full attention, one appended NextN block), same suite prompt.
 
 ## Result (greedy, 96 generated tokens, server path = benchmark reference)
 
-| path | decode tok/s | ms/tok |
-|---|---:|---:|
-| Vulkan server, `ZINC_MTP=0` | 32.9 | 30.4 |
-| Vulkan server, `ZINC_MTP=1` (default), first landing | 43.2 | 23.2 |
-| Vulkan server, `ZINC_MTP=1` (default), after round 2 | 49.9 | 20.1 |
-| Vulkan server, `ZINC_MTP=1` (default), after round 3 | **55.5** (55.4–55.7 over 6 runs) | **18.0** |
-| Vulkan CLI, `-c 8192`, MTP off / on (round 3) | 32.5 / 54.3 | 30.7 / 18.4 |
-| ROCm CLI MTP (earlier work, reference) | 48.9 vs 32.4 | |
-| llama.cpp 9400c8946 llama-server, no MTP | 29.9 | |
+| path                                                 |                     decode tok/s |      ms/tok |
+| ---------------------------------------------------- | -------------------------------: | ----------: |
+| Vulkan server, `ZINC_MTP=0`                          |                             32.9 |        30.4 |
+| Vulkan server, `ZINC_MTP=1` (default), first landing |                             43.2 |        23.2 |
+| Vulkan server, `ZINC_MTP=1` (default), after round 2 |                             49.9 |        20.1 |
+| Vulkan server, `ZINC_MTP=1` (default), after round 3 | **55.5** (55.4–55.7 over 6 runs) |    **18.0** |
+| Vulkan CLI, `-c 8192`, MTP off / on (round 3)        |                      32.5 / 54.3 | 30.7 / 18.4 |
+| ROCm CLI MTP (earlier work, reference)               |                     48.9 vs 32.4 |             |
+| llama.cpp 9400c8946 llama-server, no MTP             |                             29.9 |             |
 
 Acceptance 51–54% with 2 drafts per cycle (2.09 committed tokens per cycle).
 Server responses and 400-token CLI generations are byte-identical with MTP on
@@ -62,8 +62,8 @@ fallback path never touched the slow layers. The fix is one condition:
 route like Q6_K. Pass: 97 → 43 ms; MTP: 19.2 → 42.4 tok/s.
 
 Lessons worth keeping: per-layer timestamps beat per-phase aggregates for
-"which layers" questions; a probe must be shown to *execute on the slow
-instance* before its null result means anything (the log-dispatch probe only
+"which layers" questions; a probe must be shown to _execute on the slow
+instance_ before its null result means anything (the log-dispatch probe only
 printed Q6_K layers because the budget was exhausted by layers 0–2).
 
 ## Other pieces that landed
@@ -80,7 +80,7 @@ printed Q6_K layers because the budget was exhausted by layers 0–2).
 - **Per-token DeltaNet in the batched SSM function** for spec batches: conv +
   delta dispatched per token with the state copied to `state_hist`/`conv_hist`
   after each token so a rejected draft restores in one 3 MB copy per layer.
-- **VRAM hold**: `mtpReservedBytes` is now also *held* as a device-local
+- **VRAM hold**: `mtpReservedBytes` is now also _held_ as a device-local
   buffer from init until `mtpPrepare` runs, so the eagerly allocated KV cache
   cannot push the history buffers into system memory (the auto-context CLI run
   had 333 MB in GTT and 4× slower restores before this).
@@ -105,31 +105,31 @@ committed tokens per cycle): drafts 3.2 ms, verification pass 38.1 ms, restore
 Landed (each verified against plain greedy decode: 400-token CLI text and the
 server response are byte-identical):
 
-| change | pass ms | tok/s |
-|---|---:|---:|
-| baseline of round 2 | 42.8 | 42.5 |
-| 512-thread `rms_norm_mul_wide` / `residual_rms_norm_wide` for 2–4 row batches (the one-wave-per-row kernels left the GPU idle ~40 µs per dispatch) | 40.2 | 45.0 |
-| draft lm-head over the first 131072 rows (`ZINC_MTP_DRAFT_VOCAB`; identical drafts on this prompt, 2.4 → 1.6 ms per draft) | 40.2 | 46.6 |
-| `ssm_delta_net_cols8_hist`: one delta dispatch over all tokens writing the per-token state history in-kernel (replaces T dispatches + 3 MB copies per layer) | 39.3 | 47.5 |
-| `ssm_conv1d_batched_hist` (same idea for the conv ring) + `dmmv_q5k_rows4_cols` for the Q5_K SSM out projection + rows-8 column kernel for the lm head | 38.1 | 48.9 (server 49.9) |
+| change                                                                                                                                                       | pass ms |              tok/s |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------: | -----------------: |
+| baseline of round 2                                                                                                                                          |    42.8 |               42.5 |
+| 512-thread `rms_norm_mul_wide` / `residual_rms_norm_wide` for 2–4 row batches (the one-wave-per-row kernels left the GPU idle ~40 µs per dispatch)           |    40.2 |               45.0 |
+| draft lm-head over the first 131072 rows (`ZINC_MTP_DRAFT_VOCAB`; identical drafts on this prompt, 2.4 → 1.6 ms per draft)                                   |    40.2 |               46.6 |
+| `ssm_delta_net_cols8_hist`: one delta dispatch over all tokens writing the per-token state history in-kernel (replaces T dispatches + 3 MB copies per layer) |    39.3 |               47.5 |
+| `ssm_conv1d_batched_hist` (same idea for the conv ring) + `dmmv_q5k_rows4_cols` for the Q5_K SSM out projection + rows-8 column kernel for the lm head       |    38.1 | 48.9 (server 49.9) |
 
 Rejected on this target (do not repeat without a new hypothesis):
 
-| attempt | result |
-|---|---|
-| Fused gate+up+SwiGLU column kernel (`dmmv_q4k_fused_gate_up_swiglu_cols`, kept off by default) | neutral: 40.4 vs 40.5 ms |
-| Q4_K × Q8_1 dp4a column kernel (`ZINC_MTP_DP4A=1`, off by default) | −1.4 ms only, and the quantized activations flip a near-tie token (text differs at byte 354) — not exact |
-| rows-per-workgroup 2 / 8 for the f32 column kernels (`ZINC_MTP_COLS_ROWS`) | 41.9 / 41.7 vs 40.4 for rows 4 |
-| 16-byte header loads in the Q4_K column kernel | no change |
-| K-split 2 / 4 with a fixed-order reduce for the Q4_K column kernels | 41.5 / 46.2 vs 38.3 (the extra reduce dispatch+barrier per matrix costs more than any wave-balance gain) |
-| 3 drafts per cycle (`ZINC_MTP_DRAFTS=3`) | 2.17 tok/cycle but the T=4 pass costs +4 ms: 43.4 vs 44.5 tok/s |
-| specialization constants for NUM_ROWS in the column kernels | glslang/ACO produce garbage (array sizes fold to the default while the row mapping specializes); use separate shader files |
+| attempt                                                                                        | result                                                                                                                     |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Fused gate+up+SwiGLU column kernel (`dmmv_q4k_fused_gate_up_swiglu_cols`, kept off by default) | neutral: 40.4 vs 40.5 ms                                                                                                   |
+| Q4_K × Q8_1 dp4a column kernel (`ZINC_MTP_DP4A=1`, off by default)                             | −1.4 ms only, and the quantized activations flip a near-tie token (text differs at byte 354) — not exact                   |
+| rows-per-workgroup 2 / 8 for the f32 column kernels (`ZINC_MTP_COLS_ROWS`)                     | 41.9 / 41.7 vs 40.4 for rows 4                                                                                             |
+| 16-byte header loads in the Q4_K column kernel                                                 | no change                                                                                                                  |
+| K-split 2 / 4 with a fixed-order reduce for the Q4_K column kernels                            | 41.5 / 46.2 vs 38.3 (the extra reduce dispatch+barrier per matrix costs more than any wave-balance gain)                   |
+| 3 drafts per cycle (`ZINC_MTP_DRAFTS=3`)                                                       | 2.17 tok/cycle but the T=4 pass costs +4 ms: 43.4 vs 44.5 tok/s                                                            |
+| specialization constants for NUM_ROWS in the column kernels                                    | glslang/ACO produce garbage (array sizes fold to the default while the row mapping specializes); use separate shader files |
 
 Why the pass stalls at ~38 ms: profiled per pass, gate/up 13.5 ms (0.21
 ms/layer vs 0.17 in decode), down 9.3 (0.145 vs 0.11), SSM projections 6.3,
 delta 2.0, SSM out 2.3, attention 3.2, tail ~3. A diagnostic column kernel
 with all activation loads removed still ran gate/up at 13.1 ms, i.e. the
-rows4-cols kernel's *weight* side streams at ~490 GB/s where decode's single-row
+rows4-cols kernel's _weight_ side streams at ~490 GB/s where decode's single-row
 fused kernel reaches 590 GB/s, and neither rows, header-load width, K-split,
 dp4a nor fusion moved it. Closing the remaining ~5 ms needs a different
 small-batch matvec design (LDS-staged activations with a decode-shaped weight
@@ -142,17 +142,17 @@ target reachable.
 Cycle after round 3 (CLI, `-c 8192`): drafts 2.75 ms, verification pass 34.6
 ms, restore+catch-up 0.95 ms → ~38.3 ms per cycle at 2.09 committed tokens.
 
-| change | pass ms | CLI tok/s |
-|---|---:|---:|
-| start of round 3 | 38.1 | 48.9 |
-| **unguarded 3-column kernels** (`dmmv_*_rows4_cols3`, lm head `dmmv_q6k_rows8_cols3`): the per-row `if (row >= M) break` inside the unrolled row loop and the `if (c < num_cols)` around the activation loads kept the compiler from issuing an iteration's 24 loads up front; our shapes are all multiples of 4 and a 3-token batch has exactly 3 columns, so both guards go | 35.0 | 52.5 |
-| draft: block input + pending-h upload + NextN step in one command buffer; restore copies + catch-up in one; the pass records its own embedding copy (12 → 4 submits per cycle) | 35.0 | 53.0 |
-| K/V-only NextN catch-up (`spec_kv_only`: no Q/gate projections, flash, o-proj or FFN-norm tail; also prime 9.0 → 6.8 ms) | 34.7 | 53.7 |
-| draft lm-head over 98304 rows (server 54.4 → 54.8) and the unguarded fused gate+up+SwiGLU 3-column kernel (`ZINC_MTP_FUSED_GATEUP`, now on) | 34.6 | 54.3 (server 55.5) |
+| change                                                                                                                                                                                                                                                                                                                                                                        | pass ms |          CLI tok/s |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------: | -----------------: |
+| start of round 3                                                                                                                                                                                                                                                                                                                                                              |    38.1 |               48.9 |
+| **unguarded 3-column kernels** (`dmmv_*_rows4_cols3`, lm head `dmmv_q6k_rows8_cols3`): the per-row `if (row >= M) break` inside the unrolled row loop and the `if (c < num_cols)` around the activation loads kept the compiler from issuing an iteration's 24 loads up front; our shapes are all multiples of 4 and a 3-token batch has exactly 3 columns, so both guards go |    35.0 |               52.5 |
+| draft: block input + pending-h upload + NextN step in one command buffer; restore copies + catch-up in one; the pass records its own embedding copy (12 → 4 submits per cycle)                                                                                                                                                                                                |    35.0 |               53.0 |
+| K/V-only NextN catch-up (`spec_kv_only`: no Q/gate projections, flash, o-proj or FFN-norm tail; also prime 9.0 → 6.8 ms)                                                                                                                                                                                                                                                      |    34.7 |               53.7 |
+| draft lm-head over 98304 rows (server 54.4 → 54.8) and the unguarded fused gate+up+SwiGLU 3-column kernel (`ZINC_MTP_FUSED_GATEUP`, now on)                                                                                                                                                                                                                                   |    34.6 | 54.3 (server 55.5) |
 
 Neutral or rejected this round: process-wide `RADV_PERFTEST=cswave32` (one
 36.3 ms reading that never reproduced; explicit wave32 on the column
-pipelines is 3 ms *worse*, `ZINC_MTP_COLS_WAVE32` keeps the driver default),
+pipelines is 3 ms _worse_, `ZINC_MTP_COLS_WAVE32` keeps the driver default),
 rows 8 for gate/up (`ZINC_MTP_WIDE_ROWS`), serializing gate and up
 (`ZINC_MTP_GATEUP_SERIAL`, +0.4 ms), compute-only layer hand-off barriers
 (no change, kept), the fused norm+RoPE+KV kernel (not applicable: Qwen 3.8
@@ -165,7 +165,7 @@ re-reads accounting for most of the rest. Acceptance is prompt-dependent
 and the server path; longer generations with lower acceptance land in the
 low 50s.
 
-## Validation with MTP enabled (2026-09-07, node `hft`, `ZINC_MTP` default on)
+## Validation with MTP enabled (2026-09-07, node the configured RDNA worker, `ZINC_MTP` default on)
 
 - `zig build test -Dbackend=vulkan`: 617 passed, 1 skipped.
 - `bun test` on the node (Vulkan build, node model files via
@@ -191,7 +191,7 @@ Goal: the published core scenario (96 greedy tokens, chat prompt, CLI with
 auto context) read 52.9 while the server A/B read 55.5; keep 55+ everywhere.
 
 1. **The CLI's auto context spilled VRAM.** The Vulkan CLI handed the engine
-   the architectural maximum (262144) and let it trim against the *full* card:
+   the architectural maximum (262144) and let it trim against the _full_ card:
    30851 tokens, 32.4 GB of 32.6 GB used, ~300 MB evicted to system memory.
    Decode paid 17% with MTP (44.8 vs 54.0 tok/s at `-c 16384`) and 10% without
    (28.9 vs 32.0). Plain decode with an explicit `-c 30851` was fine only
@@ -243,14 +243,14 @@ auto context) read 52.9 while the server A/B read 55.5; keep 55+ everywhere.
 
 Results (R9700, greedy, byte-identical to plain decode on every prompt):
 
-| scenario | before (suite, 2026-09-07 morning) | after |
-|---|---:|---:|
-| core, 96 tokens (CLI auto ctx) | 52.9 (45–48 when the spill hit) | 54.6 |
-| core, 97 / 255 tokens | — | 55.2 / 54.1 |
-| context-medium, 160 | 68.5* | 60.2 |
-| context-long, 128 | 58.6 | 66.2 |
-| decode-extended, 256 | 61.2 | 66.3 |
-| server, core prompt, 96 tokens | 55.5 (round 3) / 51.3 (chained, before the staging fix) | 53.6 |
+| scenario                       |                      before (suite, 2026-09-07 morning) |       after |
+| ------------------------------ | ------------------------------------------------------: | ----------: |
+| core, 96 tokens (CLI auto ctx) |                         52.9 (45–48 when the spill hit) |        54.6 |
+| core, 97 / 255 tokens          |                                                       — | 55.2 / 54.1 |
+| context-medium, 160            |                                                   68.5* |        60.2 |
+| context-long, 128              |                                                    58.6 |        66.2 |
+| decode-extended, 256           |                                                    61.2 |        66.3 |
+| server, core prompt, 96 tokens | 55.5 (round 3) / 51.3 (chained, before the staging fix) |        53.6 |
 
 (*) the morning suite ran with the spilling planner; its per-scenario numbers
 were partly luck (VRAM 99.4% full, evictions not deterministic).
@@ -270,7 +270,7 @@ than the engine:
 1. **The RDNA target measures the server, not the CLI.** `runRdnaTarget`
    launches `zinc --port N` and drives it through the OpenAI API, so every
    published prompt carries 19 extra chat-template tokens (core prefill 67, not
-   48). Per *cycle* the CLI and the server are identical (38.2 vs 38.1 ms); the
+   48). Per _cycle_ the CLI and the server are identical (38.2 vs 38.1 ms); the
    published number is lower only because that longer prompt accepts 51.1% of
    drafts instead of 54.3%. Nothing to fix, but per-scenario CLI numbers are
    not comparable to the published ones.
@@ -278,10 +278,10 @@ than the engine:
    run, and on the R9700 that is 4.3% slower than the card's default `auto`.**
    Same binary, same prompt, same 48/94 acceptance:
 
-   | DPM | server decode |
-   |---|---:|
-   | `high` (what the harness pinned) | 53.5 / 53.6 / 53.6 |
-   | `auto` (card default) | 55.91 / 56.14 / 56.00 / 55.94 |
+   | DPM                              |                 server decode |
+   | -------------------------------- | ----------------------------: |
+   | `high` (what the harness pinned) |            53.5 / 53.6 / 53.6 |
+   | `auto` (card default)            | 55.91 / 56.14 / 56.00 / 55.94 |
 
    Forcing `high` locks a fixed nominal DPM state and gives up opportunistic
    boost. The pin came from the 9070 XT work (blog post

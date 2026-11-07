@@ -5468,7 +5468,7 @@ test "formatStreamingToolCallChunk emits valid JSON" {
         0,
         "call_0",
         "tree",
-        "{\"path\":\"/home/f44/dev/stuff/pwmedia\",\"depth\":3}",
+        "{\"path\":\"/workspace/example-project\",\"depth\":3}",
     );
     defer std.testing.allocator.free(chunk);
 
@@ -5494,7 +5494,7 @@ test "formatStreamingToolCallChunk emits valid JSON" {
     try std.testing.expect(function == .object);
     const arguments = function.object.get("arguments") orelse return error.TestUnexpectedResult;
     try std.testing.expect(arguments == .string);
-    try std.testing.expectEqualStrings("{\"path\":\"/home/f44/dev/stuff/pwmedia\",\"depth\":3}", arguments.string);
+    try std.testing.expectEqualStrings("{\"path\":\"/workspace/example-project\",\"depth\":3}", arguments.string);
 }
 
 test "parseChatRequest preserves full message history" {

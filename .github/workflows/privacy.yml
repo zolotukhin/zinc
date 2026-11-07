@@ -1,0 +1,46 @@
+name: Repository privacy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  privacy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned credential scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/zinc-gitleaks"
+          mkdir -p "$destination"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$destination/gitleaks.tar.gz"
+          # Pinned from the official v8.30.1 checksums asset, independently of
+          # the archive download; a changed upstream archive must fail here.
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $destination/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "$destination/gitleaks.tar.gz" -C "$destination" gitleaks
+          echo "GITLEAKS_BINARY=$destination/gitleaks" >> "$GITHUB_ENV"
+      - name: Verify metadata cleanup, redaction and credential exceptions
+        run: python3 -m unittest discover -s tools -p test_repository_privacy.py -v
+      - name: Check paths, addresses, compressed evidence and image metadata
+        run: python3 tools/check_repository_privacy.py
+      - name: Scan the public tree and Git history for credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          snapshot="$RUNNER_TEMP/zinc-public-tree"
+          mkdir -p "$snapshot"
+          git archive HEAD | tar -x -C "$snapshot"
+          "$GITLEAKS_BINARY" dir "$snapshot" --config .gitleaks.toml --redact=100 --max-archive-depth=3 --max-decode-depth=3 --no-banner
+          "$GITLEAKS_BINARY" git . --config .gitleaks.toml --redact=100 --max-archive-depth=3 --max-decode-depth=3 --log-opts='--all' --no-banner

@@ -5,10 +5,12 @@ one validated increment per cycle. Prefill effort 30 is CONVERGED (+53% attn shi
 rest = weight-traffic wall). Decode is now the axis.
 
 ## Measured 5090 decode gaps (zinc med tok/s vs llama-bench tg160, 2026-07-08)
+
 gemma4-26b MoE 51/157 = **32%** (worst); qwen36-35b-a3b MoE 62/158 = **39%**; gemma4-31b
 32/61 = 52%; qwen35-9b 91/157 = 58%; qwen36-27b 42/63 = 66%. **MoE rows are the worst.**
 
 ## Root cause (MEASURED, measure-first — honor it before optimizing)
+
 - **CUDA graphs are NEUTRAL on the 5090** (qwen35-9b graph-on vs ZINC_CUDA_GRAPH=0 ~equal;
   graph VERIFIED engaged). Decode is GPU-**compute/latency-bound, NOT launch-bound.** Do
   NOT chase graphs (gemma has none — porting = predicted-neutral, Effort-27 C4 4090 confirms).
@@ -20,6 +22,7 @@ gemma4-26b MoE 51/157 = **32%** (worst); qwen36-35b-a3b MoE 62/158 = **39%**; ge
   the kernel COUNT the graph can't). This is the ONLY viable decode lever found.
 
 ## Candidate levers (priority; pick ONE per cycle, token-gate it)
+
 1. **Static kernel fusion on the MoE decode hot path (Effort-27 playbook — the proven
    win-class).** Fuse ADJACENT single-block launches across command boundaries into ONE
    launch (bit-identical, block-count preserved). Effort-27 landed many +3-12% here on the
@@ -34,17 +37,19 @@ gemma4-26b MoE 51/157 = **32%** (worst); qwen36-35b-a3b MoE 62/158 = **39%**; ge
    grouping active experts for more parallelism. (Effort-27 already did dmmv_q4k_experts.)
 
 ## Dead ends — DO NOT re-litigate
+
 - **CUDA graphs (dense + MoE)**: NEUTRAL on 5090 (compute/latency-bound, not launch-bound).
 - **LM-head tail optimization**: only 7% of gemma-26b decode — not worth it.
-- The prefill dead-ends (int8-MMQ, flash, etc.) don't apply to decode but the *wall* does:
+- The prefill dead-ends (int8-MMQ, flash, etc.) don't apply to decode but the _wall_ does:
   matvec efficiency at T=1 is fundamentally hard (llama's edge is latency-tuned matvecs).
 
 ## HARD RULES (override the generic playbook)
-- **Pin the 5090**: `export CUDA_VISIBLE_DEVICES=GPU-5126d018-ec86-be8b-1bf5-b5ac323d3350`, ZINC_GPU= same.
+
+- **Pin the 5090**: `export CUDA_VISIBLE_DEVICES=${ZINC_GPU}`, ZINC_GPU= same.
 - **Box build dir `~/zinc-harvest`** (full main checkout, NOT git — rsync WHOLE worktree `./ dest/`
   single-source). Build `./scripts/zig.sh build -Dbackend=cuda -Dshaders=false -Doptimize=ReleaseFast`.
 - **Correctness gate**: default-vs-change greedy token match on gemma-26b AND qwen — `--prompt
-  "<real text>" --raw -n 20`, compare the `Output(…)` line (STDERR, 2>&1). Fusion is usually
+"<real text>" --raw -n 20`, compare the `Output(…)` line (STDERR, 2>&1). Fusion is usually
   BIT-identical (same kernels reordered) → require token-IDENTICAL. A DIFFER = revert.
 - **A/B DECODE**: interleaved ABBA ≥4 rounds, drop cold first round; decode is boost-noisy
   (±10%). Parse `Generated N tokens in … — X tok/s`. Use a ramble prompt (repeat a sentence
@@ -58,4 +63,5 @@ gemma4-26b MoE 51/157 = **32%** (worst); qwen36-35b-a3b MoE 62/158 = **39%**; ge
   STOP — do not append redundant confirmations. Revert + log negatives. STOP after one increment.
 
 ## Cycle log
+
 (append dated one-liners per cycle: target, verdict, branch)

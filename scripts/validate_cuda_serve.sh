@@ -23,7 +23,7 @@ ZIG=${ZIG:-./scripts/zig.sh}
 MD=${ZINC_MODELS:-$HOME/workspace/models}
 MODEL=${ZINC_SERVE_MODEL:-$MD/gemma-4-31B-it-Q4_K_M.gguf}
 PORT=${ZINC_SERVE_PORT:-8189}
-# Local loopback host to reach the server. The agent-zinc box is net-fenced to
+# Local loopback host to reach the server. The <worker> box is net-fenced to
 # 127.99/16, so plain 127.0.0.1 is dropped — use a 127.99.x address (the server
 # binds 0.0.0.0 so any local IP reaches it). Override for an unfenced box.
 HOST=${ZINC_SERVE_HOST:-127.99.0.1}

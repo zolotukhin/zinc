@@ -15,12 +15,13 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-| Command                    | Purpose                                                                       |
-| -------------------------- | ----------------------------------------------------------------------------- |
-| `bun run dev`              | Start the development server                                                  |
-| `bun run build`            | Build all pages into `dist/`                                                  |
-| `bun run preview`          | Preview the production build locally                                          |
-| `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts |
+| Command                    | Purpose                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------- |
+| `bun run dev`              | Start the development server                                                          |
+| `bun run build`            | Build all pages into `dist/`                                                          |
+| `bun run preview`          | Preview the production build locally                                                  |
+| `bun run check:posts`      | Verify article images and wide tables on phones/desktops, with and without JavaScript |
+| `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts         |
 
 `bun run build` adds Cloudflare's exclusion markers around literal code after
 Astro compresses the HTML. This final pass uses Bun's HTML parser and verifies
@@ -34,6 +35,11 @@ to save desktop/mobile screenshots in both themes. The check includes axe-core
 accessibility scans with evidence expanded. CI runs the same browser checks,
 plus the benchmark calculation tests. These are site development tools; they do
 not ship in the dashboard's client bundle.
+
+`bun run check:posts` checks the edited hardware/photo articles after a production
+build. It rejects missing images, empty galleries, and page-wide mobile overflow;
+wide tables must keep their content reachable. Use `POST_SCREENSHOTS=/tmp/posts`
+to save the verified layouts.
 
 The site uses Astro 7 and the unified Markdown processor so existing
 remark/rehype plugins keep working. KaTeX styles and fonts are bundled from
@@ -49,6 +55,11 @@ browser.
 | `../docs/`                       | Technical documentation                        |
 | `../src/**/*.zig`                | Source for the generated Zig API reference     |
 | `src/data/zinc-performance.json` | Published benchmark measurements               |
+
+Use the [blog guide](../writing/ZOLOTUKHIN_AI_BLOG_GUIDE.md) and
+[post template](../writing/ZOLOTUKHIN_AI_POST_TEMPLATE.md) for new posts. Published
+content lives in `src/content/posts/`; old implementation plans and duplicate
+drafts are available in Git history.
 
 The build needs the full repository, the pinned Zig toolchain, and the headers
 used by the native API layout probe. CI installs `libvulkan-dev` on Linux.

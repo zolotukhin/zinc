@@ -119,13 +119,6 @@ site/                            # Astro website + docs frontend (zolotukhin.ai)
 ├── src/styles/                  # Global site styling
 └── public/                      # Static assets served by Astro
 
-specs/                           # Historical feature design artifacts
-├── 001-zinc-inference-engine/
-├── 002-microblog-zolotukhin-ai/
-├── 003-decode-performance/
-├── 004-openai-api-server/
-└── 005-apple-silicon-inference/
-
 tools/                           # API benchmarks, metadata inspectors, graph/report and release helpers
 ├── benchmark_api.mjs
 ├── chat.html
@@ -143,7 +136,7 @@ tests/                           # TypeScript integration/smoke tests
 assets/                          # Shared repo/media assets
 research/                        # Analysis notes and external comparisons
 scripts/                         # Deployment scripts
-writing/                         # Draft writing and publishing notes
+writing/                         # Blog guide and post template
 ```
 
 ## Code Navigation

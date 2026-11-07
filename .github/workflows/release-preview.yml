@@ -66,9 +66,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      # setup-zig reads minimum_zig_version from the checked-out build.zig.zon.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: '0.17.0'
           use-cache: false
       - name: Build, audit, package and install outside the checkout
         env:

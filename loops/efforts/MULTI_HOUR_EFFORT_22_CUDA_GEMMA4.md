@@ -39,7 +39,7 @@ A standard transformer (no SSM) but with several gemma-specific pieces:
 
 - Per-layer residual diff vs llama.cpp (`l_out-N`) to pinpoint the first divergent layer (NOT just argmax — the qwen35 gate bug showed argmax can match at pos 0 while a mid-layer is wrong).
 - Token-for-token greedy vs llama.cpp on a fixed prompt before declaring coherent; then the full `validate_cuda_decode.sh` suite.
-- 4090-pinned (`GPU-e59a6fce-…`); the 26b/MoE is 16 GB (fits 24 GB).
+- 4090-pinned (`${ZINC_GPU}`); the 26b/MoE is 16 GB (fits 24 GB).
 
 ## Cycle log
 
@@ -71,12 +71,12 @@ A standard transformer (no SSM) but with several gemma-specific pieces:
 
 - **Cycle 2 (2026-06-07) — gemma4 MoE (26b-a4b) FFN wired into `ForwardGemma`.**
   The 26b run was incoherent because the old code ran only the dense `ffn_gate/up/down`
-  (which the MoE GGUF keeps *as the shared expert*) and skipped the 128-expert routed MoE
+  (which the MoE GGUF keeps _as the shared expert_) and skipped the 128-expert routed MoE
   entirely. Added a `moeFfnBlock` path (branch per-layer on `ffn_gate_inp.weight`) mirroring
   `gemma4.cpp` build graph:
   - **shared expert**: `post_ffw_norm_1(geglu_ffn(ffn_norm(attn_out)))` (dense FFN, ff=2112).
   - **router** (operates on attn_out, not the experts' normed input): `logits =
-    ffn_gate_inp · (rms_noweight(attn_out) · (1/√n_embd) · ffn_gate_inp.scale)`; top-8 softmax
+ffn_gate_inp · (rms_noweight(attn_out) · (1/√n_embd) · ffn_gate_inp.scale)`; top-8 softmax
     via the existing `softmax_topk` (softmax-over-topk ≡ softmax-all-then-renorm-topk — Z
     cancels, so it's correct for gemma4's SOFTMAX+norm_w).
   - **routed experts**: `pre_ffw_norm_2(attn_out)` → per-slot fused `ffn_gate_up_exps`
@@ -84,13 +84,13 @@ A standard transformer (no SSM) but with several gemma-specific pieces:
     (slot-major) → `moe_weighted_acc` → `post_ffw_norm_2`. The per-expert `ffn_down_exps.scale`
     is folded into the router weights on the host before the combine.
   - **combine**: `post_ffw_norm(shared + moe)`, then `hidden += cur`.
-  New additive kernels in `kernels.cu`: **`dmmv_q5_1`** (UD-Q4_K_M ships `ffn_down_exps` as Q5_1
-  — ZINC had no Q5_1 dmmv; `dmmvIdx` silently mismapped it to Q4_K), **`mul_vec_scaled`**
-  (router pre-scale), **`zero_vec`** (MoE accumulator clear). `dmmvIdx` extended `q5_1 => 5`,
-  gemma `dmmv` pipeline array grown to `[6]`. Reuses qwen's `softmax_topk`/`moe_weighted_acc`.
-  Dense 31b path unchanged (n_experts==0 → `ffnBlock`); qwen35/36 untouched (separate file).
-  **PENDING:** loop rebuild + run on the 26b — expect coherent; if not, per-layer-diff the
-  first MoE layer (layer 0) vs llama.cpp `ffn_moe_combined-0`.
+    New additive kernels in `kernels.cu`: **`dmmv_q5_1`** (UD-Q4_K_M ships `ffn_down_exps` as Q5_1
+    — ZINC had no Q5_1 dmmv; `dmmvIdx` silently mismapped it to Q4_K), **`mul_vec_scaled`**
+    (router pre-scale), **`zero_vec`** (MoE accumulator clear). `dmmvIdx` extended `q5_1 => 5`,
+    gemma `dmmv` pipeline array grown to `[6]`. Reuses qwen's `softmax_topk`/`moe_weighted_acc`.
+    Dense 31b path unchanged (n_experts==0 → `ffnBlock`); qwen35/36 untouched (separate file).
+    **PENDING:** loop rebuild + run on the 26b — expect coherent; if not, per-layer-diff the
+    first MoE layer (layer 0) vs llama.cpp `ffn_moe_combined-0`.
 
 - **Cycle 3 (2026-06-07) — gemma4-31b "token-correctness" RESOLVED: it was never a forward bug.**
   `scripts/validate_catalog.sh` showed `gemma4-31b` diverging from the llama.cpp greedy
@@ -113,7 +113,7 @@ A standard transformer (no SSM) but with several gemma-specific pieces:
     soft-cap 30.0 (monotonic → argmax-invariant; even applied, zinc keeps its pick).
   - The divergence is a **genuine near-tie**: after "…Paris." the next token is EOS(106) vs
     newline(108). **Decisive check** — llama on **CPU (full f32, ngl=0)** picks **108** with a
-    *0.51* margin, i.e. ZINC's f32 forward (108) **agrees with llama's own f32**. Only
+    _0.51_ margin, i.e. ZINC's f32 forward (108) **agrees with llama's own f32**. Only
     llama-**GPU**'s **q8_1 activation quantization** (MMVQ, the decode path the reference uses)
     shifts the logits ~0.7 and flips the tie to 106 (gap +0.21). So **ZINC is numerically
     correct**; the gate's GPU reference is q8_1-noisy. Teacher-forced agreement = **11/12**
@@ -122,14 +122,14 @@ A standard transformer (no SSM) but with several gemma-specific pieces:
   - **Fix (additive; engine forward UNCHANGED):** `validate_catalog.sh` now falls back to
     **teacher-forced next-token agreement** when free-running greedy desyncs on an early
     near-tie (the script already declares <0.2-gap flips acceptable — free-run just can't
-    express an *early* one before MINMATCH). `gemma4-31b` → **OK** (teacher-forced 11/12).
+    express an _early_ one before MINMATCH). `gemma4-31b` → **OK** (teacher-forced 11/12).
     Also hardened the `rope_freqs` lookup in `forward_cuda_gemma.zig` to fall back to the
     per-layer `blk.{i}.rope_freqs.weight` name (a no-op on these GGUFs — the global exists —
     but robust to future conversions). qwen35/36 + gemma4-26b paths untouched.
-  **Result: validate_catalog 5/5; validate_cuda_decode (qwen35 deep gate) green.** The earlier
-  "TODO: per-layer-diff validation" is now DONE — gemma4-31b is layer-for-layer faithful to
-  llama.cpp f32 through the network; the only mismatch vs the GPU reference is q8_1 rounding
-  at one near-tie.
+    **Result: validate_catalog 5/5; validate_cuda_decode (qwen35 deep gate) green.** The earlier
+    "TODO: per-layer-diff validation" is now DONE — gemma4-31b is layer-for-layer faithful to
+    llama.cpp f32 through the network; the only mismatch vs the GPU reference is q8_1 rounding
+    at one near-tie.
 
 ## Refs
 

@@ -33,7 +33,7 @@ and server commands; `zinc chat` does not provide a browser UI in that build.
 
 You need Git, the development files for your GPU backend, and Python 3 for the
 initial compiler download. `scripts/zig.sh` downloads and verifies the pinned
-**Zig 0.17.0** compiler when needed. A separate system Zig installation is
+**Zig 0.17.1** compiler when needed. A separate system Zig installation is
 optional.
 
 ### macOS (Apple Silicon)
@@ -138,6 +138,19 @@ The default address is `http://localhost:9090/`.
 To connect an app, set its OpenAI-compatible API base URL to
 `http://localhost:9090/v1` while the server is running. See the
 [API guide](/zinc/docs/api/) for requests, SDK examples, and backend limitations.
+
+## Connect a coding agent
+
+Follow the [OpenClaw setup guide](/zinc/docs/openclaw/) for one-shot coding
+tasks, or the [OpenCode setup guide](/zinc/docs/opencode/) for coding rounds
+with a project verification command. Both guides include a setup helper and
+context requirements. Stop the chat server before restarting it with the
+larger context required by your client.
+
+For OpenClaw, the [AMD acceptance report](/zinc/docs/openclaw-amd-validation/)
+records the tested models, actual file edits and test results, and limits on
+Vulkan and ROCm. Check that matrix before choosing a model; a successful config
+check alone does not establish coding ability.
 
 ## Use an existing GGUF
 

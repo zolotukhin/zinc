@@ -1,3 +1,4 @@
+import { assertPublicArtifact } from './public_artifact_privacy.mjs';
 import { outputQualityStatus } from './benchmark_quality.mjs';
 import { checkBenchmarkReference } from './benchmark_reference.mjs';
 import {
@@ -9,6 +10,7 @@ import benchmarkReference from '../config/benchmark-reference.json' with { type:
 export { outputQualityStatus } from './benchmark_quality.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const TOOL_PATH = fileURLToPath(import.meta.url);
 const ROOT = path.resolve(path.dirname(TOOL_PATH), '..');
+const ZIG_VERSION = readFileSync(path.join(ROOT, '.zig-version'), 'utf8').trim();
 const DEFAULT_SITE_DATA = path.join(ROOT, 'site', 'src', 'data', 'zinc-performance.json');
 const DEFAULT_OUTPUT = `/tmp/zinc-performance-${Date.now()}.json`;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
@@ -3674,6 +3677,15 @@ export async function buildRdnaCreds(args) {
   };
 }
 
+export function remoteZigToolchainDir(remoteHome, explicitDir, explicitBinary) {
+  return (
+    explicitDir ??
+    (explicitBinary
+      ? path.posix.dirname(explicitBinary)
+      : path.posix.join(remoteHome, '.cache', 'zinc-toolchains', `zig-${ZIG_VERSION}`))
+  );
+}
+
 async function buildIntelConfig(args) {
   const dotEnv = await readDotEnv(path.join(ROOT, '.env'));
   const host = envValue(dotEnv, 'ZINC_INTEL_HOST');
@@ -3712,9 +3724,11 @@ async function buildIntelConfig(args) {
   const remoteLibcConf =
     args.intelRemoteLibcConf ?? envValue(dotEnv, 'ZINC_INTEL_REMOTE_LIBC_CONF');
   const remoteZig = envValue(dotEnv, 'ZINC_INTEL_ZIG_REMOTE');
-  const remoteZigDir =
-    envValue(dotEnv, 'ZINC_INTEL_ZIG_DIR', 'ZINC_INTEL_REMOTE_ZIG_DIR') ??
-    (remoteZig ? path.posix.dirname(remoteZig) : `${remoteHome}/.cache/zinc-toolchains/zig-0.17.0`);
+  const remoteZigDir = remoteZigToolchainDir(
+    remoteHome,
+    envValue(dotEnv, 'ZINC_INTEL_ZIG_DIR', 'ZINC_INTEL_REMOTE_ZIG_DIR'),
+    remoteZig,
+  );
   const llamaDevice = envValue(dotEnv, 'ZINC_INTEL_LLAMA_DEVICE') ?? 'Vulkan0';
   const intelLlamaDeviceArgs = llamaDeviceArgs(llamaDevice);
   const remoteEnv = {
@@ -4861,18 +4875,10 @@ async function main() {
       // selected rows with the new measurements.
       preserveMissingPhases: args.phase !== 'all' || args.models != null || args.scenarios != null,
     });
-    // Guard: never publish host/network info into the public site data. Scan for
-    // ACTUAL host indicators (hostnames, tailscale IPs, tailnet domains) — not a
-    // bare :port, which false-positives on numeric metric values (e.g. a decode_ms
-    // of 2222.06 serializes as ":2222" in compact JSON).
-    const leak = JSON.stringify(merged).match(
-      /puffalo|tailbe7bef|agent-zinc|127\.99\.\d+\.\d+|\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\.ts\.net/g,
-    );
-    if (leak) {
-      throw new Error(
-        `Refusing to write site data: host/network info present (${[...new Set(leak)].join(', ')}). Sanitize the artifact before publishing.`,
-      );
-    }
+    assertPublicArtifact(merged, {
+      ...(await readDotEnv(path.join(ROOT, '.env'))),
+      ...process.env,
+    });
     await writeJson(args.siteData, merged);
   }
 

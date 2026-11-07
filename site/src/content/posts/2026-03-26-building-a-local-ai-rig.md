@@ -1,6 +1,6 @@
 ---
-title: "Building a local AI rig: from trading workstation to home AI server"
-date: "2026-03-26"
+title: 'Building a local AI rig: from trading workstation to home AI server'
+date: '2026-03-26'
 tags:
   - amd
   - amdgpu
@@ -9,7 +9,7 @@ tags:
   - local-ai
   - ai-rig
   - home-ai
-excerpt: "How I built the home RDNA4 node behind ZINC — from a Ryzen 9800X3D trading workstation to an AMD Radeon AI PRO R9700 inference rig. Parts list, Noctua fan swap, assembly photos, and why a $1300 GPU turned an overclocking platform into a local AI server."
+excerpt: 'How I built the home RDNA4 node behind ZINC — from a Ryzen 9800X3D trading workstation to an AMD Radeon AI PRO R9700 inference rig. Parts list, Noctua fan swap, assembly photos, and why a $1300 GPU turned an overclocking platform into a local AI server.'
 ---
 
 This was supposed to be a trading machine.
@@ -66,33 +66,19 @@ The Taichi went into the case first. The board is massive — serious VRM heatsi
 
 Then the 9800X3D dropped into the socket. I used a [Thermalright AM5 contact frame](https://www.amazon.com/dp/B0D1V45DSL) for even mounting pressure — five dollars of insurance for repeatable thermals. [Thermal Grizzly Kryonaut](https://www.amazon.com/dp/B0F48FLCRX) on top.
 
-<div class="img-pair">
-
-![X870E Taichi — VRM heatsinks, empty socket, waiting for the CPU](/blog/IMG_8042.jpg)
-![9800X3D seated — chosen for trading, turned out perfect for this too](/blog/IMG_8070.jpg)
-
-</div>
-
 Here is the thing about the 9800X3D in an AI build: nobody picks it for inference. It is "a gaming CPU." But when your actual workload is compiling a Zig codebase, running helper scripts, syncing code over SSH, tokenizing prompts, scanning logits on the CPU side, and keeping the whole machine responsive while the GPU does the heavy lifting — having the fastest single-thread chip on the platform is not a luxury. It is the reason the machine never feels slow even when the GPU is floored.
 
 ## The power supply
 
 A [Corsair HX1000i](https://www.amazon.com/dp/B0BZ2CRW8H). 1000 watts of clean power, fully modular, and way more headroom than this single-GPU build actually needs. That is deliberate. I wanted the PSU to be the one component I never think about.
 
-![Corsair HX1000i 1000W PSU for AMD GPU workstation — enough headroom for sustained local LLM inference](/blog/IMG_8047.jpg)
-
 ## The GPU that changed the whole project
 
-The previous card in my daily machine was an NVIDIA GeForce RTX 4080 Founders Edition. If you have ever held one, you know the thing: a massive triple-slot slab of metal that weighs like a brick and dominates whatever case it lives in. You build *around* a 4080 FE.
+The previous card in my daily machine was an NVIDIA GeForce RTX 4080 Founders Edition. If you have ever held one, you know the thing: a massive triple-slot slab of metal that weighs like a brick and dominates whatever case it lives in. You build _around_ a 4080 FE.
 
 So when the [AI PRO R9700](https://www.newegg.com/asrock-creator-r9700-ct-radeon-ai-pro-r9700-32gb-graphics-card/p/N82E16814930143) arrived and I pulled it out of the anti-static bag, I genuinely paused. This cannot be right. It is a compact dual-slot card with a single blower fan. No RGB. No backplate theatrics. It looks like something you would find in a Dell workstation, not in a build where you are trying to push the limits of local AI inference.
 
-<div class="img-pair">
-
 ![Holding the R9700 — my hand for scale. Compare to any triple-slot gaming card.](/blog/gpu_2.jpg)
-![The back — "AMD RADEON AI PRO" branding. Workstation-plain. Tiny.](/blog/gpu_3.jpg)
-
-</div>
 
 I held it in one hand and thought: this small thing has 32 GB of VRAM and 576 GB/s of memory bandwidth. This is supposed to run 35-billion-parameter models.
 
@@ -102,12 +88,7 @@ After years of GPUs trying to look like they belong in a spaceship, there is som
 
 It slotted into the X870E Taichi and looked almost lost. The ProArt case was designed for cards twice this size. All that empty space turned out to be a feature, not a waste — the blower has room to breathe, and the whole thermal situation is dramatically calmer than anything I have ever built with triple-slot gaming cards.
 
-<div class="img-pair">
-
 ![R9700 installed — practically disappears inside the PA602](/blog/gpu_4.jpg)
-![Full interior — motherboard, RAM, GPU, room to breathe](/blog/IMG_8039.jpg)
-
-</div>
 
 32 GB of VRAM is what makes this build actually useful for [ZINC](https://github.com/zolotukhin/zinc). It is the difference between running toy demos and fitting a real 35B-class model with room for KV cache, concurrent sessions, and TurboQuant experiments. For that, 32 GB is not a luxury. It is room to work.
 
@@ -122,20 +103,20 @@ It slotted into the X870E Taichi and looked almost lost. The ProArt case was des
 
 Here is the full parts list with links:
 
-| Part | Choice | Why |
-| --- | --- | --- |
-| CPU | [AMD Ryzen 7 9800X3D](https://www.amazon.com/dp/B0DKFMSMYK) | Originally for HFT — best single-thread AM5, 3D V-Cache |
-| Motherboard | [ASRock X870E Taichi](https://www.amazon.com/dp/B0DFP2Q3TM) | VRM headroom for overclocking, strong I/O, 4x M.2 |
-| GPU | [AMD Radeon AI PRO R9700](https://www.newegg.com/asrock-creator-r9700-ct-radeon-ai-pro-r9700-32gb-graphics-card/p/N82E16814930143) | 32 GB VRAM, RDNA4, 576 GB/s — the reason ZINC exists |
-| Memory | [G.SKILL Trident Z5 Neo 96 GB DDR5-6000 CL26](https://www.amazon.com/dp/B0F79YGMX1) | Overclocks well, tight timings, real workstation capacity |
-| Case | [ASUS ProArt PA602](https://www.amazon.com/dp/B0CPP3DWLX) | Big airflow, 420 mm rad support, GPU clearance |
-| CPU cooler | [ASUS ProArt LC 420](https://www.amazon.com/dp/B0CXLJ2N5B) | Oversized AIO for sustained loads |
-| Radiator fans | [3x Noctua NF-A14 industrialPPC-2000](https://www.amazon.com/dp/B00KESSUDW) | High static pressure through the radiator |
-| Case fans | [Noctua NF-A20 chromax](https://www.amazon.com/dp/B07ZP46RNR) + [NF-A12x25 chromax](https://www.amazon.com/dp/B09C6DQDNT) | Quiet high-airflow replacements |
-| PSU | [Corsair HX1000i](https://www.amazon.com/dp/B0BZ2CRW8H) | Clean power, headroom |
-| OS drive | [WD_BLACK SN8100 2 TB](https://www.amazon.com/dp/B0F3BD1W6R) | Fast boot + builds |
-| Model storage | [2x WD_BLACK SN850X 8 TB](https://www.newegg.com/western-digital-8tb-black/p/N82E16820250270) RAID0 | 14.6 TB fast scratch for GGUF models |
-| Archive | [WD Ultrastar DC HC550 16 TB](https://www.newegg.com/wd-0f38462-16tb/p/N82E16822234479) | Cold storage for old runs |
+| Part          | Choice                                                                                                                             | Why                                                       |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| CPU           | [AMD Ryzen 7 9800X3D](https://www.amazon.com/dp/B0DKFMSMYK)                                                                        | Originally for HFT — best single-thread AM5, 3D V-Cache   |
+| Motherboard   | [ASRock X870E Taichi](https://www.amazon.com/dp/B0DFP2Q3TM)                                                                        | VRM headroom for overclocking, strong I/O, 4x M.2         |
+| GPU           | [AMD Radeon AI PRO R9700](https://www.newegg.com/asrock-creator-r9700-ct-radeon-ai-pro-r9700-32gb-graphics-card/p/N82E16814930143) | 32 GB VRAM, RDNA4, 576 GB/s — the reason ZINC exists      |
+| Memory        | [G.SKILL Trident Z5 Neo 96 GB DDR5-6000 CL26](https://www.amazon.com/dp/B0F79YGMX1)                                                | Overclocks well, tight timings, real workstation capacity |
+| Case          | [ASUS ProArt PA602](https://www.amazon.com/dp/B0CPP3DWLX)                                                                          | Big airflow, 420 mm rad support, GPU clearance            |
+| CPU cooler    | [ASUS ProArt LC 420](https://www.amazon.com/dp/B0CXLJ2N5B)                                                                         | Oversized AIO for sustained loads                         |
+| Radiator fans | [3x Noctua NF-A14 industrialPPC-2000](https://www.amazon.com/dp/B00KESSUDW)                                                        | High static pressure through the radiator                 |
+| Case fans     | [Noctua NF-A20 chromax](https://www.amazon.com/dp/B07ZP46RNR) + [NF-A12x25 chromax](https://www.amazon.com/dp/B09C6DQDNT)          | Quiet high-airflow replacements                           |
+| PSU           | [Corsair HX1000i](https://www.amazon.com/dp/B0BZ2CRW8H)                                                                            | Clean power, headroom                                     |
+| OS drive      | [WD_BLACK SN8100 2 TB](https://www.amazon.com/dp/B0F3BD1W6R)                                                                       | Fast boot + builds                                        |
+| Model storage | [2x WD_BLACK SN850X 8 TB](https://www.newegg.com/western-digital-8tb-black/p/N82E16820250270) RAID0                                | 14.6 TB fast scratch for GGUF models                      |
+| Archive       | [WD Ultrastar DC HC550 16 TB](https://www.newegg.com/wd-0f38462-16tb/p/N82E16822234479)                                            | Cold storage for old runs                                 |
 
 ## What it does now
 

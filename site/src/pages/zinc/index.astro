@@ -4,8 +4,10 @@ import Breadcrumbs from '../../components/Breadcrumbs.astro';
 import TerminalWindow from '../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import benchmarkData from '../../data/zinc-performance.json';
+import pinnedZigVersion from '../../../../.zig-version?raw';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const compilerVersion = pinnedZigVersion.trim();
 const breadcrumbItems = [{ name: 'Home', href: '/' }, { name: 'ZINC' }];
 const target = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
@@ -61,7 +63,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
         <a href="/zinc/docs/getting-started/" class="button primary">Get started <span aria-hidden="true">→</span></a>
         <a href="https://github.com/zolotukhin/zinc" class="button">View on GitHub <span aria-hidden="true">↗</span></a>
       </div>
-      <p class="build-note">One native binary · Zig 0.17 · MIT licensed</p>
+      <p class="build-note">One native binary · Zig {compilerVersion} · MIT licensed</p>
     </div>
     <div class="use-cases" aria-label="Ways to use ZINC">
       <a href="/zinc/docs/getting-started/#start-the-chat-ui">
@@ -87,7 +89,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
       <p>Follow the <a href="/zinc/docs/getting-started/">setup guide</a> to install the prerequisites for your GPU, then build and open a chat.</p>
-      <p>The default build selects Vulkan on Linux and Metal on macOS. Each binary contains one backend. The wrapper downloads and verifies Zig 0.17.0 when needed.</p>
+      <p>The default build selects Vulkan on Linux and Metal on macOS. Each binary contains one backend. The wrapper downloads and verifies Zig {compilerVersion} when needed.</p>
       <p>Prefer a download? <a href="https://github.com/zolotukhin/zinc/releases/tag/v0.1.0">Linux 0.1.0 is available</a> for Vulkan and ROCm. See <a href="/zinc/docs/binary-releases/">downloads, requirements and installation</a>.</p>
       <p class="setup-note">AMD with Vulkan: set <code>RADV_PERFTEST=coop_matrix</code> before the GPU check or chat. ROCm has its own <a href="/zinc/docs/rocm/">build instructions</a>.</p>
     </div>
@@ -120,23 +122,43 @@ cd zinc
     </div>
   </section>
 
-  <section class="page-section quickstart" aria-labelledby="harness-heading">
+  <section class="page-section coding-harnesses" aria-labelledby="harness-heading" data-coding-harnesses>
     <div class="section-copy">
       <p class="eyebrow">Coding harnesses</p>
-      <h2 id="harness-heading">Use OpenCode with your model.</h2>
-      <p>Connect a running ZINC server, check streaming tool calls, and run coding tasks with project tests between editing rounds.</p>
-      <p>The setup script creates a portable project config. Your endpoints and keys stay in runtime environment variables.</p>
-      <p><a class="text-link" href="/zinc/docs/opencode/">OpenCode setup and testing guide →</a></p>
-      <a class="text-link" href="/zinc/harnesses/setup-opencode.mjs" download="setup-opencode.mjs">Download the setup script ↓</a>
+      <h2 id="harness-heading">Use OpenClaw or OpenCode.</h2>
+      <p>Let a coding agent work in your project with a model served by ZINC. Start the server on your GPU machine, then run either client in a second terminal.</p>
+      <p>Stop the earlier chat server before starting this one. This Vulkan checkout example gives Qwen 3.5 9B a 16K context; follow the <a href="/zinc/docs/rocm/">ROCm guide</a> for that backend's model paths and device selection.</p>
     </div>
-    <div class="terminal-wrap">
-      <TerminalWindow title="Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.0.21
+    <div class="terminal-wrap" data-harness-server>
+      <TerminalWindow title="1. Start a model server" density="compact" code={`./zig-out/bin/zinc --model-id qwen35-9b-q4k-m \\
+  -c 16384 --parallel 1 --port 9090`} />
+      <p class="caption">The examples below run from the ZINC checkout and connect to <code>http://127.0.0.1:9090/v1</code>. Point <code>--project</code> at an existing project you want the agent to edit. For a remote GPU server, use the endpoint instructions in your client's guide.</p>
+    </div>
+    <div class="harness-grid">
+      <article class="harness-client terminal-wrap" aria-labelledby="openclaw-heading" data-coding-harness="openclaw">
+        <h3 id="openclaw-heading">OpenClaw</h3>
+        <p class="harness-intro">One-shot coding tasks with a dedicated project config. Requires Node.js 24.16+ in the 24.x line, or 26.1+.</p>
+        <TerminalWindow title="2. Connect OpenClaw" density="compact" code={`npm install --global openclaw@2026.11.1
+node tools/setup_openclaw.mjs setup --project ../my-project
+node tools/setup_openclaw.mjs check --project ../my-project
+node tools/setup_openclaw.mjs run --project ../my-project -- \\
+  "Fix the failing tests and run them."`} />
+        <p class="caption"><code>check</code> validates the config and server; it does not prove coding ability. Review the resulting diff and independently run your project's tests after each task.</p>
+        <p class="harness-links"><a href="/zinc/docs/openclaw/">OpenClaw setup guide →</a> <a href="/zinc/harnesses/setup-openclaw.mjs" download="setup-openclaw.mjs">Download helper ↓</a></p>
+        <p class="caption">Six larger models passed bounded file-and-test tasks on AMD Vulkan and ROCm. The small starter model did not qualify. See <a href="/zinc/docs/openclaw-amd-validation/">model results and limits</a>; this report does not qualify Intel or Metal.</p>
+      </article>
+      <article class="harness-client terminal-wrap" aria-labelledby="opencode-heading" data-coding-harness="opencode">
+        <h3 id="opencode-heading">OpenCode</h3>
+        <p class="harness-intro">Coding rounds with streaming tool calls and an independent project verification command. Requires Bun 1.4.4 or newer.</p>
+        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.0.21
 bun tools/setup_opencode.mjs --project ../my-project \\
   --model qwen35-9b-q4k-m --context auto --output 2048 --steps 16
 bun tools/setup_opencode.mjs check --project ../my-project
 bun tools/setup_opencode.mjs run --project ../my-project \\
   --auto --verify 'bun test' -- "Fix the failing tests and run them."`} />
-      <p class="caption">Run from the ZINC checkout with a Qwen 3.5 9B server at <code>-c 16384 --parallel 1</code>. Setup discovers that capacity; it does not allocate more GPU memory. Replace <code>bun test</code> with your project's acceptance command.</p>
+        <p class="caption">Setup discovers the server's context; it does not allocate more GPU memory. Replace <code>bun test</code> with your project's acceptance command and review the diff after each run.</p>
+        <p class="harness-links"><a href="/zinc/docs/opencode/">OpenCode setup guide →</a> <a href="/zinc/harnesses/setup-opencode.mjs" download="setup-opencode.mjs">Download helper ↓</a></p>
+      </article>
     </div>
   </section>
 
@@ -165,7 +187,8 @@ bun tools/setup_opencode.mjs run --project ../my-project \\
     <nav aria-label="More ZINC resources">
       <a href="/zinc/docs/">Browse documentation <span aria-hidden="true">→</span></a>
       <a href="/zinc/docs/api/">Connect an API client <span aria-hidden="true">→</span></a>
-      <a href="/zinc/docs/opencode/">Set up a coding harness <span aria-hidden="true">→</span></a>
+      <a href="/zinc/docs/openclaw/">Set up OpenClaw <span aria-hidden="true">→</span></a>
+      <a href="/zinc/docs/opencode/">Set up OpenCode <span aria-hidden="true">→</span></a>
       <a href="/zinc/docs/development/">Build and contribute <span aria-hidden="true">→</span></a>
       <a href="https://discord.gg/QRUgWH2aGV">Join the community <span aria-hidden="true">↗</span></a>
     </nav>
@@ -201,6 +224,12 @@ bun tools/setup_opencode.mjs run --project ../my-project \\
   .terminal-wrap :global(.terminal-window) { --terminal-shadow: none; --terminal-radius: 8px; }
   .caption { margin: 0.8rem 0 0; color: var(--color-text-muted); font-size: 0.71rem; line-height: 1.6; }
   .text-link { display: inline-block; font-size: 0.82rem; }
+  .coding-harnesses { row-gap: 2rem; }
+  .harness-grid { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2rem; }
+  .harness-client { padding-top: 1.5rem; border-top: 1px solid var(--color-border); }
+  .harness-client h3 { margin: 0 0 0.6rem; font-size: 1.1rem; }
+  .harness-intro { color: var(--color-text-muted); font-size: 0.82rem; }
+  .harness-links { display: flex; flex-wrap: wrap; gap: 0.6rem 1.5rem; margin: 1rem 0 0; font-size: 0.8rem; }
   .platforms { border-top: 1px solid var(--color-border); }
   .platform { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 1.1rem 0; border-bottom: 1px solid var(--color-border); color: var(--color-text); }
   .platform:hover { text-decoration: none; }
@@ -230,6 +259,7 @@ bun tools/setup_opencode.mjs run --project ../my-project \\
     .hero h1 { max-width: 30rem; }
     .use-cases a { padding: 1.2rem 0; }
     .page-section { padding: 2.5rem 0; gap: 1.5rem; }
+    .harness-grid { grid-template-columns: 1fr; }
     .section-copy { max-width: 35rem; }
     .next-steps nav { display: grid; grid-template-columns: 1fr 1fr; }
   }

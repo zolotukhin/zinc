@@ -1,6 +1,6 @@
 ---
-title: "Why RDNA4 prefill wants a 32-column DMMV before it wants a GEMM"
-date: "2026-04-22"
+title: 'Why RDNA4 prefill wants a 32-column DMMV before it wants a GEMM'
+date: '2026-04-22'
 tags:
   - zinc
   - rdna4
@@ -26,15 +26,15 @@ keywords:
   - local LLM batched prefill
   - ZINC RDNA4 prefill plan
 faqs:
-  - question: "What is a column-batched DMMV and how does it differ from a normal DMMV?"
-    answer: "A DMMV is a dequantize-and-multiply matrix-vector kernel. It reads one quantized weight block, decodes it, multiplies it by one activation vector, and writes one output element per thread. A column-batched DMMV reads the same weight block once and multiplies it by N different activation vectors from N consecutive prompt tokens, accumulating N output elements per thread. The inner arithmetic is identical. The difference is that the weight block is paid for once instead of N times."
-  - question: "Why pick 32 as the column count?"
-    answer: "Because the per-column accumulators live in VGPRs, and the register file on an RDNA4 SIMD has to host enough waves to keep the CU occupied. At `MAX_COLS = 32` the shader still compiles to a register footprint that lets the per-token decode path, which shares this pipeline with `num_cols = 1`, hit around 78 tok/s on Qwen3-8B. Raising it to 64 regresses that path to 59 tok/s because occupancy drops. Without a second pipeline variant, 32 is the right shared ceiling."
+  - question: 'What is a column-batched DMMV and how does it differ from a normal DMMV?'
+    answer: 'A DMMV is a dequantize-and-multiply matrix-vector kernel. It reads one quantized weight block, decodes it, multiplies it by one activation vector, and writes one output element per thread. A column-batched DMMV reads the same weight block once and multiplies it by N different activation vectors from N consecutive prompt tokens, accumulating N output elements per thread. The inner arithmetic is identical. The difference is that the weight block is paid for once instead of N times.'
+  - question: 'Why pick 32 as the column count?'
+    answer: 'Because the per-column accumulators live in VGPRs, and the register file on an RDNA4 SIMD has to host enough waves to keep the CU occupied. At `MAX_COLS = 32` the shader still compiles to a register footprint that lets the per-token decode path, which shares this pipeline with `num_cols = 1`, hit around 78 tok/s on Qwen3-8B. Raising it to 64 regresses that path to 59 tok/s because occupancy drops. Without a second pipeline variant, 32 is the right shared ceiling.'
   - question: "Why not just ship a proper tiled GEMM like llama.cpp's `mul_mm.comp`?"
-    answer: "Eventually, yes. A tiled GEMM with cooperative-matrix tiles is the right asymptotic shape once N grows past a few hundred columns. The reason it is not the first move is that the 32-column DMMV closes roughly 96 percent of the weight-read waste at a fraction of the engineering cost, does not require a coop-matrix path for every quant type, and does not touch the per-token decode kernel that already works. GEMM wins the last stretch. DMMV batching wins the first, larger stretch."
-  - question: "Does this matter on dense models or only MoE?"
-    answer: "Dense models feel the gap the hardest, because every per-token prefill dispatch reads the full Q, K, V, O, gate, up, and down projections out of VRAM. A 103-token Qwen3-8B prompt re-reads 755 GiB of weights. The same prompt with a 32-column DMMV reads 30 GiB. MoE adds routing and expert-cohort batching on top of the same underlying shape, but the dense case is where the argument is cleanest."
-  - question: "What stops a local inference engine from simply adopting this?"
+    answer: 'Eventually, yes. A tiled GEMM with cooperative-matrix tiles is the right asymptotic shape once N grows past a few hundred columns. The reason it is not the first move is that the 32-column DMMV closes roughly 96 percent of the weight-read waste at a fraction of the engineering cost, does not require a coop-matrix path for every quant type, and does not touch the per-token decode kernel that already works. GEMM wins the last stretch. DMMV batching wins the first, larger stretch.'
+  - question: 'Does this matter on dense models or only MoE?'
+    answer: 'Dense models feel the gap the hardest, because every per-token prefill dispatch reads the full Q, K, V, O, gate, up, and down projections out of VRAM. A 103-token Qwen3-8B prompt re-reads 755 GiB of weights. The same prompt with a 32-column DMMV reads 30 GiB. MoE adds routing and expert-cohort batching on top of the same underlying shape, but the dense case is where the argument is cleanest.'
+  - question: 'What stops a local inference engine from simply adopting this?'
     answer: "Nothing structural. The shader exists in ZINC's tree as `dmmv_q4k_batch.comp`, and llama.cpp ships its own column-batched variants behind `NUM_COLS` as a specialization constant. What is missing is the prefill path actually calling into the batched shader with the right chunk size, scratch-buffer lifecycle, and pipeline-state variants for each `num_cols` that the register allocator needs to see. That plumbing is a week of work."
 excerpt: "ZINC's per-token RDNA4 prefill on Qwen3-8B runs at 59 tok/s while llama.cpp's Vulkan backend hits 662 tok/s on the same card. The first instinct is to ship a tiled matmul kernel. The real first move is smaller: a column-batched DMMV that reads each weight once and multiplies it by up to 32 prompt tokens at a time. Here is why that shape, not a GEMM, is where an RDNA4 prefill port should start."
 ---
@@ -96,7 +96,7 @@ for (uint e = 0u; e < 32u; e++) {
 
 The math is the same DMMV that decode has always used. The difference is the `for (uint c = 0u; c < num_cols; c++)` inner loop and the per-column accumulator array `sums[MAX_COLS]`. Each weight block is fetched, decoded, and held in per-thread registers long enough to feed `num_cols` multiply-adds before the next block is read. Weight bandwidth drops by `num_cols`. Arithmetic grows by the same factor, which is exactly what a GPU wants to hear.
 
-![AMD Radeon AI PRO R9700 from behind, workstation-plain. The GPU this post is arguing at.](/blog/gpu_3.jpg)
+![AMD Radeon AI PRO R9700, the RDNA4 card used for these measurements.](/blog/gpu_2.jpg)
 
 ## Why 32, and why RDNA4 makes that choice for you
 

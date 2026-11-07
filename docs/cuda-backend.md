@@ -63,15 +63,15 @@ directly. **Metal is the reference to mirror** (raw-pointer binds like CUDA, and
 reference for one thing Metal doesn't need: explicit H2D/D2H staging (CUDA has no unified
 memory like Apple). Mirror `src/metal/` → `src/cuda/`:
 
-| Metal file | CUDA equivalent | Responsibility |
-|---|---|---|
-| `metal/shim.h` | `cuda/cuda_shim.h` | C ABI contract (the backend boundary) |
-| `metal/shim.m` (ObjC) | `cuda/cuda_shim.c` | Driver/Runtime API impl (`cuCtx*`, `cudaMalloc`, `cuMemcpy*`, NVRTC, `cuLaunchKernel`, streams/events) |
-| `metal/c.zig` | `cuda/c.zig` | shared `@cImport("cuda_shim.h")` |
-| `metal/device.zig` | `cuda/device.zig` | `CudaDevice.init/deinit` + caps (SM count, cc, vram) |
-| `metal/buffer.zig` | `cuda/buffer.zig` | `cudaMalloc` device buffers + pinned-host staging + `upload`/`download` |
-| `metal/pipeline.zig` | `cuda/pipeline.zig` | NVRTC compile source→PTX→`CUfunction` (or cubin load) |
-| `metal/command.zig` | `cuda/command.zig` | `CudaCommand` over a `CUstream`: `dispatch`=`cuLaunchKernel`; `commitAndWait`; async `commitAsync`/`wait`/`releaseCompleted` over `CUevent` |
+| Metal file            | CUDA equivalent     | Responsibility                                                                                                                              |
+| --------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `metal/shim.h`        | `cuda/cuda_shim.h`  | C ABI contract (the backend boundary)                                                                                                       |
+| `metal/shim.m` (ObjC) | `cuda/cuda_shim.c`  | Driver/Runtime API impl (`cuCtx*`, `cudaMalloc`, `cuMemcpy*`, NVRTC, `cuLaunchKernel`, streams/events)                                      |
+| `metal/c.zig`         | `cuda/c.zig`        | shared `@cImport("cuda_shim.h")`                                                                                                            |
+| `metal/device.zig`    | `cuda/device.zig`   | `CudaDevice.init/deinit` + caps (SM count, cc, vram)                                                                                        |
+| `metal/buffer.zig`    | `cuda/buffer.zig`   | `cudaMalloc` device buffers + pinned-host staging + `upload`/`download`                                                                     |
+| `metal/pipeline.zig`  | `cuda/pipeline.zig` | NVRTC compile source→PTX→`CUfunction` (or cubin load)                                                                                       |
+| `metal/command.zig`   | `cuda/command.zig`  | `CudaCommand` over a `CUstream`: `dispatch`=`cuLaunchKernel`; `commitAndWait`; async `commitAsync`/`wait`/`releaseCompleted` over `CUevent` |
 
 Required method surface (from `metal/command.zig`, `buffer.zig`, `pipeline.zig`, `device.zig`):
 
@@ -97,17 +97,17 @@ The Vulkan backend is **110 `.comp` shaders** — the authoritative spec for the
 set. Categories: GEMM/dequant ~58, MoE routing 10, SSM 9, Norm/act 13, Attention 4, Quantize
 4, Elementwise 6, RoPE 2, KV 2. Mapping cheat-sheet (the whole port is variations of this):
 
-| Vulkan / GLSL | CUDA |
-|---|---|
-| `dotPacked4x8AccSatEXT` (int8 dot) | `__dp4a` |
-| wave64 workgroup (`local_size_x=64`) | warp32 block; use the **existing wave32 fallback path** (cross-subgroup shared-mem merge) as the template |
-| `subgroupAdd` / `subgroupClusteredAdd` | `__shfl_down_sync` reductions / `__reduce_add_sync` |
-| `subgroupMax` / `subgroupShuffle` / `subgroupBroadcastFirst` | `__reduce_max_sync` / `__shfl_sync` |
-| `subgroupBallot` / `subgroupElect` | `__ballot_sync` / `__activemask` |
-| `vec4`/`uvec4` SSBO (128-bit loads) | `float4`/`int4` |
-| push constants | kernel params or `__constant__` block |
-| specialization constants (K=2048/4096/12288, NUM_ROWS) | template params or runtime-tuned variants |
-| `vkCmdDispatchIndirect` | `cudaLaunchKernel` host indirection (or device launch) |
+| Vulkan / GLSL                                                | CUDA                                                                                                      |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `dotPacked4x8AccSatEXT` (int8 dot)                           | `__dp4a`                                                                                                  |
+| wave64 workgroup (`local_size_x=64`)                         | warp32 block; use the **existing wave32 fallback path** (cross-subgroup shared-mem merge) as the template |
+| `subgroupAdd` / `subgroupClusteredAdd`                       | `__shfl_down_sync` reductions / `__reduce_add_sync`                                                       |
+| `subgroupMax` / `subgroupShuffle` / `subgroupBroadcastFirst` | `__reduce_max_sync` / `__shfl_sync`                                                                       |
+| `subgroupBallot` / `subgroupElect`                           | `__ballot_sync` / `__activemask`                                                                          |
+| `vec4`/`uvec4` SSBO (128-bit loads)                          | `float4`/`int4`                                                                                           |
+| push constants                                               | kernel params or `__constant__` block                                                                     |
+| specialization constants (K=2048/4096/12288, NUM_ROWS)       | template params or runtime-tuned variants                                                                 |
+| `vkCmdDispatchIndirect`                                      | `cudaLaunchKernel` host indirection (or device launch)                                                    |
 
 GGML quant block layouts (Q4_K/Q5_K/Q6_K 256-elem super-blocks; Q8_0/Q5_1/Q5_0 32-elem;
 MXFP4 32-elem) are identical bit-for-bit, so the in-shader dequant unpack ports verbatim.
@@ -139,10 +139,10 @@ Milestones:
 - **M0 — toolchain (DONE).** `nvcc` + `__dp4a` + NVRTC/cuBLAS validated on the box.
 - **M0.5 — primitive layer (DONE, validated on the 5090 sm_120).** Both the C core
   (`cuda_shim.h/.c`) and the **Zig wrappers** (`src/cuda/{c,device,buffer,pipeline,command}.zig`,
-  mirroring `src/metal/*`) are written and pass via `smoke.c` *and* `smoke.zig`: device select
+  mirroring `src/metal/*`) are written and pass via `smoke.c` _and_ `smoke.zig`: device select
   (picks the 5090), staged buffers + H2D/D2H, NVRTC runtime compile, the buffers+push dispatch
   ABI, sync + async (`commitAsync`/`wait`) commit, and `__dp4a`. Use the pinned
-  Zig 0.17.0 wrapper from the repository root:
+  Zig 0.17.1 wrapper from the repository root:
   `./scripts/zig.sh build cuda-smoke -Dbackend=cuda -Dshaders=false`.
   This target builds and runs the smoke test on the designated NVIDIA host.
   For a host-only compiler check without a GPU, use
@@ -151,13 +151,13 @@ Milestones:
 - **M1 — single correct token.** `forward_cuda.zig` minimal decode for one qwen36-35b token.
   ~14 kernels (unfused reference variants), in forward order:
   1. embedding dequant (host gather) → 2. `rms_norm_mul` → 3. one templated **DMMV** covering
-  Q4_K/Q5_K/Q6_K/Q8_0/F32 + accumulate mode (Q/K/V/O, SSM in/out, router, LM head) →
-  4. attention: qk per-head rmsnorm + RoPE (partial/IMRoPE) + `kv_cache_write` (paged) +
-  `flash_attn` (or naive softmax(QKᵀ)V for 1 query) → 5. SSM: `ssm_conv1d` + `ssm_delta_net`
-  (unfused scalar) + `ssm_gated_norm` → 6. MoE: `softmax_topk` + `dmmv_q4k_moe` (gate/up) +
-  `swiglu` + `dmmv_q5k_moe` (down) + `moe_weighted_acc` + shared expert (Q8_0 + `sigmoid_scale_acc`)
-  → 7. `scale_accumulate` residuals → 8. `argmax`.
-  Validate token-for-token against the Vulkan/Metal reference on the same prompt.
+     Q4_K/Q5_K/Q6_K/Q8_0/F32 + accumulate mode (Q/K/V/O, SSM in/out, router, LM head) →
+  2. attention: qk per-head rmsnorm + RoPE (partial/IMRoPE) + `kv_cache_write` (paged) +
+     `flash_attn` (or naive softmax(QKᵀ)V for 1 query) → 5. SSM: `ssm_conv1d` + `ssm_delta_net`
+     (unfused scalar) + `ssm_gated_norm` → 6. MoE: `softmax_topk` + `dmmv_q4k_moe` (gate/up) +
+     `swiglu` + `dmmv_q5k_moe` (down) + `moe_weighted_acc` + shared expert (Q8_0 + `sigmoid_scale_acc`)
+     → 7. `scale_accumulate` residuals → 8. `argmax`.
+     Validate token-for-token against the Vulkan/Metal reference on the same prompt.
   - **Kernel library in progress** — `src/shaders/cuda/kernels.cu`, each validated numerically
     against an independent CPU reference on the 5090 via `src/cuda/kernels_test.c` (run from
     `~/cuda_proto`). Done (all `max_rel_err ≤ ~1e-5`): `rms_norm`, `dmmv_q4k` (canonical GGML
@@ -171,7 +171,7 @@ Milestones:
     exact-state + `ssm_gated_norm`) — **ALL 18 DONE** (added `kv_cache_write`, `naive_attention` GQA+sinks, and
     `ssm_delta_net` — the gated delta-net selective scan, validated multi-token incl. final
     recurrent state at 7.6e-5). **The M1 kernel library is COMPLETE.** (MoE-indexed dmmv variants
-    + flash/paged attention are M2/M3 perf items.)
+    - flash/paged attention are M2/M3 perf items.)
 - **M2 — full model, coherent generation.** Paged KV pool, SSM conv/recurrent state ring
   buffers (conv `(d_conv-1)*8192` f32/layer; recurrent `dt_rank*128*128` f32/layer), all quant
   formats, prompt prefill, chat template, server path (`model_manager_cuda.zig`). Correctness
@@ -202,7 +202,7 @@ Milestones:
 - **Repo on the box:** ZINC is public (`https://github.com/zolotukhin/zinc`) — clone it
   read-only over HTTPS into `~/workspace`, no GitHub auth or token needed. (A token is only
   needed to push changes back from the box.)
-- **Zig 0.17.0:** use `./scripts/zig.sh` from the repository root. It downloads
+- **Zig 0.17.1:** use `./scripts/zig.sh` from the repository root. It downloads
   and verifies the pinned release when needed, without replacing the system compiler.
 - **Device order:** set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (cuda:0=5090, cuda:1=4090) or select by
   cc/SM count at runtime; non-login SSH does not inherit it.
@@ -210,7 +210,7 @@ Milestones:
   5090's 32 GB, but host-side staging/mmap must stay under 24 GB (stream weights to device).
 - **wave64→warp32 numerics:** reductions change width; validate each ported kernel against the
   reference, not just compile.
-- **zinc_rt `t_cuda` Tier** (`zinc_rt/engine.zig:14-21`) is a *different* integration (direct
+- **zinc_rt `t_cuda` Tier** (`zinc_rt/engine.zig:14-21`) is a _different_ integration (direct
   submission, no CUDA driver) — out of scope; this plan uses the cudart/Driver API path.
 
 ## 8. Reference index

@@ -128,12 +128,12 @@ full 32-token columns instead of padding the 2971-token shape. Commit
 Measured on the RDNA node, Qwen3.6-35B-A3B UD Q4_K_XL, same prompts and
 same output tokens:
 
-| Shape | Base | Candidate | Result |
-|---|---:|---:|---:|
-| 111p, no profile avg of 3 | 556.7 tok/s | 626.9 tok/s | +12.6% |
-| 111p, profile | 393.6 tok/s | 631.0 tok/s | SSM 104.5 -> 51.1 ms |
-| 2971p, no profile avg of 2 | 1145.9 tok/s | 1166.6 tok/s | +1.8% |
-| 2971p, profile | 813.8 tok/s | 873.2 tok/s | output `{17}` unchanged |
+| Shape                      |         Base |    Candidate |                  Result |
+| -------------------------- | -----------: | -----------: | ----------------------: |
+| 111p, no profile avg of 3  |  556.7 tok/s |  626.9 tok/s |                  +12.6% |
+| 111p, profile              |  393.6 tok/s |  631.0 tok/s |    SSM 104.5 -> 51.1 ms |
+| 2971p, no profile avg of 2 | 1145.9 tok/s | 1166.6 tok/s |                   +1.8% |
+| 2971p, profile             |  813.8 tok/s |  873.2 tok/s | output `{17}` unchanged |
 
 Rejected follow-up: batching the alpha/beta Q8_0 projections through the
 same DP4a scratch was noisy and not worth keeping. Against the kept
@@ -156,11 +156,11 @@ the CPU Q6_K dequant reference at `M=2048, K=768`. The validator now uses a
 But enabling it inside the Qwen A3B grouped path changed the answer-bearing
 diagnostic prompt:
 
-| Variant | Prefill | Mask | Output |
-|---|---:|---|---|
-| Q6_K grouped layers 34+38 | 540.9 tok/s | fallback `0x2` | wrong (`the reference...`) |
-| Q6_K grouped layer 34 only (`ZINC_MOE_Q6K_COLS=1`) | 482.8 tok/s | fallback `0x4000000002` | wrong (`the reference...`) |
-| Q6_K columns default-off | 441.5 tok/s profile sample | fallback `0x4400000002` | correct (`the capital of France.`) |
+| Variant                                            |                    Prefill | Mask                    | Output                             |
+| -------------------------------------------------- | -------------------------: | ----------------------- | ---------------------------------- |
+| Q6_K grouped layers 34+38                          |                540.9 tok/s | fallback `0x2`          | wrong (`the reference...`)         |
+| Q6_K grouped layer 34 only (`ZINC_MOE_Q6K_COLS=1`) |                482.8 tok/s | fallback `0x4000000002` | wrong (`the reference...`)         |
+| Q6_K columns default-off                           | 441.5 tok/s profile sample | fallback `0x4400000002` | correct (`the capital of France.`) |
 
 Keep `dmmv_q6k_moe_cols.comp` and the validator as infrastructure, but leave
 the in-model Q6_K columns path opt-in via `ZINC_MOE_Q6K_COLS=1` until a
@@ -218,10 +218,10 @@ push constant to the Qwen/Gemma route-packed gate/up shaders and pass
 
 RDNA canonical 154-token prompt after the fix:
 
-| Variant | Prefill | Grouped MoE | Output |
-|---|---:|---:|---|
-| default Q4/Q5 grouped | `525.8 tok/s` | 36 layers | coherent `Paris.` continuation |
-| `ZINC_MOE_Q6K_COLS=1` | `503.3 tok/s` | 37 layers | same coherent `Paris.` continuation |
+| Variant               |       Prefill | Grouped MoE | Output                              |
+| --------------------- | ------------: | ----------: | ----------------------------------- |
+| default Q4/Q5 grouped | `525.8 tok/s` |   36 layers | coherent `Paris.` continuation      |
+| `ZINC_MOE_Q6K_COLS=1` | `503.3 tok/s` |   37 layers | same coherent `Paris.` continuation |
 
 The previous suffix Q6 diagnostic remains useful: sampled Q6_K routed-down
 matched CPU dequant at `max_abs=2.38e-7`, so the shader was clean. With the
@@ -285,9 +285,9 @@ dispatches back-to-back behind `ZINC_MOE_SINGLETON_TAIL_SPLIT=1`. It built on
 RDNA and preserved output tokens on the no-profile A/B, but it failed the
 primary 154-token benchmark:
 
-| Mode | Samples | Median |
-|---|---|---:|
-| default | 498.20, 687.59, 506.26, 694.90, 597.58, 472.02 tok/s | 551.92 tok/s |
+| Mode                 | Samples                                              |       Median |
+| -------------------- | ---------------------------------------------------- | -----------: |
+| default              | 498.20, 687.59, 506.26, 694.90, 597.58, 472.02 tok/s | 551.92 tok/s |
 | singleton-tail split | 668.37, 559.82, 473.05, 477.99, 708.08, 497.51 tok/s | 528.67 tok/s |
 
 The profiled off/on/off/on run was similarly too noisy to keep: one flag-on
@@ -357,9 +357,9 @@ unprofiled 154-token controller rejected it. Plain BN=64 samples were noisy
 and the adjusted full-64-column body + BN=32 ragged-tail variant regressed the
 fresh interleaved median:
 
-| Mode | Samples | Median |
-|---|---|---:|
-| default BN=32 | 486.74, 746.77, 491.64, 488.98, 481.89 tok/s | 488.98 tok/s |
+| Mode                    | Samples                                      |       Median |
+| ----------------------- | -------------------------------------------- | -----------: |
+| default BN=32           | 486.74, 746.77, 491.64, 488.98, 481.89 tok/s | 488.98 tok/s |
 | BN=64 body + BN=32 tail | 798.00, 552.41, 451.03, 453.07, 462.37 tok/s | 462.37 tok/s |
 
 Output text stayed unchanged (`some of the most common acronyms`), so this was
@@ -400,10 +400,10 @@ look tempting (`max_abs` mostly below `4e-3`), but the measured path was slower:
 profile sample `422.39 tok/s`, MoE down `32.5 ms` versus the normal `~27.7 ms`.
 No-profile paired samples were worse and changed the continuation:
 
-| Mode | Samples | Median | Output |
-|---|---|---:|---|
-| default | `464.14, 715.07, 724.78, 601.60, 509.15` tok/s | `601.60` tok/s | `some of the most common acronyms` |
-| Q8_1 down | `426.49, 440.71, 420.80, 434.01, 437.98` tok/s | `434.01` tok/s | `, the reference packet.` |
+| Mode      | Samples                                        |         Median | Output                             |
+| --------- | ---------------------------------------------- | -------------: | ---------------------------------- |
+| default   | `464.14, 715.07, 724.78, 601.60, 509.15` tok/s | `601.60` tok/s | `some of the most common acronyms` |
+| Q8_1 down | `426.49, 440.71, 420.80, 434.01, 437.98` tok/s | `434.01` tok/s | `, the reference packet.`          |
 
 Rejected follow-up: padding the A3B Q8_0 projection DP4a tail from 154 to 160
 tokens is not correctness-safe. The combined probe removed the f32 ragged tail
@@ -411,11 +411,11 @@ for both SSM qkv/z and SSM-out, which can make profile sub-buckets look much
 better, but it changed answer-bearing continuations. Splitting the probe showed
 both halves are unsafe on the same prompt:
 
-| `ZINC_A3B_Q8_PROJ_PAD_TAIL` | Samples | Output |
-|---|---|---|
-| `qkv_z` | `747.83, 610.82` tok/s | `us the reference, the reference the reference` |
-| `ssm_out` | `528.35, 515.18` tok/s | `be the the the the the the the` |
-| `all` | `554.73, 648.26` tok/s | `particular attention to the fact that the user` |
+| `ZINC_A3B_Q8_PROJ_PAD_TAIL` | Samples                | Output                                           |
+| --------------------------- | ---------------------- | ------------------------------------------------ |
+| `qkv_z`                     | `747.83, 610.82` tok/s | `us the reference, the reference the reference`  |
+| `ssm_out`                   | `528.35, 515.18` tok/s | `be the the the the the the the`                 |
+| `all`                       | `554.73, 648.26` tok/s | `particular attention to the fact that the user` |
 
 The default output in the same sweep stayed `some of the most common acronyms`
 at `474.85, 709.02` tok/s. Code was reverted. Keep the real-column policy in
@@ -459,25 +459,25 @@ path is now layer-major A3B prefill:
 
 Current refreshed phase budget at the plateau:
 
-| Bucket | ms |
-|---|---:|
-| SSM | 83.8 |
-| MoE | 73.9 |
-| attention | 58.3 |
+| Bucket        |   ms |
+| ------------- | ---: |
+| SSM           | 83.8 |
+| MoE           | 73.9 |
+| attention     | 58.3 |
 | shared expert | 14.9 |
-| tail | 1.0 |
+| tail          |  1.0 |
 
 Named sub-buckets:
 
-| Sub-bucket | ms |
-|---|---:|
-| SSM out | 30.3 |
-| MoE gate_up | 29.1 |
-| SSM qkv_z | 25.9 |
-| MoE down | 25.6 |
-| SSM conv | 17.8 |
+| Sub-bucket     |   ms |
+| -------------- | ---: |
+| SSM out        | 30.3 |
+| MoE gate_up    | 29.1 |
+| SSM qkv_z      | 25.9 |
+| MoE down       | 25.6 |
+| SSM conv       | 17.8 |
 | SSM gated norm | 17.1 |
-| SSM delta | 13.1 |
+| SSM delta      | 13.1 |
 
 The buckets are close now. Do not read "SSM is largest" as permission
 to try another broad SSM micro-variant. Pick a named sub-bucket with
@@ -492,13 +492,13 @@ scenario reported `590.27 tok/s` under profiling overhead, with path coverage
 
 Fresh named buckets for this longer scenario:
 
-| Bucket | ms |
-|---|---:|
-| MoE | 168.6 |
-| SSM | 138.2 |
-| attention | 110.5 |
-| shared expert | 8.1 |
-| tail | 1.0 |
+| Bucket        |    ms |
+| ------------- | ----: |
+| MoE           | 168.6 |
+| SSM           | 138.2 |
+| attention     | 110.5 |
+| shared expert |   8.1 |
+| tail          |   1.0 |
 
 MoE sub-buckets: router `11.8 ms`, topk `1.2 ms`, gate_up `72.7 ms`,
 swiglu `2.9 ms`, down `57.1 ms`, weighted_acc `5.5 ms`.
@@ -518,15 +518,15 @@ route-width reshuffle.
 
 Cycles 44-50 are the current late-plateau dead-zone:
 
-| Cycle | Attempt | Outcome |
-|---|---|---|
-| 44 | remove route-pack sentinel writes/branches | no improvement |
-| 45 | reuse terminal batched `attn_norm` | no improvement |
-| 46 | grouped Q4_K MoE Q8_1/DP4a gate/up | no improvement |
-| 47 | branchless full-tile SSM-out GEMM | large regression |
-| 48 | fused shared-expert exact suffix reuse | below threshold |
-| 49 | append grouped MoE into the SSM command | no improvement |
-| 50 | SSM-out DP4a with widened Q8 scale scratch | regression |
+| Cycle | Attempt                                    | Outcome          |
+| ----- | ------------------------------------------ | ---------------- |
+| 44    | remove route-pack sentinel writes/branches | no improvement   |
+| 45    | reuse terminal batched `attn_norm`         | no improvement   |
+| 46    | grouped Q4_K MoE Q8_1/DP4a gate/up         | no improvement   |
+| 47    | branchless full-tile SSM-out GEMM          | large regression |
+| 48    | fused shared-expert exact suffix reuse     | below threshold  |
+| 49    | append grouped MoE into the SSM command    | no improvement   |
+| 50    | SSM-out DP4a with widened Q8 scale scratch | regression       |
 
 2026-06-05 landing validation also rejected an exact-suffix scheduling
 overlap that recorded shared-expert gate/up while suffix MoE down was
@@ -589,16 +589,16 @@ Cycle 123 enablement ran the batched `ssm_delta_net` dispatch
 (n_tok=prompt_len) on **all 30 SSM layers** and confirmed bit-exact
 match (max_abs_diff < 1e-3) against the per-token reference. Trail:
 
-| Cycle | What landed |
-|---|---|
-| 97  | Per-token capture buffers + flag-gated batched dispatch (layer 0 only) |
-| 101 | CPU L2/max_abs comparison vs batched output |
-| 104 | gate_buf (z-projection) capture completes the input set |
-| 123 | Validation extended to all 30 SSM layers; bit-exact PASS@1e-3 across the entire model |
+| Cycle | What landed                                                                           |
+| ----- | ------------------------------------------------------------------------------------- |
+| 97    | Per-token capture buffers + flag-gated batched dispatch (layer 0 only)                |
+| 101   | CPU L2/max_abs comparison vs batched output                                           |
+| 104   | gate_buf (z-projection) capture completes the input set                               |
+| 123   | Validation extended to all 30 SSM layers; bit-exact PASS@1e-3 across the entire model |
 
 **This means the n_tok>prompt_len path is proven correct end to end.**
 The 15.4 GB/prefill of state DRAM round-trip traffic that A3 was
-supposed to eliminate is *measurable, validated, and ready to ship*.
+supposed to eliminate is _measurable, validated, and ready to ship_.
 
 ### The lever is one targeted change
 
@@ -635,7 +635,7 @@ restructuring**, not a rewrite.
 - If a cycle proposes any other target, STEP_BACK auto-reject before
   running the agent. The bans below are non-negotiable until A3b
   prod ships.
-- A3b prod *will* require correctness debugging across multiple
+- A3b prod _will_ require correctness debugging across multiple
   cycles. A failed first attempt yields a refined attempt the next
   cycle, not a return to MoE micro-tweaks. The validate path stays
   available for re-validating mid-debug.
@@ -647,26 +647,26 @@ restructuring**, not a rewrite.
 
 For the record, the previous pivot was ignored:
 
-| Cycle | Pattern | Reason banned |
-|---|---|---|
-| 105 | Q4_K MoE gate+up+SwiGLU triple fusion | banned MoE fusion retry (c12, c51, c74) |
-| 106 | row/block swap on dmmv_q4k_moe_fused_down_acc | banned (c43, c48, c66) |
-| 107 | d_conv specialization on ssm_conv1d | flat |
-| 108 | LDS occupancy limiter on dmmv_q4k_moe_kpar | banned variant |
-| 109 | fused o_proj merge | flat |
-| 110 | exploration cycle | flat |
-| 111 | rollback cycle-104 foundation | flat |
-| 112 | LDS+loop-swap on Q5_K MoE down | -6%, banned variant |
-| 113 | thread-shape NUM_ROWS=2→1 on fused_gate_up_moe | banned (c53, c70) |
-| 114 | SPEC_N_USED on MoE down | banned (c58) |
-| 115 | v_im-uniform Q4_K decode on fused_gate_up_moe | banned (c63) |
-| 116 | SPEC_K on softmax_topk_v2 | flat |
-| 117 | LDS limiter on flash_attn_batched | flat |
-| 118 | loop-swap on rms_norm_dmmv_q4k_alpha_beta | banned (c47) |
-| 119 | LDS limiter on dmmv_q4k_moe_fused_down_acc | banned variant |
-| 120 | infrastructure check | flat |
-| 121 | SPEC_HEAD_DIM_V4 on flash_attn_batched | flat |
-| 122 | row/block swap on dmmv_q4k_fused_gate_up_moe | banned (c43 + c12 retry) |
+| Cycle | Pattern                                        | Reason banned                           |
+| ----- | ---------------------------------------------- | --------------------------------------- |
+| 105   | Q4_K MoE gate+up+SwiGLU triple fusion          | banned MoE fusion retry (c12, c51, c74) |
+| 106   | row/block swap on dmmv_q4k_moe_fused_down_acc  | banned (c43, c48, c66)                  |
+| 107   | d_conv specialization on ssm_conv1d            | flat                                    |
+| 108   | LDS occupancy limiter on dmmv_q4k_moe_kpar     | banned variant                          |
+| 109   | fused o_proj merge                             | flat                                    |
+| 110   | exploration cycle                              | flat                                    |
+| 111   | rollback cycle-104 foundation                  | flat                                    |
+| 112   | LDS+loop-swap on Q5_K MoE down                 | -6%, banned variant                     |
+| 113   | thread-shape NUM_ROWS=2→1 on fused_gate_up_moe | banned (c53, c70)                       |
+| 114   | SPEC_N_USED on MoE down                        | banned (c58)                            |
+| 115   | v_im-uniform Q4_K decode on fused_gate_up_moe  | banned (c63)                            |
+| 116   | SPEC_K on softmax_topk_v2                      | flat                                    |
+| 117   | LDS limiter on flash_attn_batched              | flat                                    |
+| 118   | loop-swap on rms_norm_dmmv_q4k_alpha_beta      | banned (c47)                            |
+| 119   | LDS limiter on dmmv_q4k_moe_fused_down_acc     | banned variant                          |
+| 120   | infrastructure check                           | flat                                    |
+| 121   | SPEC_HEAD_DIM_V4 on flash_attn_batched         | flat                                    |
+| 122   | row/block swap on dmmv_q4k_fused_gate_up_moe   | banned (c43 + c12 retry)                |
 
 **Every single revert is a banned-list pattern with at least one
 prior cycle citation.** The agent is producing creative reframings
@@ -674,19 +674,20 @@ of dead targets to avoid the named lever.
 
 ### After A3b prod ships
 
-| # | Bet | Saving | Status |
-|---|---|---|---|
-| 1 | **A3b production wire-up** (THIS) | ~250 ms (~+15 tok/s) | infra ready, switch unflipped |
-| 2 | A4-real (n_tok=N for ssm_proj DMMVs) | ~50-80 ms | not started |
-| 3 | B (mul_mm_q4k SSM proj) | ~245 ms | not started |
-| 4 | Q8_1 mmq integer-dot | ~80-150 ms | not started |
-| 5 | C (mul_mm_id_q4k MoE) | ~680 ms | not started |
+| #   | Bet                                  | Saving               | Status                        |
+| --- | ------------------------------------ | -------------------- | ----------------------------- |
+| 1   | **A3b production wire-up** (THIS)    | ~250 ms (~+15 tok/s) | infra ready, switch unflipped |
+| 2   | A4-real (n_tok=N for ssm_proj DMMVs) | ~50-80 ms            | not started                   |
+| 3   | B (mul_mm_q4k SSM proj)              | ~245 ms              | not started                   |
+| 4   | Q8_1 mmq integer-dot                 | ~80-150 ms           | not started                   |
+| 5   | C (mul_mm_id_q4k MoE)                | ~680 ms              | not started                   |
 
 Math to beat 180 from 127.16:
+
 - A3b prod → ~145
-- + A4-real → ~150
-- + B → ~170
-- + Q8_1 mmq → ~180 ✅
+- - A4-real → ~150
+- - B → ~170
+- - Q8_1 mmq → ~180 ✅
 
 The path is unchanged from the 2026-05-05 PM pivot. What changed:
 A3b is no longer "hard, multi-cycle, scary" — it's a switch flip on
@@ -740,22 +741,22 @@ three times.
 
 Seven consecutive reverts, all banned-list retries:
 
-| Cycle | Target | Result |
-|---|---|---|
-| 85 | LDS broadcast removal in ssm_delta_net (s_gate, s_beta_val) | flat |
-| 86 | register-cache `current_input` in ssm_conv1d | flat (126.93) |
-| 87 | uint16 packed quant reads in dmmv_q8_0 | flat |
-| 88 | LICM/register-cache on ssm_delta + dmmv_q8_0 + rms_norm | flat |
-| 89 | drop pre-scale s_q/s_k LDS writes + step-2 barrier | flat |
-| 90 | register-cache delta_net_output + pre-compute SiLU in ssm_gated_norm | -0.31% |
-| 91 | vec4 X-tile preload + register-cache in dmmv_q8_0 | flat |
+| Cycle | Target                                                               | Result        |
+| ----- | -------------------------------------------------------------------- | ------------- |
+| 85    | LDS broadcast removal in ssm_delta_net (s_gate, s_beta_val)          | flat          |
+| 86    | register-cache `current_input` in ssm_conv1d                         | flat (126.93) |
+| 87    | uint16 packed quant reads in dmmv_q8_0                               | flat          |
+| 88    | LICM/register-cache on ssm_delta + dmmv_q8_0 + rms_norm              | flat          |
+| 89    | drop pre-scale s_q/s_k LDS writes + step-2 barrier                   | flat          |
+| 90    | register-cache delta_net_output + pre-compute SiLU in ssm_gated_norm | -0.31%        |
+| 91    | vec4 X-tile preload + register-cache in dmmv_q8_0                    | flat          |
 
 **Every one of these is a register-cache or LDS-narrowing variant
 on a shader the doc has banned.** The previous bans aren't holding
 because the agent reads "I cannot try X without new evidence" and
 finds creative reframings of the same dead pattern. Cycle 76+
 prompts must include the literal A3b/A4-real/B sequence as the
-*only* acceptable targets.
+_only_ acceptable targets.
 
 ### Hard rule for cycles 92-100
 
@@ -780,20 +781,21 @@ prompts must include the literal A3b/A4-real/B sequence as the
 
 ### After A3b — corrected next-bet roster
 
-| # | Bet | Target | Est. saving | Cycles |
-|---|---|---|---|---|
-| 1 | **A3b** | dispatch restructure for `ssm_delta_net` | **150-250ms** (~+15-20 tok/s) | 1-3 |
-| 2 | **A4-real** | same restructure for `ssm_proj` DMMVs (rms+alpha+beta DMMV; NOT a fusion) | 50-80ms | 1-2 |
-| 3 | **B** | wire `mul_mm_q4k.comp` into SSM proj prefill (already in tree at LM-head only) | 245ms | 2-3 |
-| 4 | **Q8_1 mmq** | port `quantize_q8_1.comp` + integer-dot Q4_K matmul | 80-150ms | 4-6 |
-| 5 | **C** | port `mul_mm_id_q4k` for MoE gate/up/down | 680ms | 5-8 |
+| #   | Bet          | Target                                                                         | Est. saving                   | Cycles |
+| --- | ------------ | ------------------------------------------------------------------------------ | ----------------------------- | ------ |
+| 1   | **A3b**      | dispatch restructure for `ssm_delta_net`                                       | **150-250ms** (~+15-20 tok/s) | 1-3    |
+| 2   | **A4-real**  | same restructure for `ssm_proj` DMMVs (rms+alpha+beta DMMV; NOT a fusion)      | 50-80ms                       | 1-2    |
+| 3   | **B**        | wire `mul_mm_q4k.comp` into SSM proj prefill (already in tree at LM-head only) | 245ms                         | 2-3    |
+| 4   | **Q8_1 mmq** | port `quantize_q8_1.comp` + integer-dot Q4_K matmul                            | 80-150ms                      | 4-6    |
+| 5   | **C**        | port `mul_mm_id_q4k` for MoE gate/up/down                                      | 680ms                         | 5-8    |
 
 Math to beat 180 tok/s from current 127.16:
+
 - A3b: 127 → ~145
-- + A4-real: ~150
-- + B: ~170
-- + Q8_1 mmq: ~180 ✅
-- + C: 200+
+- - A4-real: ~150
+- - B: ~170
+- - Q8_1 mmq: ~180 ✅
+- - C: 200+
 
 **A3b + A4-real + B is the minimum viable path.** None has been
 tried correctly. The loop is burning cycles on dead patterns
@@ -822,9 +824,9 @@ and stop the loop — the controller is broken, not the bet roster.
 
 **Best 124.30 tok/s. The loop has been stuck for 36 cycles.**
 
-| Window | Cycles | Kept | Δ tok/s | Per-cycle |
-|---|---|---|---|---|
-| First 39 | 39 | 6 | +8.96 | +0.23 |
+| Window    | Cycles | Kept          | Δ tok/s   | Per-cycle  |
+| --------- | ------ | ------------- | --------- | ---------- |
+| First 39  | 39     | 6             | +8.96     | +0.23      |
 | **40-75** | **36** | **1 (noise)** | **+0.15** | **+0.004** |
 
 The 2026-05-04 pivot below named four sub-cycles A1-A4 to attack the
@@ -917,43 +919,43 @@ ones.
 Read this before proposing any cycle. Each row is a target the loop
 already exhausted; **do not re-attempt without new profiler evidence**.
 
-| Cycle | Target shader / pattern | Outcome | Reason it was flat |
-|---|---|---|---|
-| 41 | `ssm_conv1d.comp` register-cache + branch hoist + vec4 | flat | conv1d bucket -12% but ssm_delta-dominated total didn't budge |
-| 42 | x-cache hoist on dmmv_q8_0_fused_gate_up_swiglu | fail | exploratory; nothing wired |
-| 43 | row/block swap on `dmmv_q[45]k_moe_fused_down_acc` | flat | Y=n_used already saturates wave count |
-| 44 | dormant fused alpha+beta + Q8_0 X-fusion | fail | dormant path; no callers |
-| 45 | x_data register cache on Q8_0 fused_gate_up_swiglu | -0.4% | regress; cache pressure outweighs reuse |
-| 46 | fused Q8_0 rms_norm+alpha+beta SSM proj | flat | repeats c17 dead-end |
-| 47 | rms_norm_dmmv_q4k_alpha_beta register cache | flat | dead code on Qwen3.6 quant |
-| 48 | vec4 RMW tail-write on MoE down | -0.6 | regress |
-| 49 | rms_norm_dmmv_f32 register cache | flat | already optimal |
-| 50 | vec4 sigmoid_scale_acc / sigmoid_mul | flat | shaders bypassed by Q8_0 fused tail |
-| 51 | fused dmmv_q4k_fused_gate_up_swiglu_moe | flat | banned MoE fusion retry |
-| 52 | vec4 alias on qk_norm_rope_kv_write Pass 1+4 | -0.3 | tiny regress |
-| 53 | NUM_ROWS=2→1 on dmmv_q4k_fused_gate_up_moe | flat | banned variant |
-| 54 | hoist subgroupAdd in MoE down | flat (124.22) | -28 reductions, no time |
-| 55 | single-WG fused router+topk | catastrophic regress | concurrency collapse |
-| 56 | (e,r) loop swap on MoE down | flat | banned variant |
-| 57 | softmax_topk_v2 SPEC_MAX_PER_THREAD=2 | flat | small bucket |
-| 58 | SPEC_N_USED on MoE down | flat | banned variant |
-| 59 | qk_norm_rope_kv_write register cache | flat | repeats c21 |
-| 60 | **prune dormant SSM mmq infra** | KEEP +0.15 (noise) | cleanup, no real gain |
-| 61 | vec4 + register-cache on moe_weighted_acc | flat | repeats c1 |
-| 62 | two-pass topk cross-WG | -2.1% | regress |
-| 63 | v_im-uniform Q4_K decode on fused_gate_up_moe | flat | banned variant |
-| 64 | rms_inv LDS+barrier removal on rms_norm_dmmv_f32 | flat | already wave64-optimal |
-| 65 | NUM_ROWS=4→8 on MoE down | -5.1% | banned variant |
-| 66 | per-(e,i) X-tile vec4 hoist on MoE down | flat (124.09) | banned variant |
-| 67 | full cycle-50 transform on dmmv_q4k_moe_kpar | flat | repeats c6, c10, c19 |
-| 68 | flash_attn_batched Q LDS hoist | flat | repeats c9 |
-| 69 | per-expert constant hoisting on MoE down | flat | banned variant |
-| 70 | NUM_ROWS=2→1 on basic dmmv_q4k.comp | flat | foundation audit |
-| 71 | vec4 X-tile preload on Q8_0 fused_gate_up_swiglu | flat | repeats c45 |
-| 72 | multi-accumulator ILP on MoE down | flat | banned variant |
-| 73 | ssm_conv1d state register cache | flat | repeats c41 |
-| 74 | triple-fused Q4_K MoE gate+up+SwiGLU | flat | banned MoE fusion retry |
-| 75 | LDS-cache X (8 KB) on dmmv_q4k_fused_gate_up_moe | flat | banned variant |
+| Cycle | Target shader / pattern                                | Outcome              | Reason it was flat                                            |
+| ----- | ------------------------------------------------------ | -------------------- | ------------------------------------------------------------- |
+| 41    | `ssm_conv1d.comp` register-cache + branch hoist + vec4 | flat                 | conv1d bucket -12% but ssm_delta-dominated total didn't budge |
+| 42    | x-cache hoist on dmmv_q8_0_fused_gate_up_swiglu        | fail                 | exploratory; nothing wired                                    |
+| 43    | row/block swap on `dmmv_q[45]k_moe_fused_down_acc`     | flat                 | Y=n_used already saturates wave count                         |
+| 44    | dormant fused alpha+beta + Q8_0 X-fusion               | fail                 | dormant path; no callers                                      |
+| 45    | x_data register cache on Q8_0 fused_gate_up_swiglu     | -0.4%                | regress; cache pressure outweighs reuse                       |
+| 46    | fused Q8_0 rms_norm+alpha+beta SSM proj                | flat                 | repeats c17 dead-end                                          |
+| 47    | rms_norm_dmmv_q4k_alpha_beta register cache            | flat                 | dead code on Qwen3.6 quant                                    |
+| 48    | vec4 RMW tail-write on MoE down                        | -0.6                 | regress                                                       |
+| 49    | rms_norm_dmmv_f32 register cache                       | flat                 | already optimal                                               |
+| 50    | vec4 sigmoid_scale_acc / sigmoid_mul                   | flat                 | shaders bypassed by Q8_0 fused tail                           |
+| 51    | fused dmmv_q4k_fused_gate_up_swiglu_moe                | flat                 | banned MoE fusion retry                                       |
+| 52    | vec4 alias on qk_norm_rope_kv_write Pass 1+4           | -0.3                 | tiny regress                                                  |
+| 53    | NUM_ROWS=2→1 on dmmv_q4k_fused_gate_up_moe             | flat                 | banned variant                                                |
+| 54    | hoist subgroupAdd in MoE down                          | flat (124.22)        | -28 reductions, no time                                       |
+| 55    | single-WG fused router+topk                            | catastrophic regress | concurrency collapse                                          |
+| 56    | (e,r) loop swap on MoE down                            | flat                 | banned variant                                                |
+| 57    | softmax_topk_v2 SPEC_MAX_PER_THREAD=2                  | flat                 | small bucket                                                  |
+| 58    | SPEC_N_USED on MoE down                                | flat                 | banned variant                                                |
+| 59    | qk_norm_rope_kv_write register cache                   | flat                 | repeats c21                                                   |
+| 60    | **prune dormant SSM mmq infra**                        | KEEP +0.15 (noise)   | cleanup, no real gain                                         |
+| 61    | vec4 + register-cache on moe_weighted_acc              | flat                 | repeats c1                                                    |
+| 62    | two-pass topk cross-WG                                 | -2.1%                | regress                                                       |
+| 63    | v_im-uniform Q4_K decode on fused_gate_up_moe          | flat                 | banned variant                                                |
+| 64    | rms_inv LDS+barrier removal on rms_norm_dmmv_f32       | flat                 | already wave64-optimal                                        |
+| 65    | NUM_ROWS=4→8 on MoE down                               | -5.1%                | banned variant                                                |
+| 66    | per-(e,i) X-tile vec4 hoist on MoE down                | flat (124.09)        | banned variant                                                |
+| 67    | full cycle-50 transform on dmmv_q4k_moe_kpar           | flat                 | repeats c6, c10, c19                                          |
+| 68    | flash_attn_batched Q LDS hoist                         | flat                 | repeats c9                                                    |
+| 69    | per-expert constant hoisting on MoE down               | flat                 | banned variant                                                |
+| 70    | NUM_ROWS=2→1 on basic dmmv_q4k.comp                    | flat                 | foundation audit                                              |
+| 71    | vec4 X-tile preload on Q8_0 fused_gate_up_swiglu       | flat                 | repeats c45                                                   |
+| 72    | multi-accumulator ILP on MoE down                      | flat                 | banned variant                                                |
+| 73    | ssm_conv1d state register cache                        | flat                 | repeats c41                                                   |
+| 74    | triple-fused Q4_K MoE gate+up+SwiGLU                   | flat                 | banned MoE fusion retry                                       |
+| 75    | LDS-cache X (8 KB) on dmmv_q4k_fused_gate_up_moe       | flat                 | banned variant                                                |
 
 **Single observation worth carrying forward:** every successful keep
 in this effort (cycles 11, 15, 23, 25, 28, 39, 60) either (a) folded
@@ -1005,7 +1007,7 @@ seq_idx`. **One dispatch per layer per prefill, not per token.**
 **Caveat for ZINC:** Qwen3.6 uses gated-delta-net, not classical
 Mamba S6. The state recurrence body is different (delta-rule
 key-value update, not selective-scan with softplus dt). The
-*structural* pattern transfers verbatim — state-in-registers,
+_structural_ pattern transfers verbatim — state-in-registers,
 `for (i=0; i<n_tok; i++)` token loop, single dispatch — but the inner
 body math must mirror current `ssm_delta_net.comp` per-token logic,
 not llama.cpp's S6 body.
@@ -1023,20 +1025,21 @@ Once A3 lands and validates, attack in this order. Each row has a
 named reference and an estimated upside derived from the cycle-50
 phase budget plus the post-A3 budget projection.
 
-| # | Bet | Target | Reference | Est. saving | Risk |
-|---|---|---|---|---|---|
-| 1 | A3 | `ssm_delta_net.comp` token-loop fusion | llama.cpp `ssm_scan.comp` | ~280 ms (400→120) | medium-high (recurrence correctness) |
-| 2 | A4 | Same transform on ssm_proj rms_norm+alpha+beta | A3 (own work) | ~50 ms | low after A3 |
-| 3 | B  | Wire `mul_mm_q4k` into SSM proj prefill | `mul_mm.comp` BM=64 BN=64 BK=32 | ~245 ms (325→80) | low — single dense expert |
-| 4 | T1 | Two-pass topk via cross-WG reduction | llama.cpp doesn't fuse this | ~40 ms (117→80) | low (single shader) |
-| 5 | C  | Re-port `mul_mm_id_q4k` for MoE gate/up/down | `mul_mm_id_funcs.glsl` | ~680 ms (884→200) | high (silent quality regress) |
+| #   | Bet | Target                                         | Reference                       | Est. saving       | Risk                                 |
+| --- | --- | ---------------------------------------------- | ------------------------------- | ----------------- | ------------------------------------ |
+| 1   | A3  | `ssm_delta_net.comp` token-loop fusion         | llama.cpp `ssm_scan.comp`       | ~280 ms (400→120) | medium-high (recurrence correctness) |
+| 2   | A4  | Same transform on ssm_proj rms_norm+alpha+beta | A3 (own work)                   | ~50 ms            | low after A3                         |
+| 3   | B   | Wire `mul_mm_q4k` into SSM proj prefill        | `mul_mm.comp` BM=64 BN=64 BK=32 | ~245 ms (325→80)  | low — single dense expert            |
+| 4   | T1  | Two-pass topk via cross-WG reduction           | llama.cpp doesn't fuse this     | ~40 ms (117→80)   | low (single shader)                  |
+| 5   | C   | Re-port `mul_mm_id_q4k` for MoE gate/up/down   | `mul_mm_id_funcs.glsl`          | ~680 ms (884→200) | high (silent quality regress)        |
 
 Math to beat 180 tok/s from current 124:
+
 - A3 alone: 1700 ms − 280 = 1420 ms ⇒ **148 tok/s**
-- + A4: 1370 ms ⇒ **154 tok/s**
-- + B: 1125 ms ⇒ **187 tok/s** ✅
-- + T1: 1085 ms ⇒ **194 tok/s**
-- + C: 405 ms saved further ⇒ **>250 tok/s** (run-blocked by attention/topk floors)
+- - A4: 1370 ms ⇒ **154 tok/s**
+- - B: 1125 ms ⇒ **187 tok/s** ✅
+- - T1: 1085 ms ⇒ **194 tok/s**
+- - C: 405 ms saved further ⇒ **>250 tok/s** (run-blocked by attention/topk floors)
 
 So **A3 + A4 + B is the minimum viable path past llama.cpp.** C is
 gravy. Cycles 76+ should land A3 first; nothing else moves the needle
@@ -1151,7 +1154,7 @@ Bets B and C still in reserve to clear 180.
 
 ---
 
-## TL;DR  (2026-04-26, after 50 autonomous-loop cycles)
+## TL;DR (2026-04-26, after 50 autonomous-loop cycles)
 
 **Effort 6 has moved prefill from 78.11 → 90.24 tok/s (+15.5%) over 50
 cycles.** All gains came from **micro-restructures of existing
@@ -1160,13 +1163,13 @@ cycles attempted.
 
 What landed (5 winning cycles):
 
-| cycle | tok/s | delta | what changed |
-|---|---:|---:|---|
-| 22 | 80.61 | +2.5 | wire count_experts post-prefill sweep (foundation) |
-| 28 | 83.07 | +2.5 | rms_norm_dmmv_f32 NUM_ROWS=2→1 (occupancy) |
-| 42 | 86.94 | +3.9 | rms_norm_dmmv_f32 vec4 reads/writes (cache-line) |
-| 46 | 87.82 | +0.9 | rms_norm_mul vec4 + per-thread reg cache |
-| 50 | 90.24 | +2.4 | ssm_delta_net 8t×8r → 16t×4r (cache-line + occupancy) |
+| cycle | tok/s | delta | what changed                                          |
+| ----- | ----: | ----: | ----------------------------------------------------- |
+| 22    | 80.61 |  +2.5 | wire count_experts post-prefill sweep (foundation)    |
+| 28    | 83.07 |  +2.5 | rms_norm_dmmv_f32 NUM_ROWS=2→1 (occupancy)            |
+| 42    | 86.94 |  +3.9 | rms_norm_dmmv_f32 vec4 reads/writes (cache-line)      |
+| 46    | 87.82 |  +0.9 | rms_norm_mul vec4 + per-thread reg cache              |
+| 50    | 90.24 |  +2.4 | ssm_delta_net 8t×8r → 16t×4r (cache-line + occupancy) |
 
 What was tried and reverted (cycles 14-21 + 40):
 
@@ -1206,9 +1209,9 @@ What's left to attempt (concrete, cycle-sized):
 
 ## Current measured gap (long-context prefill, 154-token prompt, after cycle 50)
 
-| model                       | ZINC P  | llama P  | ZINC %  |
-|-----------------------------|--------:|---------:|--------:|
-| Qwen 3.6 35B A3B Q4_K_XL |  90.24 |   ~180   |    50% |
+| model                    | ZINC P | llama P | ZINC % |
+| ------------------------ | -----: | ------: | -----: |
+| Qwen 3.6 35B A3B Q4_K_XL |  90.24 |    ~180 |    50% |
 
 Latest site benchmark (short prompt, 5 tokens): ZINC 67-69 tok/s vs
 llama.cpp 182-184 tok/s. The 154-token loop benchmark is more
@@ -1234,7 +1237,7 @@ Total prefill ≈ 1.7 s on the flagship 154-token benchmark (90.24 tok/s).
 `ZINC_PREFILL_PROFILE=1` before targeting any sub-bucket; cycle 50's
 ssm_delta restructure shifts the budget.
 
-## Why the GEMV-cross-token approach fails  (kept as record)
+## Why the GEMV-cross-token approach fails (kept as record)
 
 Earlier cycles tried `dmmv_q4k_moe_batched.comp` (commit `c36bd23`)
 as a structural swing. It dispatches **1.7M workgroups** (M ×
@@ -1242,18 +1245,18 @@ n_experts_used × n_tokens) where R9700 caps at ~1024 in flight. The
 shader stays in tree as record but should not be wired. The
 empirical evidence from 9 wire-in cycles: flat or negative.
 
-| approach | total WGs | per-WG work | WG saturation on R9700 |
-|---|---:|---|---|
-| ZINC per-token GEMV (current) | 154 × 8 × 704 = 867k | 1 dot | over-saturated, dispatch-bound |
-| `dmmv_q4k_moe_batched.comp` (GEMV cross-token) | 1408 × 8 × 154 = 1.7M | 1 dot | even worse |
-| llama.cpp `mul_mm` MUL_MAT_ID (tiled GEMM) | 22 × 1 × 128 = 2,816 | 64×64 tile = 4096 dots | balanced |
+| approach                                       |             total WGs | per-WG work            | WG saturation on R9700         |
+| ---------------------------------------------- | --------------------: | ---------------------- | ------------------------------ |
+| ZINC per-token GEMV (current)                  |  154 × 8 × 704 = 867k | 1 dot                  | over-saturated, dispatch-bound |
+| `dmmv_q4k_moe_batched.comp` (GEMV cross-token) | 1408 × 8 × 154 = 1.7M | 1 dot                  | even worse                     |
+| llama.cpp `mul_mm` MUL_MAT_ID (tiled GEMM)     |  22 × 1 × 128 = 2,816 | 64×64 tile = 4096 dots | balanced                       |
 
 The structural answer is per-expert grouped GEMM. The architectural
 shape is correct; the foundation port was correct. The missing piece
 is the **wire-up into prefillBatched** with the gather/scatter
 buffer layout.
 
-## The original port plan  (preserved as historical context — cycles 14-21 + 40 below)
+## The original port plan (preserved as historical context — cycles 14-21 + 40 below)
 
 The 5-step plan below was attempted and partially landed:
 
@@ -1275,6 +1278,7 @@ than porting:
 ### 1. Tiled Q4_K GEMM (foundation, no MoE yet)
 
 **Reference**:
+
 - `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
   — the dispatch shape, tile loop, shared-memory cooperative loads.
   Look at the `#ifndef COOPMAT` branch (warp-tiled MAC) since RDNA4
@@ -1286,6 +1290,7 @@ than porting:
   matches our existing `dmmv_q4k_moe_kpar.comp` layout exactly).
 
 **Tile params (start with these, then tune)**:
+
 - `BM=64, BN=64, BK=32, WM=64, WN=32, WMITER=2, WNITER=2, TM=4, TN=2`
 - `local_size_x=128` (subgroup_size=64 × NUM_WARPS=2)
 - LDS budget: `BM*(BK/2+1)*4 + BN*(BK/2+1)*4 = ~5 KiB` per WG, fits
@@ -1297,6 +1302,7 @@ on a synthetic [M, K, N] matmul before integrating with prefill.
 ### 2. MUL_MAT_ID variant (the MoE gather)
 
 **Reference**:
+
 - `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_id_funcs.glsl`
   — the `load_row_ids` function. Each WG scans the `data_ids` buffer
   with subgroup ballot (`subgroupBallot`, `subgroupBallotBitCount`)
@@ -1315,6 +1321,7 @@ is unchanged.
 ### 3. count_experts.comp (trivial helper)
 
 **Reference**:
+
 - `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/count_experts.comp`
   — 50 lines, do not modify. Reads the per-token expert_id buffer,
   outputs a `[n_experts]` count buffer that the GEMM uses for
@@ -1326,12 +1333,13 @@ helper.
 ### 4. mul_mmq variant (Q8_1-quantized activation)
 
 **Reference**:
+
 - `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp`
   — same tiled GEMM as `mul_mm` but the activation is pre-quantized to
   Q8_1 by `quantize_q8_1.comp` (which we already have). The inner-loop
   dot uses `dotPacked4x8EXT` (`GL_EXT_integer_dot_product`).
   R9700 supports this — `vulkaninfo --summary | grep
-  integerDotProduct4x8BitPackedSignedAccelerated` returns true.
+integerDotProduct4x8BitPackedSignedAccelerated` returns true.
 - `mul_mmq_funcs.glsl` Q4_K branch (lines 303-364) is the integer-dot
   version of the dequant + scale we already do in f32.
 
@@ -1342,6 +1350,7 @@ inner dot uses hardware integer-dot.
 ### 5. Pipeline selection in `prefillBatched`
 
 After #1-4 land:
+
 - For dense FFN (Gemma 4 31B): use `mul_mm_q4k` with N=N_tokens.
 - For MoE FFN (Qwen 3.6, Gemma 4 26B): use
   `mul_mm_id_q4k` with `data_ids` from the existing
@@ -1356,7 +1365,7 @@ reference. Q8_1 quantization adds ~2^-7 noise per element so the
 mmq path validates against `tol=1e-2` instead of `1e-3`; the f32
 mul_mm path should match `1e-3` cleanly.
 
-## What not to attempt  (proven dead-ends)
+## What not to attempt (proven dead-ends)
 
 These are the 11-cycle Effort 6 negative results. Do not re-spend
 cycles on them:
@@ -1481,11 +1490,11 @@ Supporting measurements that should accompany stalled cycles:
 
 ## Lessons from Prior Runs
 
-This section is not history for its own sake. It is the set of facts the next cycle must start from so we stop relitigating settled questions. The cycle counter is being reset to 1 for the next run; references below are written in terms of *what changed* rather than which numbered cycle did it, because the prior numbering is no longer authoritative.
+This section is not history for its own sake. It is the set of facts the next cycle must start from so we stop relitigating settled questions. The cycle counter is being reset to 1 for the next run; references below are written in terms of _what changed_ rather than which numbered cycle did it, because the prior numbering is no longer authoritative.
 
 ### What has actually moved the number
 
-Only a handful of changes produced a real best-checkpoint improvement. All share the same shape: restructure *when* work happens, not *how* a single dispatch is tuned.
+Only a handful of changes produced a real best-checkpoint improvement. All share the same shape: restructure _when_ work happens, not _how_ a single dispatch is tuned.
 
 - **Dead-tail skip (+~3%):** skip `final_norm` + `LM_head` and the last-layer FFN/MoE body for non-terminal prefill tokens. Dead work elimination.
 - **Double-buffered prefill pipeline (+~7%):** ping-pong between two command buffers + paired embedding staging. The CPU records token N+1 while the GPU runs token N. Overlap, not per-dispatch tuning.
@@ -1535,7 +1544,7 @@ A prior attempt extended the double-buffered prefill pipeline from 2-deep to 3-d
 
 ### What has been repeatedly attempted and rejected as pointless in isolation
 
-- **"Add more phase profiling" without a downstream change in the same cycle.** Earlier attempts added phase/dispatch counters and were reverted because they did not touch tok/s. The profile line *already* exists behind `ZINC_PREFILL_PROFILE=1`; a cycle should turn that flag on, read the output, then act.
+- **"Add more phase profiling" without a downstream change in the same cycle.** Earlier attempts added phase/dispatch counters and were reverted because they did not touch tok/s. The profile line _already_ exists behind `ZINC_PREFILL_PROFILE=1`; a cycle should turn that flag on, read the output, then act.
 - **"Restructure where prompt embedding dequant happens."** Several attempts explored CPU / staging / interleaved variants of the same idea. The current checked-in design (upfront bulk dequant into host-mapped staging) is the accepted equilibrium. Do not resubmit interleaving or async-thread variants without a new bottleneck proof.
 
 ### Current phase budget snapshot (refresh before acting)
@@ -1543,6 +1552,7 @@ A prior attempt extended the double-buffered prefill pipeline from 2-deep to 3-d
 Numbers below are for the flagship long-context benchmark. They are a snapshot; the loop should re-run with `ZINC_PREFILL_PROFILE=1` before starting a new structural attack so the agent targets the real largest bucket instead of a stale one.
 
 **Stale snapshot (first run, ~28 tok/s):**
+
 - attention: ~0.7 s
 - MoE (router + topk + gate_up + swiglu + down + weighted_acc): ~1.6 s
 - shared expert: small, typically <0.1 s
@@ -1550,6 +1560,7 @@ Numbers below are for the flagship long-context benchmark. They are a snapshot; 
   - ssm_proj alone: ~1.3 s
 
 **Cycle 50 snapshot (90.24 tok/s, total prefill ≈ 1.7 s):**
+
 - MoE: **~884 ms (24%)** — biggest bucket; untouched since cycle 40
 - ssm_delta: ~450 ms (post-cycle-50 — was ~498 ms before)
 - attention: ~340 ms
@@ -1584,15 +1595,15 @@ The existing Steps 1–7 covered telemetry, dormant infrastructure wiring, and i
 
 Each of the bets below is a multi-cycle investment with a concrete shape, a measured reference implementation, and an estimated upside derived from the reference codebase. **NOTE (cycle 50):** Steps 8/10's foundations were ported and reverted in cycles 14-21+40 — see TL;DR. Step 11 (grouped MoE) remains the highest-leverage MoE bet and was never wired.
 
-| Bet | Step | Status (cycle 50) | Reference | Est. upside | Risk |
-|-----|------|-------------------|-----------|------------|------|
-| Wave64 K-parallel single-column DMMV | 8 | **DONE** — kpar shaders in tree (`dmmv_q4k_batch_kpar`, `dmmv_q5k_moe_kpar`, `dmmv_q6k_batch_kpar`, `dmmv_q4k_moe_kpar`); subgroupAdd-reduction pattern is the canonical inner loop. | llama.cpp `mul_mat_vec_base.glsl` | (already harvested) | — |
-| NUM_COLS=2..8 specialized DMMV family | 9 | **TRIED PIECEMEAL, FLAT** — pair-batch via existing batch shaders measured -0.12 to -0.8 tok/s across multiple cycles. NUM_COLS=2..8 on the kpar path is untried but requires different shader plumbing than what exists. | llama.cpp `mul_mat_vec_max_cols=8` | +40–80% on prompt-loop DMMVs (untested at scale) | Low after kpar |
-| `quantize_q8_1` + `mul_mmq` integer dot product path | 10 | **REVERTED** — `mul_mmq_q4k.comp` ported in cycle 18 as foundationKeep, stayed dormant, deleted in cycle 40. `quantize_q8_1.comp` survives in tree. Re-doing the same way is a known dead-end; the missing piece is the wire-up. | llama.cpp `mul_mmq.comp` + `quantize_q8_1.comp` | 2–4× on the largest Q4_K/Q5_K prefill DMMVs | Medium |
-| Grouped-MoE GEMM (token permute → per-expert grouped matmul → unpermute) | 11 | **NEVER WIRED** — `mul_mm_id_q4k.comp` ported in cycle 21 as foundationKeep, stayed dormant, **DELETED** in cycle 40. The MoE bucket (884ms = 24% of prefill) has been untouched since cycle 40. Highest-leverage MoE bet remaining. | vllm `fused_moe` + llama.cpp `mul_mat_id` | 5–10× on the MoE phase; biggest single MoE win available | Medium (correctness gates required) |
-| RDNA shared-memory occupancy limiter on flash_attn + heavy DMMV | 12 | **UNTRIED** | llama.cpp `ggml-vulkan.cpp:2990` | +5–15% on attention; cleans up RDNA cache-thrash | Low (LDS allocation tweak) |
-| Coop-matrix `mul_mm` for projections where N >> 8 | 13 | **N/A** — RDNA4 has no `cooperative_matrix` extension; the warp-tiled `mul_mm.comp` (Step 1 of the inner port plan) is what we'd port. Already attempted as `mul_mm_q4k.comp` (cycle 16, kept LM-head-only, FLAT). | llama.cpp `mul_mm.comp` + `mul_mm_funcs.glsl` | (subsumed by Step 1 wire-up of `mul_mm_q4k`) | Medium-high |
-| **NEW** Cycle-42/46/50 micro-restructure pattern | 14 | **PARTIAL** — landed +9.4 tok/s across 3 cycles. Targets: dmmv_q4k_moe_kpar, dmmv_q4k_moe_fused_down_acc, moe_weighted_acc. | (in-tree: ssm_delta_net.comp post-cycle-50, rms_norm_dmmv_f32.comp post-cycle-42) | +1–3% per kernel, compounding | Low (well-validated pattern) |
+| Bet                                                                      | Step | Status (cycle 50)                                                                                                                                                                                                                    | Reference                                                                         | Est. upside                                              | Risk                                |
+| ------------------------------------------------------------------------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------- |
+| Wave64 K-parallel single-column DMMV                                     | 8    | **DONE** — kpar shaders in tree (`dmmv_q4k_batch_kpar`, `dmmv_q5k_moe_kpar`, `dmmv_q6k_batch_kpar`, `dmmv_q4k_moe_kpar`); subgroupAdd-reduction pattern is the canonical inner loop.                                                 | llama.cpp `mul_mat_vec_base.glsl`                                                 | (already harvested)                                      | —                                   |
+| NUM_COLS=2..8 specialized DMMV family                                    | 9    | **TRIED PIECEMEAL, FLAT** — pair-batch via existing batch shaders measured -0.12 to -0.8 tok/s across multiple cycles. NUM_COLS=2..8 on the kpar path is untried but requires different shader plumbing than what exists.            | llama.cpp `mul_mat_vec_max_cols=8`                                                | +40–80% on prompt-loop DMMVs (untested at scale)         | Low after kpar                      |
+| `quantize_q8_1` + `mul_mmq` integer dot product path                     | 10   | **REVERTED** — `mul_mmq_q4k.comp` ported in cycle 18 as foundationKeep, stayed dormant, deleted in cycle 40. `quantize_q8_1.comp` survives in tree. Re-doing the same way is a known dead-end; the missing piece is the wire-up.     | llama.cpp `mul_mmq.comp` + `quantize_q8_1.comp`                                   | 2–4× on the largest Q4_K/Q5_K prefill DMMVs              | Medium                              |
+| Grouped-MoE GEMM (token permute → per-expert grouped matmul → unpermute) | 11   | **NEVER WIRED** — `mul_mm_id_q4k.comp` ported in cycle 21 as foundationKeep, stayed dormant, **DELETED** in cycle 40. The MoE bucket (884ms = 24% of prefill) has been untouched since cycle 40. Highest-leverage MoE bet remaining. | vllm `fused_moe` + llama.cpp `mul_mat_id`                                         | 5–10× on the MoE phase; biggest single MoE win available | Medium (correctness gates required) |
+| RDNA shared-memory occupancy limiter on flash_attn + heavy DMMV          | 12   | **UNTRIED**                                                                                                                                                                                                                          | llama.cpp `ggml-vulkan.cpp:2990`                                                  | +5–15% on attention; cleans up RDNA cache-thrash         | Low (LDS allocation tweak)          |
+| Coop-matrix `mul_mm` for projections where N >> 8                        | 13   | **N/A** — RDNA4 has no `cooperative_matrix` extension; the warp-tiled `mul_mm.comp` (Step 1 of the inner port plan) is what we'd port. Already attempted as `mul_mm_q4k.comp` (cycle 16, kept LM-head-only, FLAT).                   | llama.cpp `mul_mm.comp` + `mul_mm_funcs.glsl`                                     | (subsumed by Step 1 wire-up of `mul_mm_q4k`)             | Medium-high                         |
+| **NEW** Cycle-42/46/50 micro-restructure pattern                         | 14   | **PARTIAL** — landed +9.4 tok/s across 3 cycles. Targets: dmmv_q4k_moe_kpar, dmmv_q4k_moe_fused_down_acc, moe_weighted_acc.                                                                                                          | (in-tree: ssm_delta_net.comp post-cycle-50, rms_norm_dmmv_f32.comp post-cycle-42) | +1–3% per kernel, compounding                            | Low (well-validated pattern)        |
 
 ### How these bets compose
 
@@ -1607,7 +1618,7 @@ These are not parallel bets. They have a deliberate dependency order:
 ### What we are explicitly NOT going to do under these bets
 
 - **Do not ship NUM_COLS≥2 with the current 1-thread-per-row shader.** Earlier pair-batch attempts have already proved this loses. NUM_COLS specialization waits for Step 8.
-- **Do not wire `recordCoopMatmul` against quantized weights without a dequant strategy.** F16-only consumption means Step 13 has to land a dequant-into-shared-memory tile loop *or* an upfront f16 scratch buffer (and amortize the dequant cost across many prompt tokens to be net-positive).
+- **Do not wire `recordCoopMatmul` against quantized weights without a dequant strategy.** F16-only consumption means Step 13 has to land a dequant-into-shared-memory tile loop _or_ an upfront f16 scratch buffer (and amortize the dequant cost across many prompt tokens to be net-positive).
 - **Do not build the grouped-MoE permute on the CPU.** llama.cpp's `mul_mat_id` does the gather inside the matmul kernel via `data_ids[]`; vllm does it on the GPU via a permute kernel. CPU permute will be drowned by submit/wait cost on a 128-expert × 154-token workload.
 
 ## Working Hypotheses
@@ -1697,7 +1708,7 @@ Allowed targets (each must either change the number of dispatches or the number 
 - batched RMS norm and elementwise passes that already understand `n_tokens`
 - projection paths where one weight read can serve multiple prompt columns (hook into Step 9 once Step 8 has landed)
 - fewer per-token command submissions, ideally with the double-buffered pipeline-prefill path extended to 3+ deep (only after proving the CPU record cost has materially grown — earlier 3-deep attempts were flat)
-- fewer redundant barriers across prompt tokens — only accept if the barrier is actually *removed*, not just narrowed in scope
+- fewer redundant barriers across prompt tokens — only accept if the barrier is actually _removed_, not just narrowed in scope
 
 Acceptance rule:
 
@@ -1750,7 +1761,7 @@ Primary files:
 
 Reference:
 
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl` (`K_PER_ITER`, subgroupAdd reduction)
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl` (`K_PER_ITER`, subgroupAdd reduction)
 - `mul_mat_vec.comp` (per-quant-type inner loop)
 
 Why this is the precondition:
@@ -1779,7 +1790,7 @@ Primary files:
 
 Reference:
 
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:267` (`mul_mat_vec_max_cols = 8`)
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp:267` (`mul_mat_vec_max_cols = 8`)
 - `mul_mat_vec_base.glsl` (NUM_COLS column-loop unroll)
 
 Concrete microsteps:
@@ -1807,7 +1818,7 @@ Primary files (all new):
 
 Reference:
 
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp`
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp`
 - `mul_mmq.comp` + `mul_mmq_funcs.glsl`
 - `ggml-vulkan.cpp:7856` (`should_use_mmvq` heuristic) and `:7975` (`ggml_vk_quantize_q8_1` call site)
 
@@ -1837,9 +1848,9 @@ Primary files:
 
 Reference:
 
-- `/Users/stepan/Workspace/vllm/vllm/model_executor/layers/fused_moe/fused_moe.py` (`fused_experts_impl`, `invoke_fused_moe_kernel`)
-- `/Users/stepan/Workspace/vllm/vllm/model_executor/layers/fused_moe/moe_permute_unpermute.py`
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` (the `MUL_MAT_ID` row-gather path)
+- `${VLLM_DIR}/vllm/model_executor/layers/fused_moe/fused_moe.py` (`fused_experts_impl`, `invoke_fused_moe_kernel`)
+- `${VLLM_DIR}/vllm/model_executor/layers/fused_moe/moe_permute_unpermute.py`
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` (the `MUL_MAT_ID` row-gather path)
 
 Why this is the largest remaining MoE win:
 
@@ -1869,7 +1880,7 @@ Primary files:
 
 Reference:
 
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2990-2994` — RDNA-specific dummy LDS allocation (26–30 KB) on flash attention to force 4-subgroup-per-SIMD occupancy and avoid cache thrashing.
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2990-2994` — RDNA-specific dummy LDS allocation (26–30 KB) on flash attention to force 4-subgroup-per-SIMD occupancy and avoid cache thrashing.
 
 Concrete microstep:
 
@@ -1890,8 +1901,8 @@ Primary files:
 
 Reference:
 
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` (per-quant-type tile loaders)
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` (per-quant-type tile loaders)
 
 Concrete microsteps:
 
@@ -1911,17 +1922,17 @@ Skip this step if Steps 8–11 already push us past Phase 3 (300 tok/s). It is t
 Qwen3.6 35B A3B MoE, RDNA4, 2971-token raw prompt, `ZINC_PREFILL_PROFILE=1`.
 Correct baseline for this probe is first output token `{ 17 }`, text `2`.
 
-| variant | prefill | gate/up | output | verdict |
-|---|---:|---:|---|---|
-| current 4-row grouped gate/up | 802.19 tok/s | 374.7 ms | `{ 17 }` / `2` | keep |
-| BM32 shared-memory gate/up probe | 783.38 tok/s | 469.2 ms | `{ 198 }` / empty | reject |
-| rows8/lane-pair gate/up probe | 798.05 tok/s | 378.5 ms | `{ 198 }` / empty | reject |
-| Q8_1 down-column path | 805.81 tok/s | 378.4 ms / 366.9 ms down | `{ 16 }` / `1` | reject |
-| 16-route block, consumers still wrote only routes 0-7 | 819.07 tok/s | 348.6 ms / 337.8 ms down | `{ 248069 }` / `</think>` | reject |
-| complete 16-route block, all 16 routes written | 802.23 tok/s | 385.5 ms / 388.6 ms down | `{ 17 }` / `2` | reject |
-| LDS activation cache inside gate/up shader | 770.56 tok/s | 523.0 ms | `{ 17 }` / `2` | reject |
-| full-block branch inside gate/up shader | 797.72 tok/s | 386.8 ms | `{ 17 }` / `2` | reject |
-| Q8_1 gate/up-column path on long top-1 prefix | 800.65 tok/s | 378.3 ms | `{ 198 }` / empty | reject |
+| variant                                               |      prefill |                  gate/up | output                    | verdict |
+| ----------------------------------------------------- | -----------: | -----------------------: | ------------------------- | ------- |
+| current 4-row grouped gate/up                         | 802.19 tok/s |                 374.7 ms | `{ 17 }` / `2`            | keep    |
+| BM32 shared-memory gate/up probe                      | 783.38 tok/s |                 469.2 ms | `{ 198 }` / empty         | reject  |
+| rows8/lane-pair gate/up probe                         | 798.05 tok/s |                 378.5 ms | `{ 198 }` / empty         | reject  |
+| Q8_1 down-column path                                 | 805.81 tok/s | 378.4 ms / 366.9 ms down | `{ 16 }` / `1`            | reject  |
+| 16-route block, consumers still wrote only routes 0-7 | 819.07 tok/s | 348.6 ms / 337.8 ms down | `{ 248069 }` / `</think>` | reject  |
+| complete 16-route block, all 16 routes written        | 802.23 tok/s | 385.5 ms / 388.6 ms down | `{ 17 }` / `2`            | reject  |
+| LDS activation cache inside gate/up shader            | 770.56 tok/s |                 523.0 ms | `{ 17 }` / `2`            | reject  |
+| full-block branch inside gate/up shader               | 797.72 tok/s |                 386.8 ms | `{ 17 }` / `2`            | reject  |
+| Q8_1 gate/up-column path on long top-1 prefix         | 800.65 tok/s |                 378.3 ms | `{ 198 }` / empty         | reject  |
 
 Do not repeat wider row tiling on `dmmv_q4k_moe_fused_gate_up_swiglu_cols_top1.comp`
 without a per-layer numeric validator. The current four-row / 16-lane reduction
@@ -1955,21 +1966,21 @@ replays batched `ssm_gated_norm` + `ssm_out` from the captured batched
 
 RDNA4 smoke on `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`, 14 prompt tokens:
 
-| check | result |
-|---|---:|
-| delta replay | `PASS@1e-3`, 30/30 SSM layers |
-| output replay | `PASS@1e-3`, 30/30 SSM layers |
-| max gated-norm sample diff | `0.0` |
-| max SSM-out/post-hidden sample diff | `2.98e-8` |
+| check                               |                        result |
+| ----------------------------------- | ----------------------------: |
+| delta replay                        | `PASS@1e-3`, 30/30 SSM layers |
+| output replay                       | `PASS@1e-3`, 30/30 SSM layers |
+| max gated-norm sample diff          |                         `0.0` |
+| max SSM-out/post-hidden sample diff |                     `2.98e-8` |
 
 Default-path smoke after the validator patch, same binary with validation off,
 154-token prompt:
 
-| run | prefill | output |
-|---:|---:|---|
-| 1 | 543.77 tok/s | `the capital of France.` |
-| 2 | 809.90 tok/s | `the capital of France.` |
-| 3 | 804.59 tok/s | `the capital of France.` |
+| run |      prefill | output                   |
+| --: | -----------: | ------------------------ |
+|   1 | 543.77 tok/s | `the capital of France.` |
+|   2 | 809.90 tok/s | `the capital of France.` |
+|   3 | 804.59 tok/s | `the capital of France.` |
 
 Use this guardrail before attempting another A3B SSM-out or layer-major prefill
 change. The previous delta-only validator was not enough to catch hidden-state
@@ -1985,12 +1996,12 @@ Added explicit SSM-out profiling split:
 Clean 322-token `context-long` profile before the split showed `ssm_out=50.4 ms`.
 The split identified this as projection-bound, not residual-bound:
 
-| phase | before DP4a | after DP4a |
-|---|---:|---:|
-| SSM total | 142.7 ms | 134.7 ms |
-| SSM out | 50.4 ms | 41.2 ms |
-| SSM out projection | 44.0 ms | 34.7 ms |
-| SSM out residual handoff | 6.2 ms | 6.3 ms |
+| phase                    | before DP4a | after DP4a |
+| ------------------------ | ----------: | ---------: |
+| SSM total                |    142.7 ms |   134.7 ms |
+| SSM out                  |     50.4 ms |    41.2 ms |
+| SSM out projection       |     44.0 ms |    34.7 ms |
+| SSM out residual handoff |      6.2 ms |     6.3 ms |
 
 Implementation: A3B Q8_0 SSM-out now reuses the existing
 `qwenA3bPrepareProjectionQ8` + `dispatchQwenA3bQ8ProjectionDp4a` full-column
@@ -1999,10 +2010,10 @@ path, with the ragged token tail left on the existing f32 Q8_0 GEMM fallback.
 RDNA4 profile samples on `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`,
 322 prompt tokens / 32 decode tokens:
 
-| run | prefill | SSM out projection | decode |
-|---:|---:|---:|---:|
-| profiled | 644.72 tok/s | 34.5 ms | 125.01 tok/s |
-| profiled repeat | 643.85 tok/s | 34.7 ms | 125.95 tok/s |
+|             run |      prefill | SSM out projection |       decode |
+| --------------: | -----------: | -----------------: | -----------: |
+|        profiled | 644.72 tok/s |            34.5 ms | 125.01 tok/s |
+| profiled repeat | 643.85 tok/s |            34.7 ms | 125.95 tok/s |
 
 No-profile repeats after the change: `644.98`, `941.76`, `772.09`,
 `700.58`, `698.73` tok/s. Treat the end-to-end number as noisy, but the
@@ -2029,10 +2040,10 @@ and accumulated route-major SwiGLU slabs directly into `scratch_hidden`, bypassi
 the suffix `scratch_down` write plus weighted-acc read. Linux shader build passed,
 but the RDNA4 profile on the same 322-token `context-long` prompt did not improve:
 
-| mode | prefill samples | median | MoE down | MoE weighted_acc |
-|---|---:|---:|---:|---:|
-| normal | `641.22`, `862.22`, `712.16` tok/s | `712.16` tok/s | `41.9-51.2 ms` | `3.6-4.6 ms` |
-| suffix fused | `639.78`, `842.66`, `708.71` tok/s | `708.71` tok/s | `44.2-52.5 ms` | `3.5-3.9 ms` |
+| mode         |                    prefill samples |         median |       MoE down | MoE weighted_acc |
+| ------------ | ---------------------------------: | -------------: | -------------: | ---------------: |
+| normal       | `641.22`, `862.22`, `712.16` tok/s | `712.16` tok/s | `41.9-51.2 ms` |     `3.6-4.6 ms` |
+| suffix fused | `639.78`, `842.66`, `708.71` tok/s | `708.71` tok/s | `44.2-52.5 ms` |     `3.5-3.9 ms` |
 
 Reason: the removed weighted-acc work is too small, and the direct-token form
 loses enough routed-down locality that down grows by roughly the same amount.
@@ -2046,10 +2057,10 @@ pipelines and routed A3B SSM qkv/z and SSM-out through them automatically. The
 pipelines built and loaded on RDNA4, but the target SSM buckets did not move
 materially:
 
-| run set | prefill samples | SSM qkv/z | SSM out_proj |
-|---|---:|---:|---:|
-| pre-probe normal | `641.22`, `862.22`, `712.16` tok/s | `38.3-40.9 ms` on warm runs | `23.8-35.0 ms` |
-| K-specialized | `599.10`, `863.95`, `720.08`, `505.25`, `721.41`, `570.56`, `507.45`, `505.54` tok/s | `38.4-41.4 ms` | `23.9-41.1 ms` |
+| run set          |                                                                      prefill samples |                   SSM qkv/z |   SSM out_proj |
+| ---------------- | -----------------------------------------------------------------------------------: | --------------------------: | -------------: |
+| pre-probe normal |                                                   `641.22`, `862.22`, `712.16` tok/s | `38.3-40.9 ms` on warm runs | `23.8-35.0 ms` |
+| K-specialized    | `599.10`, `863.95`, `720.08`, `505.25`, `721.41`, `570.56`, `507.45`, `505.54` tok/s |              `38.4-41.4 ms` | `23.9-41.1 ms` |
 
 Reason: specializing out the runtime K/stride selects was too small compared
 with the tiled DP4a body and node power-state noise. The first three-sample
@@ -2065,10 +2076,10 @@ remove one submit/wait per SSM layer without changing routed MoE math.
 
 Targeted same-build RDNA `context-long` server runs:
 
-| mode | artifact | prefill | decode | note |
-|---|---|---:|---:|---|
-| fused flag on | `/tmp/zinc-rdna-qwen36-context-fuse-ssm-moe-20260707-095110.json` | `931.9 tok/s` | `116.0 tok/s` | samples `906.6`, `957.3` |
-| default | `/tmp/zinc-rdna-qwen36-context-default-samebuild-20260707-095208.json` | `912.9 tok/s` | `120.1 tok/s` | samples `922.7`, `903.2` |
+| mode          | artifact                                                               |       prefill |        decode | note                     |
+| ------------- | ---------------------------------------------------------------------- | ------------: | ------------: | ------------------------ |
+| fused flag on | `/tmp/zinc-rdna-qwen36-context-fuse-ssm-moe-20260707-095110.json`      | `931.9 tok/s` | `116.0 tok/s` | samples `906.6`, `957.3` |
+| default       | `/tmp/zinc-rdna-qwen36-context-default-samebuild-20260707-095208.json` | `912.9 tok/s` | `120.1 tok/s` | samples `922.7`, `903.2` |
 
 The prefill difference was within node noise and the decode path was worse with
 the fused flag. Both previews repeated the benchmark prompt's checklist marker,
@@ -2085,13 +2096,13 @@ the default token stream and removed one fallback island.
 
 Selector probe, same remote build:
 
-| mode | prefill | output |
-|---|---:|---|
-| default | `616.21 tok/s` | `{248046}` |
-| `layers=1` | `1177.39 tok/s` | changed, 16-token continuation |
-| `layers=34` | `891.54 tok/s` | `{248046}` |
-| `layers=1,34` | `854.14 tok/s` | changed, same as all-Q6 continuation |
-| `1` / all eligible | `856.81 tok/s` | changed, same as `layers=1,34` |
+| mode               |         prefill | output                               |
+| ------------------ | --------------: | ------------------------------------ |
+| default            |  `616.21 tok/s` | `{248046}`                           |
+| `layers=1`         | `1177.39 tok/s` | changed, 16-token continuation       |
+| `layers=34`        |  `891.54 tok/s` | `{248046}`                           |
+| `layers=1,34`      |  `854.14 tok/s` | changed, same as all-Q6 continuation |
+| `1` / all eligible |  `856.81 tok/s` | changed, same as `layers=1,34`       |
 
 Layer-34 diagnostic replay was numerically tight:
 `ZINC_MOE_Q6K_COLS_COMPARE=1 ZINC_MOE_Q6K_COLS=layers=34` reported
@@ -2100,10 +2111,10 @@ Three extra short prompts matched output-token sequences exactly with layer 34
 enabled. After making Qwen A3B layer 34 default-on and leaving layer 1 opt-in,
 old-forced versus new-default no-profile repeats on the 300-token prompt were:
 
-| mode | samples | median | output |
-|---|---:|---:|---|
-| `ZINC_MOE_Q6K_COLS=0` | `802.60`, `988.08`, `803.51` tok/s | `803.51 tok/s` | `{248046}` |
-| new default | `1284.97`, `916.80`, `883.34` tok/s | `916.80 tok/s` | `{248046}` |
+| mode                  |                             samples |         median | output     |
+| --------------------- | ----------------------------------: | -------------: | ---------- |
+| `ZINC_MOE_Q6K_COLS=0` |  `802.60`, `988.08`, `803.51` tok/s | `803.51 tok/s` | `{248046}` |
+| new default           | `1284.97`, `916.80`, `883.34` tok/s | `916.80 tok/s` | `{248046}` |
 
 Profile of the new default on the same prompt: `734.94 tok/s` with profiling
 overhead; MoE `143.4 ms`, SSM `135.8 ms`, attention `37.3 ms`, shared `8.2 ms`.
@@ -2130,9 +2141,9 @@ full columns up to `qwenA3bPrefillPaddedTokenCount(n_tokens)`, removing the
 12-token scalar tail on the 300-token prompt. It was faster but not
 output-stable:
 
-| mode | samples | output |
-|---|---:|---|
-| default | `804.35`, `1088.76`, `891.90` tok/s | `{248046}` |
+| mode              |                               samples | output          |
+| ----------------- | ------------------------------------: | --------------- |
+| default           |   `804.35`, `1088.76`, `891.90` tok/s | `{248046}`      |
 | padded Q8 columns | `1416.16`, `1033.44`, `1008.24` tok/s | `{198, 248046}` |
 
 Rejected and removed. The scratch padding columns are not a safe no-op for this
@@ -2146,11 +2157,11 @@ the existing plain Q8 batched path and the older fused Q8 pair could be tested
 without changing attention or SSM-out. Both alternatives changed observable
 generation on the same 300-token prompt:
 
-| mode | samples | output |
-|---|---:|---|
-| default qkv/z DP4a | `703.37`, `709.94`, `715.79` tok/s | `{248046}` |
-| plain Q8 qkv/z | `921.73`, `624.03`, `612.37` tok/s | `{271, 248068, 198, ...}` |
-| fused Q8 pair qkv/z | `494.33`, `429.04`, `435.43` tok/s | `{5272, 2250, 961, ...}` |
+| mode                |                            samples | output                    |
+| ------------------- | ---------------------------------: | ------------------------- |
+| default qkv/z DP4a  | `703.37`, `709.94`, `715.79` tok/s | `{248046}`                |
+| plain Q8 qkv/z      | `921.73`, `624.03`, `612.37` tok/s | `{271, 248068, 198, ...}` |
+| fused Q8 pair qkv/z | `494.33`, `429.04`, `435.43` tok/s | `{5272, 2250, 961, ...}`  |
 
 Rejected and removed. The default qkv/z DP4a math is not interchangeable with
 the older Q8 branches under the current coherence gate; future work should look
@@ -2162,10 +2173,10 @@ selected by default for the A3B Q8 DP4a path, with `ZINC_Q8_DP4A_SPEC_K=0` to
 force the generic pipeline. Output stayed stable, but the speed signal was flat
 to worse:
 
-| mode | samples | median | output |
-|---|---:|---:|---|
-| fixed-K pipelines | `894.72`, `942.51`, `901.51` tok/s | `901.51 tok/s` | `{248046}` |
-| generic pipeline | `1285.22`, `896.66`, `891.31` tok/s | `896.66 tok/s` | `{248046}` |
+| mode              |                             samples |         median | output     |
+| ----------------- | ----------------------------------: | -------------: | ---------- |
+| fixed-K pipelines |  `894.72`, `942.51`, `901.51` tok/s | `901.51 tok/s` | `{248046}` |
+| generic pipeline  | `1285.22`, `896.66`, `891.31` tok/s | `896.66 tok/s` | `{248046}` |
 
 Profile check was clearly worse for fixed-K in the hot SSM-out projection:
 fixed-K profile `826.80 tok/s`, SSM `130.7 ms`, `qkv_z=37.4 ms`,
@@ -2189,11 +2200,11 @@ measuring a decode-only cache-hot DMMV path by mistake.
 RDNA R9700 measurements with `RADV_PERFTEST=coop_matrix`, `--iterations 200`,
 `--warmup 25`, and the canonical `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`:
 
-| case | shape | gpu ms/iter | modeled GB/s |
-|---|---:|---:|---:|
-| `q8_ssm_qkv_dp4a` | `M=8192 N=288 K=2048` | `0.502` | `683.4` |
-| `q8_ssm_z_dp4a` | `M=4096 N=288 K=2048` | `0.265` | `651.8` |
-| `q8_ssm_out_dp4a` | `M=2048 N=288 K=4096` | `0.319` | `543.3` |
+| case              |                 shape | gpu ms/iter | modeled GB/s |
+| ----------------- | --------------------: | ----------: | -----------: |
+| `q8_ssm_qkv_dp4a` | `M=8192 N=288 K=2048` |     `0.502` |      `683.4` |
+| `q8_ssm_z_dp4a`   | `M=4096 N=288 K=2048` |     `0.265` |      `651.8` |
+| `q8_ssm_out_dp4a` | `M=2048 N=288 K=4096` |     `0.319` |      `543.3` |
 
 Next optimization target from this evidence: `q8_ssm_out_dp4a`. The qkv/z
 shapes are already over the modeled board-bandwidth line because the byte model
@@ -2207,10 +2218,10 @@ Rejected Q8 DP4a BN=64 SSM-out probe (2026-07-08): temporarily added a
 `M=2048 K=4096` shape when `N` was 64-aligned. The isolated `hot-bench`
 `q8_ssm_out_dp4a --cols 320` kernel looked promising:
 
-| mode | gpu ms/iter | note |
-|---|---:|---|
-| BN=64 | `0.367` | lower modeled bytes, fewer weight rereads |
-| generic BN=32 | `0.432` | current production path |
+| mode          | gpu ms/iter | note                                      |
+| ------------- | ----------: | ----------------------------------------- |
+| BN=64         |     `0.367` | lower modeled bytes, fewer weight rereads |
+| generic BN=32 |     `0.432` | current production path                   |
 
 Whole-prefill did not confirm the win. On a 321-token prompt (`320` full
 columns), output stayed stable (`{20}` for both paths), but the profiled run

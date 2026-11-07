@@ -1,6 +1,6 @@
 # Effort 11 — Flatten the RDNA4 decode-with-context curve
 
-## TL;DR  (2026-04-29, after run-1 + run-2 + run-3 + run-4 + run-5, total 113 cycles)
+## TL;DR (2026-04-29, after run-1 + run-2 + run-3 + run-4 + run-5, total 113 cycles)
 
 **3.46× over baseline. 108.05 tok/s is a hard plateau without coopmat.**
 
@@ -10,23 +10,23 @@ measurement. The realistic next-tier improvement requires the
 multi-week `flash_attn_cm1.comp` KHR coopmat port — every cheap
 shader-internal attack has been exhausted across the run-1..5 sweep.
 
-| run | cycles | keeps | starting → best tok/s | dominant lever |
-|---|---:|---:|---|---|
-| 1 | 17 | 12 | 31.19 → 93.68 | vec4 I/O + D-split + 4/8/16-way ILP on flash_attn |
-| 2 | 13 | 2  | 93.39 → 96.16 | dispatch + barrier fusion |
-| 3 | 16 | 1  | 96.16 → 99.38 | split-K flash attention (N_I_CHUNKS=4 + merge pass) |
-| 4 | 33 | 5  | 99.38 → 108.05 | Q4_K decode opt + FFN sub-bucket diagnostic + split_merge cluster reductions |
-| 5 | 34 | 0  | 108.05 → 108.05 | **(none — see disproved swings table below)** |
+| run | cycles | keeps | starting → best tok/s | dominant lever                                                               |
+| --- | -----: | ----: | --------------------- | ---------------------------------------------------------------------------- |
+| 1   |     17 |    12 | 31.19 → 93.68         | vec4 I/O + D-split + 4/8/16-way ILP on flash_attn                            |
+| 2   |     13 |     2 | 93.39 → 96.16         | dispatch + barrier fusion                                                    |
+| 3   |     16 |     1 | 96.16 → 99.38         | split-K flash attention (N_I_CHUNKS=4 + merge pass)                          |
+| 4   |     33 |     5 | 99.38 → 108.05        | Q4_K decode opt + FFN sub-bucket diagnostic + split_merge cluster reductions |
+| 5   |     34 |     0 | 108.05 → 108.05       | **(none — see disproved swings table below)**                                |
 
 ## What got disproved in run-5
 
-| my prior swing | run-5 cycle | result | reason |
-|---|---|---|---|
-| #1 gate+up split-K on K=4096 | c37, c55 | -3.1%/-6.1%/-1.8% | gate+up already has 6144 WGs, no occupancy unlock; merge-pass overhead dominates |
-| #2 last-WG-does-norm cross-layer fusion | c54 | bit-correct but -1.4% | cross-WG sync overhead exceeds 36 saved dispatch+barrier even with proper memory_scope |
-| #3 split_merge micro-wins | c42, c43, c45, c52 | flat | local optimum on the merge shader |
-| #5 hidden-dim-rotated dispatch | c44 | -0.34% | L1/L2 thrash hypothesis was wrong |
-| #6 gate+up LDS-input broadcast | c35 | **-13.8%** | input was already L1-cached; LDS staging halved occupancy |
+| my prior swing                          | run-5 cycle        | result                | reason                                                                                 |
+| --------------------------------------- | ------------------ | --------------------- | -------------------------------------------------------------------------------------- |
+| #1 gate+up split-K on K=4096            | c37, c55           | -3.1%/-6.1%/-1.8%     | gate+up already has 6144 WGs, no occupancy unlock; merge-pass overhead dominates       |
+| #2 last-WG-does-norm cross-layer fusion | c54                | bit-correct but -1.4% | cross-WG sync overhead exceeds 36 saved dispatch+barrier even with proper memory_scope |
+| #3 split_merge micro-wins               | c42, c43, c45, c52 | flat                  | local optimum on the merge shader                                                      |
+| #5 hidden-dim-rotated dispatch          | c44                | -0.34%                | L1/L2 thrash hypothesis was wrong                                                      |
+| #6 gate+up LDS-input broadcast          | c35                | **-13.8%**            | input was already L1-cached; LDS staging halved occupancy                              |
 
 Plus 25+ smaller direct attacks on gate+up shader, down_proj,
 flash_attn, split_merge, all flat or slight regress (cataloged in
@@ -156,7 +156,7 @@ move 108.05 → 115+ are:
   expectations to ~+2-3% real code gain per run, with system-state
   drift contributing ±3% on top.
 
-## On the L=2325 GPU hang  (deferred, not blocking)
+## On the L=2325 GPU hang (deferred, not blocking)
 
 The test at L=2325 in the manual session before this effort opened
 hung the GPU (`amdgpu: ring comp_1.0.1 timeout`). Across 18
@@ -170,11 +170,11 @@ user needs L>2300 working.
 
 Three commits on `flash_attn.comp` and `flash_attn_batched.comp`:
 
-| commit | shader change | LDS added |
-|---|---|---:|
-| `6ece0a8` | Stage Q in `shared float s_q[512]` once per workgroup; remove per-K-iter `q_data[]` re-reads from inner dot | +2 KB |
-| `f68b7d7` | Cache `page_ids[]` per block in `shared uint s_page_ids_block[256]`; both Phase 1 and Phase 4 read shared instead of global | +1 KB |
-| `539b2aa` | Fuse Phase 4 rescale into V-accumulation; mirror Q-stage and page_id cache into `flash_attn_batched.comp` | none |
+| commit    | shader change                                                                                                               | LDS added |
+| --------- | --------------------------------------------------------------------------------------------------------------------------- | --------: |
+| `6ece0a8` | Stage Q in `shared float s_q[512]` once per workgroup; remove per-K-iter `q_data[]` re-reads from inner dot                 |     +2 KB |
+| `f68b7d7` | Cache `page_ids[]` per block in `shared uint s_page_ids_block[256]`; both Phase 1 and Phase 4 read shared instead of global |     +1 KB |
+| `539b2aa` | Fuse Phase 4 rescale into V-accumulation; mirror Q-stage and page_id cache into `flash_attn_batched.comp`                   |      none |
 
 All three are bit-correct and confirmed safe across 18 cycles of
 build-on at L=1500. The cycle-8 `s_kv_base_v4` precompute later
@@ -217,7 +217,7 @@ Keep rules:
    `amdgpu: ring comp_*.*.* timeout` in dmesg fails the keep gate
    regardless of measured tok/s.
 
-## Phase budget at L=1162  (cycle 0, the data point we have)
+## Phase budget at L=1162 (cycle 0, the data point we have)
 
 ```
 Per-token decode time at L=1162:  58.8 ms
@@ -262,7 +262,7 @@ serialization, or a pathological cache miss pattern). Use Vulkan
 timestamps via `recordTimestamp` around the flash_attn dispatch of
 one layer at L=1162 to measure the kernel time directly. If that
 kernel is 1.3 ms × 36 = 46 ms, attention is the bottleneck and the
-bottleneck is *not* bandwidth.
+bottleneck is _not_ bandwidth.
 
 ### H2 — Per-token dispatch overhead grows with L because the page table is re-bound
 
@@ -297,7 +297,7 @@ Confirm or kill by running with `ZINC_PREFILL_PROFILE=1` (it works
 for decode too — check the path). The phase output will show which
 bucket grows with L.
 
-## Concrete single-cycle attacks  (in landing order, lowest risk first)
+## Concrete single-cycle attacks (in landing order, lowest risk first)
 
 ### Step 1 — Bisect the GPU hang at L=2325
 
@@ -370,20 +370,20 @@ and either landed (kept) or were tried-and-reverted:
 
 ## Reference implementations
 
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp`
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp`
   — the scalar fallback path (RDNA's path when coopmat is not used).
   Read the Q shared-memory staging loop at lines 44–90 (we already
-  ported a simpler version of this) and the *fused exp+V loop* at
+  ported a simpler version of this) and the _fused exp+V loop_ at
   lines 355–384. The latter is Step 5's reference.
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp`
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp`
   — KHR cooperative_matrix variant. RDNA3+ supports KHR coopmat;
   R9700 may benefit. Compare the wmma tile shape to our scalar
   per-thread layout.
-- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2854-2928`
+- `${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2854-2928`
   — host-side flash_attn tuning parameters. Look for `block_rows`,
   `block_cols`, the `gqa_ratio` collapse, and the `limit_occupancy_shmem`
   RDNA-specific dummy LDS allocation.
-- `/Users/stepan/Workspace/zinc/src/shaders/dmmv_q4k_moe_kpar.comp`
+- `${ZINC_WORKTREE}/src/shaders/dmmv_q4k_moe_kpar.comp`
   — wave64 K-parallel pattern. The same idea applies if Step 4
   wants to subdivide a row across multiple threads with subgroupAdd
   reduction. Read the inner loop and the THREADS_PER_ROW math.

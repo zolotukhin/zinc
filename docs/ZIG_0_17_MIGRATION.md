@@ -1,6 +1,6 @@
 # Zig 0.17 migration and RDNA validation
 
-ZINC uses Zig 0.17.0. `./scripts/zig.sh` selects the pinned compiler, downloads
+ZINC now pins Zig 0.17.1. `./scripts/zig.sh` selects the pinned compiler, downloads
 the official archive when necessary, and verifies its SHA256. It preserves an
 existing system compiler. `ZINC_TOOLCHAIN_DIR` overrides the toolchain cache.
 
@@ -12,7 +12,8 @@ chunk, while preserving the merge algorithm and token IDs. JSON responses and
 SSE frames use vectored writes; SSE disables Nagle buffering and advertises the
 server's actual one-request connection lifetime.
 
-The measurements below describe the initial migration. A subsequent
+The measurements below describe the initial migration with Zig 0.17.0;
+they are not measurements of the 0.17.1 patch upgrade. A subsequent
 [BPE optimization](https://github.com/zolotukhin/zinc/blob/main/docs/ZIG_0_17_BPE.md), measured against that already optimized
 0.17 build, further reduces Gemma's long-prompt first-output latency by 34%
 and fixes ordinary angle-bracket token handling.
@@ -40,11 +41,11 @@ output parity, and stops every server it starts.
 Final Vulkan medians use three independent server rounds and three measured
 requests per scenario in each round:
 
-| Long-context first visible text | Zig 0.15.2 | Zig 0.17.0 | Change |
-| --- | ---: | ---: | ---: |
-| Qwen 3.5 9B | 1386.6 ms | 1357.8 ms | 2.1% less time |
-| Qwen 3.6 35B-A3B | 1312.2 ms | 1261.5 ms | 3.9% less time |
-| Gemma 4 26B-A4B | 1845.7 ms | 1809.1 ms | 2.0% less time |
+| Long-context first visible text | Zig 0.15.2 | Zig 0.17.0 |         Change |
+| ------------------------------- | ---------: | ---------: | -------------: |
+| Qwen 3.5 9B                     |  1386.6 ms |  1357.8 ms | 2.1% less time |
+| Qwen 3.6 35B-A3B                |  1312.2 ms |  1261.5 ms | 3.9% less time |
+| Gemma 4 26B-A4B                 |  1845.7 ms |  1809.1 ms | 2.0% less time |
 
 GPU decode throughput remains effectively level: the worst Vulkan server round
 was 0.18% below its matching baseline, within the 2% guard. These gains include the
@@ -55,11 +56,11 @@ All compared outputs match within each backend and scenario.
 ROCm's worst server round was 1.50% below its decode baseline, also within the
 2% guard. Its 800-token prefill throughput improved in both measured rounds:
 
-| Model | Round 1 | Round 2 |
-| --- | ---: | ---: |
-| Qwen 3.5 9B | +4.6% | +4.3% |
-| Qwen 3.6 35B-A3B | +38.3% | +5.0% |
-| Gemma 4 26B-A4B | +1.2% | +0.9% |
+| Model            | Round 1 | Round 2 |
+| ---------------- | ------: | ------: |
+| Qwen 3.5 9B      |   +4.6% |   +4.3% |
+| Qwen 3.6 35B-A3B |  +38.3% |   +5.0% |
+| Gemma 4 26B-A4B  |   +1.2% |   +0.9% |
 
 Qwen 35B baseline prefill varied substantially between server rounds. The
 per-round gains show that variation; the pooled 19% increase is not a stable
@@ -79,11 +80,11 @@ then times 50 encodings per corpus and build, in two alternating rounds. It uses
 the allocator used by each production build and verifies every timed token
 sequence against its reference:
 
-| Model | Code | Mixed text | Prose | Multilingual text |
-| --- | ---: | ---: | ---: | ---: |
-| Qwen 3.5 9B | 102.6× | 48.1× | 72.3× | 22.7× |
-| Qwen 3.6 35B-A3B | 103.3× | 48.8× | 71.8× | 22.7× |
-| Gemma 4 26B-A4B | 12.6× | 4.1× | 1.7× | 5.3× |
+| Model            |   Code | Mixed text | Prose | Multilingual text |
+| ---------------- | -----: | ---------: | ----: | ----------------: |
+| Qwen 3.5 9B      | 102.6× |      48.1× | 72.3× |             22.7× |
+| Qwen 3.6 35B-A3B | 103.3× |      48.8× | 71.8× |             22.7× |
+| Gemma 4 26B-A4B  |  12.6× |       4.1× |  1.7× |              5.3× |
 
 These are prompt-encoding speedups, separate from GPU token generation.
 
@@ -116,7 +117,7 @@ These are prompt-encoding speedups, separate from GPU token generation.
 - Network tests cover UTF-8 SSE framing and a 512 KiB response with a constrained
   socket send buffer. Executor tests cover zero, one and three worker threads.
 
-CI pins 0.17.0 and checks the four optimization modes, hot-decode and CUDA entrypoints,
+CI pins 0.17.1 and checks the four optimization modes, hot-decode and CUDA entrypoints,
 ZINC_RT and Metal compilation. The site build also installs the compiler and
 headers required by its native API documentation probe.
 
@@ -127,7 +128,11 @@ showed no sustained decode gain. The shipped shader sources are unchanged.
 ## Reproduce
 
 Run model and benchmark commands on the designated GPU host. Build the frozen
-baseline in a separate checkout with Zig 0.15.2, and build the candidate with:
+baseline in a separate checkout with Zig 0.15.2.
+
+To reproduce these measurements, check out the recorded 0.17.0 candidate source
+and run the commands below. Its wrapper selects that compiler; current main
+selects the 0.17.1 patch release.
 
 ```sh
 ./scripts/zig.sh build -Doptimize=ReleaseFast

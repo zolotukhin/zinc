@@ -308,6 +308,13 @@ const jsonLd = {
     margin: var(--space-md) auto;
   }
 
+  /* Keep wide parts lists and measurements inside the article on phones. */
+  .post-content table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
   .post-content figure.diagram-card {
     margin: var(--space-lg) 0;
   }

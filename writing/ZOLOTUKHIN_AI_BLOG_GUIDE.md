@@ -8,7 +8,7 @@ The target outcome is simple: every post should feel sharp, current, technical, 
 
 A strong post opens with a real hook, explains why the topic matters now, gets technical without turning into a wall of jargon, and lands with a clear takeaway. It should feel like an engineer explaining something important, not like a content machine filling a template.
 
-The writing should sound informed, calm, and specific. The best reference points in `writing/sample_*` are the narrative flow, concrete examples, and technical honesty. The parts to improve are pacing, visual structure, and SEO discipline.
+The writing should sound informed, calm, and specific. The published posts in `site/src/content/posts/` provide reference points for the narrative flow, concrete examples, and technical honesty. The parts to improve are pacing, visual structure, and SEO discipline.
 
 ## Hard rules
 

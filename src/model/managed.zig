@@ -1005,7 +1005,7 @@ test "isValidModelId rejects ids that are not a single safe path component" {
     try std.testing.expect(!isValidModelId(""));
     try std.testing.expect(!isValidModelId("."));
     try std.testing.expect(!isValidModelId(".."));
-    try std.testing.expect(!isValidModelId("../../../home/user"));
+    try std.testing.expect(!isValidModelId("../../../home/example"));
     try std.testing.expect(!isValidModelId("a/b"));
     try std.testing.expect(!isValidModelId("a\\b"));
     try std.testing.expect(!isValidModelId(".hidden"));
@@ -1029,15 +1029,15 @@ test "resolve cache root prefers XDG cache home" {
 }
 
 test "resolve config root falls back to home on linux" {
-    const path = try resolveConfigRootForEnv(std.testing.allocator, .linux, null, "/home/zinc");
+    const path = try resolveConfigRootForEnv(std.testing.allocator, .linux, null, "/home/example");
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/home/zinc/.config/zinc", path);
+    try std.testing.expectEqualStrings("/home/example/.config/zinc", path);
 }
 
 test "resolve config root uses application support on macos" {
-    const path = try resolveConfigRootForEnv(std.testing.allocator, .macos, null, "/Users/zinc");
+    const path = try resolveConfigRootForEnv(std.testing.allocator, .macos, null, "/Users/example");
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/Users/zinc/Library/Application Support/zinc", path);
+    try std.testing.expectEqualStrings("/Users/example/Library/Application Support/zinc", path);
 }
 
 test "active selection roundtrip via explicit config path" {
