@@ -222,6 +222,29 @@ describe('OpenClaw per-run session reuse', () => {
     expect(JSON.stringify(original)).toBe(before);
     expect(await sessionRuntimeConfig(original, 'different', capable())).toBe(original);
   });
+  test('normalizes trailing slashes and preserves reverse-proxy path prefixes', async () => {
+    for (const [baseUrl, healthUrl] of [
+      ['http://localhost:9090/v1/', 'http://localhost:9090/health'],
+      ['http://localhost:9090/api/v1', 'http://localhost:9090/api/health'],
+      ['http://localhost:9090/api/v1///', 'http://localhost:9090/api/health'],
+    ]) {
+      const original = runtime();
+      original.models.providers.zinc.baseUrl = baseUrl;
+      let observed;
+      const value = await sessionRuntimeConfig(
+        original,
+        'loaded',
+        capable({
+          fetchImpl: async (url: string) => {
+            observed = url;
+            return Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } });
+          },
+        }),
+      );
+      expect(observed).toBe(healthUrl);
+      expect(value).not.toBe(original);
+    }
+  });
   test('retains full prefill for absent, false, malformed or unhealthy capabilities and discovery errors', async () => {
     for (const health of [
       null,

@@ -365,7 +365,11 @@ export async function sessionRuntimeConfig(
     if (typeof apiKey !== 'string') return config;
     const match = apiKey.match(/^\$\{([A-Z][A-Z0-9_]*)\}$/);
     const key = match ? authValue(match[1], env) : apiKey;
-    const health = await jsonRequest(`${base.slice(0, -3)}/health`, {
+    // normalizeBaseUrl validates the /v1 suffix and removes trailing slashes.
+    // Retain a reverse proxy's path prefix when selecting its health route.
+    const healthUrl = new URL(base);
+    healthUrl.pathname = healthUrl.pathname.replace(/\/v1$/, '/health');
+    const health = await jsonRequest(healthUrl.href, {
       key,
       fetchImpl,
       timeout: 2000,
