@@ -13,6 +13,9 @@ The helper itself uses only Node's standard library.
 
 The [AMD model acceptance report](OPENCLAW_AMD_VALIDATION.md) records the
 published binaries, actual file/tool outcomes, contexts and model-specific limits.
+The [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-7-candidate-opencode-and-openclaw)
+records the separate Arc Pro B70 results, including Gemma workspace timeouts
+and the starter model's failed coding acceptance.
 
 ## Start ZINC
 

@@ -1,0 +1,953 @@
+{
+  "clients": {
+    "bun": "1.4.4",
+    "node": "v26.10.0",
+    "openclaw": "OpenClaw 2026.11.1 (4ffdd20)",
+    "opencode": "opencode v2.0.21"
+  },
+  "date": "2026-11-07",
+  "gemma_reuse_followup": {
+    "cache_checks_passed": true,
+    "client": "OpenClaw 2026.11.1 (4ffdd20)",
+    "client_accepted_rows": 1,
+    "completed": true,
+    "native_checks_passed": true,
+    "node": "v26.10.0",
+    "passed": false,
+    "rows": [
+      {
+        "actual_client_cache_hits": [
+          {
+            "appended": 51,
+            "reused": 4070
+          }
+        ],
+        "actual_client_reuse_observed": true,
+        "client_accepted": false,
+        "client_exit": 1,
+        "context": 16384,
+        "healthy_after": true,
+        "model": "gemma4-26b-a4b-q4k-m",
+        "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 456.94451944600223,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 75.29
+          },
+          {
+            "completed": false,
+            "name": "workspace",
+            "passed": false,
+            "seconds": 305.861
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 74.9
+          }
+        ],
+        "tool_history_control": {
+          "after_intervening_matches_full_prefill": true,
+          "cache_hits": [
+            {
+              "appended": 55,
+              "reused": 2002
+            }
+          ],
+          "cached_matches_full_prefill": true,
+          "first_prompt_tokens": 1985,
+          "passed": true,
+          "result": {
+            "calls": [],
+            "content": "zinc-canary-314",
+            "finish_reason": "stop"
+          }
+        },
+        "uncached_client_accepted": false
+      },
+      {
+        "actual_client_cache_hits": [
+          {
+            "appended": 78,
+            "reused": 4041
+          },
+          {
+            "appended": 163,
+            "reused": 4253
+          },
+          {
+            "appended": 76,
+            "reused": 4448
+          }
+        ],
+        "actual_client_reuse_observed": true,
+        "client_accepted": true,
+        "client_exit": 0,
+        "context": 12288,
+        "healthy_after": true,
+        "model": "gemma4-31b-q4k-m",
+        "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 253.21443908500078,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 75.925
+          },
+          {
+            "completed": true,
+            "name": "workspace",
+            "passed": true,
+            "seconds": 101.234,
+            "tools": {
+              "calls": 5,
+              "failures": 0,
+              "tools": ["read", "edit", "write", "exec"]
+            }
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 74.366
+          }
+        ],
+        "tool_history_control": {
+          "after_intervening_matches_full_prefill": true,
+          "cache_hits": [
+            {
+              "appended": 55,
+              "reused": 2002
+            }
+          ],
+          "cached_matches_full_prefill": true,
+          "first_prompt_tokens": 1985,
+          "passed": true,
+          "result": {
+            "calls": [],
+            "content": "zinc-canary-314",
+            "finish_reason": "stop"
+          }
+        },
+        "uncached_client_accepted": false
+      }
+    ],
+    "settings": {
+      "client_output_tokens": 1536,
+      "client_timeout_seconds": 300,
+      "kv_cache": "f16",
+      "mtp": "off",
+      "native_checks_before_and_after": true,
+      "response_repairs": false,
+      "session_reuse": "automatic capability-gated default",
+      "slots": 1,
+      "supervisor_edits": false,
+      "thinking": false
+    }
+  },
+  "hardware": {
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.7-arch1-1"
+  },
+  "hardware_unchanged": true,
+  "initial_matrix": {
+    "accepted_rows": 10,
+    "all_clients_all_models_accepted": false,
+    "complete_model_matrix": true,
+    "completed": true,
+    "engine_checks_passed": true,
+    "rows": [
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "qwen35-9b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen35-9b-q4k-m",
+        "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 64.850503018999,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 14.111
+          },
+          {
+            "completed": true,
+            "name": "workspace",
+            "passed": true,
+            "seconds": 36.489,
+            "tools": {
+              "calls": 5,
+              "failures": 0,
+              "tools": ["read", "edit", "write", "exec"]
+            }
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 12.411
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "qwen35-9b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen35-9b-q4k-m",
+        "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 221.28476116599995,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 45,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 34,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 133,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "gemma4-26b-a4b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": false,
+        "context": 16384,
+        "exit_code": 1,
+        "model": "gemma4-26b-a4b-q4k-m",
+        "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 457.9881985160009,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 75.308
+          },
+          {
+            "completed": false,
+            "name": "workspace",
+            "passed": false,
+            "seconds": 306.706
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 75.125
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "gemma4-26b-a4b-q4k-m",
+          "observed_cache_hits": 3,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "gemma4-26b-a4b-q4k-m",
+        "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 2056.260915040999,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 58,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 24,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 145,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "gemma4-31b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": false,
+        "context": 12288,
+        "exit_code": 1,
+        "model": "gemma4-31b-q4k-m",
+        "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 456.94794661000014,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 75.328
+          },
+          {
+            "completed": false,
+            "name": "workspace",
+            "passed": false,
+            "seconds": 306.146
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 74.53
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "gemma4-31b-q4k-m",
+          "observed_cache_hits": 11,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": true,
+        "context": 12288,
+        "exit_code": 0,
+        "model": "gemma4-31b-q4k-m",
+        "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 535.8699844120001,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 55,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 67,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 151,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "qwen36-27b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen36-27b-q4k-m",
+        "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 170.29487166999934,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 25.029
+          },
+          {
+            "completed": true,
+            "name": "workspace",
+            "passed": true,
+            "seconds": 120.136,
+            "tools": {
+              "calls": 6,
+              "failures": 0,
+              "tools": ["read", "write", "edit", "exec"]
+            }
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 23.628
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "qwen36-27b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen36-27b-q4k-m",
+        "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 708.502489515,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 49,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 38,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 151,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "qwen36-35b-a3b-q4k-xl",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen36-35b-a3b-q4k-xl",
+        "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 308.7163771939995,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 48.285
+          },
+          {
+            "completed": true,
+            "name": "workspace",
+            "passed": true,
+            "seconds": 211.628,
+            "tools": {
+              "calls": 6,
+              "failures": 0,
+              "tools": ["read", "write", "edit", "exec"]
+            }
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 47.945
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "qwen36-35b-a3b-q4k-xl",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen36-35b-a3b-q4k-xl",
+        "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 902.4643120090004,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 50,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 58,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 142,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "qwen38-27b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen38-27b-q4k-m",
+        "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 185.08590101699883,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": true,
+            "seconds": 25.003
+          },
+          {
+            "completed": true,
+            "name": "workspace",
+            "passed": true,
+            "seconds": 133.369,
+            "tools": {
+              "calls": 6,
+              "failures": 0,
+              "tools": ["read", "write", "exec"]
+            }
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": true,
+            "seconds": 24.894
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "qwen38-27b-q4k-m",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": true,
+        "context": 16384,
+        "exit_code": 0,
+        "model": "qwen38-27b-q4k-m",
+        "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 460.8061962739994,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 37,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 28,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 3
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 151,
+              "exitCode": 0,
+              "tests": {
+                "fail": 0,
+                "pass": 4
+              }
+            },
+            "passed": true,
+            "protected_file_violations_count": 0
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "openclaw",
+          "helper_session_policy": "no helper-injected session in this initial matrix",
+          "model": "qwen3-0.6b-q8-0",
+          "observed_cache_hits": 0,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "openclaw",
+        "client_accepted": false,
+        "context": 16384,
+        "exit_code": 1,
+        "model": "qwen3-0.6b-q8-0",
+        "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 38.258333702997334,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "completed": true,
+            "name": "text",
+            "passed": false,
+            "seconds": 8.49
+          },
+          {
+            "completed": true,
+            "name": "workspace",
+            "passed": false,
+            "seconds": 20.229,
+            "tools": {
+              "calls": 6,
+              "failures": 2,
+              "tools": ["read", "write", "exec", "apply_patch"],
+              "unresolved_error": true
+            }
+          },
+          {
+            "completed": true,
+            "name": "recovery",
+            "passed": false,
+            "seconds": 8.629
+          }
+        ]
+      },
+      {
+        "chat_prefix_reuse": {
+          "client": "opencode",
+          "helper_session_policy": "automatic when native capability is advertised",
+          "model": "qwen3-0.6b-q8-0",
+          "observed_cache_hits": 1,
+          "prompt_cache_environment_is_global_disable": false
+        },
+        "client": "opencode",
+        "client_accepted": false,
+        "context": 16384,
+        "exit_code": 1,
+        "model": "qwen3-0.6b-q8-0",
+        "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        "native_after": true,
+        "native_before": true,
+        "seconds": 48.495946343999094,
+        "server_healthy_after": true,
+        "tasks": [
+          {
+            "client_exit": 0,
+            "fixture": "rate-limiter-single",
+            "independent_test": {
+              "durationMs": 54,
+              "exitCode": 1,
+              "tests": {
+                "fail": 3,
+                "pass": 0
+              }
+            },
+            "passed": false,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "cart-multi-file",
+            "independent_test": {
+              "durationMs": 42,
+              "exitCode": 1,
+              "tests": {
+                "fail": 2,
+                "pass": 1
+              }
+            },
+            "passed": false,
+            "protected_file_violations_count": 0
+          },
+          {
+            "client_exit": 0,
+            "fixture": "python-log-cli",
+            "independent_test": {
+              "durationMs": 176,
+              "exitCode": 1,
+              "tests": {
+                "fail": 4,
+                "pass": 0
+              }
+            },
+            "passed": false,
+            "protected_file_violations_count": 0
+          }
+        ]
+      }
+    ],
+    "settings": {
+      "chat_prefix_reuse": "per-row observed; the original ZINC_PROMPT_CACHE=0 setting does not disable Vulkan chat sessions",
+      "fresh_server_per_client": true,
+      "kv_cache": "f16",
+      "mtp": "off",
+      "openclaw_output": 1536,
+      "openclaw_timeout_seconds": 300,
+      "opencode_output": 2048,
+      "opencode_steps": 16,
+      "opencode_timeout_seconds": 900,
+      "response_repairs": false,
+      "slots": 1,
+      "supervisor_edits": false,
+      "thinking": false
+    }
+  },
+  "limitations": [
+    "The 0.6B starter remains unsupported for coding-task acceptance despite passing engine/native checks.",
+    "Native controls use their own templates and uncached prompts; they do not establish token-equivalent input, matched cache work or an engine speed win.",
+    "OpenCode can inject session IDs on qualified Vulkan attention-only models. The initial OpenClaw helper used full prefill; raw performance /v1/completions requests are separately uncached.",
+    "Session reuse mathematical agreement and independent client task acceptance are separate results.",
+    "The current kernel/driver stack was retained; no kernel or driver upgrades are qualified here."
+  ],
+  "native_failed_task_controls": {
+    "completed": false,
+    "scope": "Queued separately; no claim of native client acceptance."
+  },
+  "raw_evidence_sha256": {
+    "client-cache-observations-private.json": "6f5f83de0aa8acb77fbcb1b18afc204e31f3bf6442e374908ea2e75330ef2227",
+    "clients-matrix-complete-private.json": "e6a02409c1ea83d7cd62180fabffde95e37574e838fe5f87c51826ceb1633f09",
+    "openclaw-session-reuse-private.json": "95b718ee3adca8df61e7f622edc7c7726d93afcabc40d5157aaa1d635b0456bb"
+  },
+  "release_qualification": false,
+  "schema_version": "zinc-intel-client-acceptance-followup-v1",
+  "scope": "Independent actual-client task acceptance, package native controls and two Gemma session-reuse follow-ups. Failed and timed-out tasks remain failures.",
+  "source": {
+    "archive_sha256": "f3d31e5aa3c29e74f84719bd540b3e82630db742d9b6f7a896b21209c4ff2591",
+    "binary_sha256": "3090e2ebfda53da136331729d457a3c57442a7e6888f344e99c9c88966f2cb68",
+    "helper_commit": "ea66c301891bb1550c6348aea8965526620daeea",
+    "helper_sha256": "1d60340d7f65832f569c515b455f0800ffc5663b0461c02d6f3ff86ba5ce4afe",
+    "source_commit": "51dd99dd25d9c4ab68d1e8d2f7eeef068360651c"
+  }
+}
