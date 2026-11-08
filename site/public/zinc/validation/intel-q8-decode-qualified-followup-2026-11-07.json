@@ -25,23 +25,8 @@
     "base_numerical_cases": 376,
     "expanded_q8": {
       "covered_widths": [
-        32,
-        64,
-        96,
-        512,
-        1024,
-        2048,
-        2112,
-        2816,
-        3072,
-        4096,
-        5120,
-        6144,
-        8192,
-        10240,
-        12288,
-        17408,
-        21504
+        32, 64, 96, 512, 1024, 2048, 2112, 2816, 3072, 4096, 5120, 6144, 8192,
+        10240, 12288, 17408, 21504
       ],
       "model_width_audit": [
         {
@@ -52,133 +37,78 @@
           "missing_width_tensors": [],
           "q8_lm_embedding_tensors": [
             {
-              "dimensions": [
-                1024,
-                151936
-              ],
+              "dimensions": [1024, 151936],
               "tensor": "token_embd.weight"
             }
           ],
-          "q8_widths": [
-            1024,
-            2048,
-            3072
-          ]
+          "q8_widths": [1024, 2048, 3072]
         },
         {
           "architecture": "qwen35moe",
           "embedding": 2048,
           "id": "qwen36-35b-a3b-q4k-xl",
-          "missing_fixture_widths": [
-            512
-          ],
+          "missing_fixture_widths": [512],
           "missing_width_tensors": [
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.0.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.1.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.2.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.3.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.4.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.5.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.6.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.7.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.8.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.9.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.10.ffn_down_shexp.weight"
             },
             {
-              "dimensions": [
-                512,
-                2048
-              ],
+              "dimensions": [512, 2048],
               "tensor": "blk.11.ffn_down_shexp.weight"
             }
           ],
           "q8_lm_embedding_tensors": [
             {
-              "dimensions": [
-                2048,
-                248320
-              ],
+              "dimensions": [2048, 248320],
               "tensor": "output.weight"
             },
             {
-              "dimensions": [
-                2048,
-                248320
-              ],
+              "dimensions": [2048, 248320],
               "tensor": "token_embd.weight"
             }
           ],
-          "q8_widths": [
-            512,
-            2048,
-            4096
-          ]
+          "q8_widths": [512, 2048, 4096]
         },
         {
           "architecture": "qwen35",
@@ -196,9 +126,7 @@
           "missing_fixture_widths": [],
           "missing_width_tensors": [],
           "q8_lm_embedding_tensors": [],
-          "q8_widths": [
-            4096
-          ]
+          "q8_widths": [4096]
         },
         {
           "architecture": "gemma4",
@@ -213,132 +141,78 @@
           "architecture": "gemma4",
           "embedding": 2816,
           "id": "gemma4-26b-a4b-q4k-m",
-          "missing_fixture_widths": [
-            2112,
-            2816
-          ],
+          "missing_fixture_widths": [2112, 2816],
           "missing_width_tensors": [
             {
-              "dimensions": [
-                2816,
-                262144
-              ],
+              "dimensions": [2816, 262144],
               "tensor": "token_embd.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2048
-              ],
+              "dimensions": [2816, 2048],
               "tensor": "blk.0.attn_k.weight"
             },
             {
-              "dimensions": [
-                2816,
-                4096
-              ],
+              "dimensions": [2816, 4096],
               "tensor": "blk.0.attn_q.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2048
-              ],
+              "dimensions": [2816, 2048],
               "tensor": "blk.0.attn_v.weight"
             },
             {
-              "dimensions": [
-                2112,
-                2816
-              ],
+              "dimensions": [2112, 2816],
               "tensor": "blk.0.ffn_down.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2112
-              ],
+              "dimensions": [2816, 2112],
               "tensor": "blk.0.ffn_gate.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2112
-              ],
+              "dimensions": [2816, 2112],
               "tensor": "blk.0.ffn_up.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2048
-              ],
+              "dimensions": [2816, 2048],
               "tensor": "blk.1.attn_k.weight"
             },
             {
-              "dimensions": [
-                2816,
-                4096
-              ],
+              "dimensions": [2816, 4096],
               "tensor": "blk.1.attn_q.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2048
-              ],
+              "dimensions": [2816, 2048],
               "tensor": "blk.1.attn_v.weight"
             },
             {
-              "dimensions": [
-                2112,
-                2816
-              ],
+              "dimensions": [2112, 2816],
               "tensor": "blk.1.ffn_down.weight"
             },
             {
-              "dimensions": [
-                2816,
-                2112
-              ],
+              "dimensions": [2816, 2112],
               "tensor": "blk.1.ffn_gate.weight"
             }
           ],
           "q8_lm_embedding_tensors": [
             {
-              "dimensions": [
-                2816,
-                262144
-              ],
+              "dimensions": [2816, 262144],
               "tensor": "token_embd.weight"
             }
           ],
-          "q8_widths": [
-            2112,
-            2816,
-            4096,
-            8192
-          ]
+          "q8_widths": [2112, 2816, 4096, 8192]
         },
         {
           "architecture": "qwen35",
           "embedding": 5120,
           "id": "qwen38-27b-q4k-m",
-          "missing_fixture_widths": [
-            10240
-          ],
+          "missing_fixture_widths": [10240],
           "missing_width_tensors": [
             {
-              "dimensions": [
-                10240,
-                5120
-              ],
+              "dimensions": [10240, 5120],
               "tensor": "blk.64.nextn.eh_proj.weight"
             }
           ],
           "q8_lm_embedding_tensors": [],
-          "q8_widths": [
-            10240
-          ]
+          "q8_widths": [10240]
         }
       ],
       "q8_decode_reference": {
@@ -367,40 +241,12 @@
             "prompt": "<|im_start|>user\nWrite a long story about a lighthouse keeper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 22,
             "reference_ids": [
-              334,
-              785,
-              444,
-              57909,
-              81627,
-              748,
-              54348,
-              56177,
-              641,
-              279,
-              4746,
-              315,
-              279,
-              34235,
-              6290,
-              315
+              334, 785, 444, 57909, 81627, 748, 54348, 56177, 641, 279, 4746,
+              315, 279, 34235, 6290, 315
             ],
             "zinc_ids": [
-              334,
-              785,
-              444,
-              57909,
-              81627,
-              748,
-              54348,
-              56177,
-              641,
-              279,
-              4746,
-              315,
-              279,
-              34235,
-              6290,
-              315
+              334, 785, 444, 57909, 81627, 748, 54348, 56177, 641, 279, 4746,
+              315, 279, 34235, 6290, 315
             ]
           },
           {
@@ -412,40 +258,12 @@
             "prompt": "<|im_start|>user\nExplain how a refrigerator works.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 19,
             "reference_ids": [
-              32,
-              44944,
-              4278,
-              553,
-              1667,
-              3070,
-              87072,
-              4802,
-              334,
-              311,
-              3070,
-              42196,
-              323,
-              21129,
-              3607,
-              334
+              32, 44944, 4278, 553, 1667, 3070, 87072, 4802, 334, 311, 3070,
+              42196, 323, 21129, 3607, 334
             ],
             "zinc_ids": [
-              32,
-              44944,
-              4278,
-              553,
-              1667,
-              3070,
-              87072,
-              4802,
-              334,
-              311,
-              3070,
-              42196,
-              323,
-              21129,
-              3607,
-              334
+              32, 44944, 4278, 553, 1667, 3070, 87072, 4802, 334, 311, 3070,
+              42196, 323, 21129, 3607, 334
             ]
           },
           {
@@ -457,40 +275,12 @@
             "prompt": "<|im_start|>user\nList three uses of copper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 18,
             "reference_ids": [
-              19641,
-              5711,
-              315,
-              23285,
-              2924,
-              1447,
-              16,
-              13,
-              3070,
-              29331,
-              12108,
-              18827,
-              95518,
-              42540,
-              374,
-              13570
+              19641, 5711, 315, 23285, 2924, 1447, 16, 13, 3070, 29331, 12108,
+              18827, 95518, 42540, 374, 13570
             ],
             "zinc_ids": [
-              19641,
-              5711,
-              315,
-              23285,
-              2924,
-              1447,
-              16,
-              13,
-              3070,
-              29331,
-              12108,
-              18827,
-              95518,
-              42540,
-              374,
-              13570
+              19641, 5711, 315, 23285, 2924, 1447, 16, 13, 3070, 29331, 12108,
+              18827, 95518, 42540, 374, 13570
             ]
           }
         ],
@@ -536,40 +326,12 @@
             "prompt": "<|im_start|>user\nWrite a long story about a lighthouse keeper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 22,
             "reference_ids": [
-              760,
-              9662,
-              383,
-              5068,
-              6451,
-              4963,
-              1467,
-              524,
-              11894,
-              26,
-              424,
-              58330,
-              13,
-              1049,
-              557,
-              264
+              760, 9662, 383, 5068, 6451, 4963, 1467, 524, 11894, 26, 424,
+              58330, 13, 1049, 557, 264
             ],
             "zinc_ids": [
-              760,
-              9662,
-              383,
-              5068,
-              6451,
-              4963,
-              1467,
-              524,
-              11894,
-              26,
-              424,
-              58330,
-              13,
-              1049,
-              557,
-              264
+              760, 9662, 383, 5068, 6451, 4963, 1467, 524, 11894, 26, 424,
+              58330, 13, 1049, 557, 264
             ]
           },
           {
@@ -589,40 +351,12 @@
             "prompt": "<|im_start|>user\nExplain how a refrigerator works.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 19,
             "reference_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              6992,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              36337,
-              310,
-              279,
-              4732,
-              4424
+              32, 43447, 4138, 539, 6992, 8364, 494, 279, 4613, 314, 279, 36337,
+              310, 279, 4732, 4424
             ],
             "zinc_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              6992,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              3618,
-              310,
-              279,
-              4732,
-              4424
+              32, 43447, 4138, 539, 6992, 8364, 494, 279, 4613, 314, 279, 3618,
+              310, 279, 4732, 4424
             ]
           },
           {
@@ -634,40 +368,12 @@
             "prompt": "<|im_start|>user\nList three uses of copper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 18,
             "reference_ids": [
-              8160,
-              513,
-              2250,
-              4047,
-              5533,
-              314,
-              22561,
-              25,
-              271,
-              16,
-              13,
-              220,
-              2972,
-              28371,
-              11764,
-              46258
+              8160, 513, 2250, 4047, 5533, 314, 22561, 25, 271, 16, 13, 220,
+              2972, 28371, 11764, 46258
             ],
             "zinc_ids": [
-              8160,
-              513,
-              2250,
-              4047,
-              5533,
-              314,
-              22561,
-              25,
-              271,
-              16,
-              13,
-              220,
-              2972,
-              28371,
-              11764,
-              46258
+              8160, 513, 2250, 4047, 5533, 314, 22561, 25, 271, 16, 13, 220,
+              2972, 28371, 11764, 46258
             ]
           }
         ],
@@ -721,40 +427,12 @@
             "prompt": "<|im_start|>user\nWrite a long story about a lighthouse keeper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 22,
             "reference_ids": [
-              760,
-              9662,
-              383,
-              5068,
-              6451,
-              4963,
-              1467,
-              524,
-              15756,
-              11894,
-              26,
-              424,
-              76454,
-              13,
-              1049,
-              1100
+              760, 9662, 383, 5068, 6451, 4963, 1467, 524, 15756, 11894, 26,
+              424, 76454, 13, 1049, 1100
             ],
             "zinc_ids": [
-              760,
-              9662,
-              383,
-              5068,
-              6451,
-              4963,
-              1467,
-              524,
-              15756,
-              11894,
-              26,
-              424,
-              76454,
-              13,
-              1049,
-              1100
+              760, 9662, 383, 5068, 6451, 4963, 1467, 524, 15756, 11894, 26,
+              424, 76454, 13, 1049, 1100
             ]
           },
           {
@@ -766,40 +444,12 @@
             "prompt": "<|im_start|>user\nExplain how a refrigerator works.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 19,
             "reference_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              6992,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              36337,
-              310,
-              279,
-              4732,
-              4424
+              32, 43447, 4138, 539, 6992, 8364, 494, 279, 4613, 314, 279, 36337,
+              310, 279, 4732, 4424
             ],
             "zinc_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              6992,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              36337,
-              310,
-              279,
-              4732,
-              4424
+              32, 43447, 4138, 539, 6992, 8364, 494, 279, 4613, 314, 279, 36337,
+              310, 279, 4732, 4424
             ]
           },
           {
@@ -811,40 +461,12 @@
             "prompt": "<|im_start|>user\nList three uses of copper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 18,
             "reference_ids": [
-              8160,
-              513,
-              2250,
-              4047,
-              5533,
-              314,
-              22561,
-              25,
-              271,
-              16,
-              13,
-              220,
-              2972,
-              28371,
-              11764,
-              46258
+              8160, 513, 2250, 4047, 5533, 314, 22561, 25, 271, 16, 13, 220,
+              2972, 28371, 11764, 46258
             ],
             "zinc_ids": [
-              8160,
-              513,
-              2250,
-              4047,
-              5533,
-              314,
-              22561,
-              25,
-              271,
-              16,
-              13,
-              220,
-              2972,
-              28371,
-              11764,
-              46258
+              8160, 513, 2250, 4047, 5533, 314, 22561, 25, 271, 16, 13, 220,
+              2972, 28371, 11764, 46258
             ]
           }
         ],
@@ -890,40 +512,12 @@
             "prompt": "<|im_start|>user\nWrite a long story about a lighthouse keeper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 22,
             "reference_ids": [
-              760,
-              9662,
-              383,
-              5068,
-              6451,
-              4963,
-              1467,
-              524,
-              11894,
-              26,
-              424,
-              76454,
-              13,
-              1049,
-              557,
-              264
+              760, 9662, 383, 5068, 6451, 4963, 1467, 524, 11894, 26, 424,
+              76454, 13, 1049, 557, 264
             ],
             "zinc_ids": [
-              760,
-              9662,
-              383,
-              5068,
-              6451,
-              4963,
-              1467,
-              524,
-              11894,
-              26,
-              424,
-              76454,
-              13,
-              1049,
-              557,
-              264
+              760, 9662, 383, 5068, 6451, 4963, 1467, 524, 11894, 26, 424,
+              76454, 13, 1049, 557, 264
             ]
           },
           {
@@ -935,40 +529,12 @@
             "prompt": "<|im_start|>user\nExplain how a refrigerator works.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 19,
             "reference_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              48270,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              53494,
-              318,
-              2777,
-              488,
-              1318
+              32, 43447, 4138, 539, 48270, 8364, 494, 279, 4613, 314, 279,
+              53494, 318, 2777, 488, 1318
             ],
             "zinc_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              48270,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              53494,
-              318,
-              2777,
-              488,
-              1318
+              32, 43447, 4138, 539, 48270, 8364, 494, 279, 4613, 314, 279,
+              53494, 318, 2777, 488, 1318
             ]
           },
           {
@@ -980,40 +546,12 @@
             "prompt": "<|im_start|>user\nList three uses of copper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 18,
             "reference_ids": [
-              34,
-              17936,
-              369,
-              264,
-              30894,
-              9041,
-              31474,
-              364,
-              1141,
-              8800,
-              19132,
-              94494,
-              11,
-              27462,
-              94494,
-              11
+              34, 17936, 369, 264, 30894, 9041, 31474, 364, 1141, 8800, 19132,
+              94494, 11, 27462, 94494, 11
             ],
             "zinc_ids": [
-              34,
-              17936,
-              369,
-              264,
-              30894,
-              9041,
-              31474,
-              364,
-              1141,
-              8800,
-              19132,
-              94494,
-              11,
-              27462,
-              94494,
-              11
+              34, 17936, 369, 264, 30894, 9041, 31474, 364, 1141, 8800, 19132,
+              94494, 11, 27462, 94494, 11
             ]
           }
         ],
@@ -1059,40 +597,12 @@
             "prompt": "<|turn>user\nWrite a long story about a lighthouse keeper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 22,
             "reference_ids": [
-              818,
-              9884,
-              529,
-              708,
-              8162,
-              552,
-              4099,
-              236858,
-              236751,
-              76217,
-              691,
-              711,
-              834,
-              1623,
-              496,
-              6347
+              818, 9884, 529, 708, 8162, 552, 4099, 236858, 236751, 76217, 691,
+              711, 834, 1623, 496, 6347
             ],
             "zinc_ids": [
-              818,
-              9884,
-              529,
-              708,
-              8162,
-              552,
-              4099,
-              236858,
-              236751,
-              76217,
-              691,
-              711,
-              834,
-              1623,
-              496,
-              6347
+              818, 9884, 529, 708, 8162, 552, 4099, 236858, 236751, 76217, 691,
+              711, 834, 1623, 496, 6347
             ]
           },
           {
@@ -1104,40 +614,12 @@
             "prompt": "<|turn>user\nExplain how a refrigerator works.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 19,
             "reference_ids": [
-              3834,
-              1061,
-              33055,
-              1984,
-              236764,
-              496,
-              41839,
-              1677,
-              711,
-              3643,
-              623,
-              3663,
-              7445,
-              1781,
-              13884,
-              236764
+              3834, 1061, 33055, 1984, 236764, 496, 41839, 1677, 711, 3643, 623,
+              3663, 7445, 1781, 13884, 236764
             ],
             "zinc_ids": [
-              3834,
-              1061,
-              33055,
-              1984,
-              236764,
-              496,
-              41839,
-              1677,
-              711,
-              3643,
-              623,
-              3663,
-              7445,
-              1781,
-              13884,
-              236764
+              3834, 1061, 33055, 1984, 236764, 496, 41839, 1677, 711, 3643, 623,
+              3663, 7445, 1781, 13884, 236764
             ]
           },
           {
@@ -1149,40 +631,12 @@
             "prompt": "<|turn>user\nList three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 19,
             "reference_ids": [
-              19765,
-              3364,
-              6178,
-              529,
-              14561,
-              659,
-              236787,
-              108,
-              236770,
-              236761,
-              138,
-              1018,
-              109454,
-              80288,
-              53121,
-              18800
+              19765, 3364, 6178, 529, 14561, 659, 236787, 108, 236770, 236761,
+              138, 1018, 109454, 80288, 53121, 18800
             ],
             "zinc_ids": [
-              19765,
-              3364,
-              6178,
-              529,
-              14561,
-              659,
-              236787,
-              108,
-              236770,
-              236761,
-              138,
-              1018,
-              109454,
-              80288,
-              53121,
-              18800
+              19765, 3364, 6178, 529, 14561, 659, 236787, 108, 236770, 236761,
+              138, 1018, 109454, 80288, 53121, 18800
             ]
           },
           {
@@ -1194,40 +648,12 @@
             "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: Write a long story about a lighthouse keeper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 1139,
             "reference_ids": [
-              236788,
-              77938,
-              173928,
-              1602,
-              711,
-              3666,
-              506,
-              25872,
-              236793,
-              528,
-              1707,
-              236764,
-              668,
-              1053,
-              7785,
-              28959
+              236788, 77938, 173928, 1602, 711, 3666, 506, 25872, 236793, 528,
+              1707, 236764, 668, 1053, 7785, 28959
             ],
             "zinc_ids": [
-              236788,
-              77938,
-              173928,
-              1602,
-              711,
-              3666,
-              506,
-              25872,
-              236793,
-              528,
-              1707,
-              236764,
-              668,
-              1053,
-              7785,
-              28959
+              236788, 77938, 173928, 1602, 711, 3666, 506, 25872, 236793, 528,
+              1707, 236764, 668, 1053, 7785, 28959
             ]
           },
           {
@@ -1239,40 +665,12 @@
             "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: Explain how a refrigerator works.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 1136,
             "reference_ids": [
-              236776,
-              41839,
-              4146,
-              684,
-              18828,
-              5387,
-              699,
-              506,
-              4888,
-              529,
-              506,
-              18820,
-              532,
-              36122,
-              625,
-              1131
+              236776, 41839, 4146, 684, 18828, 5387, 699, 506, 4888, 529, 506,
+              18820, 532, 36122, 625, 1131
             ],
             "zinc_ids": [
-              236776,
-              41839,
-              4146,
-              684,
-              18828,
-              5387,
-              699,
-              506,
-              4888,
-              529,
-              506,
-              18820,
-              532,
-              36122,
-              625,
-              1131
+              236776, 41839, 4146, 684, 18828, 5387, 699, 506, 4888, 529, 506,
+              18820, 532, 36122, 625, 1131
             ]
           },
           {
@@ -1284,40 +682,12 @@
             "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: List three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 1136,
             "reference_ids": [
-              19765,
-              6178,
-              529,
-              14561,
-              659,
-              236787,
-              108,
-              236770,
-              236761,
-              5213,
-              109454,
-              35615,
-              1018,
-              568,
-              26303,
-              531
+              19765, 6178, 529, 14561, 659, 236787, 108, 236770, 236761, 5213,
+              109454, 35615, 1018, 568, 26303, 531
             ],
             "zinc_ids": [
-              19765,
-              6178,
-              529,
-              14561,
-              659,
-              236787,
-              108,
-              236770,
-              236761,
-              5213,
-              109454,
-              35615,
-              1018,
-              568,
-              26303,
-              531
+              19765, 6178, 529, 14561, 659, 236787, 108, 236770, 236761, 5213,
+              109454, 35615, 1018, 568, 26303, 531
             ]
           }
         ],
@@ -1375,40 +745,12 @@
             "prompt": "<|turn>user\nWrite a long story about a lighthouse keeper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 22,
             "reference_ids": [
-              818,
-              9551,
-              1602,
-              711,
-              14778,
-              2178,
-              3324,
-              506,
-              5716,
-              529,
-              103592,
-              173928,
-              236793,
-              625,
-              11742,
-              993
+              818, 9551, 1602, 711, 14778, 2178, 3324, 506, 5716, 529, 103592,
+              173928, 236793, 625, 11742, 993
             ],
             "zinc_ids": [
-              818,
-              9551,
-              1602,
-              711,
-              14778,
-              2178,
-              3324,
-              506,
-              5716,
-              529,
-              103592,
-              173928,
-              236793,
-              625,
-              11742,
-              993
+              818, 9551, 1602, 711, 14778, 2178, 3324, 506, 5716, 529, 103592,
+              173928, 236793, 625, 11742, 993
             ]
           },
           {
@@ -1420,40 +762,12 @@
             "prompt": "<|turn>user\nExplain how a refrigerator works.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 19,
             "reference_ids": [
-              2021,
-              3050,
-              1217,
-              496,
-              41839,
-              4146,
-              236764,
-              506,
-              1346,
-              2132,
-              3210,
-              531,
-              13808,
-              563,
-              600,
-              5213
+              2021, 3050, 1217, 496, 41839, 4146, 236764, 506, 1346, 2132, 3210,
+              531, 13808, 563, 600, 5213
             ],
             "zinc_ids": [
-              2021,
-              3050,
-              1217,
-              496,
-              41839,
-              4146,
-              236764,
-              506,
-              1346,
-              2132,
-              3210,
-              531,
-              13808,
-              563,
-              600,
-              5213
+              2021, 3050, 1217, 496, 41839, 4146, 236764, 506, 1346, 2132, 3210,
+              531, 13808, 563, 600, 5213
             ]
           },
           {
@@ -1465,40 +779,12 @@
             "prompt": "<|turn>user\nList three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 19,
             "reference_ids": [
-              8291,
-              659,
-              1806,
-              3364,
-              6178,
-              529,
-              14561,
-              236787,
-              108,
-              236770,
-              236761,
-              138,
-              1018,
-              109454,
-              80288,
-              53121
+              8291, 659, 1806, 3364, 6178, 529, 14561, 236787, 108, 236770,
+              236761, 138, 1018, 109454, 80288, 53121
             ],
             "zinc_ids": [
-              8291,
-              659,
-              1806,
-              3364,
-              6178,
-              529,
-              14561,
-              236787,
-              108,
-              236770,
-              236761,
-              138,
-              1018,
-              109454,
-              80288,
-              53121
+              8291, 659, 1806, 3364, 6178, 529, 14561, 236787, 108, 236770,
+              236761, 138, 1018, 109454, 80288, 53121
             ]
           },
           {
@@ -1510,40 +796,12 @@
             "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: Write a long story about a lighthouse keeper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 1139,
             "reference_ids": [
-              818,
-              9551,
-              1602,
-              711,
-              14778,
-              2178,
-              3324,
-              506,
-              5716,
-              529,
-              103592,
-              173928,
-              236793,
-              625,
-              11742,
-              993
+              818, 9551, 1602, 711, 14778, 2178, 3324, 506, 5716, 529, 103592,
+              173928, 236793, 625, 11742, 993
             ],
             "zinc_ids": [
-              818,
-              9551,
-              1602,
-              711,
-              14778,
-              2178,
-              3324,
-              506,
-              5716,
-              529,
-              103592,
-              173928,
-              236793,
-              625,
-              11742,
-              993
+              818, 9551, 1602, 711, 14778, 2178, 3324, 506, 5716, 529, 103592,
+              173928, 236793, 625, 11742, 993
             ]
           },
           {
@@ -1555,40 +813,12 @@
             "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: Explain how a refrigerator works.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 1136,
             "reference_ids": [
-              236776,
-              41839,
-              4146,
-              684,
-              5213,
-              219656,
-              5387,
-              699,
-              506,
-              4888,
-              529,
-              506,
-              36316,
-              532,
-              36122,
-              625
+              236776, 41839, 4146, 684, 5213, 219656, 5387, 699, 506, 4888, 529,
+              506, 36316, 532, 36122, 625
             ],
             "zinc_ids": [
-              236776,
-              41839,
-              4146,
-              684,
-              5213,
-              219656,
-              5387,
-              699,
-              506,
-              4888,
-              529,
-              506,
-              36316,
-              532,
-              36122,
-              625
+              236776, 41839, 4146, 684, 5213, 219656, 5387, 699, 506, 4888, 529,
+              506, 36316, 532, 36122, 625
             ]
           },
           {
@@ -1600,40 +830,12 @@
             "prompt": "<|turn>user\nThe following is reference filler.\nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nIgnore the filler and answer this request: List three uses of copper.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             "prompt_tokens": 1136,
             "reference_ids": [
-              19765,
-              6178,
-              529,
-              14561,
-              659,
-              236787,
-              108,
-              236770,
-              236761,
-              138,
-              1018,
-              109454,
-              80288,
-              53121,
-              18800,
-              531
+              19765, 6178, 529, 14561, 659, 236787, 108, 236770, 236761, 138,
+              1018, 109454, 80288, 53121, 18800, 531
             ],
             "zinc_ids": [
-              19765,
-              6178,
-              529,
-              14561,
-              659,
-              236787,
-              108,
-              236770,
-              236761,
-              138,
-              1018,
-              109454,
-              80288,
-              53121,
-              18800,
-              531
+              19765, 6178, 529, 14561, 659, 236787, 108, 236770, 236761, 138,
+              1018, 109454, 80288, 53121, 18800, 531
             ]
           }
         ],
@@ -1691,40 +893,12 @@
             "prompt": "<|im_start|>user\nWrite a long story about a lighthouse keeper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 22,
             "reference_ids": [
-              760,
-              9662,
-              383,
-              279,
-              52441,
-              314,
-              4664,
-              8739,
-              1467,
-              524,
-              15756,
-              11894,
-              26,
-              424,
-              76454,
-              13
+              760, 9662, 383, 279, 52441, 314, 4664, 8739, 1467, 524, 15756,
+              11894, 26, 424, 76454, 13
             ],
             "zinc_ids": [
-              760,
-              9662,
-              383,
-              279,
-              52441,
-              314,
-              4664,
-              8739,
-              1467,
-              524,
-              15756,
-              11894,
-              26,
-              424,
-              76454,
-              13
+              760, 9662, 383, 279, 52441, 314, 4664, 8739, 1467, 524, 15756,
+              11894, 26, 424, 76454, 13
             ]
           },
           {
@@ -1736,40 +910,12 @@
             "prompt": "<|im_start|>user\nExplain how a refrigerator works.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 19,
             "reference_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              6992,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              3618,
-              318,
-              2777,
-              488,
-              1318
+              32, 43447, 4138, 539, 6992, 8364, 494, 279, 4613, 314, 279, 3618,
+              318, 2777, 488, 1318
             ],
             "zinc_ids": [
-              32,
-              43447,
-              4138,
-              539,
-              6992,
-              8364,
-              494,
-              279,
-              4613,
-              314,
-              279,
-              3618,
-              318,
-              2777,
-              488,
-              1318
+              32, 43447, 4138, 539, 6992, 8364, 494, 279, 4613, 314, 279, 3618,
+              318, 2777, 488, 1318
             ]
           },
           {
@@ -1781,40 +927,12 @@
             "prompt": "<|im_start|>user\nList three uses of copper.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             "prompt_tokens": 18,
             "reference_ids": [
-              8160,
-              513,
-              2250,
-              5839,
-              5533,
-              314,
-              22561,
-              25,
-              271,
-              16,
-              13,
-              220,
-              2972,
-              28371,
-              11764,
-              46258
+              8160, 513, 2250, 5839, 5533, 314, 22561, 25, 271, 16, 13, 220,
+              2972, 28371, 11764, 46258
             ],
             "zinc_ids": [
-              8160,
-              513,
-              2250,
-              5839,
-              5533,
-              314,
-              22561,
-              25,
-              271,
-              16,
-              13,
-              220,
-              2972,
-              28371,
-              11764,
-              46258
+              8160, 513, 2250, 5839, 5533, 314, 22561, 25, 271, 16, 13, 220,
+              2972, 28371, 11764, 46258
             ]
           }
         ],
