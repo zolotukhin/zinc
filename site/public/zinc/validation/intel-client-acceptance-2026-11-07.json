@@ -1,4 +1,17 @@
 {
+  "cleanup_followup": {
+    "actual_client_cpu_protocol_passed": true,
+    "cases": [
+      "already-removed temporary file",
+      "cleanup permission error after success",
+      "combined client and cleanup errors, including deadline and unsuccessful task report"
+    ],
+    "client_version": "OpenClaw 2026.11.1 (4ffdd20)",
+    "focused_tests": 29,
+    "gpu_request_policy_changed": false,
+    "helper_sha256": "fb4ab87d14c84f53e5f0fe2e3c2cbc371f0571a5483e80d149d7d2cc52fa1306",
+    "scope": "Filesystem cleanup and error preservation only; the earlier GPU session/request evidence retains its exact tested helper identity."
+  },
   "clients": {
     "bun": "1.4.4",
     "node": "v26.10.0",

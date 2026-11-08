@@ -411,6 +411,16 @@ async function withSessionConfig(filename, model, dependencies, run) {
     path.dirname(path.resolve(filename)),
     `.${CONFIG_NAME}.${randomUUID()}.run`,
   );
+  const removeTemporary = async () => {
+    try {
+      await (dependencies?.unlinkImpl ?? unlink)(temporary);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Raw filesystem errors can contain a private project path.
+        throw new Error('OpenClaw temporary run config cleanup failed');
+      }
+    }
+  };
   let created = false;
   try {
     const handle = await open(temporary, 'wx', 0o600);
@@ -421,13 +431,38 @@ async function withSessionConfig(filename, model, dependencies, run) {
       await handle.close();
     }
   } catch {
-    if (created) await unlink(temporary);
+    if (created) await removeTemporary();
     return run(filename);
   }
+  let runFailed = false;
+  let runFailure;
   try {
     return await run(temporary);
+  } catch (error) {
+    runFailed = true;
+    runFailure = error;
+    throw error;
   } finally {
-    await unlink(temporary);
+    try {
+      await removeTemporary();
+    } catch (cleanupError) {
+      // Retain the client's cause and diagnostics if both operations fail.
+      // A successful client still fails when its private config remains behind.
+      if (runFailed) {
+        const message = runFailure instanceof Error ? runFailure.message : 'OpenClaw client failed';
+        const combined = new AggregateError(
+          [runFailure, cleanupError],
+          `${message}; ${cleanupError.message}`,
+          {
+            cause: runFailure,
+          },
+        );
+        if (runFailure?.code !== undefined) combined.code = runFailure.code;
+        if (runFailure?.diagnostics !== undefined) combined.diagnostics = runFailure.diagnostics;
+        throw combined;
+      }
+      throw cleanupError;
+    }
   }
 }
 
@@ -567,8 +602,8 @@ export async function runOpenClaw(
   { binary = 'openclaw', filename, model, project, prompt, timeout = 600 },
   dependencies,
 ) {
-  const result = await withSessionConfig(filename, model, dependencies, (runtimeFilename) =>
-    clientCommand(
+  return withSessionConfig(filename, model, dependencies, async (runtimeFilename) => {
+    const result = await clientCommand(
       {
         binary,
         args: runArguments(runtimeFilename, model, project, timeout),
@@ -577,11 +612,11 @@ export async function runOpenClaw(
         timeout,
       },
       dependencies,
-    ),
-  );
-  if (result.report.ok !== true || result.report.status !== 'ok' || result.report.error)
-    throw new Error('OpenClaw did not report a successful completed task');
-  return result;
+    );
+    if (result.report.ok !== true || result.report.status !== 'ok' || result.report.error)
+      throw new Error('OpenClaw did not report a successful completed task');
+    return result;
+  });
 }
 
 export async function main(argv = process.argv.slice(2)) {

@@ -203,13 +203,18 @@ describe('OpenClaw per-run session reuse', () => {
       expect(url).toBe('http://127.0.0.1:9090/health');
       expect(options.headers.authorization).toBe('Bearer private-test-key');
       expect(options.signal).toBeInstanceOf(AbortSignal);
-      return Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } });
+      return Response.json({
+        status: 'ok',
+        capabilities: { chat_session_reuse: true },
+      });
     },
     ...extra,
   });
   test('only injects into the qualified model, preserving configuration and environment references', async () => {
     const original = runtime();
-    original.agents.defaults.models['zinc/loaded'].params.extraBody = { custom: 7 };
+    original.agents.defaults.models['zinc/loaded'].params.extraBody = {
+      custom: 7,
+    };
     const before = JSON.stringify(original);
     const value = await sessionRuntimeConfig(original, 'loaded', capable());
     expect(value.agents.defaults.models['zinc/loaded'].params).toEqual({
@@ -237,7 +242,10 @@ describe('OpenClaw per-run session reuse', () => {
         capable({
           fetchImpl: async (url: string) => {
             observed = url;
-            return Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } });
+            return Response.json({
+              status: 'ok',
+              capabilities: { chat_session_reuse: true },
+            });
           },
         }),
       );
@@ -296,7 +304,9 @@ describe('OpenClaw per-run session reuse', () => {
     for (const alias of ['extraBody', 'extra_body'])
       for (const key of ['', null, 'caller-session']) {
         const original = runtime();
-        original.agents.defaults.models['zinc/loaded'].params[alias] = { session_id: key };
+        original.agents.defaults.models['zinc/loaded'].params[alias] = {
+          session_id: key,
+        };
         let called = false;
         expect(
           await sessionRuntimeConfig(
@@ -391,7 +401,10 @@ describe('OpenClaw owned process and task result', () => {
       ...f.dependencies,
       env: { ...process.env, TEST_ZINC_KEY: 'private-test-key' },
       fetchImpl: async () =>
-        Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } }),
+        Response.json({
+          status: 'ok',
+          capabilities: { chat_session_reuse: true },
+        }),
     });
     expect(path.dirname(result.report.filename)).toBe(f.project);
     expect(result.report.filename).not.toBe(f.options.filename);
@@ -418,7 +431,10 @@ describe('OpenClaw owned process and task result', () => {
         deadlineMs: 300,
         graceMs: 100,
         fetchImpl: async () =>
-          Response.json({ status: 'ok', capabilities: { chat_session_reuse: true } }),
+          Response.json({
+            status: 'ok',
+            capabilities: { chat_session_reuse: true },
+          }),
         spawnImpl: (binary: string, args: string[], options: any) => {
           const child = spawnImpl(binary, args, options);
           if (failure === 'interrupt') child.stdout.once('data', () => process.emit('SIGINT'));
@@ -427,6 +443,87 @@ describe('OpenClaw owned process and task result', () => {
       };
       await expect(runOpenClaw(f.options, deps)).rejects.toThrow();
       expect((await readdir(f.project)).sort()).toEqual([CONFIG_NAME, 'client.mjs'].sort());
+    }
+  });
+  test('accepts an already-removed run config without changing the client outcome', async () => {
+    const f = await fakeClient(`console.log(JSON.stringify({ok:true,status:'ok'}));`);
+    const original = config({ model: 'loaded' });
+    await writeConfig(f.project, original);
+    const result = await runOpenClaw(f.options, {
+      ...f.dependencies,
+      fetchImpl: async () =>
+        Response.json({
+          status: 'ok',
+          capabilities: { chat_session_reuse: true },
+        }),
+      unlinkImpl: async (filename: string) => {
+        await rm(filename);
+        throw Object.assign(new Error('already removed'), { code: 'ENOENT' });
+      },
+    });
+    expect(result.report.ok).toBe(true);
+    expect(JSON.parse(await readFile(f.options.filename, 'utf8'))).toEqual(original);
+    expect((await readdir(f.project)).filter((name) => name.endsWith('.run'))).toEqual([]);
+  });
+  test('reports cleanup failure after client success without exposing filesystem diagnostics', async () => {
+    const f = await fakeClient(`console.log(JSON.stringify({ok:true,status:'ok'}));`);
+    await writeConfig(f.project, config({ model: 'loaded' }));
+    await expect(
+      runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () =>
+          Response.json({
+            status: 'ok',
+            capabilities: { chat_session_reuse: true },
+          }),
+        unlinkImpl: async () => {
+          throw Object.assign(new Error('EPERM private-project-diagnostic'), {
+            code: 'EPERM',
+          });
+        },
+      }),
+    ).rejects.toThrow(/^OpenClaw temporary run config cleanup failed$/);
+    expect((await readdir(f.project)).filter((name) => name.endsWith('.run'))).toHaveLength(1);
+  });
+  test('preserves client failure and its cause when temporary-config cleanup also fails', async () => {
+    for (const source of [
+      'process.exit(7)',
+      `console.log(JSON.stringify({ok:false,status:'error'}));`,
+      'setInterval(()=>{},1000);',
+    ]) {
+      const f = await fakeClient(source);
+      await writeConfig(f.project, config({ model: 'loaded' }));
+      let caught: any;
+      try {
+        await runOpenClaw(f.options, {
+          ...f.dependencies,
+          deadlineMs: 300,
+          graceMs: 100,
+          fetchImpl: async () =>
+            Response.json({
+              status: 'ok',
+              capabilities: { chat_session_reuse: true },
+            }),
+          unlinkImpl: async () => {
+            throw Object.assign(new Error('EBUSY private-project-diagnostic'), {
+              code: 'EBUSY',
+            });
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(AggregateError);
+      expect(caught.errors).toHaveLength(2);
+      expect(caught.cause).toBe(caught.errors[0]);
+      expect(caught.diagnostics).toBe(caught.cause.diagnostics);
+      expect(caught.code).toBe(caught.cause.code);
+      expect(caught.message).toContain(caught.cause.message);
+      expect(caught.message).toContain('temporary run config cleanup failed');
+      expect(caught.message).not.toContain('private-project-diagnostic');
+      if (source === 'process.exit(7)') expect(caught.cause.diagnostics.code).toBe(7);
+      else if (source.startsWith('setInterval')) expect(caught.code).toBe('OPENCLAW_TIMEOUT');
+      else expect(caught.cause.message).toContain('did not report a successful completed task');
     }
   });
   test('passes stdin literally, uses one-shot flags, and removes isolated state', async () => {
@@ -457,7 +554,11 @@ describe('OpenClaw owned process and task result', () => {
     const f = await fakeClient(`process.on('SIGTERM',()=>{});setInterval(()=>{},1000);`);
     const start = Date.now();
     await expect(
-      runOpenClaw(f.options, { ...f.dependencies, deadlineMs: 200, graceMs: 100 }),
+      runOpenClaw(f.options, {
+        ...f.dependencies,
+        deadlineMs: 200,
+        graceMs: 100,
+      }),
     ).rejects.toThrow('timeout');
     expect(Date.now() - start).toBeLessThan(3000);
   });
