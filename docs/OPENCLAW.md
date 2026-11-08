@@ -17,6 +17,9 @@ The [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-7-candidate-open
 records the separate Arc Pro B70 results, including Gemma workspace timeouts
 and the starter model's failed coding acceptance.
 
+For a complete Linux walkthrough, see
+[OpenCode and OpenClaw on AMD: R9700 and RX 9070 XT](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/).
+
 ## Start ZINC
 
 Choose the [Linux release](BINARY_RELEASES.md) for Vulkan or ROCm. Start one
