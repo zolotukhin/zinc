@@ -14,11 +14,95 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def test_health_poll_precision_does_not_shorten_the_startup_deadline(self):
+        for interval in (0.5, 0.01):
+            with self.subTest(interval=interval):
+                clock = {"now": 0.0}
+                def health(*args):
+                    # Beyond 600 fast polls: the deadline must remain time-based.
+                    if clock["now"] < 8.2:
+                        raise OSError("not listening")
+                    return {"status": "ok"}
+                def sleep(seconds): clock["now"] += seconds
+                with patch.object(benchmark_intel.gpu.time, "monotonic", side_effect=lambda: clock["now"]), \
+                     patch.object(benchmark_intel.gpu.time, "sleep", side_effect=sleep), \
+                     patch.object(benchmark_intel.gpu, "json_request", side_effect=health):
+                    benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1, poll_interval=interval)
+                self.assertGreaterEqual(clock["now"], 8.2)
+                self.assertLessEqual(clock["now"], 8.2 + interval + 1e-6)
+
+    def test_health_requires_ok_and_retains_the_release_poll_default(self):
+        clock = {"now": 0.0}
+        def sleep(seconds): clock["now"] += seconds
+        with patch.object(benchmark_intel.gpu.time, "monotonic", side_effect=lambda: clock["now"]), \
+             patch.object(benchmark_intel.gpu.time, "sleep", side_effect=sleep), \
+             patch.object(benchmark_intel.gpu, "json_request", side_effect=[None, {}, {"status": "loading"}, {"status": "ok"}]) as health:
+            benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1, require_ok=True)
+        self.assertEqual(health.call_count, 4)
+        self.assertEqual(clock["now"], 1.5)
+        with patch.object(benchmark_intel.gpu, "json_request", return_value={}), patch.object(benchmark_intel.gpu.time, "sleep") as sleep:
+            benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1)
+            sleep.assert_not_called()
+
+    def test_health_timeout_and_dead_process_cannot_supply_readiness(self):
+        with patch.object(benchmark_intel.gpu, "json_request") as health:
+            with self.assertRaisesRegex(ValueError, "exited before"):
+                benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=1)), 1)
+            health.assert_not_called()
+        clock = {"now": 0.0}
+        def unavailable(*args):
+            clock["now"] += 120
+            raise OSError("unavailable")
+        def sleep(seconds): clock["now"] += seconds
+        with patch.object(benchmark_intel.gpu.time, "monotonic", side_effect=lambda: clock["now"]), \
+             patch.object(benchmark_intel.gpu.time, "sleep", side_effect=sleep), \
+             patch.object(benchmark_intel.gpu, "json_request", side_effect=unavailable) as health:
+            with self.assertRaisesRegex(ValueError, "health timeout"):
+                benchmark_intel.gpu.ready(Mock(poll=Mock(return_value=None)), 1, poll_interval=0.01)
+        self.assertGreaterEqual(clock["now"], 360)
+        self.assertLess(clock["now"], 480)
+
+    def test_invalid_health_polling_cannot_busy_loop_or_sleep_forever(self):
+        for interval in (0, -1, True, float("nan"), float("inf"), 361):
+            with self.subTest(interval=interval), self.assertRaisesRegex(ValueError, "poll interval"):
+                benchmark_intel.gpu.ready(Mock(), 1, poll_interval=interval)
+
+    def test_startup_comparison_uses_each_campaigns_recorded_resolution(self):
+        model, settings = self.campaign()
+        for row in model["processes"]:
+            row["startup_ms"] = 120 if row["engine"] == "zinc" else 135
+        def startup(active):
+            return next(d for d in benchmark_intel.performance_comparison(model, active)["dimensions"] if d["field"] == "startup_ms")
+        self.assertEqual(startup(settings)["outcome"], "unresolved")
+        for row in model["processes"]: row["startup_poll_interval_ms"] = 10
+        self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "better")
+        model["processes"][0]["startup_poll_interval_ms"] = 500
+        self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "unresolved")
+        del model["processes"][0]["startup_poll_interval_ms"]
+        self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "unresolved")
+        model["processes"][0]["startup_poll_interval_ms"] = 10
+        historical = dict(settings); historical.pop("startup_poll_interval_ms")
+        self.assertEqual(startup(historical)["outcome"], "unresolved")
+        for row in model["processes"]:
+            if row["engine"] == "llama": row["startup_ms"] = 125
+        self.assertEqual(startup({**settings, "startup_poll_interval_ms": 10})["outcome"], "unresolved")
+
+    def test_invalid_recorded_startup_resolution_cannot_establish_a_win(self):
+        for invalid in (None, True, 0, -1, "10", float("nan"), float("inf"), 360_001):
+            with self.subTest(resolution=invalid):
+                model, settings = self.campaign()
+                model["processes"][0]["startup_poll_interval_ms"] = invalid
+                result = benchmark_intel.performance_comparison(model, settings)
+                self.assertFalse(result["headline_eligible"])
+                self.assertIsNone(result["startup_resolution_ms"])
+                startup = next(d for d in result["dimensions"] if d["field"] == "startup_ms")
+                self.assertEqual(startup["outcome"], "unavailable")
+
     def campaign(self):
         settings = {"rounds": 3, "runs": 3, "warmup": 1, "backend": "vulkan", "target": "intel",
                     "kv_cache": "f16", "mtp": "off", "slots": 1, "prompt_cache": False,
                     "startup_poll_interval_ms": 500}
-        model = {"passed": True, "samples": [], "stream_samples": [], "processes": [],
+        model = {"passed": True, "correctness": {"passed": True}, "samples": [], "stream_samples": [], "processes": [],
                  "scenarios": [{"id": s} for s in ("core", "context-medium", "context-long", "decode-extended")]}
         for number in range(1, 4):
             for engine in ("zinc", "llama"):
@@ -31,6 +115,7 @@ class IntelMetricsTest(unittest.TestCase):
                     model["stream_samples"].append({"engine": engine, "round": number, "scenario": scenario["id"],
                         "first_usable_content_ms": 10 if better else 20})
                 model["processes"].append({"engine": engine, "round": number, "startup_ms": 1000 if better else 2000,
+                    **({"kv_cache": "f16"} if better else {"gpu_offload": {"backend": "vulkan", "offloaded": 40, "total": 40}}),
                     "memory": {"gpu_memory_available": True, "observed_peak": {
                         "host_peak_rss_bytes": 100 if better else 200,
                         "gpu_resident_vram_bytes": 100 if better else 200,
@@ -59,7 +144,7 @@ class IntelMetricsTest(unittest.TestCase):
     def test_unknown_memory_diagnostic_counts_or_wrong_settings_cannot_claim_all_dimensions(self):
         original, settings = self.campaign()
         for change in ("missing_memory", "unavailable_memory", "missing_round", "duplicate_sample", "early_eos",
-                       "one_round", "one_run", "wrong_kv", "mtp_on", "cached", "multiple_slots", "missing_workload", "failed_model"):
+                       "one_round", "one_run", "wrong_kv", "mtp_on", "cached", "multiple_slots", "missing_workload", "duplicate_workload", "failed_model"):
             with self.subTest(change=change):
                 model, active = copy.deepcopy(original), dict(settings)
                 if change == "missing_memory":
@@ -79,6 +164,7 @@ class IntelMetricsTest(unittest.TestCase):
                 elif change == "cached": active["prompt_cache"] = True
                 elif change == "multiple_slots": active["slots"] = 2
                 elif change == "missing_workload": model["scenarios"].pop()
+                elif change == "duplicate_workload": model["scenarios"].append(copy.deepcopy(model["scenarios"][0]))
                 elif change == "failed_model": model["passed"] = False
                 self.assertFalse(benchmark_intel.performance_comparison(model, active)["all_dimensions_better"])
 
@@ -93,6 +179,106 @@ class IntelMetricsTest(unittest.TestCase):
         result = benchmark_intel.metric_comparison(rows, "memory.zero", 1, 1)
         self.assertEqual(result["outcome"], "tied")
         self.assertFalse(result["all_rounds_better"])
+
+    def test_cpu_partial_or_missing_gpu_evidence_and_unqualified_models_cannot_claim_a_win(self):
+        original, settings = self.campaign()
+        for change in ("missing_offload", "null_offload", "cpu", "partial", "zero_layers", "boolean_layers",
+                       "wrong_backend", "missing_kv", "missing_correctness", "failed_correctness", "boolean_round"):
+            with self.subTest(change=change):
+                model = copy.deepcopy(original)
+                zinc = next(p for p in model["processes"] if p["engine"] == "zinc")
+                llama = next(p for p in model["processes"] if p["engine"] == "llama")
+                if change == "missing_offload": del llama["gpu_offload"]
+                elif change == "null_offload": llama["gpu_offload"] = None
+                elif change == "cpu": llama["gpu_offload"].update(offloaded=0, backend="cpu")
+                elif change == "partial": llama["gpu_offload"]["offloaded"] = 39
+                elif change == "zero_layers": llama["gpu_offload"].update(offloaded=0, total=0)
+                elif change == "boolean_layers": llama["gpu_offload"].update(offloaded=True, total=True)
+                elif change == "wrong_backend": llama["gpu_offload"]["backend"] = "rocm"
+                elif change == "missing_kv": del zinc["kv_cache"]
+                elif change == "missing_correctness": del model["correctness"]
+                elif change == "failed_correctness": model["correctness"]["passed"] = False
+                elif change == "boolean_round": llama["round"] = True
+                self.assertFalse(benchmark_intel.performance_comparison(model, settings)["all_dimensions_better"])
+
+    def complete_campaign(self):
+        model, settings = self.campaign()
+        required = [m["id"] for m in benchmark_intel.policy()["models"]]
+        hardware = {"gpu": "Intel GPU fixture", "os": "Linux fixture", "driver": "fixture"}
+        return {"passed": True, "required_models": required, "selected_models": list(required),
+                "models": [{**copy.deepcopy(model), "id": identifier} for identifier in required],
+                "settings": settings, "hardware_unchanged": True, "hardware": hardware,
+                "hardware_after": dict(hardware), "reference": {"commit": "a" * 40},
+                "latest_reference_check": {"commit": "a" * 40, "observed_head": "a" * 40,
+                                           "checked_at": "2026-11-07T00:00:00+00:00"}}
+
+    def test_extra_server_records_stay_visible_and_explain_why_the_campaign_is_ineligible(self):
+        model, settings = self.campaign()
+        model["processes"].append(copy.deepcopy(model["processes"][0]))
+        result = benchmark_intel.performance_comparison(model, settings)
+        self.assertEqual(result["gpu_offload_verification"], {
+            "passed": False, "expected_servers": 6, "observed_servers": 7,
+            "reason": "missing or extra measured-server records"})
+        self.assertFalse(result["headline_eligible"])
+        self.assertEqual(len(model["processes"]), 7)
+
+    def test_all_models_win_is_derived_from_completed_models_not_the_requested_list(self):
+        report = self.complete_campaign()
+        self.assertEqual(benchmark_intel.campaign_outcome(report), {
+            "complete_model_matrix": True, "complete_performance_matrix": True,
+            "all_models_all_dimensions_better": True})
+        for change in ("missing_model", "duplicate_model", "extra_model", "failed_model", "failed_correctness",
+                       "missing_correctness", "subset_requested", "duplicate_request", "empty_required", "narrowed_scope", "interrupted", "reported_error"):
+            with self.subTest(change=change):
+                active = copy.deepcopy(report)
+                if change == "missing_model": active["models"].pop()
+                elif change == "duplicate_model": active["models"][-1] = copy.deepcopy(active["models"][0])
+                elif change == "extra_model": active["models"].append({**copy.deepcopy(active["models"][0]), "id": "extra"})
+                elif change == "failed_model": active["models"][-1]["passed"] = False
+                elif change == "failed_correctness": active["models"][-1]["correctness"]["passed"] = False
+                elif change == "missing_correctness": del active["models"][-1]["correctness"]
+                elif change == "subset_requested": active["selected_models"].pop()
+                elif change == "duplicate_request": active["selected_models"][-1] = active["selected_models"][0]
+                elif change == "empty_required": active.update(required_models=[], selected_models=[], models=[])
+                elif change == "narrowed_scope":
+                    active["required_models"].pop()
+                    active["selected_models"].pop()
+                    active["models"].pop()
+                elif change == "interrupted": active["passed"] = False
+                elif change == "reported_error": active["error"] = "interrupted after samples"
+                result = benchmark_intel.campaign_outcome(active)
+                self.assertFalse(result["complete_model_matrix"])
+                self.assertFalse(result["complete_performance_matrix"])
+                self.assertFalse(result["all_models_all_dimensions_better"])
+
+    def test_stale_summary_flags_missing_workloads_driver_changes_and_unverified_latest_are_not_wins(self):
+        original = self.complete_campaign()
+        for change in ("losing_model", "missing_workload", "missing_samples", "missing_gpu", "driver_changed",
+                       "missing_hardware", "missing_reference_check", "different_upstream_head", "missing_checked_at",
+                       "null_reference", "null_reference_check", "wrong_settings"):
+            with self.subTest(change=change):
+                report = copy.deepcopy(original)
+                # Stale cached flags may survive a rerun; inspect the actual samples.
+                for model in report["models"]:
+                    model.update(performance_comparison={"all_dimensions_better": True}, comparison_eligible={})
+                model = report["models"][-1]
+                if change == "losing_model":
+                    for sample in model["samples"]:
+                        if sample["engine"] == "zinc": sample["decodeTps"] = 1
+                elif change == "missing_workload": model["scenarios"].pop()
+                elif change == "missing_samples": model["samples"] = []
+                elif change == "missing_gpu": model["processes"][-1].pop("gpu_offload")
+                elif change == "driver_changed": report["hardware_after"]["driver"] = "different"
+                elif change == "missing_hardware": del report["hardware"]
+                elif change == "missing_reference_check": del report["latest_reference_check"]
+                elif change == "different_upstream_head": report["latest_reference_check"]["observed_head"] = "b" * 40
+                elif change == "missing_checked_at": del report["latest_reference_check"]["checked_at"]
+                elif change == "null_reference": report["reference"] = None
+                elif change == "null_reference_check": report["latest_reference_check"] = None
+                elif change == "wrong_settings": report["settings"]["kv_cache"] = "f32"
+                self.assertFalse(benchmark_intel.campaign_outcome(report)["all_models_all_dimensions_better"])
+                if change == "losing_model":
+                    self.assertFalse(report["models"][-1]["performance_comparison"]["all_dimensions_better"])
 
     def test_missing_counters_cannot_be_headline_eligible(self):
         model, settings = self.campaign()

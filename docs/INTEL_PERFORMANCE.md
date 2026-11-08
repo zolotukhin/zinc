@@ -43,7 +43,17 @@ The report retains every measured request's prefill/decode rates and full HTTP
 latency. A separate warmed 16-token SSE probe measures time to first usable
 content for each workload and round. Startup measures time until health is
 ready, with OS caches retained; it is not a cold-disk claim. Health is polled
-every 500 ms, so sub-500 ms startup differences are unresolved. Linux process status
+every 10 ms in new campaigns, so sub-10 ms startup differences are unresolved.
+Historical 500 ms samples retain their original resolution. The measurement
+includes health-request latency and the wait between polls; it remains observed
+HTTP readiness with retained OS caches. Each server records its polling interval,
+and a comparison uses the coarsest interval across both engines and all rounds.
+Missing historical per-server metadata defaults to 500 ms. Cross-protocol data
+cannot inherit the newer run's finer resolution. In these timing campaigns a
+successful JSON response counts as ready only when its health status is `ok`;
+loading and malformed replies keep polling within the six-minute startup deadline.
+Other release-helper callers retain their existing response contract and interval.
+Linux process status
 and DRM fdinfo supply host RSS and observed GPU resident/allocated memory peaks.
 GPU peaks are sampled every 50 ms, and unavailable counters remain unknown.
 Client identifiers and PCI addresses are never published. The counter semantics
@@ -64,7 +74,7 @@ HTTP latency and first usable streaming content for every workload, plus startup
 host peak RSS and observed resident/allocated VRAM. Each dimension retains the
 paired medians for every round. A losing round cannot disappear inside a pooled
 median, and unavailable counters remain unknown. Startup differences within the
-500 ms polling resolution are unresolved. Ties are not wins.
+recorded polling resolution are unresolved. Ties are not wins.
 Each round records its expected, observed and valid sample counts so missing,
 extra and invalid measurements can be distinguished. `measured_dimensions`
 counts dimensions with complete paired data across every round;
@@ -79,6 +89,21 @@ it can be true while the performance objective remains false. A diagnostic
 subset, an early-EOS workload, an unknown memory counter or a faster pooled
 median cannot establish the full objective. Repeated observed improvements do
 not themselves establish statistical confidence or concurrent-client capacity.
+
+Model coverage is derived from completed results, including successful native
+inference checks, rather than the requested model list. Missing, duplicated or
+unfinished model rows cannot establish a complete matrix. The catalog and Intel
+policy are checked together in CI so a new managed model cannot silently escape
+qualification. A CPU-only Zig exporter reads the compiled catalog data, without
+source-text parsing or GPU initialization. Each measured baseline server must retain evidence of complete
+Vulkan GPU offload, and each ZINC server must confirm F16 KV. Cached comparison
+flags are refreshed from the samples before deriving the campaign result. Extra
+or restarted servers remain in the evidence with an explicit ineligibility
+reason; warmup requests reuse the measured server. An all-model win also requires the
+recorded upstream HEAD check to match the performance reference and the hardware
+identity to remain unchanged through cleanup.
+These stricter summary gates apply to new campaigns; historical reports retain
+their recorded fields and measurements.
 
 New campaigns probe GPU, kernel and Vulkan driver identities again after all
 servers have stopped. A changed identity fails the campaign; `hardware_unchanged`
@@ -197,6 +222,35 @@ separate. Hardware and package identities remain unchanged through the run.
 The [bounded-upload investigation](VULKAN_UPLOAD_STAGING.md) separately records
 the temporary-memory reduction and loading-time observations. Its A/B compares
 two ZINC packages and does not establish a speed advantage over llama.cpp.
+
+### Q8 decode candidate: correctness and controlled timing
+
+The [November 7 development-candidate investigation](/zinc/validation/intel-q8-decode-investigation-2026-11-07.json)
+records the SIMD32 row-layout candidate in [PR #75](https://github.com/zolotukhin/zinc/pull/75), built with Zig 0.17.1 at
+`51dd99dd` (tree-identical to PR head `520b46e9`). It is separate from the
+published 0.1.0 archives. All seven models pass the resumed native/API replay:
+431 of 432 choices match the primary native sequence, with one already qualified
+near-tie branch. All 81 full HTTP continuations, both Gemma sliding-window sets,
+context boundaries, cancellation/error recovery, chat streaming and Unicode pass.
+The interrupted reports remain preserved. A fresh post-reboot run also passes
+376 base numerical cases and the expanded Q8 fixture's 180 cases / 90 bitwise
+pairs, with the package, shaders, oracle, kernel and Mesa identities unchanged.
+
+Three balanced-order rounds compare the same starter-model GGUF through reusable
+servers: the packaged legacy override, the packaged candidate default and
+freshly built llama.cpp Vulkan `9f0e5098`. F16 KV, MTP off, one slot and disabled
+prompt caching match throughout. The record retains 144 requests, 36 streaming
+probes and nine server lifetimes; candidate and legacy complete outputs match.
+Short-chat round-median decode rises from 192.94 to 250.91 tokens/s, about 30%,
+and HTTP latency falls from 529.16 to 412.78 ms. The native competitor remains
+ahead at 288.56 decode and 2,697.46 prefill tokens/s; candidate prefill is 1,978.22.
+
+This remains a one-model performance diagnostic. Natural EOS on context-long
+is retained and excluded from full-budget comparisons. Startup in this run used
+500 ms polling and remains unresolved at that resolution; the newer 10 ms
+measurement protocol does not relabel these samples. Actual OpenCode/OpenClaw
+acceptance and broader performance checks are separate gates before promoting
+the candidate. These results do not establish an all-model performance win.
 
 ## Work order after 0.1.0
 
