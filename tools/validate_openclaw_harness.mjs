@@ -4,9 +4,15 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { buildConfig, runOpenClaw, validateClient, writeConfig } from './setup_openclaw.mjs';
+import {
+  buildConfig,
+  CONFIG_NAME,
+  runOpenClaw,
+  validateClient,
+  writeConfig,
+} from './setup_openclaw.mjs';
 import { createFixture, TASK, verifyFixture } from './openclaw_eval.mjs';
 
 function response(res, body, delta, finish) {
@@ -76,6 +82,8 @@ await mkdir(root, { mode: 0o700 });
 const project = path.join(root, 'project'),
   fixture = await createFixture(project);
 const requests = [];
+const sessionKeys = new Map();
+let withoutCapabilityRequests = 0;
 let resolveCancellationClosed;
 const cancellationClosed = new Promise((resolve) => {
   resolveCancellationClosed = resolve;
@@ -101,6 +109,13 @@ const actions = [
 ];
 const server = createServer(async (req, res) => {
   try {
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({ status: 'ok', capabilities: { chat_session_reuse: phase !== 'legacy' } }),
+      );
+      return;
+    }
     if (req.url !== '/v1/chat/completions' || req.method !== 'POST')
       throw new Error('Unexpected client endpoint');
     let raw = '';
@@ -109,6 +124,18 @@ const server = createServer(async (req, res) => {
       if (raw.length > 1024 * 1024) throw new Error('Oversized request');
     }
     const body = JSON.parse(raw);
+    if (phase === 'legacy') {
+      if (Object.hasOwn(body, 'session_id'))
+        throw new Error('Unqualified server received a session key');
+      withoutCapabilityRequests++;
+    } else {
+      if (typeof body.session_id !== 'string' || !/^openclaw-[0-9a-f-]{36}$/.test(body.session_id))
+        throw new Error('The actual client did not forward its per-run session key');
+      const prior = sessionKeys.get(phase);
+      if (prior !== undefined && prior !== body.session_id)
+        throw new Error('A tool turn changed the per-run session key');
+      sessionKeys.set(phase, body.session_id);
+    }
     requests.push({
       model: body.model,
       stream: body.stream,
@@ -149,7 +176,7 @@ const server = createServer(async (req, res) => {
       }
       return;
     }
-    if (phase === 'recovery') {
+    if (phase === 'recovery' || phase === 'legacy') {
       response(res, body, { content: 'ZINC_PROTOCOL_RECOVERED' }, 'stop');
       return;
     }
@@ -219,6 +246,7 @@ try {
     }),
   );
   await validateClient({ binary: opts.binary, filename, project });
+  const savedConfig = await readFile(filename, 'utf8');
   const client = await runOpenClaw({
     binary: opts.binary,
     filename,
@@ -307,6 +335,24 @@ try {
     timeout: 30,
   });
   failureChecks.recovery = recovered.report.final?.trim() === 'ZINC_PROTOCOL_RECOVERED';
+  // An older/unqualified server must retain the original wire contract.
+  phase = 'legacy';
+  const legacy = await runOpenClaw({
+    binary: opts.binary,
+    filename,
+    project,
+    model: 'zinc-protocol',
+    prompt: 'Reply ZINC_PROTOCOL_RECOVERED.',
+    timeout: 30,
+  });
+  failureChecks.unqualifiedServerUnchanged =
+    withoutCapabilityRequests > 0 && legacy.report.final?.trim() === 'ZINC_PROTOCOL_RECOVERED';
+  failureChecks.sessionKeysIsolated =
+    sessionKeys.size === 4 && new Set(sessionKeys.values()).size === 4;
+  failureChecks.savedConfigUnchanged = (await readFile(filename, 'utf8')) === savedConfig;
+  failureChecks.runtimeConfigsRemoved = (await readdir(project)).every(
+    (name) => !name.startsWith(`.${CONFIG_NAME}.`),
+  );
   const summary = {
     kind: 'cpu-scripted-protocol',
     clientVersion: version.stdout.trim(),

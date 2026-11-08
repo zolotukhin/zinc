@@ -330,6 +330,142 @@ export async function loadConfig(project) {
   return { filename, config, provider, model };
 }
 
+// Match the OpenCode integration: reuse belongs to one client run and only to
+// an explicitly qualified server capability. Hybrid recurrent state and ROCm
+// currently omit that capability, so they retain full prefill.
+export async function sessionRuntimeConfig(
+  config,
+  model,
+  { env = process.env, fetchImpl = fetch, sessionId = randomUUID } = {},
+) {
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!object(config)) return config;
+  const flag = env.ZINC_OPENCLAW_SESSION_REUSE;
+  if (flag !== undefined && flag !== '1') return config;
+  const ref = `zinc/${model}`;
+  const provider = config.models?.providers?.zinc;
+  if (config.agents?.defaults?.model?.primary !== ref || provider?.api !== 'openai-completions')
+    return config;
+  const entries = config.agents.defaults.models;
+  if (entries !== undefined && !object(entries)) return config;
+  const entry = entries?.[ref] === undefined ? {} : entries[ref];
+  if (!object(entry)) return config;
+  const params = entry.params === undefined ? {} : entry.params;
+  if (!object(params)) return config;
+  // Preserve custom configurations with ambiguous alias precedence.
+  if (Object.hasOwn(params, 'extraBody') && Object.hasOwn(params, 'extra_body')) return config;
+  for (const key of ['extraBody', 'extra_body']) {
+    if (Object.hasOwn(params, key) && !object(params[key])) return config;
+    // Empty/null session keys are intentional opt-outs, just as in OpenCode.
+    if (params[key] && Object.hasOwn(params[key], 'session_id')) return config;
+  }
+  try {
+    // Check once per task, not per tool turn. Do not cache across tasks: the
+    // same endpoint can switch to a model/backend without qualified reuse.
+    const base = normalizeBaseUrl(provider.baseUrl);
+    const apiKey = provider.apiKey ?? 'zinc-local';
+    if (typeof apiKey !== 'string') return config;
+    const match = apiKey.match(/^\$\{([A-Z][A-Z0-9_]*)\}$/);
+    const key = match ? authValue(match[1], env) : apiKey;
+    // normalizeBaseUrl validates the /v1 suffix and removes trailing slashes.
+    // Retain a reverse proxy's path prefix when selecting its health route.
+    const healthUrl = new URL(base);
+    healthUrl.pathname = healthUrl.pathname.replace(/\/v1$/, '/health');
+    const health = await jsonRequest(healthUrl.href, {
+      key,
+      fetchImpl,
+      timeout: 2000,
+    });
+    if (health?.status !== 'ok' || health?.capabilities?.chat_session_reuse !== true) return config;
+  } catch {
+    // Optional discovery must not prevent an otherwise normal client launch.
+    return config;
+  }
+  const live = structuredClone(config);
+  const models = (live.agents.defaults.models ??= {});
+  const bodyKey = Object.hasOwn(params, 'extra_body') ? 'extra_body' : 'extraBody';
+  models[ref] = {
+    ...entry,
+    params: {
+      ...params,
+      [bodyKey]: { ...params[bodyKey], session_id: `openclaw-${sessionId()}` },
+    },
+  };
+  return live;
+}
+
+async function withSessionConfig(filename, model, dependencies, run) {
+  let config;
+  try {
+    await regularFile(filename);
+    config = JSON.parse(await readFile(filename, 'utf8'));
+  } catch {
+    // Let the actual client retain its normal config validation/error contract.
+    return run(filename);
+  }
+  const live = await sessionRuntimeConfig(config, model, dependencies);
+  if (live === config) return run(filename);
+  // Keep the same parent directory so relative includes and plugin paths keep
+  // their meaning. Copy raw environment references, never resolved secrets.
+  const temporary = path.join(
+    path.dirname(path.resolve(filename)),
+    `.${CONFIG_NAME}.${randomUUID()}.run`,
+  );
+  const removeTemporary = async () => {
+    try {
+      await (dependencies?.unlinkImpl ?? unlink)(temporary);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Raw filesystem errors can contain a private project path.
+        throw new Error('OpenClaw temporary run config cleanup failed');
+      }
+    }
+  };
+  let created = false;
+  try {
+    const handle = await open(temporary, 'wx', 0o600);
+    created = true;
+    try {
+      await handle.writeFile(JSON.stringify(live, null, 2) + '\n');
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    if (created) await removeTemporary();
+    return run(filename);
+  }
+  let runFailed = false;
+  let runFailure;
+  try {
+    return await run(temporary);
+  } catch (error) {
+    runFailed = true;
+    runFailure = error;
+    throw error;
+  } finally {
+    try {
+      await removeTemporary();
+    } catch (cleanupError) {
+      // Retain the client's cause and diagnostics if both operations fail.
+      // A successful client still fails when its private config remains behind.
+      if (runFailed) {
+        const message = runFailure instanceof Error ? runFailure.message : 'OpenClaw client failed';
+        const combined = new AggregateError(
+          [runFailure, cleanupError],
+          `${message}; ${cleanupError.message}`,
+          {
+            cause: runFailure,
+          },
+        );
+        if (runFailure?.code !== undefined) combined.code = runFailure.code;
+        if (runFailure?.diagnostics !== undefined) combined.diagnostics = runFailure.diagnostics;
+        throw combined;
+      }
+      throw cleanupError;
+    }
+  }
+}
+
 export function runArguments(filename, model, project, timeout) {
   return [
     'agent',
@@ -466,19 +602,21 @@ export async function runOpenClaw(
   { binary = 'openclaw', filename, model, project, prompt, timeout = 600 },
   dependencies,
 ) {
-  const result = await clientCommand(
-    {
-      binary,
-      args: runArguments(filename, model, project, timeout),
-      project,
-      input: prompt,
-      timeout,
-    },
-    dependencies,
-  );
-  if (result.report.ok !== true || result.report.status !== 'ok' || result.report.error)
-    throw new Error('OpenClaw did not report a successful completed task');
-  return result;
+  return withSessionConfig(filename, model, dependencies, async (runtimeFilename) => {
+    const result = await clientCommand(
+      {
+        binary,
+        args: runArguments(runtimeFilename, model, project, timeout),
+        project,
+        input: prompt,
+        timeout,
+      },
+      dependencies,
+    );
+    if (result.report.ok !== true || result.report.status !== 'ok' || result.report.error)
+      throw new Error('OpenClaw did not report a successful completed task');
+    return result;
+  });
 }
 
 export async function main(argv = process.argv.slice(2)) {
