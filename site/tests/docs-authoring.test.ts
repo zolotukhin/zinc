@@ -1,3 +1,5 @@
+// Run in site-check.yml after installing site dependencies. Core Bun filters
+// include any tools/ or site/src/ path, so this test lives in site/tests/.
 import { describe, expect, test } from 'bun:test';
 import { readdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
