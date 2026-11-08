@@ -374,6 +374,13 @@ behind a separate GRUB fallback, saves signed rollback package archives, and
 performs a full Arch update without rebooting. System library rollback still
 requires reviewing the complete transaction.
 
+Recovery retains the original package-manager failure and reports secondary
+module/GRUB errors separately. A same-release successful reinstall keeps its
+installed modules; a different kernel image reusing that release stops recovery
+for administrator review. Old unowned module directories still receive their
+saved contents. Cached and downloaded rollback archives both require valid
+signatures, and package verification retains Arch epochs and release suffixes.
+
 The November 7 live plan found Arch kernel `7.2.14` versus upstream stable
 `7.3.3`, and Arch oneAPI `2026.0` versus Intel `2026.2`. The script refreshes
 the kernel and Arch metadata at runtime; its Intel compiler reference is dated

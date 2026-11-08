@@ -16,6 +16,7 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.error
@@ -27,6 +28,10 @@ PACKAGES = ("linux", "linux-headers", "linux-firmware-intel", "intel-compute-run
 BACKUP_PACKAGES = PACKAGES + ("linux-firmware", "mesa", "vulkan-intel")
 ONEAPI_CURRENT = "2026.2.0"  # Intel's 2026-10-22 release; checked 2026-11-07.
 ENVIRONMENT = {**os.environ, "LC_ALL": "C"}
+PACKAGE_CACHE = Path("/var/cache/pacman/pkg")
+# Standalone administrator copies cannot import the repository's harness.
+# A CPU contract keeps this policy in sync with intel_native_probe.py.
+BUSY_PROCESSES = ("zinc", "llama-server", "llama-cli", "llama-bench", "zinc-sycl-probe", "icpx", "cmake")
 
 
 def require(condition, message):
@@ -36,7 +41,11 @@ def require(condition, message):
 
 def command(args, check=True):
     result = subprocess.run(args, capture_output=True, text=True, env=ENVIRONMENT, timeout=120)
-    require(not check or result.returncode == 0, "command failed: " + shlex.join(args))
+    if check and result.returncode != 0:
+        # GPG/GRUB diagnostics are necessary to repair the administrator's run.
+        # This is local terminal output, never a public validation artifact.
+        detail = result.stderr.strip()
+        raise ValueError(f"command failed (exit {result.returncode}): " + shlex.join(args) + ("\n" + detail if detail else ""))
     return result
 
 
@@ -64,7 +73,10 @@ def latest():
         rows = [r for r in data["results"] if r["pkgname"] == name and r["repo"].lower() in ("core", "extra")
                 and r["arch"] in ("x86_64", "any")]
         require(len(rows) == 1, "official Arch package is missing or ambiguous: " + name)
-        packages[name] = {"version": rows[0]["pkgver"] + "-" + rows[0]["pkgrel"], "repo": rows[0]["repo"]}
+        epoch = rows[0].get("epoch") or 0
+        require(type(epoch) is int and epoch >= 0, "invalid Arch package epoch: " + name)
+        package_version = (str(epoch) + ":" if epoch else "") + rows[0]["pkgver"] + "-" + rows[0]["pkgrel"]
+        packages[name] = {"version": package_version, "repo": rows[0]["repo"]}
     return {"kernel_stable": stable, "oneapi_current": ONEAPI_CURRENT, "arch": packages}
 
 
@@ -105,13 +117,14 @@ def check_host():
 
 def idle():
     require(not Path("/var/lib/pacman/db.lck").exists(), "another package transaction is active")
-    for name in ("zinc", "llama-server", "llama-cli", "llama-bench", "zinc-sycl-probe", "icpx", "cmake"):
+    for name in BUSY_PROCESSES:
         require(command(["pgrep", "-x", name], check=False).returncode == 1, "worker is busy: " + name)
     nodes = list(Path("/dev/dri").glob("renderD*"))
     require(bool(nodes), "no render node")
     # A quiet inference process list does not prove that another GPU user is idle.
     require(shutil.which("fuser") is not None, "install psmisc for GPU-user inspection")
-    require(command(["fuser", *map(str, nodes)], check=False).returncode == 1,
+    clients = command(["fuser", *map(str, nodes)], check=False)
+    require(clients.returncode == 1 and not clients.stderr.strip(),
             "a render node is open; stop and inspect its owner before updating")
 
 
@@ -141,9 +154,9 @@ def download(url, target):
 
 
 def archive_package(name, package_version, destination):
-    require(re.fullmatch(r"[a-z0-9+_.-]+", name), "invalid package name")
-    require(re.fullmatch(r"[A-Za-z0-9:+_.-]+", package_version), "invalid package version")
-    cache = Path("/var/cache/pacman/pkg")
+    require(re.fullmatch(r"[a-z0-9][a-z0-9+_.-]*", name), "invalid package name")
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:+_.-]*", package_version), "invalid package version")
+    cache = PACKAGE_CACHE
     archive_version = package_version.split(":")[-1]
     for arch in ("x86_64", "any"):
         for suffix in ("zst", "xz"):
@@ -163,7 +176,13 @@ def archive_package(name, package_version, destination):
                         continue
                     raise
             # Read the system trust store; never import an arbitrary signing key.
-            command(["pacman-key", "--verify", str(target) + ".sig", str(target)])
+            try:
+                command(["pacman-key", "--verify", str(target) + ".sig", str(target)])
+            except Exception:
+                # A failed signature must never leave an apparently usable pair.
+                target.unlink(missing_ok=True)
+                target.with_name(filename + ".sig").unlink(missing_ok=True)
+                raise
             return filename
     raise ValueError("cannot preserve a signed rollback archive for " + name + " " + package_version)
 
@@ -177,6 +196,52 @@ def regenerate_grub():
         candidate.replace("/boot/grub/grub.cfg")
     finally:
         candidate.unlink(missing_ok=True)
+
+
+def restore_old_modules(saved_modules, modules, boot_image, transaction_failed):
+    listing = command(["pacman", "-Ql", "linux"], check=False)
+    if listing.returncode:
+        require(listing.returncode == 1 and re.search(r"package ['\"]linux['\"] was not found", listing.stderr),
+                "cannot determine installed kernel ownership; inspect modules before rebooting")
+    owns_release = any(line.startswith("linux " + str(modules) + "/") for line in listing.stdout.splitlines())
+    if owns_release:
+        # A same-release reinstall owns this tree. Never replace its new modules
+        # with the old copies on success, or pair different kernel images with it.
+        require(boot_image.is_file() and hashlib.sha256(boot_image.read_bytes()).digest() ==
+                hashlib.sha256((saved_modules / "vmlinuz").read_bytes()).digest(),
+                "installed kernel reuses the saved release with a different image; manual rollback review is required")
+        if not transaction_failed:
+            return
+    # An unowned/DKMS file can keep the removed old kernel directory alive.
+    # Merge its saved contents even when the directory itself still exists.
+    modules.mkdir(exist_ok=True)
+    command(["cp", "-a", "--remove-destination", str(saved_modules) + "/.", str(modules) + "/"])
+
+
+def finish_transaction(saved_modules, modules, boot_image, failed):
+    errors = []
+    for label, action in (("restore saved modules", lambda: restore_old_modules(saved_modules, modules, boot_image, failed)),
+                          ("regenerate GRUB", regenerate_grub)):
+        try:
+            action()
+        except Exception as error:
+            errors.append((label, error))
+    return errors
+
+
+def run_transaction(saved_modules, modules, boot_image):
+    try:
+        # Arch partial upgrades are unsupported: refresh and upgrade together.
+        result = subprocess.run(["pacman", "-Syu", "--needed", *PACKAGES], env=ENVIRONMENT)
+        require(result.returncode == 0, f"pacman update failed with exit code {result.returncode}; inspect the transaction output")
+    except BaseException:
+        # Preserve the original failure/cancellation, and still attempt both
+        # recovery steps. Secondary errors are visible instead of replacing it.
+        for label, error in finish_transaction(saved_modules, modules, boot_image, True):
+            print(f"Additional recovery failure ({label}): {error}", file=sys.stderr, flush=True)
+        raise
+    errors = finish_transaction(saved_modules, modules, boot_image, False)
+    require(not errors, "package update finished but recovery failed: " + "; ".join(f"{label}: {error}" for label, error in errors))
 
 
 def apply(targets, allow_lag):
@@ -231,18 +296,7 @@ def apply(targets, allow_lag):
     regenerate_grub()
     print("Saved boot fallback and signed package archives: " + str(backup), flush=True)
     print("Review pacman's full transaction. This script never reboots.", flush=True)
-    try:
-        # Arch partial upgrades are unsupported: refresh and upgrade together.
-        result = subprocess.run(["pacman", "-Syu", "--needed", *PACKAGES], env=ENVIRONMENT)
-    finally:
-        # Package removal may delete the old module tree, but the saved kernel
-        # must still be able to load matching modules after a rollback boot.
-        # Unowned/DKMS files can keep an otherwise emptied directory alive.
-        # Restore its contents too, rather than testing directory existence.
-        modules.mkdir(exist_ok=True)
-        command(["cp", "-a", "--remove-destination", str(saved_modules) + "/.", str(modules) + "/"])
-        regenerate_grub()
-    require(result.returncode == 0, "package update failed; inspect pacman output and the saved fallback")
+    run_transaction(saved_modules, modules, boot / "vmlinuz-linux")
     after = installed()
     (backup / "packages-after.json").write_text(json.dumps(after, indent=2) + "\n")
     require(packages_ready(after, targets),
@@ -267,6 +321,9 @@ def main(argv=None):
               "command": ["pacman", "-Syu", "--needed", *PACKAGES]}
     print(json.dumps(report, indent=2), flush=True)
     if args.apply:
+        def interrupted(signum, _frame):
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, interrupted)
         apply(targets, args.allow_distro_lag)
     else:
         print("Plan only: no packages, boot files, drivers, or kernel were changed.")

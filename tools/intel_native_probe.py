@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 
@@ -15,6 +16,7 @@ from release_lib import install_signal_handlers, require, sha256, worker_reserva
 WIDTHS = (1, 31, 32, 63, 64, 65, 255, 256, 257, 1023, 1024, 65537, 1048583)
 EXPECTED_CASES = len(WIDTHS) * 2 * 3
 EXPECTED_ELEMENTS = sum(WIDTHS) * 2 * 2 * 3
+BUSY_PROCESSES = ("zinc", "llama-server", "llama-cli", "llama-bench", "zinc-sycl-probe", "icpx", "cmake")
 
 
 def validate_probe(result):
@@ -34,9 +36,13 @@ def validate_probe(result):
 
 
 def idle():
-    for name in ("zinc", "llama-server", "llama-cli", "llama-bench", "zinc-sycl-probe"):
+    for name in BUSY_PROCESSES:
         result = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True)
         require(result.returncode == 1, "GPU worker is busy or its processes cannot be inspected")
+    nodes = list(Path("/dev/dri").glob("renderD*"))
+    require(nodes and shutil.which("fuser"), "render-node inspection is unavailable")
+    clients = subprocess.run(["fuser", *map(str, nodes)], capture_output=True, text=True)
+    require(clients.returncode == 1 and not clients.stderr.strip(), "GPU worker is busy or render-node inspection is incomplete")
 
 
 def main():

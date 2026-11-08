@@ -1,6 +1,7 @@
 // Standalone native-stack bring-up, not a ZINC inference backend or benchmark.
 // Build with Intel icpx -fsycl. Run only on the remote Intel test worker.
 #include <sycl/sycl.hpp>
+#include "intel_probe_json.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,20 +16,6 @@ static constexpr std::size_t widths[] = {
 };
 static constexpr std::size_t guard = 32;
 static constexpr float sentinel = 123456.0f;
-
-static std::string quoted(const std::string &value) {
-    std::string out = "\"";
-    const char hex[] = "0123456789abcdef";
-    for (unsigned char c : value) {
-        if (c == '"' || c == '\\') out += '\\';
-        if (c < 32) {
-            out += "\\u00";
-            out += hex[c >> 4];
-            out += hex[c & 15];
-        } else out += static_cast<char>(c);
-    }
-    return out + '"';
-}
 
 struct DeviceBuffer {
     sycl::queue &queue;
@@ -132,13 +119,13 @@ int main(int argc, char **) {
                 }
         }
         std::cout << "{\"passed\":true,\"backend\":\"level_zero\",\"device_type\":\"gpu\",\"vendor_id\":32902,"
-                  << "\"device_name\":" << quoted(device.get_info<sycl::info::device::name>())
-                  << ",\"driver_version\":" << quoted(device.get_info<sycl::info::device::driver_version>())
+                  << "\"device_name\":" << intel_probe_json_quote(device.get_info<sycl::info::device::name>())
+                  << ",\"driver_version\":" << intel_probe_json_quote(device.get_info<sycl::info::device::driver_version>())
                   << ",\"cases\":" << cases << ",\"elements_checked\":" << elements
                   << ",\"guards_checked\":" << cases * guard * 4 << ",\"max_absolute_error\":0}\n";
         return 0;
     } catch (const std::exception &error) {
-        std::cout << "{\"passed\":false,\"error\":" << quoted(error.what()) << "}\n";
+        std::cout << "{\"passed\":false,\"error\":" << intel_probe_json_quote(error.what()) << "}\n";
         return 1;
     }
 }
