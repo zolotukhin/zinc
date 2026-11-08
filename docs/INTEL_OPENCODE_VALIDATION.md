@@ -4,7 +4,56 @@ The Intel Arc Pro B70 checks keep inference correctness, API behavior, client
 exit and independent acceptance tests separate. Earlier failures retain their
 source, binary and launch settings.
 
-## Latest package and corrected launcher
+## November 7 candidate: OpenCode and OpenClaw
+
+The [seven-model client follow-up](/zinc/validation/intel-client-acceptance-2026-11-07.json)
+checks the Q8 decode candidate's exact CI Vulkan archive with actual
+**OpenCode 2.0.21** and **OpenClaw 2026.11.1**. All fourteen model/client rows
+pass frozen native HTTP continuations before and after the client, with a
+healthy server afterward. Independent coding acceptance remains separate:
+
+<table tabindex="0" aria-label="Initial November 7 Intel client acceptance; session-reuse follow-up below">
+  <thead><tr><th scope="col">Model</th><th scope="col">OpenCode fixtures</th><th scope="col">OpenClaw text / workspace / recovery</th></tr></thead>
+  <tbody>
+    <tr><th scope="row">Qwen 3.5 9B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
+    <tr><th scope="row">Gemma 4 26B-A4B</th><td>3/3</td><td>Pass / timeout / pass</td></tr>
+    <tr><th scope="row">Gemma 4 31B</th><td>3/3</td><td>Pass / timeout / pass</td></tr>
+    <tr><th scope="row">Qwen 3.6 27B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
+    <tr><th scope="row">Qwen 3.6 35B-A3B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
+    <tr><th scope="row">Qwen 3.8 27B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
+    <tr><th scope="row">Qwen 3 0.6B</th><td>0/3</td><td>Fail / fail / fail</td></tr>
+  </tbody>
+</table>
+
+OpenCode uses three independent fixtures, 16 steps, 2,048 output tokens and
+900 seconds per fixture. OpenClaw uses exact text, a real file-edit/test/receipt
+task and recovery, with 1,536 output tokens and 300 seconds per task. Both use
+one slot, F16 KV, MTP off and thinking off. Gemma 31B uses 12,288 context;
+other models use 16,384. No supervisor edits, response repair or deadline
+extensions enter these results. The starter's zero OpenCode exit does not
+count as success when its independent tests fail.
+
+The initial OpenClaw helper does not inject a session ID. OpenCode already
+uses automatic session IDs on qualified attention-only Vulkan models, and
+its observed reuse is retained per row. The original campaign's
+`ZINC_PROMPT_CACHE=0` setting does **not** disable Vulkan chat-session reuse;
+these client timings are not a matched cache-off engine comparison. The raw
+performance suite uses separate uncached `/v1/completions` requests.
+
+The capability-gated OpenClaw session-reuse follow-up changes Gemma 31B's
+workspace outcome to **pass in 101.23 seconds**, within the same 300-second
+limit. Its text and recovery checks also pass. Gemma 26B still times out on
+the workspace task. Both Gemmas pass cached-versus-full-prefill tool-history
+checks beyond their 1,024-token sliding window and after an intervening request;
+all frozen native checks before and after the client remain correct. Actual
+client reuse is observed on both models. The original failed rows remain in
+the report; session reuse does not qualify Gemma 26B's workspace acceptance.
+
+Native GPU controls for the failed tasks are queued separately. This is
+development candidate evidence; it does not recertify the published 0.1.0
+archives or establish a broad coding benchmark or a performance win.
+
+## November 2 package and corrected launcher
 
 The [complete November 2 matrix](/zinc/validation/intel-opencode-packaged-default-2026-11-02.json)
 uses one exact CI Vulkan archive and actual OpenCode 2.0.21. All seven
@@ -169,10 +218,10 @@ zinc model pull qwen35-9b-q4k-m
 zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
 ```
 
-Use a development build containing the corrections above; no public 0.1.0
-archive has been published. The catalog's tested-profile
-promotion is separate from these source-specific diagnostics; an untested
-profile warning remains possible. An explicit `--model-id` loads the installed
+Use a build containing the corrections recorded for the selected result.
+The published 0.1.0 archives and later development candidates have separate
+qualification evidence. The catalog's tested-profile promotion is separate
+from these source-specific diagnostics; an untested profile warning remains possible. An explicit `--model-id` loads the installed
 model without changing its global activation.
 
 In a second terminal, use Bun 1.4.4 or newer and actual OpenCode 2.0.21:

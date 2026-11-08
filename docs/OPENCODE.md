@@ -10,7 +10,7 @@ version in the [RDNA4 validation report](OPENCODE_RELEASE_VALIDATION.md) and
 The [AMD setup walkthrough](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/)
 connects OpenCode and OpenClaw, with R9700 evidence and RX 9070 XT memory guidance.
 
-[Download the standalone script](/zinc/harnesses/setup-opencode.mjs), or use
+[Download the standalone script](https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs), or use
 `tools/setup_opencode.mjs` from a ZINC checkout. The downloaded script has no
 package dependencies and accepts the same arguments.
 
@@ -86,7 +86,7 @@ require the advertised read/write/shell tools and verify the OpenCode 2 preset
 omits `execute`.
 OpenCode 2 needs a ZINC build supporting `max_completion_tokens`; older servers
 silently used a 256-token default and truncated tool calls. The
-[compatibility evidence](/zinc/validation/opencode-client-compatibility-2026-11-01.json)
+[compatibility evidence](https://zolotukhin.ai/zinc/validation/opencode-client-compatibility-2026-11-01.json)
 records the reproduced failure and corrected one-token limits on Intel.
 
 To configure a project without cloning ZINC, download the same script and run it
