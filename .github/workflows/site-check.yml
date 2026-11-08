@@ -65,9 +65,9 @@ jobs:
         working-directory: site
         run: bun run build
 
-      - name: Check benchmark calculations
+      - name: Check benchmark calculations and guide authoring
         working-directory: site
-        run: bun test src/lib/benchmark-view.test.ts
+        run: bun test src/lib/benchmark-view.test.ts tools/docs-authoring.test.ts
 
       # Reuse the existing Playwright and axe-core dependencies in site/package.json.
       - name: Install browser for rendered page checks

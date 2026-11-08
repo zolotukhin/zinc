@@ -4,7 +4,13 @@
   "date": "2026-11-07",
   "decision": {
     "broad_default": "rejected",
-    "narrower_packaged_gpu_qualification": "pending",
+    "narrower_packaged_gpu_qualification": {
+      "archive_sha256": "b42045607851b939b79d0e3f7ee7c460fc890332e6049515d9c45fa511ffd02b",
+      "passed": true,
+      "report": "https://zolotukhin.ai/zinc/validation/intel-q8-decode-narrow-default-2026-11-08.json",
+      "scope": "Separate exact archive; historical broad-switch samples are unchanged.",
+      "source_commit": "4b1d2d73485041344a84da0cb40bc40d58bc7580"
+    },
     "narrower_policy": "all-Q8 dense Qwen matrices only; other graphs keep the legacy default and may explicitly opt in",
     "reason": "Gemma 26B decode is 4.6% slower in every controlled round; Qwen 9B is 0.3\u20130.5% slower. Numerical agreement alone does not establish performance eligibility."
   },

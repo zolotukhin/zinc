@@ -254,7 +254,7 @@ the candidate. These results do not establish an all-model performance win.
 
 ### Broad row-layout default rejected after all-model controls
 
-The [expanded numerical and six-model timing follow-up](/zinc/validation/intel-q8-decode-qualified-followup-2026-11-07.json)
+The [expanded numerical and six-model timing follow-up](https://zolotukhin.ai/zinc/validation/intel-q8-decode-qualified-followup-2026-11-07.json)
 retains the original candidate archive and every round. The Q8 numerical fixture
 now covers every managed Q8 input width: **228 native-reference cases and 114
 bitwise pairs** pass, including shared-expert, Gemma and NextN widths skipped by
@@ -280,13 +280,43 @@ quantization, MoE, recurrent and sliding-window graphs retain the legacy path.
 `ZINC_INTEL_Q8_DECODE=1` remains an explicit broader experiment;
 `ZINC_INTEL_Q8_DECODE=0` is the legacy control. Unknown settings disable the
 candidate. SIMD32 capability checks and missing-pipeline fallback still apply.
-The revised package must pass its own GPU checks before promotion; the historical
-archive results are not relabeled as measurements of the narrower build.
+The fresh package checks below confirm that selector; the historical archive
+results are not relabeled as measurements of the narrower build.
 
 The [client matrix](INTEL_OPENCODE_VALIDATION.md) separately records real coding
 task acceptance. These core-only ZINC A/B controls do not replace the complete
 four-workload campaign against a freshly pinned llama.cpp, nor establish an
 all-model performance win.
+
+### Fresh package with the narrower default
+
+The [November 8 UTC package validation](https://zolotukhin.ai/zinc/validation/intel-q8-decode-narrow-default-2026-11-08.json)
+tests CI archive `b4204560…ffd02b`, source `4b1d2d73`, tree-identical to
+candidate head `7f1556c0`. All 376 base numerical cases, 228 Q8 cases / 114
+bitwise pairs and fourteen full-vocabulary checks pass at the unchanged
+0.001 tolerance. All seven models pass native/API replay: 431 primary choices
+and one previously qualified near-tie branch, with 81 complete HTTP
+continuations, both Gemma window sets, context boundaries, cancellation/error
+recovery, streaming and Unicode. Logs confirm that only the all-Q8 starter
+selects the row kernel; the six larger models retain legacy. Explicit-off and
+missing-shader controls retain the native starter output too.
+
+The separate three-round starter run retains all 144 requests, 36 streaming
+probes and nine server lifetimes. Short-chat median-of-round-medians decode
+rises from **193.20 to 251.22 tokens/s**, about 30%, and HTTP latency falls
+from **527.76 to 413.22 ms**. The newly built llama.cpp Vulkan `f477f795`,
+selected immediately before its build and checked again at campaign start,
+reaches **289.39 decode** and **2,722.97 prefill tokens/s**. Candidate prefill
+is 1,925.46 tokens/s. Individual round medians and every sample remain in the
+report; this is not an all-model performance win.
+
+Both engines use the same GGUF, F16 KV, MTP off, one slot and uncached raw
+completions. Natural EOS on context-long remains visible and excludes that
+pair from full-budget comparisons. Startup retains the historical 500 ms
+polling protocol and cannot resolve smaller differences. Hardware, package and
+reference identities stay unchanged through the run. These are development
+archive checks, separate from final release certification and coding-task
+acceptance.
 
 ## Work order after 0.1.0
 
