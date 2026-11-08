@@ -1,0 +1,326 @@
+{
+  "accepted_rows": 2,
+  "all_client_tasks_accepted": false,
+  "clients": {
+    "node": "v26.10.0",
+    "openclaw": "OpenClaw 2026.11.1 (4ffdd20)",
+    "opencode": "opencode v2.0.21"
+  },
+  "completed": true,
+  "date": "2026-11-07",
+  "discovery_adapter": {
+    "cpu_metadata_test_mjs": "import assert from 'node:assert/strict';\nimport {nativeMetadata} from './discovery-adapter.mjs';\nconst h={status:'ok'},l={data:[{id:'model'}]},p={model_alias:'model',total_slots:1,default_generation_settings:{n_ctx:16384}};\nconst check=(health=h,listing=l,props=p,model='model',context=16384)=>nativeMetadata(health,listing,props,model,context,'http://127.0.0.1/v1');\nassert.equal(check().context,16384);\nfor(const context of [0,3999,8192,16384.5,Infinity])assert.throws(()=>check(h,l,p,'model',context));\nassert.throws(()=>check({status:'loading'}));assert.throws(()=>check(h,{data:[]}));assert.throws(()=>check(h,{data:[{id:'model'},{id:'other'}]}));assert.throws(()=>check(h,l,p,'other'));assert.throws(()=>check(h,l,{...p,total_slots:2}));assert.throws(()=>check(h,l,{...p,model_alias:'other'}));assert.throws(()=>check(h,l,{...p,default_generation_settings:{}}));assert.throws(()=>check(h,l,{...p,default_generation_settings:{n_ctx:'16384'}}));\nconsole.log('Native discovery adapter: valid capacity plus 13 invalid metadata controls passed; no inference response adapter.');\n",
+    "cpu_metadata_test_scope": "Metadata validation only: one valid plus 13 invalid metadata controls, no inference responses.",
+    "scope": "Discovery only, reading actual native /props capacity plus health/model alias; unmodified direct client and GPU inference responses.",
+    "source_mjs": "import assert from 'node:assert/strict';\nimport {readFile} from 'node:fs/promises';\nimport {pathToFileURL} from 'node:url';\nexport function nativeMetadata(health,listing,props,model,context,baseUrl){\n assert.equal(health?.status,'ok','Native server is not healthy');\n assert.ok(Array.isArray(listing?.data)&&listing.data.length===1,'Native discovery is ambiguous');\n assert.equal(listing.data[0].id,model,'Native alias changed');\n assert.equal(props?.model_alias,model,'Native props alias changed');\n assert.equal(props?.total_slots,1,'Native control is not single-slot');\n const capacity=props?.default_generation_settings?.n_ctx;\n assert.ok(Number.isSafeInteger(capacity)&&capacity>=4000&&capacity<=1048576,'Native context metadata is invalid');\n assert.ok(Number.isSafeInteger(context)&&context>=4000&&context===capacity,'Native context differs from the control');\n return {baseUrl,model,context};\n}\nasync function fetchJSON(url){\n const response=await fetch(url,{signal:AbortSignal.timeout(10000)});assert.ok(response.ok,'Native discovery HTTP failed');\n const text=await response.text();assert.ok(Buffer.byteLength(text)<=2097152,'Native metadata is oversized');return JSON.parse(text);\n}\nif(import.meta.url===pathToFileURL(process.argv[1]).href){\n const [configPath,baseUrl,rawContext,model,output,binary]=process.argv.slice(2);\n const config=JSON.parse(await readFile(configPath,'utf8'));\n const {evaluate}=await import(pathToFileURL(config.decode_source+'/tools/openclaw_eval.mjs').href);\n const url=new URL(baseUrl);assert.equal(url.hostname,'127.0.0.1');assert.equal(url.pathname,'/v1');\n const context=Number(rawContext);\n const discover=async()=>{\n  const [health,listing,props]=await Promise.all([fetchJSON(new URL('/health',url)),fetchJSON(new URL('/v1/models',url)),fetchJSON(new URL('/props',url))]);\n  return nativeMetadata(health,listing,props,model,context,baseUrl);\n };\n // Only metadata discovery is adapted. The real client, fixture verifier and\n // every inference/tool request use the unmodified direct native endpoint.\n const summary=await evaluate({baseUrl,context,output,binary,timeout:300},{discover});\n process.exitCode=summary.passed?0:1;\n}\n",
+    "source_sha256": "8bbc1bbb47fab9d00b5588bab8021b99ea1bde4e84955e00c043b80c52409fbc"
+  },
+  "engine_checks_passed": true,
+  "evidence_sha256": {
+    "native-client-controls-private.json": "012fbcb4eef15d2d71904868740f60aadefb7773d5aad049910b2a76808a41d3",
+    "native-openclaw-controls-private.json": "7de14a0c5c6e955b26d6e1993484d31c77ff1407f07ace203c6435c394f8c8d9"
+  },
+  "hardware": {
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.3-arch1.2",
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.7-arch1-1"
+  },
+  "hardware_unchanged": true,
+  "initial_discovery_attempts": [
+    {
+      "client": "openclaw",
+      "client_started": false,
+      "healthy_after": true,
+      "launch_failure": "ZINC-specific context_length discovery is absent from native /v1/models. Repeated with actual native /props capacity and alias checks.",
+      "model": "gemma4-26b-a4b-q4k-m",
+      "raw_before_after_identical": true,
+      "task_acceptance_measured": false
+    },
+    {
+      "client": "openclaw",
+      "client_started": false,
+      "healthy_after": true,
+      "launch_failure": "ZINC-specific context_length discovery is absent from native /v1/models. Repeated with actual native /props capacity and alias checks.",
+      "model": "gemma4-31b-q4k-m",
+      "raw_before_after_identical": true,
+      "task_acceptance_measured": false
+    },
+    {
+      "client": "openclaw",
+      "client_started": false,
+      "healthy_after": true,
+      "launch_failure": "ZINC-specific context_length discovery is absent from native /v1/models. Repeated with actual native /props capacity and alias checks.",
+      "model": "qwen3-0.6b-q8-0",
+      "raw_before_after_identical": true,
+      "task_acceptance_measured": false
+    }
+  ],
+  "limitations": [
+    "The native Gemma tasks pass; that does not erase the original ZINC workspace timeouts.",
+    "The starter fails both native clients as well as ZINC coding acceptance; successful process exit is insufficient.",
+    "Only metadata discovery is adapted. The actual client, fixture creation, independent verifier and direct inference endpoint remain unchanged.",
+    "The native reference uses its own Jinja template and uncached prompts. ZINC OpenCode may reuse session prefixes; these client wall times are not a matched engine benchmark."
+  ],
+  "reference": {
+    "commit": "9f0e5098a5d5d8adb8dd5c59036ae2a38ab07db9",
+    "library_sha256": {
+      "libggml-base.so": "7ff915391108565007cda2d9e3f23297903e342474fd46bfbad2180087aaf4de",
+      "libggml-base.so.0": "7ff915391108565007cda2d9e3f23297903e342474fd46bfbad2180087aaf4de",
+      "libggml-base.so.0.29.0": "7ff915391108565007cda2d9e3f23297903e342474fd46bfbad2180087aaf4de",
+      "libggml-cpu.so": "a09f29345951abc31553de5ae7ce325e3bb5f2aff1a4a1241c229ed6b5f4f9a7",
+      "libggml-cpu.so.0": "a09f29345951abc31553de5ae7ce325e3bb5f2aff1a4a1241c229ed6b5f4f9a7",
+      "libggml-cpu.so.0.29.0": "a09f29345951abc31553de5ae7ce325e3bb5f2aff1a4a1241c229ed6b5f4f9a7",
+      "libggml-vulkan.so": "be24707c8d850ce5483ebc5e71c404c8c3821977074446d011f31fee74b0ee80",
+      "libggml-vulkan.so.0": "be24707c8d850ce5483ebc5e71c404c8c3821977074446d011f31fee74b0ee80",
+      "libggml-vulkan.so.0.29.0": "be24707c8d850ce5483ebc5e71c404c8c3821977074446d011f31fee74b0ee80",
+      "libggml.so": "5d43879d8ca265ae03456c4d5272ac989d2c38721d361bd717634c905e114408",
+      "libggml.so.0": "5d43879d8ca265ae03456c4d5272ac989d2c38721d361bd717634c905e114408",
+      "libggml.so.0.29.0": "5d43879d8ca265ae03456c4d5272ac989d2c38721d361bd717634c905e114408",
+      "libllama-common.so": "1e2d787351d0bfccf821484833fae312e0f05344a251f1e435b8756064087708",
+      "libllama-common.so.0": "1e2d787351d0bfccf821484833fae312e0f05344a251f1e435b8756064087708",
+      "libllama-common.so.0.9.0": "1e2d787351d0bfccf821484833fae312e0f05344a251f1e435b8756064087708",
+      "libllama-server-impl.so": "0347e712add460450f1d9a1be4dbd4013267c6d1e5524f3f53457b51b53714d9",
+      "libllama.so": "9dc84ed07811b0f6b9d3d06c7c2716438727589efc01ccd98669bb16f367f65e",
+      "libllama.so.0": "9dc84ed07811b0f6b9d3d06c7c2716438727589efc01ccd98669bb16f367f65e",
+      "libllama.so.0.9.0": "9dc84ed07811b0f6b9d3d06c7c2716438727589efc01ccd98669bb16f367f65e"
+    },
+    "server_sha256": "3a01fe1abe5c644003f4241e6e21c8bcc0f5404f60d5c6edacf54071cb730e54",
+    "tokenizer_sha256": "8d638b400ca4dc58652fc779e80ca613eab27127777c6320b77743f76800ddbe",
+    "version": "version: 0.9.0-dev (build 1, commit 9f0e509)\nbuilt with GNU 16.2.1 for Linux x86_64"
+  },
+  "reference_scope": "pinned at the recorded earlier performance campaign selection; this control is not a latest-version speed claim",
+  "release_qualification": false,
+  "rows": [
+    {
+      "client": "openclaw",
+      "client_exit": 0,
+      "context": 16384,
+      "gpu_offload": {
+        "backend": "vulkan",
+        "offloaded": 31,
+        "total": 31
+      },
+      "healthy_after": true,
+      "model": "gemma4-26b-a4b-q4k-m",
+      "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+      "native_client_accepted": true,
+      "raw_before_after_identical": true,
+      "seconds": 104.08394160900207,
+      "selected_fixtures": ["text", "workspace", "recovery"],
+      "tasks": [
+        {
+          "completed": true,
+          "name": "text",
+          "passed": true,
+          "seconds": 15.113
+        },
+        {
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "completed": true,
+          "name": "workspace",
+          "passed": true,
+          "seconds": 73.555,
+          "tools": {
+            "calls": 7,
+            "failures": 0,
+            "tools": ["read", "write", "exec", "edit"]
+          }
+        },
+        {
+          "completed": true,
+          "name": "recovery",
+          "passed": true,
+          "seconds": 13.45
+        }
+      ],
+      "zinc_client_accepted": false,
+      "zinc_observed_cache_hits": 0
+    },
+    {
+      "client": "openclaw",
+      "client_exit": 0,
+      "context": 12288,
+      "gpu_offload": {
+        "backend": "vulkan",
+        "offloaded": 61,
+        "total": 61
+      },
+      "healthy_after": true,
+      "model": "gemma4-31b-q4k-m",
+      "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "native_client_accepted": true,
+      "raw_before_after_identical": true,
+      "seconds": 203.83121228899836,
+      "selected_fixtures": ["text", "workspace", "recovery"],
+      "tasks": [
+        {
+          "completed": true,
+          "name": "text",
+          "passed": true,
+          "seconds": 31.929
+        },
+        {
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": true,
+            "tests": true
+          },
+          "completed": true,
+          "name": "workspace",
+          "passed": true,
+          "seconds": 140.329,
+          "tools": {
+            "calls": 5,
+            "failures": 0,
+            "tools": ["read", "write", "edit", "exec"]
+          }
+        },
+        {
+          "completed": true,
+          "name": "recovery",
+          "passed": true,
+          "seconds": 30.516
+        }
+      ],
+      "zinc_client_accepted": false,
+      "zinc_observed_cache_hits": 0
+    },
+    {
+      "client": "openclaw",
+      "client_exit": 1,
+      "context": 16384,
+      "gpu_offload": {
+        "backend": "vulkan",
+        "offloaded": 29,
+        "total": 29
+      },
+      "healthy_after": true,
+      "model": "qwen3-0.6b-q8-0",
+      "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "native_client_accepted": false,
+      "raw_before_after_identical": true,
+      "seconds": 34.98577423099778,
+      "selected_fixtures": ["text", "workspace", "recovery"],
+      "tasks": [
+        {
+          "completed": true,
+          "name": "text",
+          "passed": false,
+          "seconds": 7.861
+        },
+        {
+          "checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": false,
+            "tests": false
+          },
+          "completed": true,
+          "name": "workspace",
+          "passed": false,
+          "seconds": 18.396,
+          "tools": {
+            "calls": 4,
+            "failures": 0,
+            "tools": ["read", "write", "exec"]
+          }
+        },
+        {
+          "completed": true,
+          "name": "recovery",
+          "passed": false,
+          "seconds": 7.884
+        }
+      ],
+      "zinc_client_accepted": false,
+      "zinc_observed_cache_hits": 0
+    },
+    {
+      "client": "opencode",
+      "client_exit": 1,
+      "context": 16384,
+      "gpu_offload": {
+        "backend": "vulkan",
+        "offloaded": 29,
+        "total": 29
+      },
+      "healthy_after": true,
+      "model": "qwen3-0.6b-q8-0",
+      "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "native_client_accepted": false,
+      "raw_before_after_identical": true,
+      "seconds": 41.207022647002304,
+      "selected_fixtures": [
+        "rate-limiter-single",
+        "cart-multi-file",
+        "python-log-cli"
+      ],
+      "tasks": [
+        {
+          "client_exit": 0,
+          "fixture": "rate-limiter-single",
+          "independent_test": {
+            "durationMs": 40,
+            "exitCode": 1,
+            "tests": {
+              "fail": 3,
+              "pass": 0
+            }
+          },
+          "passed": false,
+          "protected_file_violations_count": 0
+        },
+        {
+          "client_exit": 0,
+          "fixture": "cart-multi-file",
+          "independent_test": {
+            "durationMs": 43,
+            "exitCode": 1,
+            "tests": {
+              "fail": 2,
+              "pass": 1
+            }
+          },
+          "passed": false,
+          "protected_file_violations_count": 0
+        },
+        {
+          "client_exit": 0,
+          "fixture": "python-log-cli",
+          "independent_test": {
+            "durationMs": 167,
+            "exitCode": 1,
+            "tests": {
+              "fail": 4,
+              "pass": 0
+            }
+          },
+          "passed": false,
+          "protected_file_violations_count": 0
+        }
+      ],
+      "zinc_client_accepted": false,
+      "zinc_observed_cache_hits": 1
+    }
+  ],
+  "schema_version": "zinc-intel-native-client-controls-v1",
+  "scope": "Native Vulkan controls for failed bounded client tasks. The native reference is pinned from the earlier campaign, not a latest-version performance claim. No token-equivalent-template, matched-cache or engine-speed claim.",
+  "settings": {
+    "jinja": true,
+    "kv_cache": "f16",
+    "mtp": "off",
+    "native_prompt_cache": false,
+    "openclaw_timeout_seconds": 300,
+    "opencode_timeout_seconds": 900,
+    "reasoning_budget": 0,
+    "response_repairs": false,
+    "slots": 1,
+    "supervisor_edits": false
+  }
+}

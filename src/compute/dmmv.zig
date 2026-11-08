@@ -12,11 +12,71 @@ const pipeline_mod = @import("../vulkan/pipeline.zig");
 const CommandBuffer = @import("../vulkan/command.zig").CommandBuffer;
 const Buffer = @import("../vulkan/buffer.zig").Buffer;
 const GpuConfig = @import("../vulkan/gpu_detect.zig").GpuConfig;
+const GpuVendor = @import("../vulkan/gpu_detect.zig").GpuVendor;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 
 const log = std.log.scoped(.dmmv);
 const descriptor_pool_max_sets: u32 = 256;
 const descriptors_per_set: u32 = 3;
+
+fn intelQ8RowDecodeEnabled(vendor: GpuVendor, legacy_subgroup_size: u32, can_require_simd32: bool, full_subgroups: bool, qualified_default: bool, setting: ?[]const u8) bool {
+    // Enforce the reduction width rather than assuming the device's default
+    // equals the pipeline's width. =0 retains the original shader for A/B runs.
+    // The new shader preserves the legacy SIMD32 sum order specifically.
+    if (vendor != .intel_arc_xe2 or legacy_subgroup_size != 32 or !can_require_simd32 or !full_subgroups) return false;
+    // Unknown values must not silently enable an experimental arithmetic path.
+    return if (setting) |value| std.mem.eql(u8, value, "1") else qualified_default;
+}
+
+test "Intel Q8 row decode requires enforceable SIMD32 and honors the control" {
+    try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, true, null));
+    try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, true, "1"));
+    try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, true, "0"));
+    try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, false, null));
+    try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, false, "1"));
+    try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, false, "0"));
+    for ([_][]const u8{ "", "false", "off", "true", "2", "01" }) |setting| {
+        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, true, setting));
+    }
+    for ([_]u32{ 0, 8, 16, 64 }) |legacy_width| {
+        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, legacy_width, true, true, true, null));
+    }
+    for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false } }) |caps| {
+        try std.testing.expect(!intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, caps[0], caps[1], true, null));
+    }
+    for (std.enums.values(GpuVendor)) |vendor| {
+        if (vendor == .intel_arc_xe2) continue;
+        try std.testing.expect(!intelQ8RowDecodeEnabled(vendor, 32, true, true, true, "1"));
+        try std.testing.expect(!intelQ8RowDecodeEnabled(vendor, 32, true, true, true, null));
+    }
+}
+
+fn createQ8DecodePipeline(
+    instance: *const Instance,
+    shader_dir: []const u8,
+    intel_rows: bool,
+    spec_constants: []const pipeline_mod.SpecConst,
+    options: pipeline_mod.PipelineOptions,
+    allocator: std.mem.Allocator,
+) !Pipeline {
+    var path_buf: [512]u8 = undefined;
+    if (intel_rows) {
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_intel_rows.spv", .{shader_dir});
+        var intel_options = options;
+        intel_options.required_subgroup_size = 32;
+        intel_options.require_full_subgroups = true;
+        if (pipeline_mod.createFromSpirvWithOptions(instance, path, 3, @sizeOf(DmmvPushConstants), spec_constants, intel_options, allocator)) |pipeline| {
+            log.info("Q8_0 Intel row decode shader loaded (WG64, required SIMD32)", .{});
+            return pipeline;
+        } else |err| {
+            // An older shader directory or unsupported driver must retain the
+            // working Q8 path, including the fixed-width specializations.
+            log.warn("Intel Q8 row shader unavailable; using the legacy shader: {s}", .{@errorName(err)});
+        }
+    }
+    const fallback = try std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir});
+    return pipeline_mod.createFromSpirvWithOptions(instance, fallback, 3, @sizeOf(DmmvPushConstants), spec_constants, options, allocator);
+}
 
 pub const ProjectionSpecializations = @import("projection_specializations.zig").ProjectionSpecializations;
 
@@ -982,7 +1042,7 @@ pub const DmmvDispatch = struct {
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         // Standalone kernel benchmarks retain every supported specialization.
-        return initWithSpecializations(instance, gpu_config, shader_dir, max_k, .all(), allocator);
+        return initWithSpecializations(instance, gpu_config, shader_dir, max_k, .all(), false, allocator);
     }
 
     /// Initialize a loaded model with only its applicable fixed-K variants.
@@ -992,6 +1052,7 @@ pub const DmmvDispatch = struct {
         shader_dir: []const u8,
         max_k: u32,
         projection_demand: ProjectionSpecializations,
+        qualified_q8_rows_default: bool,
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         const use_wave64 = gpu_config.wave_size == 64;
@@ -1075,8 +1136,8 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
-        const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const intel_q8_rows = intelQ8RowDecodeEnabled(gpu_config.vendor, instance.caps.default_subgroup_size, instance.caps.supportsRequiredSubgroupSize(32), instance.caps.compute_full_subgroups, qualified_q8_rows_default, host_io.getenv("ZINC_INTEL_Q8_DECODE"));
+        const pipeline_q8_0 = createQ8DecodePipeline(instance, shader_dir, intel_q8_rows, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -1091,14 +1152,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
         const q8_spec64 = [_]pipeline_mod.SpecConst{.{ .id = 2, .value = 64 }};
-        const q8_spec64_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_spec64 = pipeline_mod.createFromSpirvWithOptions(instance, q8_spec64_path, 3, push_size, &q8_spec64, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_spec64 = createQ8DecodePipeline(instance, shader_dir, intel_q8_rows, &q8_spec64, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 spec64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_spec128 = [_]pipeline_mod.SpecConst{.{ .id = 2, .value = 128 }};
-        const q8_spec128_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_spec128 = pipeline_mod.createFromSpirvWithOptions(instance, q8_spec128_path, 3, push_size, &q8_spec128, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_spec128 = createQ8DecodePipeline(instance, shader_dir, intel_q8_rows, &q8_spec128, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 spec128 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

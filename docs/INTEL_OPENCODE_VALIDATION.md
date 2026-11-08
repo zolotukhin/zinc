@@ -12,18 +12,15 @@ checks the Q8 decode candidate's exact CI Vulkan archive with actual
 pass frozen native HTTP continuations before and after the client, with a
 healthy server afterward. Independent coding acceptance remains separate:
 
-<table tabindex="0" aria-label="Initial November 7 Intel client acceptance; session-reuse follow-up below">
-  <thead><tr><th scope="col">Model</th><th scope="col">OpenCode fixtures</th><th scope="col">OpenClaw text / workspace / recovery</th></tr></thead>
-  <tbody>
-    <tr><th scope="row">Qwen 3.5 9B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
-    <tr><th scope="row">Gemma 4 26B-A4B</th><td>3/3</td><td>Pass / timeout / pass</td></tr>
-    <tr><th scope="row">Gemma 4 31B</th><td>3/3</td><td>Pass / timeout / pass</td></tr>
-    <tr><th scope="row">Qwen 3.6 27B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
-    <tr><th scope="row">Qwen 3.6 35B-A3B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
-    <tr><th scope="row">Qwen 3.8 27B</th><td>3/3</td><td>Pass / pass / pass</td></tr>
-    <tr><th scope="row">Qwen 3 0.6B</th><td>0/3</td><td>Fail / fail / fail</td></tr>
-  </tbody>
-</table>
+| Model            | OpenCode fixtures | OpenClaw text / workspace / recovery |
+| ---------------- | ----------------: | ------------------------------------ |
+| Qwen 3.5 9B      |               3/3 | Pass / pass / pass                   |
+| Gemma 4 26B-A4B  |               3/3 | Pass / timeout / pass                |
+| Gemma 4 31B      |               3/3 | Pass / timeout / pass                |
+| Qwen 3.6 27B     |               3/3 | Pass / pass / pass                   |
+| Qwen 3.6 35B-A3B |               3/3 | Pass / pass / pass                   |
+| Qwen 3.8 27B     |               3/3 | Pass / pass / pass                   |
+| Qwen 3 0.6B      |               0/3 | Fail / fail / fail                   |
 
 OpenCode uses three independent fixtures, 16 steps, 2,048 output tokens and
 900 seconds per fixture. OpenClaw uses exact text, a real file-edit/test/receipt
@@ -49,9 +46,25 @@ all frozen native checks before and after the client remain correct. Actual
 client reuse is observed on both models. The original failed rows remain in
 the report; session reuse does not qualify Gemma 26B's workspace acceptance.
 
-Native GPU controls for the failed tasks are queued separately. This is
-development candidate evidence; it does not recertify the published 0.1.0
-archives or establish a broad coding benchmark or a performance win.
+The [separate native Vulkan controls](https://zolotukhin.ai/zinc/validation/intel-native-client-controls-2026-11-07.json)
+use the same pinned client versions, GGUFs, contexts and task limits, with
+llama.cpp `9f0e5098` from the earlier recorded campaign. Both Gemmas pass
+OpenClaw, including workspace tasks in 73.56 seconds (26B) and 140.33 seconds
+(31B). The starter fails both clients' coding acceptance on the native GPU
+server too. Every native before/after continuation remains identical and each
+server stays healthy. These are bounded task controls, with different native
+templates and cache behavior, not a matched engine-speed comparison.
+
+The first OpenClaw control stopped before launching the client because native
+`/v1/models` lacks ZINC's context-capacity field. Those launch failures remain
+in the report and do not count as model failures. The corrected discovery reads
+actual native `/props` capacity, slot count and alias, plus health and model
+identity. The report includes the discovery adapter source and its metadata
+tests; inference responses, the actual client and independent verifier remain
+unchanged.
+
+This is development candidate evidence; it does not recertify the published
+0.1.0 archives or establish a broad coding benchmark or a performance win.
 
 ## November 2 package and corrected launcher
 

@@ -455,6 +455,45 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(launched, list(markers) if missing is None else list(markers)[:list(markers).index(missing) + 1])
             self.assertEqual(reaped, launched)
 
+    def test_intel_q8_gate_requires_all_cases_and_records_the_tested_package_shaders(self):
+        shader_dir = self.root / "share/zinc/shaders"
+        shader_dir.mkdir(parents=True)
+        for name in ("dmmv_q8_0", "dmmv_q8_0_intel_rows"):
+            (shader_dir / (name + ".spv")).write_bytes(name.encode())
+        marker = "PASS: 228 Q8 native-reference/offset/accumulation/guard cases\nPASS: 114 Q8 identical-reduction pairs"
+        for status, text in ((1, marker), (0, ""), (0, marker.replace("228", "227")),
+                             (0, marker + "\n" + marker), (0, marker.replace("114", "113")),
+                             (0, marker.replace("228", "60").replace("114", "30")),
+                             (0, marker.replace("228", "180").replace("114", "90")),
+                             (0, marker.splitlines()[0]), (0, marker)):
+            reaped = []
+            @contextlib.contextmanager
+            def child(command, log, cwd, env):
+                self.assertEqual(Path(command[0]).name, "validate-q8-decode")
+                self.assertEqual(env["ZINC_GPU"], "3")
+                self.assertEqual(env["ZINC_SHADER_DIR"], str(shader_dir))
+                Path(log).write_text(text + "\n")
+                try:
+                    yield SimpleNamespace(wait=lambda timeout: status)
+                finally:
+                    reaped.append(True)
+            with self.subTest(status=status, text=text), patch.object(release_gpu, "output", return_value="") as compile_tool, \
+                    patch.object(release_gpu, "process", side_effect=child):
+                if status or text != marker:
+                    with self.assertRaisesRegex(ValueError, "reference validation failed|reference suite was incomplete"):
+                        release_gpu.q8_decode_reference(self.root, self.root, self.root, 3, self.root, {})
+                else:
+                    result = release_gpu.q8_decode_reference(self.root, self.root, self.root, 3, self.root, {})
+                    self.assertEqual(result["cases"], 228)
+                    self.assertEqual(result["bitwise_pairs"], 114)
+                    self.assertTrue(result["passed"])
+                    self.assertEqual(result["shader_sha256"], {name: sha256(shader_dir / (name + ".spv"))
+                                     for name in ("dmmv_q8_0", "dmmv_q8_0_intel_rows")})
+                    self.assertEqual(result["validator_source_sha256"], sha256(ROOT / "tools/validate_q8_decode.c"))
+                    self.assertEqual(result["shared_fixture_source_sha256"], sha256(ROOT / "tools/validate_dmmv_shared_cache.c"))
+            self.assertEqual(compile_tool.call_count, 1)
+            self.assertEqual(reaped, [True])
+
     def test_rocm_kernel_gate_rejects_wrong_embedded_source_failure_and_incomplete_success(self):
         (self.root / "bin").mkdir()
         binary = self.root / "bin/zinc"

@@ -25,6 +25,8 @@ typedef struct { VkBuffer handle; VkDeviceMemory memory; void *data; size_t size
 typedef struct { uint32_t M, K, expert_stride, x_expert_stride, x_offset, y_offset; } MoePush;
 typedef struct { uint32_t M, K, a_offset, x_offset, y_offset, acc_mode; } F32Push;
 typedef struct { const char *shader; enum ggml_type type; } Kernel;
+#define ZINC_DMMV_TEST_ROWS 67
+#define ZINC_DMMV_BENCH_ROWS 256
 static VkInstance instance;
 static VkPhysicalDevice physical;
 static VkDevice device;
@@ -138,9 +140,11 @@ static VkShaderModule shader(const char *name) {
 static int compare_double(const void *a, const void *b) {
     double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y);
 }
-static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench) {
+static void run_case_capture(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench, uint32_t q8_blocks, float *capture) {
     const int f32 = kernel.type == GGML_TYPE_F32;
-    const uint32_t M = bench ? 256 : 67, slots = f32 ? 1 : 2, experts = 3, x_start = 5, y_start = 7;
+    const int dense = f32 || kernel.type == GGML_TYPE_Q8_0;
+    // Q8 reads vec4 inputs, so its nonzero X offset must remain 16-byte aligned.
+    const uint32_t M = bench ? ZINC_DMMV_BENCH_ROWS : ZINC_DMMV_TEST_ROWS, slots = dense ? 1 : 2, experts = 3, x_start = dense && !f32 ? 8 : 5, y_start = 7;
     const uint32_t x_stride = separate_inputs ? K + 11 : 0;
     const size_t row_bytes = ggml_row_size(kernel.type, K);
     const uint32_t expert_stride = (uint32_t)((M * row_bytes + 255) / 256 * 256);
@@ -165,7 +169,7 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
         .binding = i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
     VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = f32 ? 3 : 4, .pBindings = bindings };
+        .bindingCount = dense ? 3 : 4, .pBindings = bindings };
     VkDescriptorSetLayout set_layout;
     check(vkCreateDescriptorSetLayout(device, &li, NULL, &set_layout));
     VkPushConstantRange range = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = 24 };
@@ -174,8 +178,13 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
     VkPipelineLayout layout;
     check(vkCreatePipelineLayout(device, &pi, NULL, &layout));
     VkShaderModule module = shader(kernel.shader);
-    VkSpecializationMapEntry entry = { .constantID = 1, .size = 4 };
-    VkSpecializationInfo spec = { .mapEntryCount = 1, .pMapEntries = &entry, .dataSize = 4, .pData = &capacity };
+    const uint32_t spec_values[] = { capacity, q8_blocks };
+    const VkSpecializationMapEntry entries[] = {
+        { .constantID = 1, .offset = 0, .size = 4 },
+        { .constantID = 2, .offset = 4, .size = 4 },
+    };
+    VkSpecializationInfo spec = { .mapEntryCount = kernel.type == GGML_TYPE_Q8_0 ? 2 : 1,
+        .pMapEntries = entries, .dataSize = sizeof spec_values, .pData = spec_values };
     VkComputePipelineCreateInfo pipeline_info = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main", .pSpecializationInfo = &spec },
@@ -197,7 +206,7 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
         writes[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
             .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &infos[i] };
     }
-    vkUpdateDescriptorSets(device, f32 ? 3 : 4, writes, 0, NULL);
+    vkUpdateDescriptorSets(device, dense ? 3 : 4, writes, 0, NULL);
     MoePush moe_push = { M, K, expert_stride, x_stride, x_start * 4, y_start * 4 };
     F32Push f32_push = { M, K, expert_stride, x_start * 4, y_start * 4, (uint32_t)accumulate };
     VkCommandBufferAllocateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -213,9 +222,9 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
     vkCmdResetQueryPool(cmd, queries, 0, 2);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, NULL);
-    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, f32 ? (void *)&f32_push : (void *)&moe_push);
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, dense ? (void *)&f32_push : (void *)&moe_push);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queries, 0);
-    vkCmdDispatch(cmd, f32 ? M : (M + 63) / 64, slots, 1);
+    vkCmdDispatch(cmd, f32 ? M : dense ? (M + 1) / 2 : (M + 63) / 64, slots, 1);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queries, 1);
     VkMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
@@ -234,7 +243,7 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
         times[repeat] = (ticks[1] - ticks[0]) * properties.limits.timestampPeriod / 1000.0;
         if (repeat) continue;
         for (uint32_t s = 0; s < slots; s++) for (uint32_t r = 0; r < M; r++) {
-            const void *src = (char *)b[0].data + (f32 ? 1 : routing[s]) * expert_stride + r * row_bytes;
+            const void *src = (char *)b[0].data + (dense ? 1 : routing[s]) * expert_stride + r * row_bytes;
             if (f32) memcpy(decoded, src, K * 4); else traits->to_float(src, decoded, K);
             double expected = accumulate ? (float)((s * M + r) % 13) * 0.125f - 0.5f : 0;
             for (uint32_t j = 0; j < K; j++) expected += (double)decoded[j] * x[x_start + s * x_stride + j];
@@ -249,6 +258,7 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
         }
         for (size_t i = 0; i < y_count; i++)
             if ((i < y_start || i >= y_start + slots * M) && y[i] != -999.25f) fail("output guard");
+        if (capture) memcpy(capture, y + y_start, slots * M * sizeof *capture);
     }
     qsort(times, repeats, sizeof times[0], compare_double);
     printf("PASS %-17s K=%5u SPEC_K=%5u stride=%5u acc=%d error=%.6g%s%.3f us\n",
@@ -260,6 +270,12 @@ static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_
     vkDestroyDescriptorSetLayout(device, set_layout, NULL);
     for (unsigned i = 0; i < 4; i++) free_buffer(b[i]);
     free(row); free(decoded);
+}
+static void run_case_specialized(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench, uint32_t q8_blocks) {
+    run_case_capture(kernel, K, capacity, separate_inputs, accumulate, bench, q8_blocks, NULL);
+}
+static void run_case(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench) {
+    run_case_specialized(kernel, K, capacity, separate_inputs, accumulate, bench, 0);
 }
 int main(int argc, char **argv) {
     int fits_only = 0, bench = 0;

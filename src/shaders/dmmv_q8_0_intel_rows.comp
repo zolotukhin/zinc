@@ -1,0 +1,67 @@
+#version 460
+// Intel Xe2 Q8_0 DMMV: one 32-lane row per half of a 64-thread workgroup.
+// Retain the legacy SIMD32 reduction order. Combining blocks at stride 32
+// changed near-tie choices in the recurrent/MoE models despite small numerical
+// error; two stride-64 accumulators preserve the original two subgroup sums.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint SPEC_M = 4096;
+layout(constant_id = 1) const uint SPEC_K = 4096;
+layout(constant_id = 2) const uint SPEC_BLOCKS_PER_ROW = 0u;
+layout(push_constant) uniform PushConstants {
+    uint M; uint K; uint a_offset; uint x_offset; uint y_offset; uint acc_mode;
+};
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_data[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
+
+float dot_q8_block(const uint qs_off, const uint x_base_v4) {
+    float block_sum = 0.0;
+    for (uint i = 0u; i < 8u; i++) {
+        const uint q = qs_off + i * 4u;
+        const ivec4 value = ivec4(int(int8_t(a_data[q])), int(int8_t(a_data[q + 1u])),
+                                  int(int8_t(a_data[q + 2u])), int(int8_t(a_data[q + 3u])));
+        block_sum += dot(vec4(value), x_data[x_base_v4 + i]);
+    }
+    return block_sum;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid & 31u;
+    const uint row = gl_WorkGroupID.x * 2u + (tid >> 5u);
+    const uint blocks = SPEC_BLOCKS_PER_ROW != 0u ? SPEC_BLOCKS_PER_ROW : K / 32u;
+    float low = 0.0;
+    float high = 0.0;
+    if (row < M) {
+        [[unroll]] for (uint block = lane; block < blocks; block += 64u) {
+            uint offset = a_offset + (row * blocks + block) * 34u;
+            float scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
+            // The legacy specialized loop fuses this update. Leaving a*b+c
+            // implicit changed fixed-128 results by one ULP on Xe2; fma keeps
+            // the same rounding as the legacy stride-64 accumulators.
+            low = fma(scale, dot_q8_block(offset + 2u, x_offset / 16u + block * 8u), low);
+            if (block + 32u < blocks) {
+                offset += 32u * 34u;
+                scale = unpackHalf2x16(uint(a_data[offset]) | (uint(a_data[offset + 1u]) << 8u)).x;
+                high = fma(scale, dot_q8_block(offset + 2u, x_offset / 16u + (block + 32u) * 8u), high);
+            }
+        }
+    }
+    // The host requires full SIMD32 subgroups, one complete row per subgroup.
+    // Keep the legacy per-lane stride-64 accumulators and subgroupAdd order;
+    // merging low+high matches its two-subgroup result without an SLM barrier.
+    low = subgroupAdd(low);
+    high = subgroupAdd(high);
+    if (lane == 0u && row < M) {
+        const float result = low + high;
+        const uint output_index = y_offset / 4u + row;
+        if (acc_mode == 0u) y_data[output_index] = result;
+        else y_data[output_index] += result;
+    }
+}
