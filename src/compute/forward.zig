@@ -2044,8 +2044,13 @@ pub const InferenceEngine = struct {
         const d_inner_val = if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim;
         const max_k = @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val);
         var projection_demand: @import("dmmv.zig").ProjectionSpecializations = .{};
-        for (model.tensors.items) |tensor| projection_demand.includeTensor(tensor.info);
-        var dmmv = try DmmvDispatch.initWithSpecializations(instance, &gpu_config, shader_dir, max_k, projection_demand, allocator);
+        var q8_decode_demand: prefill_policy.Q8RowDecodeDemand = .{};
+        for (model.tensors.items) |tensor| {
+            projection_demand.includeTensor(tensor.info);
+            q8_decode_demand.includeTensor(tensor.info);
+        }
+        const q8_rows_default = q8_decode_demand.qualified(config.*);
+        var dmmv = try DmmvDispatch.initWithSpecializations(instance, &gpu_config, shader_dir, max_k, projection_demand, q8_rows_default, allocator);
         errdefer dmmv.deinit();
 
         var elementwise = try ElementwiseDispatch.init(instance, shader_dir, allocator);
