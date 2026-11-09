@@ -6,6 +6,11 @@ Both engines must offload the model to that GPU. There is no CPU-only inference
 baseline. CPU unit tests and numerical shader references remain correctness
 checks, separate from performance comparisons.
 
+The [November 9 final CI-package replay](/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json)
+passes all seven ZINC model support gates on the updated Intel worker. The
+competing native SYCL configuration still needs repeatability controls on six
+models before it can establish an all-model performance baseline.
+
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
 workloads: short chat, medium context, long context, and extended decode. It first
@@ -572,3 +577,49 @@ text; it cannot excuse unrelated later errors. Failed validation blocks speed
 claims. All packaged SPIR-V hashes and repeated full JSON/SSE output hashes
 are retained. ZINC's backend remains Vulkan in this comparison; this does not
 implement a native ZINC Intel backend.
+
+## Final CI package and native FP32 comparison
+
+The [complete November 9 diagnosis](/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json)
+uses exact CI Vulkan archive `2d0e1369`, binary hash `3bea62b8`, and performance
+reference `0a94a3f2`, selected before building. All seven ZINC models pass:
+376 numerical cases, 228 Q8 cases with 114 bitwise pairs, tokenizer parity,
+27 complete continuation cases against the frozen Vulkan reference, 81 HTTP replays, raw JSON/SSE parity,
+and recovery after disconnect/context errors. Both Gemmas cross their
+1,024-token sliding window. The continuations retain 431 exact choices and one
+qualified near tie, including its independently verified tail. Binary, all
+214 shaders, hardware and native-stack identities remain unchanged.
+
+The native FP32 build uses official Intel oneAPI 2026.2 packages, Level Zero,
+F16 KV, disabled MTP/graphs/prompt caching and zero RAM prompt cache. All seven
+models fully offload to SYCL and pass the initial frozen-oracle continuation
+checks. Complete greedy outputs then change on six larger models during
+repetition or after a server restart. Those rejected samples remain in the
+record. This is a repeatability failure for the measured configuration; it does
+not establish that the model architecture is unsupported by the native backend.
+
+Only the Qwen 0.6B starter completes all three balanced rounds. The table combines
+short-prompt throughput with startup and memory medians across the three server
+lifetimes:
+
+| Measurement                 | ZINC Vulkan | llama.cpp SYCL FP32 |
+| --------------------------- | ----------: | ------------------: |
+| Prefill, tokens/s           |     1,879.2 |             6,661.2 |
+| Decode, tokens/s            |       235.5 |               356.2 |
+| Observed startup, ms        |       203.8 |             1,266.7 |
+| Peak process RSS, MiB       |       685.0 |               821.0 |
+| Observed resident VRAM, MiB |       952.4 |             1,275.5 |
+
+ZINC starts faster and uses less observed memory in those rounds; native SYCL
+has higher throughput. The starter's long-context workload reaches natural EOS
+before the common budget, so the full performance matrix remains incomplete.
+No all-model or all-dimension win is established. This development-package
+record does not recertify the published 0.1.0 archives or establish coding
+ability for the starter.
+
+Some rejected timed processes lack final memory/runtime observations in the
+frozen harness. Those fields remain unknown. The later observation collector
+retains them on failures while preserving the original error; it does not
+backfill historical data. The next controls separate oneDNN attention from
+other oneDNN operations on the affected models, followed by matched timing only
+for configurations that pass the same correctness and repeatability gates.
