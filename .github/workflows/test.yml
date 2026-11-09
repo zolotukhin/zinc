@@ -46,6 +46,8 @@ jobs:
             package: 'opencode-ai@1.19.4'
           - version: '2.0.21'
             package: '@opencode/cli@2.0.21'
+          - version: '2.2.6'
+            package: '@opencode/cli@2.2.6'
     steps:
       - uses: actions/checkout@v5
         with:

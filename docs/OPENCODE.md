@@ -4,7 +4,7 @@ Use OpenCode with a model served by ZINC. The
 [setup script](https://github.com/zolotukhin/zinc/blob/main/tools/setup_opencode.mjs)
 creates a project configuration, checks the API, and runs tasks headlessly.
 It requires **Bun 1.4.4 or newer**. The client protocol is tested with
-**OpenCode 1.19.4 and 2.0.21**. Model coding results retain their actual client
+**OpenCode 1.19.4, 2.0.21 and 2.2.6**. Model coding results retain their actual client
 version in the [RDNA4 validation report](OPENCODE_RELEASE_VALIDATION.md) and
 [Intel model matrix](INTEL_OPENCODE_VALIDATION.md).
 The [AMD setup walkthrough](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/)
@@ -333,7 +333,9 @@ checks, fatal API errors that must skip verification, and the actual file-read
 and command-output limits. The acceptance test
 and portable configuration must remain unchanged. It needs Bun and an installed
 OpenCode CLI; `--opencode FILE` or `OPENCODE_BIN` selects a different executable.
-CI runs it with OpenCode 1.19.4.
+CI runs it with OpenCode 1.19.4, 2.0.21 and 2.2.6. The
+[2.2.6 protocol preflight](/zinc/validation/opencode-protocol-2.2.6-2026-11-09.json)
+retains the actual-client outcomes and helper hashes.
 
 Choose a fresh output directory. Its `result.json` contains portable outcomes;
 raw event and check logs stay in that directory. The default fixture includes
