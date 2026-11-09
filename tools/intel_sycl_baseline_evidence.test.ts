@@ -20,6 +20,9 @@ test('the final CI package retains all seven native, streaming and recovery supp
     '0bebe4850b999110c4811769b37927f0731a0b7a4a6befd1164926b76a2ce52e',
   );
   expect(Object.keys(report.zinc.shader_sha256)).toHaveLength(214);
+  for (const [name, digest] of Object.entries(report.q8_decode_reference.shader_sha256)) {
+    expect(report.zinc.shader_sha256[`share/zinc/shaders/${name}.spv`]).toBe(digest);
+  }
   expect(report.kernel_reference).toEqual({
     passed: true,
     cases: 376,
@@ -79,6 +82,23 @@ test('the official native baseline preserves rejected outputs and cannot claim a
   expect(report.native_build.settings.GGML_SYCL_F16).toBe('OFF');
   expect(report.native_build.settings.GGML_SYCL_HOST_MEM_FALLBACK).toBe('OFF');
   expect(report.settings.native_stack_verified).toBe(true);
+  expect(report.settings).toEqual(
+    expect.objectContaining({
+      backend: 'vulkan',
+      reference_backend: 'sycl',
+      protocol: 'raw',
+      kv_cache: 'f16',
+      mtp: 'off',
+      slots: 1,
+      prompt_cache: false,
+      rounds: 3,
+      runs: 3,
+      warmup: 1,
+      temperature: 0,
+      top_p: 1,
+      seed: 0,
+    }),
+  );
   expect(report.passed).toBe(false);
   expect(report.complete_model_matrix).toBe(false);
   expect(report.complete_performance_matrix).toBe(false);

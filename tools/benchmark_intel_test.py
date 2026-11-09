@@ -41,13 +41,27 @@ class IntelMetricsTest(unittest.TestCase):
                     runtime.assert_called_once()
 
     def test_successful_measurements_still_fail_if_required_observation_is_missing(self):
+        for first in (True, False):
+            with self.subTest(failed_collector_first=first):
+                record = {}
+                failure = subprocess.TimeoutExpired("probe", 1)
+                collectors = [("native_runtime", Mock(side_effect=failure)), ("memory", lambda: {"peak": 123})]
+                if not first: collectors.reverse()
+                # Probe errors become model-level failures, including when a
+                # different collector succeeded first. This is the exception
+                # type the CLI catches to save and continue the next model.
+                with self.assertRaisesRegex(ValueError, "native_runtime observation unavailable") as caught:
+                    with benchmark_intel.process_observations(record, collectors):
+                        pass
+                self.assertIs(caught.exception.__cause__, failure)
+                self.assertEqual(record, {"native_runtime_error": "TimeoutExpired", "memory": {"peak": 123}})
         record = {}
-        failure = ValueError("native runtime proof unavailable")
-        with self.assertRaises(ValueError) as caught:
-            with benchmark_intel.process_observations(record, [("native_runtime", Mock(side_effect=failure)), ("memory", lambda: {"peak": 123})]):
+        first_error = RuntimeError("memory probe")
+        with self.assertRaisesRegex(ValueError, "memory observation unavailable") as caught:
+            with benchmark_intel.process_observations(record, [("memory", Mock(side_effect=first_error)), ("native_runtime", Mock(side_effect=ValueError("runtime probe")))]):
                 pass
-        self.assertIs(caught.exception, failure)
-        self.assertEqual(record, {"native_runtime_error": "ValueError", "memory": {"peak": 123}})
+        self.assertIs(caught.exception.__cause__, first_error)
+        self.assertEqual(record, {"memory_error": "RuntimeError", "native_runtime_error": "ValueError"})
         record = {}
         with benchmark_intel.process_observations(record, [("memory", lambda: {"peak": 123})]):
             self.assertEqual(record, {})

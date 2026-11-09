@@ -50,9 +50,13 @@ def process_observations(record, collectors):
                 # without replacing the measurement/cancellation that failed.
                 record[key + "_error"] = type(error).__name__
                 if not failed and observation_error is None:
-                    observation_error = error
+                    observation_error = (key, error)
         if observation_error is not None:
-            raise observation_error
+            key, error = observation_error
+            # The model-level ValueError handler saves this record and honors
+            # --keep-going. A raw probe TimeoutExpired/RuntimeError would skip
+            # that handler and abort the remaining model matrix.
+            raise ValueError(f"required process {key} observation unavailable ({type(error).__name__})") from error
 
 
 def reference_selection(selected, head, selected_at=None, current=None):
