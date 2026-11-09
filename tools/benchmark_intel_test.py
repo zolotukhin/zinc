@@ -1,5 +1,6 @@
 """CPU fixtures for Intel measurement, never a GPU or a model load."""
 import copy
+import datetime
 import io
 import json
 from pathlib import Path
@@ -14,6 +15,27 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def test_reference_is_frozen_at_observed_selection_before_building(self):
+        current = datetime.datetime(2026, 11, 9, 20, tzinfo=datetime.timezone.utc)
+        timestamp = "2026-11-09T19:00:00Z"
+        selected = {"commit": "a" * 40, "checked_at_utc": timestamp}
+        check = benchmark_intel.reference_selection(selected, "b" * 40, timestamp, current)
+        self.assertEqual(check, {"commit": "a" * 40, "observed_head": "a" * 40,
+                         "checked_at": timestamp, "scope": "campaign-before-build", "observed_head_at_run": "b" * 40})
+        # The default remains a live run-start check; a moving upstream cannot
+        # silently relabel the selected source as the newer revision.
+        with self.assertRaisesRegex(ValueError, "latest native"):
+            benchmark_intel.reference_selection(selected, "b" * 40, current=current)
+        self.assertEqual(benchmark_intel.reference_selection(selected, "a" * 40, current=current)["scope"], "run-start")
+        for invalid in ("2026-11-09T17:59:59Z", "2026-11-09T20:00:01Z", "2026-11-09T19:00:00", "invalid", 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                benchmark_intel.reference_selection({**selected, "checked_at_utc": invalid}, "b" * 40, invalid, current)
+        with self.assertRaisesRegex(ValueError, "differs"):
+            benchmark_intel.reference_selection(selected, "b" * 40, "2026-11-09T19:01:00Z", current)
+        for pin, head in (("bad", "a" * 40), ("a" * 40, "bad")):
+            with self.assertRaises(ValueError):
+                benchmark_intel.reference_selection({**selected, "commit": pin}, head, timestamp, current)
+
     def test_rejected_repetitions_and_prompt_mismatches_remain_in_the_evidence(self):
         model, identities, counts = {"samples": [], "stream_samples": []}, {}, {}
         first = {"engine": "zinc", "scenario": "core", "round": 1, "content_sha256": "a", "promptTokens": 42}

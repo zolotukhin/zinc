@@ -42,7 +42,12 @@ Refresh and build the performance reference before starting, following
 [the benchmark guide](BENCHMARKING.md#latest-llamacpp-and-matched-mtp-pairs).
 The harness holds the shared worker reservation, refuses existing inference
 processes, and reaps each owned server group before starting another. Keep the
-SSH invocation alive until it finishes.
+SSH invocation alive until it finishes. For long native builds, refresh
+`config/benchmark-reference.json` first and pass its exact `checked_at_utc`
+value using `--reference-selected-at`. This freezes the upstream HEAD selected
+before compilation for at most two hours. The report records any newer live
+HEAD at run start separately; it does not claim the frozen build contains those
+later commits. Without this option, the live HEAD must still match the pin.
 
 The report retains every measured request's prefill/decode rates and full HTTP
 latency. A separate warmed 16-token SSE probe measures time to first usable
@@ -460,6 +465,17 @@ baseline remains unqualified while oneDNN/attention controls are isolated;
 these failed attempts establish no headline speed claim. The benchmark pin
 has since advanced to `5f490d7b`; rebuilding it is separate from these frozen
 results.
+
+The [refreshed native runtime controls](/zinc/validation/intel-native-runtime-controls-2026-11-09.json)
+use `5f490d7b` with the same starter GGUF and official Intel environment. Six
+treatments cover FP32/FP16 with default oneDNN, native SYCL attention, or oneDNN
+disabled. Each gets 24 full requests and eight raw SSE controls across four
+workloads and two server lifetimes. FP32 default, FP32 without oneDNN, FP16
+with native attention, and FP16 without oneDNN pass this limited repeatability
+check. FP32 with native attention drifts twice; default FP16 drifts nine times.
+All attempts remain in the record. These starter controls identify candidates
+for the full catalog; they do not establish that nondeterminism was fixed or
+qualify an all-model native baseline.
 
 On November 9, the remote Arch worker was running kernel `7.2.14-arch1-1`,
 compute runtime `26.40.40196.8`, IGC `2.42.6`, Level Zero loader `1.34.0`,
