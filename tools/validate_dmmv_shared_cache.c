@@ -142,7 +142,13 @@ static int compare_double(const void *a, const void *b) {
 }
 static void run_case_capture(Kernel kernel, uint32_t K, uint32_t capacity, int separate_inputs, int accumulate, int bench, uint32_t q8_blocks, float *capture) {
     const int f32 = kernel.type == GGML_TYPE_F32;
-    const int dense = f32 || kernel.type == GGML_TYPE_Q8_0;
+    // Dense Q4 and expert Q4 share a quantizer, but their descriptors, push
+    // constants, row dispatch and output sizes differ. Never infer that ABI
+    // from quantization alone, including in the paired-layout proof.
+    const int dense_q4 = kernel.type == GGML_TYPE_Q4_K &&
+        (!strcmp(kernel.shader, "dmmv_q4k") || !strcmp(kernel.shader, "dmmv_q4k_intel_rows"));
+    const int dense = f32 || kernel.type == GGML_TYPE_Q8_0 || dense_q4;
+    if (capture && !dense) fail("row capture requires the dense shader ABI");
     // Q8 reads vec4 inputs, so its nonzero X offset must remain 16-byte aligned.
     const uint32_t M = bench ? ZINC_DMMV_BENCH_ROWS : ZINC_DMMV_TEST_ROWS, slots = dense ? 1 : 2, experts = 3, x_start = dense && !f32 ? 8 : 5, y_start = 7;
     const uint32_t x_stride = separate_inputs ? K + 11 : 0;

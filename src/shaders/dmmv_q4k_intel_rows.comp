@@ -1,0 +1,110 @@
+#version 460
+// Experimental Intel SIMD32 Q4_K row layout. WG64 still emits two rows.
+// Each subgroup carries both legacy stride-4 block streams independently;
+// their final sum retains the original two-subgroup reduction order. GPU
+// fixtures must prove bitwise identity before this can replace the default.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 64) in;
+layout(push_constant) uniform PushConstants {
+    uint M; uint K; uint a_offset; uint x_offset; uint y_offset; uint acc_mode;
+};
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
+const uint Q4K_BLOCK_U32 = 36u;
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
+}
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
+}
+
+float accumulate_block(float sum, uint row_u32, uint i, uint itid) {
+    const uint il = itid / 4u;
+    const uint ir = itid % 4u;
+    const uint v_im = il / 2u;
+    const uint v_in = il % 2u;
+    const uint l0 = 4u * (2u * ir + v_in);
+    const uint q_offset = 32u * v_im + l0;
+    const uint y_offset_local = 64u * v_im + l0;
+    const uint shift = v_im * 16u;
+    const uint x_base = x_offset / 16u;
+    uint b_idx = (i * 256u + y_offset_local) / 4u;
+    vec4 by0 = x_v4[x_base + b_idx];
+    vec4 by1 = x_v4[x_base + b_idx + 8u];
+    uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
+    vec4 by2 = x_v4[x_base + b_idx2];
+    vec4 by3 = x_v4[x_base + b_idx2 + 8u];
+    uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+
+    uint d_dmin = a_u32[blk_u32];
+    float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+    float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+    uint sc0 = a_u32[blk_u32 + 1u];
+    uint sc1 = a_u32[blk_u32 + 2u];
+    uint sc2 = a_u32[blk_u32 + 3u];
+
+    uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
+    uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u];
+
+    vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+    vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+    vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+    vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+    uint sc0_v = sc0 >> shift;
+    uint sc1_v = sc1 >> shift;
+    uint sc2_v = sc2 >> shift;
+
+    float sc_a = float(sc0_v & 0x3Fu);
+    float mn_a = float(sc1_v & 0x3Fu);
+    float sc_b = float((sc0_v >> 8u) & 0x3Fu);
+    float mn_b = float((sc1_v >> 8u) & 0x3Fu);
+    float sc_c = float((sc2_v & 0xFu) | ((sc0_v & 0xC0u) >> 2u));
+    float mn_c = float(((sc2_v & 0xF0u) >> 4u) | ((sc1_v & 0xC0u) >> 2u));
+    float sc_d = float(((sc2_v >> 8u) & 0xFu) | (((sc0_v >> 8u) & 0xC0u) >> 2u));
+    float mn_d = float((((sc2_v >> 8u) & 0xF0u) >> 4u) | (((sc1_v >> 8u) & 0xC0u) >> 2u));
+
+    float factor0 = d_val * sc_a; float bias0 = dmin_val * mn_a;
+    float factor1 = d_val * sc_b; float bias1 = dmin_val * mn_b;
+    float factor2 = d_val * sc_c; float bias2 = dmin_val * mn_c;
+    float factor3 = d_val * sc_d; float bias3 = dmin_val * mn_d;
+
+    sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+    sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+    sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+    sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+    return sum;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid & 31u;
+    const uint row = gl_WorkGroupID.x * 2u + (tid >> 5u);
+    const uint blocks = K / 256u;
+    const uint itid = lane % 16u;
+    const uint ix = lane / 16u;
+    const uint row_u32 = a_offset / 4u + row * blocks * Q4K_BLOCK_U32;
+    float low = 0.0;
+    float high = 0.0;
+    if (row < M) {
+        for (uint i = ix; i < blocks; i += 4u) {
+            low = accumulate_block(low, row_u32, i, itid);
+            if (i + 2u < blocks) high = accumulate_block(high, row_u32, i + 2u, itid);
+        }
+    }
+    low = subgroupAdd(low);
+    high = subgroupAdd(high);
+    if (lane == 0u && row < M) {
+        const uint output_index = y_offset / 4u + row;
+        const float result = low + high;
+        if (acc_mode == 0u) y_data[output_index] = result;
+        else y_data[output_index] += result;
+    }
+}
