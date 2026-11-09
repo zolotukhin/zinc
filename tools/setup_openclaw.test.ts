@@ -795,27 +795,186 @@ await new Promise(r=>setTimeout(r,450));console.log(JSON.stringify({ok:true,stat
     expect(starts).toBe(1);
     expect(await readFile(path.join(f.project, 'effect.txt'), 'utf8')).toBe('one task');
   });
-  test('interruption while preparation state is retiring cannot launch another attempt', async () => {
-    const f = await fakeClient(
-      `import {writeFileSync} from 'node:fs';import path from 'node:path';for(let i=0;i<120;i++)writeFileSync(path.join(process.env.OPENCLAW_STATE_DIR,String(i)),'state');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
-    );
-    let starts = 0;
-    let failure: any;
-    try {
-      await runOpenClaw(f.options, {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    test(`${signal} while preparation state is retiring cannot launch another attempt`, async () => {
+      const f = await fakeClient(
+        `console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
+      );
+      await writeConfig(f.project, config({ model: 'loaded' }));
+      const retiring = Promise.withResolvers<string>();
+      const release = Promise.withResolvers<void>();
+      const initialListeners = process.listenerCount(signal);
+      let starts = 0;
+      const running = runOpenClaw(f.options, {
         ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
         spawnImpl: (binary, args, options) => {
           starts++;
-          const child = f.dependencies.spawnImpl(binary, args, options);
-          child.once('close', () => setImmediate(() => process.emit('SIGINT')));
-          return child;
+          return f.dependencies.spawnImpl(binary, args, options);
         },
+        rmImpl: async (state, options) => {
+          // Hold the actual gap after the child handlers are removed. A large
+          // directory and setImmediate cannot reliably place a signal here.
+          retiring.resolve(state);
+          await release.promise;
+          return rm(state, options);
+        },
+      }).then(
+        () => null,
+        (error) => error,
+      );
+      let state: string | undefined;
+      try {
+        const reached = await Promise.race([retiring.promise, running]);
+        expect(typeof reached).toBe('string');
+        state = reached;
+        expect(process.listenerCount(signal)).toBe(initialListeners + 1);
+        process.emit(signal);
+      } finally {
+        release.resolve();
+      }
+      const failure = await running;
+      expect(starts).toBe(1);
+      expect(failure?.code).toBe('OPENCLAW_INTERRUPTED');
+      expect(failure?.cause?.diagnostics.stdout).toContain('both preparation attempts');
+      expect(process.listenerCount(signal)).toBe(initialListeners);
+      await expect(stat(state!)).rejects.toThrow();
+    });
+
+    test(`${signal} during the retry fingerprint retains cancellation and cannot replay`, async () => {
+      const f = await fakeClient(
+        `console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
+      );
+      await writeConfig(f.project, config({ model: 'loaded' }));
+      const scanning = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const initialListeners = process.listenerCount(signal);
+      let starts = 0,
+        snapshots = 0;
+      const running = runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          return f.dependencies.spawnImpl(binary, args, options);
+        },
+        fingerprintImpl: async (_project, shouldStop) => {
+          if (++snapshots === 1) return 'unchanged-project';
+          scanning.resolve();
+          await release.promise;
+          expect(shouldStop()).toBe(true);
+          return 'unchanged-project';
+        },
+      }).then(
+        () => null,
+        (error) => error,
+      );
+      try {
+        await Promise.race([scanning.promise, running]);
+        expect(snapshots).toBe(2);
+        expect(process.listenerCount(signal)).toBe(initialListeners + 1);
+        process.emit(signal);
+      } finally {
+        release.resolve();
+      }
+      const failure = await running;
+      expect(starts).toBe(1);
+      expect(failure?.code).toBe('OPENCLAW_INTERRUPTED');
+      expect(failure?.cause?.diagnostics.stdout).toContain('both preparation attempts');
+      expect(process.listenerCount(signal)).toBe(initialListeners);
+    });
+  }
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    for (const allocation of [1, 2]) {
+      test(`${signal} during state allocation ${allocation} cannot start a cancelled client`, async () => {
+        const marker = path.join(await temp(), 'attempts');
+        const f = await fakeClient(`import {existsSync,writeFileSync} from 'node:fs';
+if(!existsSync(${JSON.stringify(marker)})){writeFileSync(${JSON.stringify(marker)},'1');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+writeFileSync('effect.txt','must not run after cancellation');console.log(JSON.stringify({ok:true,status:'ok'}));`);
+        await writeConfig(f.project, config({ model: 'loaded' }));
+        const allocated = Promise.withResolvers<string>();
+        const release = Promise.withResolvers<void>();
+        const states: string[] = [];
+        const initialListeners = process.listenerCount(signal);
+        let starts = 0;
+        const running = runOpenClaw(f.options, {
+          ...f.dependencies,
+          fetchImpl: async () => Response.json({ status: 'ok' }),
+          mkdtempImpl: async (prefix) => {
+            const state = await mkdtemp(prefix);
+            states.push(state);
+            if (states.length === allocation) {
+              allocated.resolve(state);
+              await release.promise;
+            }
+            return state;
+          },
+          spawnImpl: (binary, args, options) => {
+            starts++;
+            return f.dependencies.spawnImpl(binary, args, options);
+          },
+        }).then(
+          () => null,
+          (error) => error,
+        );
+        try {
+          const reached = await Promise.race([allocated.promise, running]);
+          expect(typeof reached).toBe('string');
+          expect(states).toHaveLength(allocation);
+          expect(process.listenerCount(signal)).toBe(initialListeners + 1);
+          process.emit(signal);
+        } finally {
+          release.resolve();
+        }
+        const failure = await running;
+        expect(starts).toBe(allocation - 1);
+        expect(failure?.code).toBe('OPENCLAW_INTERRUPTED');
+        expect(process.listenerCount(signal)).toBe(initialListeners);
+        await expect(stat(path.join(f.project, 'effect.txt'))).rejects.toThrow();
+        for (const state of states) await expect(stat(state)).rejects.toThrow();
       });
-    } catch (error) {
-      failure = error;
     }
-    expect(starts).toBe(1);
-    expect(failure?.code).toBe('OPENCLAW_INTERRUPTED');
+  }
+
+  test('unchanged preparation can still retry after controlled state retirement', async () => {
+    const marker = path.join(await temp(), 'attempts');
+    const f = await fakeClient(`import {existsSync,writeFileSync} from 'node:fs';
+if(!existsSync(${JSON.stringify(marker)})){writeFileSync(${JSON.stringify(marker)},'1');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+console.log(JSON.stringify({ok:true,status:'ok'}));`);
+    await writeConfig(f.project, config({ model: 'loaded' }));
+    const retiring = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const states: string[] = [];
+    let starts = 0;
+    const running = runOpenClaw(f.options, {
+      ...f.dependencies,
+      fetchImpl: async () => Response.json({ status: 'ok' }),
+      spawnImpl: (binary, args, options) => {
+        starts++;
+        return f.dependencies.spawnImpl(binary, args, options);
+      },
+      rmImpl: async (state, options) => {
+        states.push(state);
+        if (states.length === 1) {
+          retiring.resolve();
+          await release.promise;
+        }
+        return rm(state, options);
+      },
+    });
+    try {
+      await retiring.promise;
+      expect(starts).toBe(1);
+    } finally {
+      release.resolve();
+    }
+    const result = await running;
+    expect(result.report.ok).toBe(true);
+    expect(result.preparationFailures).toHaveLength(1);
+    expect(starts).toBe(2);
+    expect(states).toHaveLength(2);
+    for (const state of states) await expect(stat(state)).rejects.toThrow();
   });
   test('uses a private temporary sibling config and removes it without changing the saved file', async () => {
     const f = await fakeClient(
