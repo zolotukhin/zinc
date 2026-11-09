@@ -15,6 +15,41 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def test_observations_are_retained_after_rejected_measurements_and_cancellation(self):
+        for failure in (ValueError("complete output changed"), KeyboardInterrupt()):
+            record = {"passed": False}
+            memory, runtime = Mock(return_value={"peak": 123}), Mock(return_value={"runtime": "level_zero"})
+            with self.assertRaises(type(failure)) as caught:
+                with benchmark_intel.process_observations(record, [("memory", memory), ("native_runtime", runtime)]):
+                    memory.assert_not_called(); runtime.assert_not_called()
+                    raise failure
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(record, {"passed": False, "memory": {"peak": 123}, "native_runtime": {"runtime": "level_zero"}})
+            memory.assert_called_once(); runtime.assert_called_once()
+
+    def test_missing_observations_do_not_mask_the_primary_failure_or_skip_other_collectors(self):
+        failure = ValueError("complete output changed")
+        record, runtime = {}, Mock(return_value={"runtime": "level_zero"})
+        with self.assertRaises(ValueError) as caught:
+            with benchmark_intel.process_observations(record, [("memory", Mock(side_effect=OSError("private diagnostic"))), ("native_runtime", runtime)]):
+                raise failure
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(record, {"memory_error": "OSError", "native_runtime": {"runtime": "level_zero"}})
+        runtime.assert_called_once()
+
+    def test_successful_measurements_still_fail_if_required_observation_is_missing(self):
+        record = {}
+        failure = ValueError("native runtime proof unavailable")
+        with self.assertRaises(ValueError) as caught:
+            with benchmark_intel.process_observations(record, [("native_runtime", Mock(side_effect=failure)), ("memory", lambda: {"peak": 123})]):
+                pass
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(record, {"native_runtime_error": "ValueError", "memory": {"peak": 123}})
+        record = {}
+        with benchmark_intel.process_observations(record, [("memory", lambda: {"peak": 123})]):
+            self.assertEqual(record, {})
+        self.assertEqual(record, {"memory": {"peak": 123}})
+
     def test_reference_is_frozen_at_observed_selection_before_building(self):
         current = datetime.datetime(2026, 11, 9, 20, tzinfo=datetime.timezone.utc)
         timestamp = "2026-11-09T19:00:00Z"

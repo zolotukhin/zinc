@@ -2,6 +2,7 @@
 """Validate Intel Vulkan inference, then compare matched Vulkan or SYCL servers."""
 
 import argparse
+from contextlib import contextmanager
 import datetime
 import json
 import math
@@ -28,6 +29,30 @@ HARNESS = ("tools/benchmark_intel.py", "tools/benchmark_metrics.py", "tools/inte
            "tools/release_gpu.py", "tools/release_lib.py", "config/benchmark-reference.json", "config/release/targets.json")
 HARNESS += ("tools/validate_dmmv_shared_cache.c", "tools/validate_q8_decode.c", "tools/validate_gemma_router.c", "tools/validate_attention_window.c")
 HARNESS += ("tools/intel_sycl_environment.py", "tools/intel_native_probe.py", "tools/intel_sycl_probe.cpp", "tools/intel_probe_json.h")
+
+
+@contextmanager
+def process_observations(record, collectors):
+    """Save diagnostics while the process is alive, including rejected requests."""
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        observation_error = None
+        for key, collect in collectors:
+            try:
+                record[key] = collect()
+            except (ValueError, AssertionError, OSError) as error:
+                # A dying process can lose /proc entries. Retain that fact
+                # without replacing the measurement/cancellation that failed.
+                record[key + "_error"] = type(error).__name__
+                if not failed and observation_error is None:
+                    observation_error = error
+        if observation_error is not None:
+            raise observation_error
 
 
 def reference_selection(selected, head, selected_at=None, current=None):
@@ -578,20 +603,21 @@ def main():
                                 else:
                                     process["kv_cache"] = zinc_kv_storage(log.read_text(errors="replace"))
                                 current["processes"].append(process)
-                                for scenario in scenarios:
-                                    for iteration in range(args.warmup + args.runs):
-                                        number += 1
-                                        # Natural EOS is retained as evidence, never a full-budget win.
-                                        sample = measure(engine, "off", child, port, log, scenario, model_work, number, require_full_budget=False, completion_mode="raw")
-                                        retain_measurement(current, "samples", {"engine": engine, "round": round_index + 1,
-                                                           "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample}, identities, counts)
-                                        save()
-                                    probe = stream_probe(port, scenario["body"], completion_mode="raw")
-                                    retain_measurement(current, "stream_samples", {"engine": engine, "round": round_index + 1,
-                                                       "scenario": scenario["id"], **probe}, identities)
+                                collectors = [("memory", memory.snapshot)]
                                 if engine == "llama" and args.reference_backend == "sycl":
-                                    process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
-                                process["memory"] = memory.snapshot()
+                                    collectors.append(("native_runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix)))
+                                with process_observations(process, collectors):
+                                    for scenario in scenarios:
+                                        for iteration in range(args.warmup + args.runs):
+                                            number += 1
+                                            # Natural EOS is retained as evidence, never a full-budget win.
+                                            sample = measure(engine, "off", child, port, log, scenario, model_work, number, require_full_budget=False, completion_mode="raw")
+                                            retain_measurement(current, "samples", {"engine": engine, "round": round_index + 1,
+                                                               "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample}, identities, counts)
+                                            save()
+                                        probe = stream_probe(port, scenario["body"], completion_mode="raw")
+                                        retain_measurement(current, "stream_samples", {"engine": engine, "round": round_index + 1,
+                                                           "scenario": scenario["id"], **probe}, identities)
                             idle()
                             save()
                     current["comparison_eligible"] = comparison_eligibility(current["samples"], scenarios)
