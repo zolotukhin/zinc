@@ -6,6 +6,12 @@ on:
   # CPU-only checks cover stacked PRs targeting feature branches too.
   pull_request:
 
+# Keep the newest revision's checks; an old Mac build can otherwise occupy a
+# runner long after a follow-up commit has replaced it.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   openclaw-harness:
     name: OpenClaw protocol (2026.11.1)
