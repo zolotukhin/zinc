@@ -352,8 +352,9 @@ and total token usage. The stream ends with `data: [DONE]`.
 Vulkan/Metal stream the same greedy continuation as their JSON route, including
 safe handling of Unicode characters split across tokens. EOG tokens count toward
 usage but are omitted from text. An unfinished Unicode character at the output
-budget is omitted in both formats. A disconnected streaming client cancels
-prefill/decode and releases the generation slot for the next request.
+budget is omitted in both formats. Vulkan checks for a disconnected reader
+during prefill and between decode tokens, then releases the generation slot.
+The Metal preview checks during decode; it does not interrupt active prefill.
 
 ---
 
