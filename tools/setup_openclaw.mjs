@@ -651,14 +651,26 @@ export function runArguments(filename, model, project, timeout) {
 
 async function clientCommand(
   { binary, args, project, input = '', timeout },
-  { env = process.env, spawnImpl = spawn, deadlineMs = (timeout + 30) * 1000, graceMs = 2000 } = {},
+  {
+    env = process.env,
+    spawnImpl = spawn,
+    deadlineMs = (timeout + 30) * 1000,
+    graceMs = 2000,
+    rmImpl = rm,
+    mkdtempImpl = mkdtemp,
+    isInterrupted = () => false,
+  } = {},
 ) {
   // One-shot OpenClaw owns its temporary state and retires its resources. Own
   // the process group too, so timeout or Ctrl-C cannot orphan tool processes.
-  const state = await mkdtemp(path.join(tmpdir(), 'zinc-openclaw-'));
+  const state = await mkdtempImpl(path.join(tmpdir(), 'zinc-openclaw-'));
   const childEnv = { ...env, OPENCLAW_STATE_DIR: state };
   let child;
   try {
+    // State allocation awaits I/O before the child signal handlers exist.
+    // The outer task still owns cancellation during that gap.
+    if (isInterrupted())
+      throw Object.assign(new Error('OpenClaw was interrupted'), { code: INTERRUPTED_CODE });
     const executable =
       binary.includes('/') || binary.includes('\\') ? path.resolve(binary) : binary;
     child = spawnImpl(executable, args, {
@@ -667,8 +679,9 @@ async function clientCommand(
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-  } catch {
-    await rm(state, { recursive: true, force: true });
+  } catch (error) {
+    await rmImpl(state, { recursive: true, force: true });
+    if (error.code === INTERRUPTED_CODE) throw error;
     throw new Error('OpenClaw could not start; check --openclaw-bin and its Node.js requirement');
   }
   const stop = (signal) => {
@@ -742,7 +755,7 @@ async function clientCommand(
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', interrupt);
     stop('SIGKILL');
-    await rm(state, { recursive: true, force: true });
+    await rmImpl(state, { recursive: true, force: true });
   }
 }
 
@@ -861,8 +874,9 @@ export async function runOpenClaw(
     process.on('SIGINT', interrupt);
     process.on('SIGTERM', interrupt);
     try {
+      const fingerprint = dependencies?.fingerprintImpl ?? preparationProjectFingerprint;
       const snapshot = () =>
-        preparationProjectFingerprint(project, () => interrupted || performance.now() >= expires);
+        fingerprint(project, () => interrupted || performance.now() >= expires);
       const before = guard ? await snapshot() : null;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
@@ -884,7 +898,7 @@ export async function runOpenClaw(
                 input: prompt,
                 timeout,
               },
-              { ...dependencies, deadlineMs: remaining },
+              { ...dependencies, deadlineMs: remaining, isInterrupted: () => interrupted },
             );
           } finally {
             guard?.end();
@@ -895,15 +909,6 @@ export async function runOpenClaw(
             throw new Error('OpenClaw did not report a successful completed task');
           return failures.length ? { ...result, preparationFailures: failures } : result;
         } catch (error) {
-          // A signal can arrive while clientCommand retires its state after
-          // removing the child's signal handlers. Preserve cancellation even
-          // when the process itself had already returned a preparation error.
-          if (interrupted && error.code !== INTERRUPTED_CODE) {
-            const stopped = new Error('OpenClaw was interrupted', { cause: error });
-            stopped.code = INTERRUPTED_CODE;
-            if (error.diagnostics) stopped.diagnostics = error.diagnostics;
-            error = stopped;
-          }
           if (
             attempt === 0 &&
             !interrupted &&
@@ -916,6 +921,15 @@ export async function runOpenClaw(
           ) {
             failures.push(error.diagnostics);
             continue;
+          }
+          // State retirement and the retry fingerprint both await I/O after
+          // the child handlers retire. Check cancellation after those awaits
+          // so its result wins over the earlier preparation error.
+          if (interrupted && error.code !== INTERRUPTED_CODE) {
+            const stopped = new Error('OpenClaw was interrupted', { cause: error });
+            stopped.code = INTERRUPTED_CODE;
+            if (error.diagnostics) stopped.diagnostics = error.diagnostics;
+            error = stopped;
           }
           if (failures.length) error.preparationFailures = failures;
           throw error;
