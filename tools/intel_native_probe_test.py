@@ -1,4 +1,4 @@
-"""CPU acceptance guards: no compiler, model, runtime, or GPU is opened."""
+"""CPU fixtures: no model, Intel runtime, or GPU is opened."""
 import copy
 import json
 from pathlib import Path
@@ -40,8 +40,28 @@ class NativeProbeTest(unittest.TestCase):
 
     def test_busy_and_failed_process_inspection_stop_the_run(self):
         for code in (0, 2):
-            with self.subTest(code=code), patch.object(native.subprocess, "run", return_value=Mock(returncode=code)):
+            with self.subTest(code=code), patch.object(native.subprocess, "run", return_value=Mock(returncode=code)), \
+                    patch.object(native.Path, "glob", side_effect=AssertionError("must stop before DRI inspection")) as nodes, \
+                    patch.object(native.shutil, "which", side_effect=AssertionError("must stop before fuser discovery")) as fuser:
                 with self.assertRaisesRegex(ValueError, "worker is busy"):
+                    native.idle()
+                nodes.assert_not_called(); fuser.assert_not_called()
+
+    def test_idle_worker_allows_the_probe(self):
+        with patch.object(native.subprocess, "run", return_value=Mock(returncode=1, stderr="")) as run, \
+                patch.object(native.Path, "glob", return_value=[native.Path("/dev/dri/renderD128")]), \
+                patch.object(native.shutil, "which", return_value="/usr/bin/fuser"):
+            native.idle()
+            self.assertEqual(run.call_count, len(native.BUSY_PROCESSES) + 1)
+            self.assertEqual(run.call_args.args[0][0], "fuser")
+
+    def test_render_node_clients_and_incomplete_inspection_stop_the_probe(self):
+        for code, stderr in ((0, ""), (2, ""), (1, "Cannot inspect process")):
+            responses = [Mock(returncode=1)] * len(native.BUSY_PROCESSES) + [Mock(returncode=code, stderr=stderr)]
+            with self.subTest(code=code, stderr=stderr), patch.object(native.subprocess, "run", side_effect=responses), \
+                    patch.object(native.Path, "glob", return_value=[native.Path("/dev/dri/renderD128")]), \
+                    patch.object(native.shutil, "which", return_value="/usr/bin/fuser"):
+                with self.assertRaisesRegex(ValueError, "busy or render-node"):
                     native.idle()
 
 
@@ -81,22 +101,6 @@ class NativeProbeJsonTest(unittest.TestCase):
                 result = self.decode(b"before" + value + b"after")
                 self.assertTrue(result.startswith("before") and result.endswith("after"))
                 self.assertIn("\ufffd", result)
-        with patch.object(native.subprocess, "run", return_value=Mock(returncode=1, stderr="")) as run, \
-                patch.object(native.Path, "glob", return_value=[native.Path("/dev/dri/renderD128")]), \
-                patch.object(native.shutil, "which", return_value="/usr/bin/fuser"):
-            native.idle()
-            self.assertEqual(run.call_count, len(native.BUSY_PROCESSES) + 1)
-            self.assertEqual(run.call_args.args[0][0], "fuser")
-
-    def test_render_node_clients_and_incomplete_inspection_stop_the_probe(self):
-        for code, stderr in ((0, ""), (2, ""), (1, "Cannot inspect process")):
-            responses = [Mock(returncode=1)] * len(native.BUSY_PROCESSES) + [Mock(returncode=code, stderr=stderr)]
-            with self.subTest(code=code, stderr=stderr), patch.object(native.subprocess, "run", side_effect=responses), \
-                    patch.object(native.Path, "glob", return_value=[native.Path("/dev/dri/renderD128")]), \
-                    patch.object(native.shutil, "which", return_value="/usr/bin/fuser"):
-                with self.assertRaisesRegex(ValueError, "busy or render-node"):
-                    native.idle()
-
 
 if __name__ == "__main__":
     unittest.main()
