@@ -28,6 +28,34 @@ class NativeReferenceTest(unittest.TestCase):
                              "temperature": 0, "top_p": 1, "seed": 0, "cache_prompt": False})
             self.assertEqual(result[0]["prompt_mode"], "raw")
 
+    def test_raw_stream_requires_complete_text_identity_usage_and_terminator(self):
+        baseline = {"model": "fixture", "choices": [{"text": "café 東京", "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 42, "completion_tokens": 16, "total_tokens": 58}}
+        common = {"id": "cmpl-test", "created": 123, "model": "fixture", "object": "text_completion"}
+        events = [{**common, "choices": [{"index": 0, "text": "café ", "finish_reason": None}]},
+                  {**common, "choices": [{"index": 0, "text": "東京", "finish_reason": None}]},
+                  {**common, "choices": [{"index": 0, "text": "", "finish_reason": "length"}]},
+                  {**common, "choices": [], "usage": baseline["usage"]}]
+        def transcript(rows, done=True):
+            return ("".join("data: " + json.dumps(x, ensure_ascii=False) + "\n\n" for x in rows)
+                    + ("data: [DONE]\n\n" if done else "")).encode()
+        self.assertEqual(benchmark.raw_stream_parity(transcript(events), baseline)["usage"], baseline["usage"])
+        for mutation in ("text", "identity", "usage", "finish", "chat", "late-content", "missing-usage"):
+            with self.subTest(mutation=mutation):
+                rows = copy.deepcopy(events)
+                if mutation == "text": rows[1]["choices"][0]["text"] = "wrong"
+                if mutation == "identity": rows[1]["id"] = "other"
+                if mutation == "usage": rows[3]["usage"]["completion_tokens"] = 15
+                if mutation == "finish": rows[2]["choices"][0]["finish_reason"] = "stop"
+                if mutation == "chat": rows[0]["object"] = "chat.completion.chunk"
+                if mutation == "late-content": rows.append(rows[0])
+                if mutation == "missing-usage": rows.pop()
+                with self.assertRaises(ValueError): benchmark.raw_stream_parity(transcript(rows), baseline)
+        with self.assertRaisesRegex(ValueError, "terminate"):
+            benchmark.raw_stream_parity(transcript(events, done=False), baseline)
+        with self.assertRaisesRegex(ValueError, "terminate"):
+            benchmark.raw_stream_parity(json.dumps(baseline).encode(), baseline)
+
     def expected(self, ids=None, content="primary"):
         ids = [1] * 16 if ids is None else ids
         return {"content": content, "completion_probabilities": [

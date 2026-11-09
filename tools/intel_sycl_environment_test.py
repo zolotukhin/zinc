@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.parse import urlsplit
 
 import intel_sycl_environment as sycl
 
@@ -23,6 +24,46 @@ class SyclEnvironmentTest(unittest.TestCase):
             for key in ("GGML_SYCL_ENABLE_XMX", "SYCL_DEVICE_FILTER", "ZE_AFFINITY_MASK"):
                 self.assertNotIn(key, result)
             self.assertEqual(result["ZINC_MTP"], "0")
+            self.assertEqual(result["GGML_SYCL_ENABLE_GRAPH"], "0")
+            self.assertEqual(sycl.environment(prefix, base, graphs=True)["GGML_SYCL_ENABLE_GRAPH"], "1")
+            with self.assertRaisesRegex(ValueError, "graph selection"):
+                sycl.environment(prefix, base, graphs="0")
+
+    def test_build_identity_distinguishes_fp16_and_rejects_fallback_or_other_sources(self):
+        with tempfile.TemporaryDirectory(prefix="native build ") as directory:
+            root = Path(directory); binary = root / "bin"; binary.mkdir(); source = root / "source"; source.mkdir()
+            values = {"CMAKE_HOME_DIRECTORY": str(source), "CMAKE_BUILD_TYPE": "Release", "GGML_SYCL": "ON",
+                      "GGML_VULKAN": "OFF", "GGML_CUDA": "OFF", "GGML_METAL": "OFF", "GGML_NATIVE": "OFF",
+                      "GGML_SYCL_HOST_MEM_FALLBACK": "OFF", "GGML_SYCL_SUPPORT_XMX": "ON",
+                      "GGML_SYCL_GRAPH": "ON", "GGML_SYCL_DNN": "ON", "GGML_SYCL_F16": "OFF"}
+            def write():
+                (root / "CMakeCache.txt").write_text("\n".join(key + ":STRING=" + value for key, value in values.items()))
+            write(); before = sycl.build_manifest(binary, source)
+            self.assertNotIn(directory, json.dumps(before))
+            values["GGML_SYCL_F16"] = "ON"; write(); after = sycl.build_manifest(binary, source)
+            self.assertNotEqual(before, after)
+            self.assertEqual(after["settings"]["GGML_SYCL_F16"], "ON")
+            values["GGML_SYCL_HOST_MEM_FALLBACK"] = "ON"; write()
+            with self.assertRaisesRegex(ValueError, "build settings differ"):
+                sycl.build_manifest(binary, source)
+            values["GGML_SYCL_HOST_MEM_FALLBACK"] = "OFF"; values["CMAKE_HOME_DIRECTORY"] = str(root / "other"); write()
+            with self.assertRaisesRegex(ValueError, "recorded source"):
+                sycl.build_manifest(binary, source)
+
+    def test_explicit_stack_lock_contains_only_public_archive_urls_with_sha256(self):
+        lock = Path(__file__).resolve().parent.parent / "config/intel/oneapi-2026.2-linux-64.explicit.txt"
+        lines = [line for line in lock.read_text().splitlines() if line and not line.startswith("#")]
+        self.assertEqual(lines.pop(0), "@EXPLICIT")
+        self.assertEqual(len(lines), 41)
+        self.assertEqual(len(lines), len(set(lines)))
+        for line in lines:
+            url = urlsplit(line)
+            self.assertEqual(url.scheme, "https")
+            self.assertIn(url.netloc, ("software.repos.intel.com", "conda.anaconda.org"))
+            self.assertEqual(url.query, "")
+            self.assertRegex(url.fragment, r"^[a-f0-9]{64}$")
+            self.assertNotIn("/home/", url.path)
+            self.assertNotIn("/Users/", url.path)
 
     def test_package_manifest_is_complete_order_independent_and_detects_changes(self):
         with tempfile.TemporaryDirectory() as directory:

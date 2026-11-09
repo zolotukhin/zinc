@@ -28,7 +28,26 @@ def stack_manifest(prefix):
     return {"packages": rows, "sha256": hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()}
 
 
-def environment(prefix, base):
+def build_manifest(directory, source):
+    """Retain compile-time precision without publishing CMake's private paths."""
+    cache = Path(directory).resolve().parent / "CMakeCache.txt"
+    require(cache.is_file(), "SYCL reference needs its original CMake build cache")
+    values = {}
+    for line in cache.read_text().splitlines():
+        if line and not line.startswith(("//", "#")) and "=" in line and ":" in line.split("=", 1)[0]:
+            key, value = line.split("=", 1)
+            values[key.split(":", 1)[0]] = value
+    require(Path(values.get("CMAKE_HOME_DIRECTORY", "")).resolve() == Path(source).resolve(),
+            "SYCL build cache differs from its recorded source")
+    expected = {"CMAKE_BUILD_TYPE": "Release", "GGML_SYCL": "ON", "GGML_VULKAN": "OFF", "GGML_CUDA": "OFF",
+                "GGML_METAL": "OFF", "GGML_NATIVE": "OFF", "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+                "GGML_SYCL_SUPPORT_XMX": "ON", "GGML_SYCL_GRAPH": "ON", "GGML_SYCL_DNN": "ON"}
+    require(all(values.get(key) == value for key, value in expected.items()), "SYCL reference build settings differ")
+    require(values.get("GGML_SYCL_F16") in ("ON", "OFF"), "SYCL reference precision is missing")
+    return {"cache_sha256": sha256(cache), "settings": {**expected, "GGML_SYCL_F16": values["GGML_SYCL_F16"]}}
+
+
+def environment(prefix, base, graphs=False):
     prefix = Path(prefix).resolve()
     require((prefix / "bin/icpx").is_file() and (prefix / "lib").is_dir(), "native compiler/runtime prefix is incomplete")
     # Inherited tuning can silently disable graphs/XMX or choose another device.
@@ -37,6 +56,8 @@ def environment(prefix, base):
     result["PATH"] = str(prefix / "bin") + os.pathsep + result.get("PATH", os.defpath)
     result["LD_LIBRARY_PATH"] = str(prefix / "lib")
     result["ONEAPI_DEVICE_SELECTOR"] = "level_zero:gpu"
+    require(type(graphs) is bool, "SYCL graph selection must be explicit")
+    result["GGML_SYCL_ENABLE_GRAPH"] = "1" if graphs else "0"
     result["MKLROOT"] = str(prefix)
     return result
 

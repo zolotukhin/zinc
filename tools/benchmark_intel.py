@@ -135,6 +135,75 @@ def native_reference_validation(args, work, env, reference_env):
             "performance_configuration_checked": True, "agreement": agreement, "cases": cases, "gpu_offload": offload, "runtime": runtime}
 
 
+def raw_stream_parity(transcript, baseline):
+    """Require complete text and usage, not merely a nonempty first chunk."""
+    require(len(transcript) <= 1024 * 1024, "raw stream exceeded its transcript limit")
+    frames = [line[5:].lstrip(" ") for line in transcript.decode("utf-8", errors="strict").splitlines() if line.startswith("data:")]
+    require(frames and frames[-1] == "[DONE]" and frames.count("[DONE]") == 1, "raw stream did not terminate")
+    text, finish, usage, identity = [], None, None, None
+    for frame in frames[:-1]:
+        event = json.loads(frame)
+        require(not event.get("error") and event.get("object") == "text_completion", "raw stream returned an error or a chat event")
+        require(event.get("model") == baseline.get("model"), "raw stream changed its model")
+        current = (event.get("id"), event.get("created"))
+        require(isinstance(current[0], str) and current[0] and type(current[1]) is int, "raw stream identity is missing")
+        identity = current if identity is None else identity
+        require(current == identity, "raw stream identity changed")
+        choices = event.get("choices")
+        require(isinstance(choices, list) and len(choices) <= 1, "raw stream choices are invalid")
+        if not choices:
+            require(finish is not None and usage is None and event.get("usage") == baseline.get("usage"), "raw stream usage differs")
+            usage = event["usage"]
+            continue
+        require(finish is None and usage is None, "raw stream continued after its finish")
+        choice = choices[0]
+        require(choice.get("index") == 0 and isinstance(choice.get("text"), str) and "delta" not in choice, "raw stream text is missing")
+        text.append(choice["text"])
+        finish = choice.get("finish_reason")
+        require(finish in (None, "length", "stop") and (finish is None or choice["text"] == ""), "raw stream finish is invalid")
+    require(finish == baseline["choices"][0]["finish_reason"] and usage == baseline.get("usage") and usage is not None,
+            "raw stream finish or usage differs")
+    content = "".join(text)
+    require(content == baseline["choices"][0]["text"] and "\ufffd" not in content, "complete raw JSON/SSE text differs")
+    return {"content_sha256": text_hash(content), "usage": usage, "finish_reason": finish}
+
+
+def raw_stream_validation(args, work, env):
+    samples = json.loads((work / "reference-samples.json").read_text())
+    port, cases = gpu.free_port(), []
+    command = [str(args.zinc_tree / "bin/zinc"), "-m", str(args.model), "-d", str(args.device),
+               "--context", str(args.context), "--parallel", "1", "--port", str(port)]
+    with gpu.process(command, work / "raw-stream-validation.log", work, env) as child:
+        gpu.ready(child, port, require_ok=True)
+        for sample in samples:
+            body = {"prompt": sample["prompt"], "max_tokens": policy()["reference"]["agreement"]["tokens_per_case"],
+                    "temperature": 0, "cache_prompt": False}
+            baseline = gpu.json_request(port, "/v1/completions", {**body, "stream": False})
+            expected = sample["expected"]
+            accepted = [expected["content"], expected.get("validated_content")]
+            require(baseline["choices"][0]["text"] in accepted, "raw stream JSON control differs from frozen oracle")
+            with gpu.request(port, "/v1/completions", {**body, "stream": True, "stream_options": {"include_usage": True}}) as response:
+                require("text/event-stream" in response.headers.get("Content-Type", ""), "raw streaming returned JSON")
+                cases.append(raw_stream_parity(response.read(1024 * 1024 + 1), baseline))
+        # Close only after real generated text, then check full native answers on
+        # the same server; a healthy HTTP response cannot prove state recovery.
+        with gpu.request(port, "/v1/completions", {"prompt": samples[0]["prompt"], "max_tokens": 256,
+                         "temperature": 0, "stream": True}) as response:
+            cancelled = False
+            for _ in range(1024):
+                line = response.readline(1024 * 1024 + 1).decode("utf-8", errors="strict").strip()
+                require(line != "data: [DONE]", "raw generation completed before cancellation")
+                if line.startswith("data:"):
+                    event = json.loads(line[5:].lstrip(" "))
+                    require(not event.get("error"), "raw stream failed before cancellation")
+                    if any(choice.get("text") and not choice.get("finish_reason") for choice in event.get("choices", [])):
+                        cancelled = True
+                        break
+            require(cancelled, "raw cancellation did not observe generated text")
+        gpu.reference_http_parity(port, {"temperature": 0, "stream": False}, [(s["prompt"], s["expected"]) for s in samples])
+    return {"passed": True, "cases": cases, "complete_native_replay_after_cancellation": True}
+
+
 def comparison_eligibility(samples, scenarios):
     eligible = {}
     for scenario in scenarios:
@@ -343,6 +412,8 @@ def main():
     parser.add_argument("--reference-device", help="explicit llama.cpp device for the performance reference")
     parser.add_argument("--sycl-prefix", type=Path, help="isolated official Intel package environment")
     parser.add_argument("--sycl-probe", type=Path, help="native readiness probe compiled in the selected environment")
+    parser.add_argument("--sycl-graphs", action="store_true", help="measure the opt-in native SYCL graph configuration separately")
+    parser.add_argument("--keep-going", action="store_true", help="retain a failed model and attempt the remaining matrix; the campaign still fails")
     args = parser.parse_args()
     if sys.platform != "linux" or min(args.rounds, args.runs, args.warmup) < 1 or len(args.models) != len(set(args.models)):
         parser.error("run on the remote Linux GPU worker with positive counts and unique models")
@@ -387,7 +458,7 @@ def main():
         report["latest_reference_check"] = {"commit": pin, "observed_head": head, "checked_at": now(), "scope": "frozen for this campaign"}
         env = gpu.packaged_environment()
         env.update(OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="4", ZINC_MTP="0", ZINC_KV_CACHE="f16", ZINC_KV_F16="1", ZINC_KV_Q8="0", ZINC_PROMPT_CACHE="0")
-        reference_env = sycl.environment(args.sycl_prefix, env) if args.reference_backend == "sycl" else env
+        reference_env = sycl.environment(args.sycl_prefix, env, graphs=args.sycl_graphs) if args.reference_backend == "sycl" else env
         zinc = args.zinc_tree / "bin/zinc"
         source = gpu.output(["git", "-C", str(args.zinc_source), "rev-parse", "HEAD"]).strip()
         require(not gpu.output(["git", "-C", str(args.zinc_source), "status", "--porcelain", "--untracked-files=no"]).strip(), "ZINC source is modified")
@@ -409,6 +480,8 @@ def main():
                 devices = [p for p in Path("/sys/class/drm").glob("renderD*/device/vendor") if p.read_text().strip() == "0x8086"]
                 require(len(devices) == 1, "cross-backend comparison requires exactly one physical Intel render device")
                 report["native_stack"] = sycl.stack_manifest(args.sycl_prefix)
+                report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source)
+                report["settings"]["native_runtime"] = {"GGML_SYCL_ENABLE_GRAPH": "1" if args.sycl_graphs else "0"}
                 report["native_probe"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
                 report["settings"]["native_stack_verified"] = True
             print("Correctness: 376 numerical shader cases", flush=True)
@@ -425,65 +498,75 @@ def main():
                 report["models"].append(current)
                 model_work = work / identifier
                 model_work.mkdir()
-                print("Correctness: " + identifier, flush=True)
-                gpu.tokenizer_parity(args.zinc_tree, args.oracle, args.model, model_work, env)
-                current["correctness"] = correctness(args, model_work, env, model_pin)
-                if args.reference_backend == "sycl":
-                    print("Correctness: timed SYCL configuration versus frozen Vulkan oracle", flush=True)
-                    current["native_reference_validation"] = native_reference_validation(args, model_work, env, reference_env)
-                scenarios = run_json(["bun", str(ROOT / "tools/intel_workloads.mjs"), identifier])
-                scenarios = raw_scenarios(args, scenarios, model_work, env)
-                current["scenarios"] = [{k: v for k, v in row.items() if k != "body"} | {"request_sha256": text_hash(json.dumps(row["body"], sort_keys=True))} for row in scenarios]
-                identities, counts, number = {}, {}, 0
-                for round_index in range(args.rounds):
-                    for engine in (["zinc", "llama"] if round_index % 2 == 0 else ["llama", "zinc"]):
-                        idle()
-                        port = gpu.free_port()
-                        if engine == "zinc":
-                            command = [str(zinc), "-m", str(args.model), "-d", str(args.device), "--context", str(args.context), "--parallel", "1", "--port", str(port)]
-                            active_env = env
-                        else:
-                            command = performance_reference_command(args, port)
-                            active_env = gpu.reference_environment(args.llama_bin, reference_env)
-                        log = model_work / f"{round_index}-{engine}.log"
-                        print(f"Benchmark {identifier}, round {round_index + 1}/{args.rounds}: {engine}", flush=True)
-                        started = time.monotonic()
-                        with gpu.process(command, log, args.zinc_source, active_env) as child, MemoryTracker(child.pid) as memory:
-                            gpu.ready(child, port, poll_interval=report["settings"]["startup_poll_interval_ms"] / 1000, require_ok=True)
-                            process = {"engine": engine, "round": round_index + 1, "startup_ms": (time.monotonic() - started) * 1000,
-                                       "startup_poll_interval_ms": report["settings"]["startup_poll_interval_ms"]}
-                            if engine == "llama":
-                                process["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"), args.reference_backend)
-                                if args.reference_backend == "sycl":
-                                    process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
+                try:
+                    print("Correctness: " + identifier, flush=True)
+                    gpu.tokenizer_parity(args.zinc_tree, args.oracle, args.model, model_work, env)
+                    current["correctness"] = correctness(args, model_work, env, model_pin)
+                    current["raw_streaming"] = raw_stream_validation(args, model_work, env)
+                    if args.reference_backend == "sycl":
+                        print("Correctness: timed SYCL configuration versus frozen Vulkan oracle", flush=True)
+                        current["native_reference_validation"] = native_reference_validation(args, model_work, env, reference_env)
+                    scenarios = run_json(["bun", str(ROOT / "tools/intel_workloads.mjs"), identifier])
+                    scenarios = raw_scenarios(args, scenarios, model_work, env)
+                    current["scenarios"] = [{k: v for k, v in row.items() if k != "body"} | {"request_sha256": text_hash(json.dumps(row["body"], sort_keys=True))} for row in scenarios]
+                    identities, counts, number = {}, {}, 0
+                    for round_index in range(args.rounds):
+                        for engine in (["zinc", "llama"] if round_index % 2 == 0 else ["llama", "zinc"]):
+                            idle()
+                            port = gpu.free_port()
+                            if engine == "zinc":
+                                command = [str(zinc), "-m", str(args.model), "-d", str(args.device), "--context", str(args.context), "--parallel", "1", "--port", str(port)]
+                                active_env = env
                             else:
-                                process["kv_cache"] = zinc_kv_storage(log.read_text(errors="replace"))
-                            current["processes"].append(process)
-                            for scenario in scenarios:
-                                for iteration in range(args.warmup + args.runs):
-                                    number += 1
-                                    # Natural EOS is retained as evidence, never a full-budget win.
-                                    sample = measure(engine, "off", child, port, log, scenario, model_work, number, require_full_budget=False, completion_mode="raw")
-                                    key = (engine, scenario["id"])
-                                    require(identities.setdefault(key, sample["content_sha256"]) == sample["content_sha256"], "repeated complete outputs differ")
-                                    observed = counts.setdefault(scenario["id"], [])
-                                    observed.append(sample["promptTokens"])
-                                    require(max(observed) - min(observed) <= 1, "engines processed different prompt counts")
-                                    current["samples"].append({"engine": engine, "round": round_index + 1, "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample})
-                                    save()
-                                probe = stream_probe(port, scenario["body"], completion_mode="raw")
-                                key = (engine, scenario["id"], "stream")
-                                require(identities.setdefault(key, probe["content_sha256"]) == probe["content_sha256"], "repeated streaming outputs differ")
-                                current["stream_samples"].append({"engine": engine, "round": round_index + 1, "scenario": scenario["id"], **probe})
-                            if engine == "llama" and args.reference_backend == "sycl":
-                                process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
-                            process["memory"] = memory.snapshot()
-                        idle()
-                        save()
-                current["comparison_eligible"] = comparison_eligibility(current["samples"], scenarios)
-                current["passed"] = True
-                current["performance_comparison"] = performance_comparison(current, report["settings"])
-                save()
+                                command = performance_reference_command(args, port)
+                                active_env = gpu.reference_environment(args.llama_bin, reference_env)
+                            log = model_work / f"{round_index}-{engine}.log"
+                            print(f"Benchmark {identifier}, round {round_index + 1}/{args.rounds}: {engine}", flush=True)
+                            started = time.monotonic()
+                            with gpu.process(command, log, args.zinc_source, active_env) as child, MemoryTracker(child.pid) as memory:
+                                gpu.ready(child, port, poll_interval=report["settings"]["startup_poll_interval_ms"] / 1000, require_ok=True)
+                                process = {"engine": engine, "round": round_index + 1, "startup_ms": (time.monotonic() - started) * 1000,
+                                           "startup_poll_interval_ms": report["settings"]["startup_poll_interval_ms"]}
+                                if engine == "llama":
+                                    process["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"), args.reference_backend)
+                                    if args.reference_backend == "sycl":
+                                        process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
+                                else:
+                                    process["kv_cache"] = zinc_kv_storage(log.read_text(errors="replace"))
+                                current["processes"].append(process)
+                                for scenario in scenarios:
+                                    for iteration in range(args.warmup + args.runs):
+                                        number += 1
+                                        # Natural EOS is retained as evidence, never a full-budget win.
+                                        sample = measure(engine, "off", child, port, log, scenario, model_work, number, require_full_budget=False, completion_mode="raw")
+                                        key = (engine, scenario["id"])
+                                        require(identities.setdefault(key, sample["content_sha256"]) == sample["content_sha256"], "repeated complete outputs differ")
+                                        observed = counts.setdefault(scenario["id"], [])
+                                        observed.append(sample["promptTokens"])
+                                        require(max(observed) - min(observed) <= 1, "engines processed different prompt counts")
+                                        current["samples"].append({"engine": engine, "round": round_index + 1, "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample})
+                                        save()
+                                    probe = stream_probe(port, scenario["body"], completion_mode="raw")
+                                    key = (engine, scenario["id"], "stream")
+                                    require(identities.setdefault(key, probe["content_sha256"]) == probe["content_sha256"], "repeated streaming outputs differ")
+                                    current["stream_samples"].append({"engine": engine, "round": round_index + 1, "scenario": scenario["id"], **probe})
+                                if engine == "llama" and args.reference_backend == "sycl":
+                                    process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
+                                process["memory"] = memory.snapshot()
+                            idle()
+                            save()
+                    current["comparison_eligible"] = comparison_eligibility(current["samples"], scenarios)
+                    current["passed"] = True
+                    current["performance_comparison"] = performance_comparison(current, report["settings"])
+                    save()
+                except (ValueError, AssertionError) as error:
+                    current["passed"] = False
+                    current["error"] = str(error)
+                    save()
+                    if not args.keep_going:
+                        raise
+                    print("Model failed: " + identifier + "; retained attempt and continuing", flush=True)
+                    idle()
             require(reference_identity(args.llama_bin, args.llama_source, reference_env, pin) == report["reference"], "performance reference changed")
             require(reference_identity(args.oracle, args.oracle_source, env, policy()["reference"]["commit"]) == report["oracle"], "correctness oracle changed")
             require(sha256(zinc) == report["zinc"]["sha256"], "ZINC binary changed")
@@ -498,11 +581,14 @@ def main():
             report["hardware_unchanged"] = True
             if args.reference_backend == "sycl":
                 report["native_stack_after"] = sycl.stack_manifest(args.sycl_prefix)
+                report["native_build_after"] = sycl.build_manifest(args.llama_bin, args.llama_source)
                 report["native_probe_after"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
-                require(report["native_stack_after"] == report["native_stack"] and report["native_probe_after"] == report["native_probe"],
+                require(report["native_stack_after"] == report["native_stack"] and report["native_probe_after"] == report["native_probe"]
+                        and report["native_build_after"] == report["native_build"],
                         "native runtime, packages or GPU changed during the campaign")
-        report.update(passed=True, cleanup="no GPU process remains")
+        report.update(passed=all(model["passed"] for model in report["models"]), cleanup="no GPU process remains")
         report.update(campaign_outcome(report))
+        require(report["passed"], "one or more model checks failed; all attempts are retained")
     except BaseException as error:
         report["error"] = str(error) if type(error) in (ValueError, AssertionError) else type(error).__name__
         raise

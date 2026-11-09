@@ -1,6 +1,7 @@
 # Intel Arc performance qualification
 
-The target is ZINC Vulkan against llama.cpp Vulkan on the same Intel Arc GPU.
+The target is ZINC Vulkan against current llama.cpp Vulkan and native
+SYCL/Level Zero on the same Intel Arc GPU. These are separate campaigns.
 Both engines must offload the model to that GPU. There is no CPU-only inference
 baseline. CPU unit tests and numerical shader references remain correctness
 checks, separate from performance comparisons.
@@ -20,6 +21,10 @@ three measured requests per round. Natural early EOS remains in the report and
 excludes that workload from full-budget comparisons; finishing early is never
 counted as a speed win. Reduced prefill work, different prompt counts, invalid
 token accounting, and unstable repeated outputs fail the campaign.
+Workload messages are rendered once by the frozen correctness oracle. Both
+servers receive identical raw prompt bytes through `/v1/completions`, including
+the separate streaming probes. Development ZINC builds with raw SSE support
+are required; the 0.1.0 Vulkan archives do not implement raw streaming.
 llama.cpp must report full GPU layer offload; ZINC must confirm F16 KV storage.
 
 Run the following **on the remote Intel worker**, with paths supplied by private
@@ -430,3 +435,81 @@ by exact numerical kernels, one end-to-end model, all seven native model
 continuations and API/OpenCode recovery. Keep Vulkan and ROCm release builds
 independent of the new runtime, and qualify native binaries separately before
 advertising native Intel support.
+
+### Official package environment and native reference
+
+On November 9, the remote Arch worker was running kernel `7.2.14-arch1-1`,
+compute runtime `26.40.40196.8`, IGC `2.42.6`, Level Zero loader `1.34.0`,
+firmware `20261019` and Mesa `26.2.6`. A separate, user-owned environment now
+contains Intel's official DPC++ compiler, SYCL runtime and oneMKL `2026.2.0`,
+oneDNN package `2026.1.0`, and oneDPL `2022.14.0`. These packages do not replace
+the system's oneAPI environment. This is project testing of official packages
+on Arch; Arch is not one of Intel OMIX's documented validated distributions.
+
+The probe compiled with that compiler passed all 78 cases, checking 13,406,292
+elements and 9,984 output guards with zero numerical error. A diagnostic native
+llama.cpp starter-model run fully offloaded 29/29 layers and returned identical
+complete output across four repetitions. That establishes bring-up, not a
+seven-model performance or coding qualification.
+
+The [explicit Linux x86-64 package lock](https://github.com/zolotukhin/zinc/blob/main/config/intel/oneapi-2026.2-linux-64.explicit.txt)
+retains all 41 archive URLs and SHA256 checksums, without installation paths.
+After verifying and installing micromamba, create the isolated environment on
+the remote worker:
+
+```bash
+micromamba create -y --prefix "$ZINC_INTEL_PREFIX" \
+  --file config/intel/oneapi-2026.2-linux-64.explicit.txt
+```
+
+Intel documents its official package channel in the
+[compiler installation instructions](https://www.intel.com/content/www/us/en/developer/tools/oneapi/dpc-compiler-download.html).
+Keep the compiler and runtime in the same environment. Build the refreshed
+llama.cpp source with the official compiler:
+
+```bash
+micromamba run --prefix "$ZINC_INTEL_PREFIX" cmake \
+  -S "$LLAMA_SOURCE" -B "$LLAMA_SYCL_BUILD" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
+  -DCMAKE_PREFIX_PATH="$ZINC_INTEL_PREFIX" \
+  -DGGML_SYCL=ON -DGGML_SYCL_F16=ON -DGGML_SYCL_HOST_MEM_FALLBACK=OFF \
+  -DGGML_VULKAN=OFF -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF \
+  -DLLAMA_BUILD_TESTS=ON
+micromamba run --prefix "$ZINC_INTEL_PREFIX" cmake \
+  --build "$LLAMA_SYCL_BUILD" --parallel 2 \
+  --target llama-server llama-cli llama-tokenize llama-eval-callback test-backend-ops
+```
+
+Also build `GGML_SYCL_F16=OFF` in a different build directory. Upstream recommends
+testing both precisions because their speed and accuracy differ. Graph execution
+is separately opt-in at runtime; compiled graph support does not mean it is
+active. Keep the default and `--sycl-graphs` treatments separate. Do not enable
+persistent SYCL caching as an assumed speed fix: upstream documents crashes
+with it. See the [upstream SYCL guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md).
+
+Run the native comparison on that worker with its existing private reservation
+and model configuration:
+
+```bash
+python3 tools/benchmark_intel.py \
+  --zinc-tree "$ZINC_PACKAGE_TREE" --zinc-source "$ZINC_SOURCE" \
+  --llama-bin "$LLAMA_SYCL_BUILD/bin" --llama-source "$LLAMA_SOURCE" \
+  --reference-backend sycl --reference-device "$LLAMA_SYCL_DEVICE" \
+  --sycl-prefix "$ZINC_INTEL_PREFIX" --sycl-probe "$ZINC_INTEL_PROBE" \
+  --oracle "$ZINC_REFERENCE_BIN" --oracle-source "$ZINC_REFERENCE_SOURCE" \
+  --worker-config "$ZINC_WORKER_CONFIG" --output "$ZINC_BENCHMARK_REPORT"
+```
+
+The harness requires one physical Intel render device, full SYCL offload, the
+78-case readiness probe, installed package identities and original CMake build
+settings. It verifies the live server's SYCL and Level Zero libraries come from
+the selected environment. Those identities are checked again after cleanup.
+ZINC and the frozen Vulkan oracle keep their own loader environments.
+
+The exact timed SYCL configuration must pass complete frozen-reference
+continuations, including Gemma's extended window prompts. An allowed near tie
+requires an independently teacher-forced oracle suffix and matching decoded
+text; it cannot excuse unrelated later errors. Failed validation blocks speed
+claims. All packaged SPIR-V hashes and repeated full JSON/SSE output hashes
+are retained. ZINC's backend remains Vulkan in this comparison; this does not
+implement a native ZINC Intel backend.
