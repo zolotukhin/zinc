@@ -91,11 +91,12 @@ def native_reference_validation(args, work, env, reference_env):
                      gpu.reference_environment(args.llama_bin, reference_env)) as child:
         gpu.ready(child, port, require_ok=True)
         offload = native_gpu_layers(log.read_text(errors="replace"), "sycl")
-        for sample in samples:
+        for index, sample in enumerate(samples):
             prompt, expected = sample["prompt"], sample["expected"]
             wanted = gpu.reference_generated_ids(expected)
             actual = gpu.json_request(port, "/completion", {"prompt": prompt, "n_predict": len(wanted),
                                       "temperature": 0, "n_probs": 2, "cache_prompt": False})
+            write_json(work / f"native-reference-case-{index}.json", {"prompt": prompt, "expected": expected, "actual": actual})
             ids = gpu.reference_generated_ids(actual)
             require(len(ids) == len(wanted), "SYCL reference continuation count differs")
             comparison = {"tokens": len(ids), "near_ties": []}
@@ -210,6 +211,19 @@ def comparison_eligibility(samples, scenarios):
         measured = [s for s in samples if s["scenario"] == scenario["id"] and not s["warmup"]]
         eligible[scenario["id"]] = {s["engine"] for s in measured} == {"zinc", "llama"} and all(s["output_budget_complete"] for s in measured)
     return eligible
+
+
+def retain_measurement(model, collection, row, identities, counts=None):
+    # Retain the rejected request too. Otherwise the public report would stop
+    # just before the divergent output and require private logs to explain it.
+    model[collection].append(row)
+    key = (collection, row["engine"], row["scenario"])
+    require(identities.setdefault(key, row["content_sha256"]) == row["content_sha256"],
+            row["engine"] + " " + row["scenario"] + " repeated complete outputs differ")
+    if counts is not None:
+        observed = counts.setdefault(row["scenario"], [])
+        observed.append(row["promptTokens"])
+        require(max(observed) - min(observed) <= 1, "engines processed different prompt counts")
 
 
 def metric_comparison(rows, field, rounds, runs, higher_is_better=False, eligible=True, resolution=0):
@@ -543,17 +557,12 @@ def main():
                                         number += 1
                                         # Natural EOS is retained as evidence, never a full-budget win.
                                         sample = measure(engine, "off", child, port, log, scenario, model_work, number, require_full_budget=False, completion_mode="raw")
-                                        key = (engine, scenario["id"])
-                                        require(identities.setdefault(key, sample["content_sha256"]) == sample["content_sha256"], "repeated complete outputs differ")
-                                        observed = counts.setdefault(scenario["id"], [])
-                                        observed.append(sample["promptTokens"])
-                                        require(max(observed) - min(observed) <= 1, "engines processed different prompt counts")
-                                        current["samples"].append({"engine": engine, "round": round_index + 1, "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample})
+                                        retain_measurement(current, "samples", {"engine": engine, "round": round_index + 1,
+                                                           "scenario": scenario["id"], "warmup": iteration < args.warmup, **sample}, identities, counts)
                                         save()
                                     probe = stream_probe(port, scenario["body"], completion_mode="raw")
-                                    key = (engine, scenario["id"], "stream")
-                                    require(identities.setdefault(key, probe["content_sha256"]) == probe["content_sha256"], "repeated streaming outputs differ")
-                                    current["stream_samples"].append({"engine": engine, "round": round_index + 1, "scenario": scenario["id"], **probe})
+                                    retain_measurement(current, "stream_samples", {"engine": engine, "round": round_index + 1,
+                                                       "scenario": scenario["id"], **probe}, identities)
                                 if engine == "llama" and args.reference_backend == "sycl":
                                     process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
                                 process["memory"] = memory.snapshot()

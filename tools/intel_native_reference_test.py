@@ -101,6 +101,11 @@ class NativeReferenceTest(unittest.TestCase):
                     result = benchmark.native_reference_validation(args, work, {}, {})
                 finally:
                     self.assertEqual(active, [])
+                    # Even a count/text/suffix failure keeps the actual native
+                    # response for diagnosis; it must not vanish on exception.
+                    saved = json.loads((work / "native-reference-case-0.json").read_text())
+                    self.assertIn("actual", saved)
+                    self.assertIn("expected", saved)
             return result, commands, requests
 
     def test_close_choice_requires_independent_oracle_suffix_and_complete_text(self):

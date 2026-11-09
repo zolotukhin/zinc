@@ -14,6 +14,26 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def test_rejected_repetitions_and_prompt_mismatches_remain_in_the_evidence(self):
+        model, identities, counts = {"samples": [], "stream_samples": []}, {}, {}
+        first = {"engine": "zinc", "scenario": "core", "round": 1, "content_sha256": "a", "promptTokens": 42}
+        benchmark_intel.retain_measurement(model, "samples", first, identities, counts)
+        # Different engines need not generate identical text. A new server of
+        # the same engine still has to reproduce the complete prior output.
+        benchmark_intel.retain_measurement(model, "samples", {**first, "engine": "llama", "content_sha256": "b"}, identities, counts)
+        rejected = {**first, "round": 2, "content_sha256": "changed"}
+        with self.assertRaisesRegex(ValueError, "zinc core repeated"):
+            benchmark_intel.retain_measurement(model, "samples", rejected, identities, counts)
+        self.assertEqual(model["samples"][-1], rejected)
+        rejected = {**first, "promptTokens": 45}
+        with self.assertRaisesRegex(ValueError, "different prompt counts"):
+            benchmark_intel.retain_measurement(model, "samples", rejected, identities, counts)
+        self.assertEqual(model["samples"][-1], rejected)
+        self.assertEqual(len(model["samples"]), 4)
+        # The 16-token stream is a separate output budget and identity.
+        benchmark_intel.retain_measurement(model, "stream_samples", {**first, "content_sha256": "stream"}, identities)
+        self.assertEqual(len(model["stream_samples"]), 1)
+
     def test_raw_completions_use_text_and_full_prefill_accounting(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); log = root / "server.log"; log.write_text("")
