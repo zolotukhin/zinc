@@ -13,9 +13,10 @@ The helper itself uses only Node's standard library.
 
 The [AMD model acceptance report](OPENCLAW_AMD_VALIDATION.md) records the
 published binaries, actual file/tool outcomes, contexts and model-specific limits.
-The [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-7-candidate-opencode-and-openclaw)
-records the separate Arc Pro B70 results, including Gemma workspace timeouts
-and the starter model's failed coding acceptance.
+The [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
+records the separate Arc Pro B70 results. The November 9 development-package
+replay passes both Gemma workspace tasks; earlier timeouts and the starter
+model's failed coding acceptance remain in their original records.
 
 For a complete Linux walkthrough, see
 [OpenCode and OpenClaw on AMD: R9700 and RX 9070 XT](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/).
@@ -128,6 +129,13 @@ environment-based key references are preserved; the temporary copy is removed
 when the client exits, including after a timeout or interruption. Separate tasks
 get separate keys. Hybrid recurrent models, ROCm, older servers and failed
 capability discovery retain full prefill.
+
+Development Vulkan builds also keep a verified canonical prefix when a client
+edits earlier messages. This is enabled by default for Intel Xe2 Gemma MoE;
+`ZINC_CHAT_PREFIX_ROLLBACK=0` on the server retains the previous reuse rules.
+The [Gemma qualification](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
+records the edited-history, invalidation, real-client and explicit-disable
+controls on the exact package.
 
 Set `ZINC_OPENCLAW_SESSION_REUSE=0` for an uncached client control. An explicit
 `session_id`, including an empty or null value, in the model's `extraBody` or

@@ -11,6 +11,13 @@ passes all seven ZINC model support gates on the updated Intel worker. The
 competing native SYCL configuration still needs repeatability controls on six
 models before it can establish an all-model performance baseline.
 
+The [separate Gemma cache/client replay](/zinc/validation/intel-gemma-chat-prefix-2026-11-09.json)
+passes all sixteen cache controls and twelve real OpenCode/OpenClaw task checks
+on that same CI package. Its request-latency controls compare prefix reuse with
+full prefill on one ZINC server. The [client report](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
+keeps those results separate from uncached competitor throughput and the
+published release archives.
+
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
 workloads: short chat, medium context, long context, and extended decode. It first
