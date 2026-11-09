@@ -622,6 +622,41 @@ console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify
         expect(await readFile(path.join(f.project, 'effect.txt'), 'utf8')).toBe('changed');
     }
   });
+
+  test('interruption while fingerprinting stops before starting a client and removes listeners', async () => {
+    const f = await fakeClient('console.log(JSON.stringify({ok:true,status:"ok"}));');
+    await writeConfig(f.project, config({ model: 'loaded' }));
+    await Promise.all(
+      Array.from({ length: 512 }, (_, i) => writeFile(path.join(f.project, String(i)), 'file')),
+    );
+    const listeners = process.listenerCount('SIGTERM');
+    let starts = 0;
+    const signal = setInterval(() => {
+      if (process.listenerCount('SIGTERM') > listeners) {
+        clearInterval(signal);
+        process.emit('SIGTERM');
+      }
+    }, 1);
+    let error: any;
+    try {
+      await runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          return f.dependencies.spawnImpl(binary, args, options);
+        },
+      });
+    } catch (failure) {
+      error = failure;
+    } finally {
+      clearInterval(signal);
+    }
+    expect(error?.code).toBe('OPENCLAW_INTERRUPTED');
+    expect(starts).toBe(0);
+    expect(process.listenerCount('SIGTERM')).toBe(listeners);
+    expect((await readdir(f.project)).some((name) => name.endsWith('.run'))).toBe(false);
+  });
 });
 
 test('only empty pre-admission runtime failures qualify for a preparation retry', () => {

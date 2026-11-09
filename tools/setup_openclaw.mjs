@@ -797,13 +797,14 @@ export function isRuntimePreparationFailure(error) {
   );
 }
 
-async function preparationProjectFingerprint(project) {
+async function preparationProjectFingerprint(project, shouldStop) {
   // Bound this extra check. Large, unreadable or linked projects simply keep
   // the original failure. Never follow links outside the task's directory.
   const hash = createHash('sha256');
   let entries = 0,
     bytes = 0;
   async function visit(relative) {
+    if (shouldStop()) throw new Error('snapshot cancelled');
     if (++entries > 4096) throw new Error('snapshot limit');
     const filename = path.join(project, relative),
       metadata = await lstat(filename);
@@ -824,6 +825,7 @@ async function preparationProjectFingerprint(project) {
         const contentHash = createHash('sha256');
         let size = 0;
         for (;;) {
+          if (shouldStop()) throw new Error('snapshot cancelled');
           const { bytesRead } = await file.read(buffer, 0, buffer.length);
           if (bytesRead === 0) break;
           size += bytesRead;
@@ -859,7 +861,9 @@ export async function runOpenClaw(
     process.on('SIGINT', interrupt);
     process.on('SIGTERM', interrupt);
     try {
-      const before = guard ? await preparationProjectFingerprint(project) : null;
+      const snapshot = () =>
+        preparationProjectFingerprint(project, () => interrupted || performance.now() >= expires);
+      const before = guard ? await snapshot() : null;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           if (interrupted)
@@ -906,7 +910,7 @@ export async function runOpenClaw(
             guard?.canRetry() === true &&
             isRuntimePreparationFailure(error) &&
             before !== null &&
-            before === (await preparationProjectFingerprint(project)) &&
+            before === (await snapshot()) &&
             !interrupted &&
             performance.now() < expires
           ) {
