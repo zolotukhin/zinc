@@ -42,7 +42,12 @@ Refresh and build the performance reference before starting, following
 [the benchmark guide](BENCHMARKING.md#latest-llamacpp-and-matched-mtp-pairs).
 The harness holds the shared worker reservation, refuses existing inference
 processes, and reaps each owned server group before starting another. Keep the
-SSH invocation alive until it finishes.
+SSH invocation alive until it finishes. For long native builds, refresh
+`config/benchmark-reference.json` first and pass its exact `checked_at_utc`
+value using `--reference-selected-at`. This freezes the upstream HEAD selected
+before compilation for at most two hours. The report records any newer live
+HEAD at run start separately; it does not claim the frozen build contains those
+later commits. Without this option, the live HEAD must still match the pin.
 
 The report retains every measured request's prefill/decode rates and full HTTP
 latency. A separate warmed 16-token SSE probe measures time to first usable

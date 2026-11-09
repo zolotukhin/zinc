@@ -54,7 +54,10 @@ test('native runtime diagnostics retain all precisions, controls and complete GP
 
 test('native repeatability verdicts derive from full responses across both server lifetimes', () => {
   for (const row of evidence.rows) {
+    // One first-seen identity per scenario spans BOTH lifetimes, including
+    // warmups. Resetting at restart would hide four FP16 changes (9 -> 5).
     const first = new Map();
+    const expectedDrift = [];
     let differences = 0;
     for (const sample of row.samples) {
       const identity = JSON.stringify([
@@ -66,10 +69,16 @@ test('native repeatability verdicts derive from full responses across both serve
         sample.finish_reason,
       ]);
       if (!first.has(sample.scenario)) first.set(sample.scenario, identity);
-      else if (first.get(sample.scenario) !== identity) differences++;
+      else if (first.get(sample.scenario) !== identity) {
+        differences++;
+        expectedDrift.push([sample.lifetime, sample.scenario, sample.repeat]);
+      }
     }
     expect(row.output_drift).toHaveLength(differences);
     expect(row.drift_count).toBe(differences);
+    expect(
+      row.output_drift.map((sample) => [sample.lifetime, sample.scenario, sample.repeat]),
+    ).toEqual(expectedDrift);
     expect(row.passed).toBe(differences === 0 && row.streams.every((probe) => probe.matches_json));
   }
   expect(evidence.rows.filter((row) => row.passed).map((row) => row.id)).toEqual([

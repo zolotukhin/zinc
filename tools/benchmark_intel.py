@@ -2,6 +2,7 @@
 """Validate Intel Vulkan inference, then compare matched Vulkan or SYCL servers."""
 
 import argparse
+import datetime
 import json
 import math
 import os
@@ -27,6 +28,29 @@ HARNESS = ("tools/benchmark_intel.py", "tools/benchmark_metrics.py", "tools/inte
            "tools/release_gpu.py", "tools/release_lib.py", "config/benchmark-reference.json", "config/release/targets.json")
 HARNESS += ("tools/validate_dmmv_shared_cache.c", "tools/validate_q8_decode.c", "tools/validate_gemma_router.c", "tools/validate_attention_window.c")
 HARNESS += ("tools/intel_sycl_environment.py", "tools/intel_native_probe.py", "tools/intel_sycl_probe.cpp", "tools/intel_probe_json.h")
+
+
+def reference_selection(selected, head, selected_at=None, current=None):
+    """Freeze the observed upstream pin before a long build, never its successor."""
+    pin = selected.get("commit")
+    require(isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{40}", pin), "invalid performance reference pin")
+    require(isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head), "invalid observed upstream HEAD")
+    current = current or datetime.datetime.now(datetime.timezone.utc)
+    if selected_at is None:
+        require(head == pin, "refresh and build the latest native performance reference before starting a campaign")
+        return {"commit": pin, "observed_head": head, "checked_at": current.isoformat(), "scope": "run-start"}
+    require(selected_at == selected.get("checked_at_utc"), "campaign selection differs from the recorded pin")
+    try:
+        timestamp = datetime.datetime.fromisoformat(selected_at.replace("Z", "+00:00"))
+        require(timestamp.tzinfo is not None, "reference selection needs an explicit timezone")
+        age = current - timestamp
+    except (TypeError, AttributeError, ValueError) as error:
+        raise ValueError("invalid reference selection timestamp") from error
+    require(datetime.timedelta(0) <= age <= datetime.timedelta(hours=2), "select a fresh reference before building the campaign")
+    # observed_head is the selection-time pin recorded by benchmark_reference;
+    # retain the live HEAD separately if upstream advanced during compilation.
+    return {"commit": pin, "observed_head": pin, "checked_at": selected_at,
+            "scope": "campaign-before-build", "observed_head_at_run": head}
 
 
 def native_gpu_layers(log, backend="vulkan"):
@@ -422,6 +446,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--reference-selected-at", help="Reuse the recorded upstream selection from before this campaign's builds (at most two hours old)")
     parser.add_argument("--reference-backend", choices=("vulkan", "sycl"), default="vulkan")
     parser.add_argument("--reference-device", help="explicit llama.cpp device for the performance reference")
     parser.add_argument("--sycl-prefix", type=Path, help="isolated official Intel package environment")
@@ -469,10 +494,10 @@ def main():
         write_json(args.output, report)
     save()
     try:
-        pin = json.loads((ROOT / "config/benchmark-reference.json").read_text())["commit"]
+        selected = json.loads((ROOT / "config/benchmark-reference.json").read_text())
+        pin = selected["commit"]
         head = gpu.output(["bun", str(ROOT / "tools/benchmark_reference.mjs"), "head"], timeout=60).strip()
-        require(head == pin, "refresh and build the latest native performance reference before starting a campaign")
-        report["latest_reference_check"] = {"commit": pin, "observed_head": head, "checked_at": now(), "scope": "frozen for this campaign"}
+        report["latest_reference_check"] = reference_selection(selected, head, args.reference_selected_at)
         env = gpu.packaged_environment()
         env.update(OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="4", ZINC_MTP="0", ZINC_KV_CACHE="f16", ZINC_KV_F16="1", ZINC_KV_Q8="0", ZINC_PROMPT_CACHE="0")
         reference_env = sycl.environment(args.sycl_prefix, env, graphs=args.sycl_graphs,
