@@ -3087,8 +3087,9 @@ fn handleChatCompletions(
             // A dropped Gemma thought header can change the canonical history
             // without changing thousands of preceding prompt tokens. Keep the
             // exact prefix and overwrite every KV row from the first mismatch.
-            // Opt in until cached/full-prefill and actual-client controls pass.
-            const rewind_enabled = if (host_io.getenv("ZINC_CHAT_PREFIX_ROLLBACK")) |v| std.mem.eql(u8, v, "1") else false;
+            // Default only on the Intel Gemma MoE profile; the independent
+            // state guard still excludes recurrent or speculative state.
+            const rewind_enabled = session_reuse_policy.rewindRequested(host_io.getenv("ZINC_CHAT_PREFIX_ROLLBACK"), runtime.canonicalPrefixDefault(engine));
             const rewind_len = if (rewind_enabled and runtime.canRewindAttentionPrefix(engine))
                 server_state.chat_reuse_cache.attentionPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, match_ns)
             else

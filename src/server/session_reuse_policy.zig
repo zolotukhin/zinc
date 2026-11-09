@@ -20,6 +20,17 @@ pub fn canRewindPrefix(vulkan: bool, recurrent_width: u32, has_draft_state: bool
     return canAdvertise(vulkan, recurrent_width) and !has_draft_state and has_kv_pages;
 }
 
+/// The Intel Gemma MoE client path needs canonical replay after its template
+/// drops an empty thought channel. Keep the automatic change on this profile;
+/// other attention-only graphs retain the explicit experimental override.
+pub fn defaultRewind(vulkan: bool, intel_xe2: bool, gemma: bool, experts: u32, recurrent_width: u32) bool {
+    return vulkan and intel_xe2 and gemma and experts > 0 and recurrent_width == 0;
+}
+
+pub fn rewindRequested(setting: ?[]const u8, qualified_default: bool) bool {
+    return if (setting) |value| std.mem.eql(u8, value, "1") else qualified_default;
+}
+
 /// Reuse only the identical canonical prefix. Reprocess at least the last
 /// prompt token even on an identical/shortened retry: the previous request's
 /// logits describe its final generated token, not the end of this prompt.
@@ -44,6 +55,23 @@ test "prefix rewind requires resident attention KV without draft state" {
     try std.testing.expect(!canRewindPrefix(true, 4096, false, true));
     try std.testing.expect(!canRewindPrefix(true, 0, true, true));
     try std.testing.expect(!canRewindPrefix(true, 0, false, false));
+}
+
+test "automatic canonical replay stays on Intel Gemma MoE and honors explicit controls" {
+    try std.testing.expect(defaultRewind(true, true, true, 128, 0));
+    try std.testing.expect(!defaultRewind(false, true, true, 128, 0));
+    try std.testing.expect(!defaultRewind(true, false, true, 128, 0));
+    try std.testing.expect(!defaultRewind(true, true, false, 128, 0));
+    try std.testing.expect(!defaultRewind(true, true, true, 0, 0));
+    try std.testing.expect(!defaultRewind(true, true, true, 128, 4096));
+    try std.testing.expect(rewindRequested(null, true));
+    try std.testing.expect(!rewindRequested(null, false));
+    for ([_]bool{ true, false }) |default| {
+        try std.testing.expect(rewindRequested("1", default));
+        for ([_][]const u8{ "0", "", "true", "false", "unknown", " 1" }) |setting| {
+            try std.testing.expect(!rewindRequested(setting, default));
+        }
+    }
 }
 
 test "prefix rewind replaces a dropped thinking header and later tool history" {
