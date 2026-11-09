@@ -295,9 +295,9 @@ curl -N http://localhost:8080/v1/chat/completions \
 
 ## POST /v1/completions
 
-The request/JSON example below applies to all backends. Vulkan/Metal return
-JSON only; ROCm/CUDA also stream raw completions and default to SSE. Set
-`stream: false` explicitly when expecting the JSON shape.
+The request/JSON example below applies to all backends. Set `stream` explicitly:
+Vulkan/Metal default to JSON; ROCm/CUDA default to SSE. Development builds after
+0.1.0 also support raw SSE on Vulkan/Metal; the 0.1.0 archives return JSON there.
 
 Generate from a raw text prompt without applying a chat template.
 
@@ -311,13 +311,14 @@ Generate from a raw text prompt without applying a chat template.
 }
 ```
 
-| Field         | Type    | Default          | Description                                                                     |
-| ------------- | ------- | ---------------- | ------------------------------------------------------------------------------- |
-| `model`       | string  | current model    | Vulkan/Metal may activate an installed model. ROCm/CUDA keep the startup model. |
-| `prompt`      | string  | required         | Raw text prompt.                                                                |
-| `max_tokens`  | integer | 256              | Maximum generated tokens before context-budget clamping.                        |
-| `temperature` | float   | accepted         | Parsed for compatibility but not applied by this endpoint yet.                  |
-| `stream`      | boolean | backend-specific | Vulkan/Metal ignore it and return JSON; ROCm/CUDA honor it and default to SSE.  |
+| Field                          | Type    | Default          | Description                                                                     |
+| ------------------------------ | ------- | ---------------- | ------------------------------------------------------------------------------- |
+| `model`                        | string  | current model    | Vulkan/Metal may activate an installed model. ROCm/CUDA keep the startup model. |
+| `prompt`                       | string  | required         | Raw text prompt.                                                                |
+| `max_tokens`                   | integer | 256              | Maximum generated tokens before context-budget clamping.                        |
+| `temperature`                  | float   | accepted         | Parsed for compatibility but not applied by this endpoint yet.                  |
+| `stream`                       | boolean | backend-specific | Enable SSE text chunks. Vulkan/Metal default to `false`; ROCm/CUDA to `true`.   |
+| `stream_options.include_usage` | boolean | `false`          | On Vulkan/Metal, append a separate usage event before `[DONE]` when streaming.  |
 
 ### Response
 
@@ -341,6 +342,19 @@ Generate from a raw text prompt without applying a chat template.
   }
 }
 ```
+
+With `stream: true`, raw chunks use `choices[].text` and object
+`text_completion`. They do not add assistant-role deltas or apply chat templates.
+The final choice has empty text and a `stop` or `length` finish reason. When
+`stream_options.include_usage` is true, a following event has empty `choices`
+and total token usage. The stream ends with `data: [DONE]`.
+
+Vulkan/Metal stream the same greedy continuation as their JSON route, including
+safe handling of Unicode characters split across tokens. EOG tokens count toward
+usage but are omitted from text. An unfinished Unicode character at the output
+budget is omitted in both formats. Vulkan checks for a disconnected reader
+during prefill and between decode tokens, then releases the generation slot.
+The Metal preview checks during decode; it does not interrupt active prefill.
 
 ---
 
