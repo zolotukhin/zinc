@@ -461,6 +461,17 @@ these failed attempts establish no headline speed claim. The benchmark pin
 has since advanced to `5f490d7b`; rebuilding it is separate from these frozen
 results.
 
+The [refreshed native runtime controls](/zinc/validation/intel-native-runtime-controls-2026-11-09.json)
+use `5f490d7b` with the same starter GGUF and official Intel environment. Six
+treatments cover FP32/FP16 with default oneDNN, native SYCL attention, or oneDNN
+disabled. Each gets 24 full requests and eight raw SSE controls across four
+workloads and two server lifetimes. FP32 default, FP32 without oneDNN, FP16
+with native attention, and FP16 without oneDNN pass this limited repeatability
+check. FP32 with native attention drifts twice; default FP16 drifts nine times.
+All attempts remain in the record. These starter controls identify candidates
+for the full catalog; they do not establish that nondeterminism was fixed or
+qualify an all-model native baseline.
+
 On November 9, the remote Arch worker was running kernel `7.2.14-arch1-1`,
 compute runtime `26.40.40196.8`, IGC `2.42.6`, Level Zero loader `1.34.0`,
 firmware `20261019` and Mesa `26.2.6`. A separate, user-owned environment now
