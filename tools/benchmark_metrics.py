@@ -87,13 +87,15 @@ class MemoryTracker:
         self.sample()
 
 
-def stream_probe(port, body, timeout=600, clock=time.monotonic):
+def stream_probe(port, body, timeout=600, clock=time.monotonic, completion_mode="chat"):
+    require(completion_mode in ("chat", "raw"), "unknown streaming measurement mode")
     # A separate short probe measures first usable content without replacing
     # the ordinary full-output phase/latency samples with short generations.
     payload = {**body, "stream": True, "stream_options": {"include_usage": True}, "max_tokens": 16}
     started, first, content, done = clock(), None, [], False
     data = []
-    with gpu.request(port, "/v1/chat/completions", payload, timeout=timeout) as response:
+    endpoint = "/v1/completions" if completion_mode == "raw" else "/v1/chat/completions"
+    with gpu.request(port, endpoint, payload, timeout=timeout) as response:
         received = 0
         while True:
             require(clock() - started < timeout, "streaming benchmark exceeded its deadline")
@@ -121,7 +123,7 @@ def stream_probe(port, body, timeout=600, clock=time.monotonic):
             require("error" not in item, "streaming benchmark returned an error")
             choices = item.get("choices", [])
             if choices:
-                text = choices[0].get("delta", {}).get("content")
+                text = choices[0].get("text") if completion_mode == "raw" else choices[0].get("delta", {}).get("content")
                 if text is None:
                     continue
                 require(isinstance(text, str), "streaming content is not text")

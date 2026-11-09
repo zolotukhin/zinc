@@ -14,6 +14,73 @@ from benchmark_gemma_rocm import correctness_prompts
 
 
 class IntelMetricsTest(unittest.TestCase):
+    def test_raw_completions_use_text_and_full_prefill_accounting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); log = root / "server.log"; log.write_text("")
+            body = {"choices": [{"text": "raw answer", "finish_reason": "length"}]}
+            parsed = {"prefillTokens": 20, "promptTokens": 20, "generatedTokens": 16}
+            with patch.object(benchmark_matched_mtp.gpu, "request", side_effect=lambda *a, **k: io.BytesIO(json.dumps(body).encode())) as request, \
+                    patch.object(benchmark_matched_mtp, "run_json", return_value=parsed):
+                sample = benchmark_matched_mtp.measure("llama", "off", Mock(poll=Mock(return_value=None)), 1, log,
+                            {"body": {"prompt": "same bytes", "cache_prompt": False}, "max_tokens": 16}, root, 1, completion_mode="raw")
+                self.assertEqual(request.call_args.args[1], "/v1/completions")
+                self.assertTrue(sample["output_budget_complete"])
+                parsed["prefillTokens"] = 1
+                with self.assertRaisesRegex(ValueError, "cache reduced"):
+                    benchmark_matched_mtp.measure("llama", "off", Mock(poll=Mock(return_value=None)), 1, log,
+                                {"body": {"prompt": "same bytes"}, "max_tokens": 16}, root, 2, completion_mode="raw")
+
+    def test_raw_streaming_reads_text_chunks_and_retains_the_common_cap(self):
+        events = [{"choices": [{"text": " "}]}, {"choices": [{"text": "Hello"}]}, {"choices": [], "usage": {}}]
+        frames = b"".join(b"data: " + json.dumps(x).encode() + b"\n\n" for x in events) + b"data: [DONE]\n\n"
+        ticks = iter(range(1000))
+        with patch.object(benchmark_metrics.gpu, "request", return_value=io.BytesIO(frames)) as request:
+            result = benchmark_metrics.stream_probe(1, {"prompt": "same bytes", "max_tokens": 256},
+                        clock=lambda: next(ticks) / 1000, completion_mode="raw")
+            self.assertEqual(request.call_args.args[1], "/v1/completions")
+            self.assertEqual(request.call_args.args[2]["max_tokens"], 16)
+            self.assertEqual(result["content_bytes"], len(" Hello"))
+
+    def test_shader_fingerprints_detect_overlay_changes_and_never_include_host_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); shader = root / "kernel.spv"; shader.write_bytes(b"original")
+            before = benchmark_intel.packaged_shaders(root)
+            self.assertEqual(set(before), {"kernel.spv"}); self.assertNotIn(str(root), json.dumps(before))
+            shader.write_bytes(b"modified")
+            self.assertNotEqual(before, benchmark_intel.packaged_shaders(root))
+            shader.unlink()
+            with self.assertRaisesRegex(ValueError, "no packaged shaders"):
+                benchmark_intel.packaged_shaders(root)
+
+    def test_sycl_comparison_needs_live_runtime_proof_and_native_model_correctness(self):
+        model, settings = self.campaign()
+        settings.update(reference_backend="sycl", native_stack_verified=True, protocol="raw")
+        model["native_reference_validation"] = {"passed": True}
+        for process in model["processes"]:
+            if process["engine"] == "llama":
+                process["gpu_offload"]["backend"] = "sycl"
+                process["native_runtime"] = {"runtime": "level_zero", "library_sha256": {
+                    "libsycl.so.9": "a" * 64, "libur_adapter_level_zero.so.0": "b" * 64}}
+        result = benchmark_intel.performance_comparison(model, settings)
+        self.assertTrue(result["headline_eligible"])
+        self.assertEqual(result["reference_backend"], "sycl")
+        self.assertEqual(result["zinc_backend"], "vulkan")
+        self.assertFalse(benchmark_intel.performance_comparison(model, {**settings, "native_stack_verified": False})["headline_eligible"])
+        del model["native_reference_validation"]
+        self.assertFalse(benchmark_intel.performance_comparison(model, settings)["headline_eligible"])
+        model["native_reference_validation"] = {"passed": True}
+        native = next(p for p in model["processes"] if p["engine"] == "llama")
+        native["native_runtime"] = {"runtime": "opencl", "library_sha256": {}}
+        self.assertFalse(benchmark_intel.performance_comparison(model, settings)["gpu_offload_verified"])
+
+    def test_sycl_label_requires_an_actual_sycl_model_buffer(self):
+        log = 'offloaded 29/29 layers to GPU\nllama_model_load: SYCL0 model buffer size = 500 MiB\n'
+        self.assertEqual(benchmark_intel.native_gpu_layers(log, "sycl")["backend"], "sycl")
+        with self.assertRaisesRegex(ValueError, "SYCL model buffer"):
+            benchmark_intel.native_gpu_layers(log.replace('SYCL0', 'Vulkan0'), "sycl")
+        with self.assertRaisesRegex(ValueError, "full GPU"):
+            benchmark_intel.native_gpu_layers(log.replace('29/29', '28/29'), "sycl")
+
     def test_health_poll_precision_does_not_shorten_the_startup_deadline(self):
         for interval in (0.5, 0.01):
             with self.subTest(interval=interval):
