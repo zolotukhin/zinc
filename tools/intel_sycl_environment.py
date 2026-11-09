@@ -49,7 +49,7 @@ def build_manifest(directory, source):
     return {"cache_sha256": sha256(cache), "settings": {**expected, "GGML_SYCL_F16": values["GGML_SYCL_F16"]}}
 
 
-def environment(prefix, base, graphs=False):
+def environment(prefix, base, graphs=False, dnn=True, onednn_attention=True):
     prefix = Path(prefix).resolve()
     require((prefix / "bin/icpx").is_file() and (prefix / "lib").is_dir(), "native compiler/runtime prefix is incomplete")
     # Inherited tuning can silently disable graphs/XMX or choose another device.
@@ -63,7 +63,10 @@ def environment(prefix, base, graphs=False):
     # Keep the host's existing GPU ICDs scoped to this reference environment.
     result["OCL_ICD_VENDORS"] = "/etc/OpenCL/vendors"
     require(type(graphs) is bool, "SYCL graph selection must be explicit")
+    require(type(dnn) is bool and type(onednn_attention) is bool, "SYCL oneDNN settings must be explicit booleans")
     result["GGML_SYCL_ENABLE_GRAPH"] = "1" if graphs else "0"
+    result["GGML_SYCL_ENABLE_DNN"] = "1" if dnn else "0"
+    result["GGML_SYCL_FA_ONEDNN"] = "1" if onednn_attention else "0"
     result["MKLROOT"] = str(prefix)
     return result
 

@@ -163,7 +163,15 @@ def hardware_evidence(diagnostics, family, device):
     return {"gpu": gpu, "os": platform.system() + " " + platform.release(), "driver": " / ".join(fields)}
 
 
+def reference_case_count(text, description, expected):
+    """Count a completed suite, rejecting duplicate or truncated pass markers."""
+    counts = re.findall(r"^PASS: ([1-9][0-9]*) " + re.escape(description) + r"$", text, re.M)
+    require(len(counts) == 1 and int(counts[0]) == expected, "reference suite was incomplete: " + description)
+    return int(counts[0])
+
+
 def kernel_reference(tree, reference, checkout, device, work, env):
+    counts = {}
     executable = work / "validate-shared-cache"
     output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_dmmv_shared_cache.c"),
             "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
@@ -171,7 +179,7 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     log = work / "kernel-reference.log"
     with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged kernel reference validation failed")
-    require("PASS: 84 cache-boundary/reference/offset/stride/guard cases" in log.read_text(), "kernel reference suite was incomplete")
+    counts["shared_cache"] = reference_case_count(log.read_text(), "cache-boundary/reference/offset/stride/guard cases", 84)
     executable = work / "validate-gemma-router"
     output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_gemma_router.c"),
             "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
@@ -179,7 +187,7 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     log = work / "gemma-router-reference.log"
     with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged Gemma router reference validation failed")
-    require("PASS: 36 Gemma router workgroup/reference/guard/replay cases" in log.read_text(), "Gemma router reference suite was incomplete")
+    counts["gemma_router"] = reference_case_count(log.read_text(), "Gemma router workgroup/reference/guard/replay cases", 36)
     executable = work / "validate-attention-window"
     output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_attention_window.c"),
             "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
@@ -187,7 +195,8 @@ def kernel_reference(tree, reference, checkout, device, work, env):
     log = work / "attention-window-reference.log"
     with process([str(executable)], log, work, {**reference_environment(reference, env), "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged sliding-window reference validation failed")
-    require("PASS: 256 sliding-window/page/reference/guard/replay cases" in log.read_text(), "sliding-window reference suite was incomplete")
+    counts["attention_window"] = reference_case_count(log.read_text(), "sliding-window/page/reference/guard/replay cases", 256)
+    return {"passed": True, "cases": sum(counts.values()), "suites": counts}
 
 
 def q8_decode_reference(tree, reference, checkout, device, work, env):
@@ -200,11 +209,10 @@ def q8_decode_reference(tree, reference, checkout, device, work, env):
     with process([str(executable)], log, work, {**reference_environment(reference, env),
                  "ZINC_SHADER_DIR": str(tree / "share/zinc/shaders"), "ZINC_GPU": str(device)}) as child:
         require(child.wait(timeout=300) == 0, "packaged Q8 decode reference validation failed")
-    require(re.findall(r"^PASS: 228 Q8 native-reference/offset/accumulation/guard cases$", log.read_text(), re.M) ==
-            ["PASS: 228 Q8 native-reference/offset/accumulation/guard cases"], "Q8 decode reference suite was incomplete")
-    require(re.findall(r"^PASS: 114 Q8 identical-reduction pairs$", log.read_text(), re.M) ==
-            ["PASS: 114 Q8 identical-reduction pairs"], "Q8 identical-reduction reference suite was incomplete")
-    return {"passed": True, "cases": 228, "bitwise_pairs": 114,
+    text = log.read_text()
+    cases = reference_case_count(text, "Q8 native-reference/offset/accumulation/guard cases", 228)
+    pairs = reference_case_count(text, "Q8 identical-reduction pairs", 114)
+    return {"passed": True, "cases": cases, "bitwise_pairs": pairs,
             "validator_source_sha256": sha256(ROOT / "tools/validate_q8_decode.c"),
             "shared_fixture_source_sha256": sha256(ROOT / "tools/validate_dmmv_shared_cache.c"),
             "shader_sha256": {name: sha256(tree / "share/zinc/shaders" / (name + ".spv"))

@@ -448,12 +448,24 @@ class ReleaseTest(unittest.TestCase):
                     reaped.append(name)
             with self.subTest(missing=missing), patch.object(release_gpu, "output", return_value=""), patch.object(release_gpu, "process", side_effect=child):
                 if missing is None:
-                    release_gpu.kernel_reference(self.root, self.root, self.root, 0, self.root, {})
+                    result = release_gpu.kernel_reference(self.root, self.root, self.root, 0, self.root, {})
+                    self.assertEqual(result, {"passed": True, "cases": 376,
+                        "suites": {"shared_cache": 84, "gemma_router": 36, "attention_window": 256}})
                 else:
                     with self.assertRaisesRegex(ValueError, "reference suite was incomplete"):
                         release_gpu.kernel_reference(self.root, self.root, self.root, 0, self.root, {})
             self.assertEqual(launched, list(markers) if missing is None else list(markers)[:list(markers).index(missing) + 1])
             self.assertEqual(reaped, launched)
+
+    def test_native_case_counts_reject_duplicate_truncated_and_wrong_suite_markers(self):
+        marker = "PASS: 84 cache-boundary/reference/offset/stride/guard cases"
+        description = "cache-boundary/reference/offset/stride/guard cases"
+        self.assertEqual(release_gpu.reference_case_count("device ready\n" + marker + "\n", description, 84), 84)
+        for text in ("", marker.replace("84", "83"), marker.replace("84", "084"),
+                     marker.replace("84", "0"), marker + " (partial)", marker + "\n" + marker,
+                     marker.replace("cache-boundary", "unrelated")):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "reference suite was incomplete"):
+                release_gpu.reference_case_count(text, description, 84)
 
     def test_intel_q8_gate_requires_all_cases_and_records_the_tested_package_shaders(self):
         shader_dir = self.root / "share/zinc/shaders"

@@ -28,9 +28,26 @@ class SyclEnvironmentTest(unittest.TestCase):
             self.assertEqual(result["OCL_ICD_VENDORS"], "/etc/OpenCL/vendors")
             self.assertEqual(result["ZINC_MTP"], "0")
             self.assertEqual(result["GGML_SYCL_ENABLE_GRAPH"], "0")
+            self.assertEqual(result["GGML_SYCL_ENABLE_DNN"], "1")
+            self.assertEqual(result["GGML_SYCL_FA_ONEDNN"], "1")
             self.assertEqual(sycl.environment(prefix, base, graphs=True)["GGML_SYCL_ENABLE_GRAPH"], "1")
             with self.assertRaisesRegex(ValueError, "graph selection"):
                 sycl.environment(prefix, base, graphs="0")
+
+    def test_native_controls_are_explicit_independent_and_do_not_change_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory); (prefix / "bin").mkdir(); (prefix / "lib").mkdir()
+            (prefix / "bin/icpx").write_bytes(b"fixture")
+            base = {"GGML_SYCL_ENABLE_DNN": "0", "GGML_SYCL_FA_ONEDNN": "0"}
+            for dnn, attention in ((False, False), (False, True), (True, False), (True, True)):
+                result = sycl.environment(prefix, base, dnn=dnn, onednn_attention=attention)
+                self.assertEqual(result["GGML_SYCL_ENABLE_DNN"], "1" if dnn else "0")
+                self.assertEqual(result["GGML_SYCL_FA_ONEDNN"], "1" if attention else "0")
+                self.assertEqual(result["GGML_SYCL_ENABLE_GRAPH"], "0")
+            self.assertEqual(sycl.environment(prefix, base)["GGML_SYCL_ENABLE_DNN"], "1")
+            for options in ({"dnn": "0"}, {"onednn_attention": "1"}, {"dnn": None}):
+                with self.subTest(options=options), self.assertRaisesRegex(ValueError, "explicit booleans"):
+                    sycl.environment(prefix, base, **options)
 
     def probe(self, *, gpu_count=1, vendor=0x8086, platform_count=1):
         def platforms(count, data, actual):

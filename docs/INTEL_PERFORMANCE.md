@@ -438,6 +438,29 @@ advertising native Intel support.
 
 ### Official package environment and native reference
 
+The [November 9 seven-model support record](/zinc/validation/intel-seven-model-support-2026-11-09.json)
+checks development Vulkan package `56bec228` on the updated Intel node. All seven
+catalog models pass: 376 shared numerical cases, 228 Q8 cases with 114 identical
+reduction pairs, tokenizer parity, 27 full native-reference continuations, 81
+full HTTP replays and 27 raw JSON/SSE checks. Native choices are 431/432 exact
+with one qualified Qwen 35B near tie. Both Gemmas cross their 1024-token window;
+cancellation and error recovery preserve complete native answers. The binary,
+all 214 packaged shaders, kernel and driver remain unchanged through cleanup.
+This is a development inference/protocol qualification. Actual OpenCode and
+OpenClaw task acceptance and final release-byte certification remain separate.
+
+The same record retains the failed native SYCL FP16 attempt at `a4d4f2fd`,
+selected as upstream HEAD when that campaign started. Six models fail repeated
+complete-output checks; Qwen 35B exceeds the allowed near-tie count. The frozen
+short reference checks pass for the other six, so these findings do not mean
+their inference fails outright. A separate FP32 starter diagnostic also drifts
+on one medium-context repetition across 24 full requests and eight SSE probes.
+Changing FP16 to FP32 alone does not resolve this consistency check. The native
+baseline remains unqualified while oneDNN/attention controls are isolated;
+these failed attempts establish no headline speed claim. The benchmark pin
+has since advanced to `5f490d7b`; rebuilding it is separate from these frozen
+results.
+
 On November 9, the remote Arch worker was running kernel `7.2.14-arch1-1`,
 compute runtime `26.40.40196.8`, IGC `2.42.6`, Level Zero loader `1.34.0`,
 firmware `20261019` and Mesa `26.2.6`. A separate, user-owned environment now
@@ -486,6 +509,13 @@ is separately opt-in at runtime; compiled graph support does not mean it is
 active. Keep the default and `--sycl-graphs` treatments separate. Do not enable
 persistent SYCL caching as an assumed speed fix: upstream documents crashes
 with it. See the [upstream SYCL guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md).
+
+For consistency diagnostics, `--sycl-native-attention` selects the native SYCL
+attention kernel instead of oneDNN SDPA; `--sycl-disable-dnn` separately selects
+the oneDNN-disabled control. Each campaign records all three explicit runtime
+settings. The default keeps oneDNN and its attention path enabled and graphs
+disabled. Compare these treatments separately with their original failures
+retained; a successful slower control does not replace the recorded default.
 
 Run the native comparison on that worker with its existing private reservation
 and model configuration:

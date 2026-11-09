@@ -170,8 +170,7 @@ def main():
                 diagnostics = gpu.output([str(zinc), "--check", "-d", str(args.device)], env, timeout=360)
                 report["hardware"] = gpu.hardware_evidence(diagnostics, family, args.device)
                 print("Correctness: 376 shader/reference cases", flush=True)
-                gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
-                report["kernel_reference"] = {"passed": True, "cases": 376}
+                report["kernel_reference"] = gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
             else:
                 diagnostics = gpu.output([str(zinc), "--check"], env, timeout=360)
                 # R9700 protocol: verify the observed gfx1201 target and logical

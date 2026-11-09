@@ -108,10 +108,10 @@ def native_reference_validation(args, work, env, reference_env):
                 pending.append((prompt, actual, ids, tie))
             cases.append({"reference_ids": wanted, "native_ids": ids, "content": actual.get("content"), "comparison": comparison})
         runtime = sycl.runtime_evidence(child.pid, args.sycl_prefix)
-    # The native GPU process has exited before the oracle starts. A close first
-    # choice never excuses an unrelated later error: force it and check the tail.
     agreement = reference_agreement([case["comparison"] for case in cases], expected_cases=len(samples))
     if pending:
+        # The native process has exited before this oracle launch. A close
+        # first choice still requires an independently checked complete tail.
         generation = policy()["reference"]["generation"]
         port = gpu.free_port()
         command = [str(args.oracle / "llama-server"), "-m", str(args.model), "--device", args.oracle_device, "-ngl", "999",
@@ -427,6 +427,8 @@ def main():
     parser.add_argument("--sycl-prefix", type=Path, help="isolated official Intel package environment")
     parser.add_argument("--sycl-probe", type=Path, help="native readiness probe compiled in the selected environment")
     parser.add_argument("--sycl-graphs", action="store_true", help="measure the opt-in native SYCL graph configuration separately")
+    parser.add_argument("--sycl-native-attention", action="store_true", help="measure native SYCL attention instead of oneDNN SDPA as a separate treatment")
+    parser.add_argument("--sycl-disable-dnn", action="store_true", help="measure the explicit oneDNN-disabled control separately")
     parser.add_argument("--keep-going", action="store_true", help="retain a failed model and attempt the remaining matrix; the campaign still fails")
     args = parser.parse_args()
     if sys.platform != "linux" or min(args.rounds, args.runs, args.warmup) < 1 or len(args.models) != len(set(args.models)):
@@ -445,6 +447,7 @@ def main():
                 and re.fullmatch(r"SYCL\d+", args.reference_device), "SYCL reference needs a prefix, probe and explicit SYCL device")
         args.sycl_prefix, args.sycl_probe = args.sycl_prefix.resolve(), args.sycl_probe.resolve()
     else:
+        require(not (args.sycl_graphs or args.sycl_native_attention or args.sycl_disable_dnn), "native tuning controls require a SYCL reference")
         require(args.reference_device in (None, args.oracle_device), "Vulkan performance reference must use the oracle GPU")
         args.reference_device = args.oracle_device
     os.umask(0o077)
@@ -472,7 +475,8 @@ def main():
         report["latest_reference_check"] = {"commit": pin, "observed_head": head, "checked_at": now(), "scope": "frozen for this campaign"}
         env = gpu.packaged_environment()
         env.update(OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="4", ZINC_MTP="0", ZINC_KV_CACHE="f16", ZINC_KV_F16="1", ZINC_KV_Q8="0", ZINC_PROMPT_CACHE="0")
-        reference_env = sycl.environment(args.sycl_prefix, env, graphs=args.sycl_graphs) if args.reference_backend == "sycl" else env
+        reference_env = sycl.environment(args.sycl_prefix, env, graphs=args.sycl_graphs,
+                                        dnn=not args.sycl_disable_dnn, onednn_attention=not args.sycl_native_attention) if args.reference_backend == "sycl" else env
         zinc = args.zinc_tree / "bin/zinc"
         source = gpu.output(["git", "-C", str(args.zinc_source), "rev-parse", "HEAD"]).strip()
         require(not gpu.output(["git", "-C", str(args.zinc_source), "status", "--porcelain", "--untracked-files=no"]).strip(), "ZINC source is modified")
@@ -495,7 +499,8 @@ def main():
                 require(len(devices) == 1, "cross-backend comparison requires exactly one physical Intel render device")
                 report["native_stack"] = sycl.stack_manifest(args.sycl_prefix)
                 report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source)
-                report["settings"]["native_runtime"] = {"GGML_SYCL_ENABLE_GRAPH": "1" if args.sycl_graphs else "0"}
+                report["settings"]["native_runtime"] = {key: reference_env[key] for key in (
+                    "GGML_SYCL_ENABLE_GRAPH", "GGML_SYCL_ENABLE_DNN", "GGML_SYCL_FA_ONEDNN")}
                 report["native_probe"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
                 report["native_opencl"] = json.loads(gpu.output([sys.executable, str(ROOT / "tools/intel_sycl_environment.py"),
                                       "--probe-opencl", str(args.sycl_prefix / "lib/libOpenCL.so.1")], reference_env, timeout=60))
@@ -503,10 +508,8 @@ def main():
                         "OpenCL and Level Zero GPU identities differ")
                 report["settings"]["native_stack_verified"] = True
             print("Correctness: 376 numerical shader cases", flush=True)
-            gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
-            report["kernel_reference"] = {"passed": True, "cases": 376}
-            gpu.q8_decode_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
-            report["q8_decode_reference"] = {"passed": True, "cases": 228, "identical_pairs": 114}
+            report["kernel_reference"] = gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
+            report["q8_decode_reference"] = gpu.q8_decode_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
             for identifier in args.models:
                 model_pin = next(m for m in policy()["models"] if m["id"] == identifier)
                 args.model, args.context = Path(worker["models"][identifier]), model_pin["context"]
@@ -547,8 +550,6 @@ def main():
                                            "startup_poll_interval_ms": report["settings"]["startup_poll_interval_ms"]}
                                 if engine == "llama":
                                     process["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"), args.reference_backend)
-                                    if args.reference_backend == "sycl":
-                                        process["native_runtime"] = sycl.runtime_evidence(child.pid, args.sycl_prefix)
                                 else:
                                     process["kv_cache"] = zinc_kv_storage(log.read_text(errors="replace"))
                                 current["processes"].append(process)

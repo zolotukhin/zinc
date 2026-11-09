@@ -1,0 +1,2687 @@
+{
+  "schema_version": "zinc-intel-seven-model-support-v1",
+  "date": "2026-11-09",
+  "date_basis": "UTC",
+  "scope": "Packaged development Vulkan inference, complete native continuations, API recovery and raw SSE on Intel Arc Pro B70",
+  "passed": true,
+  "release_qualification": false,
+  "complete_model_matrix": true,
+  "complete_performance_matrix": false,
+  "all_models_all_dimensions_better": false,
+  "source_report_sha256": "8d5e35e488b075c80daa946553cc984bcb134c739823faeafecdc3e768114e8a",
+  "started_at": "2026-11-09T18:07:31.160825+00:00",
+  "completed_at": "2026-11-09T19:03:39.261625+00:00",
+  "hardware": {
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.6-arch1.1",
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.14-arch1-1"
+  },
+  "hardware_unchanged": true,
+  "zinc": {
+    "commit": "56bec2287ed7c2bdd5e2b67bac0d12bfff79768a",
+    "sha256": "d43ef924c170c8b9df5ed4cebad21a83d343b1d05065351518927a12c27cd7c7",
+    "shader_sha256": {
+      "share/zinc/shaders/argmax.spv": "640f3edf6a3968e426b10935a4c9c7664eb8eff4c5edca18f4220f078cdc0c50",
+      "share/zinc/shaders/bias_add.spv": "13160449d0b373104d4a28585c303ebcb845cdf3f4d3ce8bd9abbba923893a29",
+      "share/zinc/shaders/count_experts.spv": "cf0dae69e2d362b81a77f6cfa2f62742cff695de9eb46b10d842c8d9246be858",
+      "share/zinc/shaders/deinterleave.spv": "b4405c09f86a6b08154378ed5b7a3a40f961dadb6047e92b395cbf3afb8006f3",
+      "share/zinc/shaders/deinterleave_batched.spv": "d729b5d45a6c9b944a73b88dde33c54debab1a304c8f2201f194761c42ea5920",
+      "share/zinc/shaders/dmmv_f16.spv": "9fd7007d62226aa174c935b520508312d1c295740e181babc3f00168b00d5b2d",
+      "share/zinc/shaders/dmmv_f32.spv": "7b2bd16cb82a57ebbcd81155c614a730d7e20f9611fe00184d4c9e4b84692744",
+      "share/zinc/shaders/dmmv_f32_dual_batch.spv": "bb50e14cb9863a3b3ee349f5d5e50055d29c9fc342b370ce0d49949674646a82",
+      "share/zinc/shaders/dmmv_mxfp4.spv": "aac69a85cff64203e2405dcbb5b9ce7f329e350d199e4f0429141693bdc4a5dc",
+      "share/zinc/shaders/dmmv_mxfp4_moe.spv": "7dc8a9ad0818713211786d4fb17ef8d13ba12cacdf62bd9d5e78aedf3a36b32e",
+      "share/zinc/shaders/dmmv_q4k.spv": "fc69bb60ff2a75f5e76ac4c26ede4c106f7642479440ab2516081819e05fc5e9",
+      "share/zinc/shaders/dmmv_q4k_batch.spv": "f333484aa78d97f519b94a1daaff6e972502e57a50e8024b7de3b67698194534",
+      "share/zinc/shaders/dmmv_q4k_batch_kpar.spv": "87f16c466e32f668da584a821c35ef4fabfe2e80d2027ffdf2f59885cf02fb0c",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_geglu.spv": "0fc5f95c83b366a6100f4d4807cc193eff5d2e38a23467ec3fb871422b32a7b6",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_geglu_pair.spv": "cd73b1a668243202adf4ec207d749ecc69c91d4a207f747be28dff2d0feb4cbf",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_moe.spv": "94fca458f4680aa1181e408785636698449191e493289efec12ff8c642b6cb65",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_swiglu.spv": "94401a23367ec924f1c281f8038cc43506297b7ae7af4d580cb5ca36ab42c34f",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_swiglu_cols.spv": "f7c2c15b5011f3efe0ee1f4afb145252ce14d89bda54203623cff422cd050f2c",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_swiglu_cols3.spv": "5c5497acabed59a3fc97dcebdaf8c44314cd722e42f27fa86c9cf88179ff889f",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_swiglu_cols4.spv": "de90fa661b08919c7cdd4b218ff14989805604206bde71821e208a509692ab49",
+      "share/zinc/shaders/dmmv_q4k_fused_gate_up_swiglu_moe.spv": "cf5454d2d9a68cd165651301d5b7457222ffb7484c0c12112dbbff29f4de8308",
+      "share/zinc/shaders/dmmv_q4k_moe.spv": "1c18c6fa02bf294fe4918e0ff72746dd6038539116ae974c828fcdbfd99356e0",
+      "share/zinc/shaders/dmmv_q4k_moe_batched.spv": "dcf42b0c802847e2a1ef38f5fd1089e13cb9ec25bf5aada960cf4f206eefc8f6",
+      "share/zinc/shaders/dmmv_q4k_moe_cols.spv": "80b6a4c4333dfe749a30dd1c84e89a3d2a8cb5993760cf7d8e302f7eb7b60c7e",
+      "share/zinc/shaders/dmmv_q4k_moe_cols_q8_1.spv": "79445b8a107dd3ac0c7c4ea0a30cb7227e52a7d5fcd02b3474bc5f4af1d948c5",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_down_acc.spv": "5332ba248c94060e0b5af9ddccd37846f47a9bdade19e1efb3425022c63d2d78",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_gate_up_geglu.spv": "5daf80829674ff208b5be3f7091e9adf9c384d89ac6acd05930f4dbe59ee2384",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_gate_up_geglu_batch_top1.spv": "a8ee7212d4f0f760807c904fc39720d7f71778033975fd778b37709166a14de4",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_gate_up_geglu_cols_top1.spv": "8c7f45dc9aa60e56643f2f94de6a28368609602e8d28ab403dc8fc644f68b0a2",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_gate_up_geglu_cols_top1_q8_1.spv": "7883607d7cb4832248eb0294c8dfa6e8f88195ba3559acc7b0ce8dc50112431a",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_gate_up_swiglu_cols_top1.spv": "1951f2e17a700514bdc038d6b44a28aff13a62f22c6b064975b86ac1c94d6b99",
+      "share/zinc/shaders/dmmv_q4k_moe_fused_gate_up_swiglu_cols_top1_q8_1.spv": "5030a2cf3ca00b115b6b5f6c01c66b6c27085761337a4aa30c266a11fb382229",
+      "share/zinc/shaders/dmmv_q4k_moe_kpar.spv": "647fd2df114118a0d63271d9cc0dddd06a3543efd6ab3504275c504a6a935265",
+      "share/zinc/shaders/dmmv_q4k_o_proj_merge.spv": "0adfacaf76b27da288bf53a2bf1659d482de1a42ef5aa7435a0adc8ea3b6577e",
+      "share/zinc/shaders/dmmv_q4k_q8_1.spv": "633194d2cadcef8c5ceddf02b522bb6bd6a10c10a39256fe2c6711965a44a5c3",
+      "share/zinc/shaders/dmmv_q4k_q8_1_cols.spv": "c9981012e8e63a3c65cfef5bbaa25ebcbab528aaff049afd94c35711983713aa",
+      "share/zinc/shaders/dmmv_q4k_rows2_cols.spv": "a2216569976cc5b7dbbf4b2f12bb592448a3d58a1fe0c0f1b566bdc4f055259e",
+      "share/zinc/shaders/dmmv_q4k_rows4.spv": "ec69fed3646aec58e0f51e4b5f8dbd2d24653753d3cc674bb85d3027223f5ff0",
+      "share/zinc/shaders/dmmv_q4k_rows4_cols.spv": "6130d01097f152f7fec48daf0f90f29540d1f4ebef3728f089aed2eac93cf0c6",
+      "share/zinc/shaders/dmmv_q4k_rows4_cols3.spv": "fe504ca24df5787df53c6ef5fdfdc05166f7848c3ac07a6bf589f00eabf8a56d",
+      "share/zinc/shaders/dmmv_q4k_rows4_cols4.spv": "6a971314a37c2796d51d68ca1c85c17f87f0ff186ff4e6f4822c75d933a376c2",
+      "share/zinc/shaders/dmmv_q4k_rows8_cols.spv": "22a4a318a11c1bead5a46796aae35b4f21add16ed194a7806275f0f7af0e81a2",
+      "share/zinc/shaders/dmmv_q4k_rows8_cols3.spv": "0966de4a5c6385fd2c5f8f59beab9c75262b4518050d2d70d32490a79d66684a",
+      "share/zinc/shaders/dmmv_q4k_rows8_cols4.spv": "2e499301dd6cf4e4f403d0b1c4ba7ecb553f1b92409bece4fa5feb14feaf9b9b",
+      "share/zinc/shaders/dmmv_q4k_wide.spv": "754bcbaf16f1c713aaa3a5cb1713338a3e8ee13fbf305330db08426ded747b76",
+      "share/zinc/shaders/dmmv_q5_0.spv": "fda3f2fc698ede93e91ce665bebe5e16822939efa8792e1851dcd8cb5421f34b",
+      "share/zinc/shaders/dmmv_q5_1.spv": "a900a61da3dbf49e5c012f0c0a5ab40c576308556ceb3866ad4ef5616a7d8d72",
+      "share/zinc/shaders/dmmv_q5_1_acc.spv": "29b827ea8e07ff6b5fd2a907599ae14b5d0189a7c85ff6060aa2b3ba75eb4911",
+      "share/zinc/shaders/dmmv_q5_1_moe.spv": "0e2f8d5c4d4e045535fdd518d9d0e93456e09ea0a1490469497c5936cbc23b8e",
+      "share/zinc/shaders/dmmv_q5_1_moe_cols.spv": "f239a02410183d3ca78d1d9a62dc722b1badfcf5126d8c33394aec9f68340676",
+      "share/zinc/shaders/dmmv_q5_1_moe_down_acc_scaled_batch_top1.spv": "5eeed38b93fcafa431c86b4c8823cd56ffed1cdd9f43b639e6c949f24c563370",
+      "share/zinc/shaders/dmmv_q5_1_moe_fused_down_acc.spv": "951cf872fe1352405b0f713e5dccddd2cb3c44ae4107c49c0bd05af13b3e1a80",
+      "share/zinc/shaders/dmmv_q5_1_moe_fused_down_acc_scaled.spv": "42a4fde844fd00ae7df490a54228042d3b17e00d747edbc0dc14f15e505c3629",
+      "share/zinc/shaders/dmmv_q5k.spv": "2a74a25e518609f6413f44dca2589995845411cd96fa3468be833c018c7e8675",
+      "share/zinc/shaders/dmmv_q5k_moe.spv": "4274be031c7b403d07435934bcc96648cda6e8d0186c8dc61e61a2b680ec08ee",
+      "share/zinc/shaders/dmmv_q5k_moe_cols.spv": "ebb8164f2e279eb1ae5d7ba9e68bf02bf6ff246f936f4648cf1b0fc46a9c3974",
+      "share/zinc/shaders/dmmv_q5k_moe_cols_q8_1.spv": "2b324012ad934365ea74826e3d2aa02facedbc6851cd7f46b79dc5dc8ffdc040",
+      "share/zinc/shaders/dmmv_q5k_moe_fused_down_acc.spv": "b08237f293a3b37041ba567d8e74b4e128b0edec7e21d68be740e662be078be8",
+      "share/zinc/shaders/dmmv_q5k_moe_fused_down_acc_q8_1.spv": "fb94711964eb53328671935af521147a26c9dc02030a6ca668e2c8c258c2cab5",
+      "share/zinc/shaders/dmmv_q5k_moe_kpar.spv": "627d40365f1976aaebcb67e13b8036fa5715d37fee7837e31cbebd63f1a41fff",
+      "share/zinc/shaders/dmmv_q5k_rows4_cols.spv": "996c6c5dd365bafa303af70042f6565eb6f353a8120726baee1d26307785d64e",
+      "share/zinc/shaders/dmmv_q5k_rows4_cols3.spv": "1db98639ec2795d412afa7cd89aecadd9b320ad1d5356d08b3799f7b8f0ac475",
+      "share/zinc/shaders/dmmv_q5k_rows4_cols4.spv": "f8938ca8a16999b8e589bfecec21e00dbf067e46d36cc1b443c0de0c93c9b2cf",
+      "share/zinc/shaders/dmmv_q6k.spv": "5b68b38cf4e91cbc5bd00fa0e8e19b30bc3bfe35ded95e9f13d8a0a13a2c582b",
+      "share/zinc/shaders/dmmv_q6k_batch.spv": "d379c22ed480292038216081a86a28d492ac430d29a6b307075ff0edf4475864",
+      "share/zinc/shaders/dmmv_q6k_batch_kpar.spv": "4c1e0ed74ae41835aa8ce281506ad2843fbf4c90ae6c529d2b3215a827c9b90b",
+      "share/zinc/shaders/dmmv_q6k_moe.spv": "0d465d7dfe75f02686c119dafc2724b09716a49f5f1e84ff28352cad95dba71f",
+      "share/zinc/shaders/dmmv_q6k_moe_cols.spv": "483e7afa89c307f9eb5c0103621fb36e1537164c45659349aae22057f4088c0b",
+      "share/zinc/shaders/dmmv_q6k_rows2_cols.spv": "077debeabacb9a41e967c6cfc82db6618ada16294ac60a5eb01c4b9fcb09a7c8",
+      "share/zinc/shaders/dmmv_q6k_rows4.spv": "b04f2bd9fb52a35ddf9408be85d29d0a13284ccd00893a22ec3230f71b3c9908",
+      "share/zinc/shaders/dmmv_q6k_rows4_cols.spv": "a5917bdd4858a83f8177c5d94196024b62059c61c0dc8d4169066062aa87c4d1",
+      "share/zinc/shaders/dmmv_q6k_rows4_cols3.spv": "148d562f17716d1fa6a8d233645f612df25ca3c8e75b8aecc40d94f0fdbba5ca",
+      "share/zinc/shaders/dmmv_q6k_rows4_cols4.spv": "f5889c2172c6a28fbe9fa7ff66bd0be97de03d12681369e4e04768c48a8c7274",
+      "share/zinc/shaders/dmmv_q6k_rows8_cols.spv": "e0a338f93d843ac3cb1869a61718f435d6af652f04a3552f225ce84a1e6c4671",
+      "share/zinc/shaders/dmmv_q6k_rows8_cols3.spv": "66fe0f00a9c92a05f7e5461da6eaa5784536f2e2b010ed2f78c197330f640767",
+      "share/zinc/shaders/dmmv_q6k_rows8_cols4.spv": "54b77e13e2ffa9b58b054f79e5e33106bd30cf78669539b0ca84792fd3bfbe20",
+      "share/zinc/shaders/dmmv_q6k_wide.spv": "328e5fc0186e1dc1d85a6001121697c2fd6e39106fcd0aab1da5d1aedb19c7a5",
+      "share/zinc/shaders/dmmv_q8_0.spv": "5cc43fa566fc38d6e35d26050bc3ee0f0089dda9c51bd47ad937cb5788dbc635",
+      "share/zinc/shaders/dmmv_q8_0_batch.spv": "be4fb684f6e2bbd0c2d6c1f20cb6b5ba4f8419a8cbf506210e5386e61f402267",
+      "share/zinc/shaders/dmmv_q8_0_fused_gate_up_geglu.spv": "891ce6a56c987d54f768db4043f7a46ce29f8c69efcdc18d9962a7d806ea2fe0",
+      "share/zinc/shaders/dmmv_q8_0_fused_gate_up_geglu4.spv": "7bd8ba67390dedc34371f88a39662a7dadb3b977c5622e0f13fc85eec4f866e4",
+      "share/zinc/shaders/dmmv_q8_0_fused_gate_up_swiglu.spv": "e499fa27c2543e56799f90d2dc7d283ee4977d7b2a1417c36b321aaab3ca489a",
+      "share/zinc/shaders/dmmv_q8_0_fused_gate_up_swiglu_gate.spv": "109d0175c38382d0b1114d4ee120b135b770b3038cd13d2b11adcd4bccd7aa91",
+      "share/zinc/shaders/dmmv_q8_0_fused_pair.spv": "0fcbbd99fb8e1744cc78d96bfaf3a91457ac0df051b3173e290d7404d04b335d",
+      "share/zinc/shaders/dmmv_q8_0_intel_rows.spv": "47e1c01acc633d47d623b56da55b3ca4e1800043ada986f5c457e3433fc9bcfb",
+      "share/zinc/shaders/dmmv_q8_0_kpar_batch.spv": "a79e25105f5fda906ff65b35d59bc3e33cfd17bf8d7f015472bdcea1321e2530",
+      "share/zinc/shaders/dmmv_q8_0_moe_fused_down_acc_scaled.spv": "11c87c2d527695e2311be94efab7d4696a89aec21d08e712a0cc2150a3aea894",
+      "share/zinc/shaders/dmmv_q8_0_q8_1.spv": "5cd4a99899bc8d3825aefbfb58de9c3e5118c71cc38a78210d8ac64a50bb9827",
+      "share/zinc/shaders/dmmv_q8_0_sigmoid_acc.spv": "610fea048c1ac038fa2dd5efdf956a0b9c39c33f302be427cb4773f6bd579974",
+      "share/zinc/shaders/dmmv_q8_0_wide.spv": "0eaa64dc54c2234814b5e61b50d044784fffbac7af41bae5d9abe2caaedf3eb3",
+      "share/zinc/shaders/dmmv_q8_0_wide4.spv": "20d0631e6b97499164f5f55753497f4089ec6f19a12458e8d3c1dc416ec443e8",
+      "share/zinc/shaders/embed_gather.spv": "5b6a8f1702270154ffa1d7a79daae0bd8b27d70edcc4338311cce7cdb06db23e",
+      "share/zinc/shaders/flash_attn.spv": "a214a0cc2eb07f9eb590760b535b2af7a154743a083f6420a44e7c65894352b1",
+      "share/zinc/shaders/flash_attn_batched.spv": "447555add7838b0689502f755a75bc84353d128773eaad50175ee1179766d7d7",
+      "share/zinc/shaders/flash_attn_batched_f16kv.spv": "6ac660ca541c9785c2e5815121117769c2eda90ac87c75b6b9e0bf4166516007",
+      "share/zinc/shaders/flash_attn_batched_gqa.spv": "7a8082481d3a314d162342b7aebe27f2542ae1a8d7fda1b9a73d80a675cea53e",
+      "share/zinc/shaders/flash_attn_batched_gqa_f16kv.spv": "bedd3fc74dc271c9a6791e1d60485e34a98bae626ff8b9fda681a0e1b5c4e03c",
+      "share/zinc/shaders/flash_attn_batched_qt.spv": "b73e1417443cf575376c3dd244c19e409c1595d2bf13e8884446a411ccd7162b",
+      "share/zinc/shaders/flash_attn_batched_qt_f16kv.spv": "a0ba28401baf59112fb481d690e255cda5acd40602422676f5d93c80b0527d70",
+      "share/zinc/shaders/flash_attn_batched_tile.spv": "70329a6995dcb2ce127da06ed7f210e629a5b6970d43673bbfe188cc2ef38f8c",
+      "share/zinc/shaders/flash_attn_batched_tile_f16kv.spv": "3a9a033034b16ff12846f5eb4c0ca33419bc235994b1b166c5b563fdedca4be4",
+      "share/zinc/shaders/flash_attn_batched_tile_q8kv.spv": "ea3907121cd11a333cc6fe937d2a96defd62e0e532443b69c067ac4268f8d301",
+      "share/zinc/shaders/flash_attn_batched_tile_q8mmq.spv": "4a26b60e9cb7bb2a2b631adb848cf25989ad6dfdac8891729c774c2b69a32945",
+      "share/zinc/shaders/flash_attn_batched_tile_q8mmq_lds.spv": "05cc87ce9b095c0cc1d68efe34f9fce7d3328112c07d5eef33f3fbfb9bf1c680",
+      "share/zinc/shaders/flash_attn_f16kv.spv": "0f8d2ffe585639e5a9968f67de89d676f57d31c17e7434d6bc22a6f2d256d19f",
+      "share/zinc/shaders/flash_attn_gqa.spv": "242d4fb50153de885e7e30c7cdedb2f3bdb0e2dd172e7b66be8058b192d209ea",
+      "share/zinc/shaders/flash_attn_gqa_f16kv.spv": "cd48a7183f3b8dc7bccd729d649a82cf85cf4281b27d8fcf1f928111fdbaea7b",
+      "share/zinc/shaders/flash_attn_gqa_q8kv.spv": "6a073cf4600422d709ac0c76b53a296c4a63efe81a39958c50c4fc4b4ff0dc7e",
+      "share/zinc/shaders/flash_attn_q8kv.spv": "4a49d9fcf3099190e7f8d99b50fec65923e9de99db89e6a97e99e197290f50a1",
+      "share/zinc/shaders/flash_attn_q8mmq.spv": "2337e0c9c8af37d9db30be6db351dd6a87589d90a97fd09bfed7041555ee36ff",
+      "share/zinc/shaders/flash_attn_split_merge.spv": "c72bb329692b9f52dcbb6b94f318110ba5dd9638fa90ee61968f93ebe5072034",
+      "share/zinc/shaders/geglu.spv": "b5f4ae27ec1c8a01da1a516cea82ee55555b90932e4b57ac178ce56a34c4d7f2",
+      "share/zinc/shaders/gemma_moe_tail_fused.spv": "1a1050da891dad83d9f62d83dfa80fec713dfa8da57c0097abd936b97fc49512",
+      "share/zinc/shaders/k_norm_rope_kv_write_batched.spv": "9f2d44bed344a744795edb18a0192094c4bb0bda44d9e7bf48423fe37b85e02c",
+      "share/zinc/shaders/k_norm_rope_kv_write_batched_f16kv.spv": "737732ec5806af7edb039abc2b4bdad5520a2ec981691300f4aeda0bc1598f31",
+      "share/zinc/shaders/kv_cache_write.spv": "014b7525fb767258c66ca182d6a41fb9d90f6b3070aa3b945ef26e5b60c0fcc4",
+      "share/zinc/shaders/kv_cache_write_batched.spv": "d82d5e08538588ac4bfc44784affe5db10abffa5a6fa290feb27ee722aef579b",
+      "share/zinc/shaders/kv_cache_write_batched_f16kv.spv": "55d09fe862a83c710764d6f9dd095dbdc589d804340336f8de94ec9d7bde6d2d",
+      "share/zinc/shaders/kv_cache_write_batched_q8kv.spv": "74d7c6a5a1d079489e78100354dda622c0a6becf8614af759679a3a869c13ec8",
+      "share/zinc/shaders/kv_cache_write_f16kv.spv": "0f29e174c7d5af765ae027e170d36f975b852144f1866954ada5cb92130f4028",
+      "share/zinc/shaders/kv_cache_write_q8kv.spv": "d50b006cc05d71c78a3db5cb6cc4c6413fa5440e879e536083a55078ea7ce4f4",
+      "share/zinc/shaders/kv_cache_write_single_f16kv.spv": "039110ff240ee12bfe0ba9f741b0e9c94a8be6ff351009a4c92378354fdf69cd",
+      "share/zinc/shaders/kv_cache_write_single_q8kv.spv": "50097b7916adce21dc6c610f540f4a1efcb494dddfeff8054a6d5e87762e25b9",
+      "share/zinc/shaders/moe_route_pack.spv": "84d3e35b19013f248fa60fbdf1fe9dc150ee84c46174f912caebe3eb3f26f2e4",
+      "share/zinc/shaders/moe_weighted_acc.spv": "be13ca8aad5780b2efae53ef7c1384812e3ba7898b7ac76879e7ddd62ea72ed2",
+      "share/zinc/shaders/moe_weighted_acc_batch.spv": "1a8a7cfea53562159d1be5d85df12c3fd1e31740fa884d0cc3f85335cc0a6705",
+      "share/zinc/shaders/moe_weighted_acc_scaled_batch.spv": "4bb67589aadb07cf916834acb7a08322931a0b97e95a85002d05e80bb590467e",
+      "share/zinc/shaders/mul_elementwise.spv": "4f1808c523c75e993e9ffb9e977c6af4d3cd4cc4bbb7bef3986c152896ec21d3",
+      "share/zinc/shaders/mul_mm_id_q4k.spv": "c1f57572734f131a2050b2b8cb3d7b789a60a102a9750a3c044bfefc6abd4308",
+      "share/zinc/shaders/mul_mm_q4k.spv": "908deafc6eb66964c6b51769dff354c1661c98070dab96f7220dc05da06af66f",
+      "share/zinc/shaders/mul_mm_q4k_down_acc.spv": "49c75ce3467d1613254c0c127c9b17c7e1232d754a9ec199f069b07927239792",
+      "share/zinc/shaders/mul_mm_q4k_down_acc_wide.spv": "3a700c84a85affb85ec2a65d805894e6905419661c64bdbe559678101deddf8a",
+      "share/zinc/shaders/mul_mm_q4k_full_dp4a.spv": "a34dadb5f23b314c60b1b306829c9ba3ddf00d0949348971b86c9f16972139da",
+      "share/zinc/shaders/mul_mm_q4k_full_dp4a_bm64_n64_acc.spv": "004cb27f71bf712867938b1e5b9d3ca825c9280e19e2b753d4ffbc6b5144d603",
+      "share/zinc/shaders/mul_mm_q4k_full_dp4a_mmq64_n64_acc.spv": "bdb4da424ec7db7cf71af236e28fb562e2382244204dbcb22255bfa143dd21a4",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_geglu.spv": "af7ff77f280d76553ca87840e708d384b828332914359cec7269b05e153a9a92",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_geglu_full.spv": "e22cc1c9ac751e3f3e0d4ec5ca7220cb6565b86a4081cb1c09063d83ed23e1e3",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_geglu_n1_dp4a_q8.spv": "187b1cc997554850d9ed1b8b8f31a619fcfa8749f054c67011fb3a6c62831fa5",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_geglu_tail8.spv": "9818c135cd66640d4c4495a370f84f90ca7bade33f27cc00efa6398e1c3b6b86",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu.spv": "b3afb90575a65a43226b9506b3115866ec367a2c277627f668b3e637f2545573",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu_full.spv": "a784c9f900eccd227e4c487047dbc9108e6b71e458616fc983bde02b5b17f044",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu_full_dp4a.spv": "faa92d4649324347badad1daebb5ae643d709885dd1bbe557633790bfd3e4093",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu_full_dp4a_q8.spv": "5662689d02f9f900fc45f67cd1030939cb5a205bb2c9fc115c79b197513e3c12",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1.spv": "871c1fa8840cd40be3ecca580d08cb4ea0f0d586c0ebcaf8f6130430edf4de28",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_1_bm64.spv": "f7431df7af5f06733653a502d29d7f690393dcf820f7eae69b891857a9f3d384",
+      "share/zinc/shaders/mul_mm_q4k_gate_up_swiglu_full_dp4a_q8_bm64.spv": "424f46fe1c1ca94e6d7dde92ae38d9200c613c2b51c5269bdf58a95b2061ea7f",
+      "share/zinc/shaders/mul_mm_q4k_tail8.spv": "36d76edc770064ebcad51a66c327f7557a4376813087f71ac39c49e0fd517941",
+      "share/zinc/shaders/mul_mm_q5k.spv": "bbf8c51da7c0cccf895171222b62b9e927fa0e230952bc7eafc0d931b6d688d1",
+      "share/zinc/shaders/mul_mm_q5k_full_dp4a.spv": "4000a5ba6ffe2590806051005ebf392e1ed2109b5e9e5e044a623a820129f9a5",
+      "share/zinc/shaders/mul_mm_q5k_wide.spv": "fd5e2d6d8dd7d49c66b4fcc9737e66d4815ac99061339535b4ee5b2947485df5",
+      "share/zinc/shaders/mul_mm_q6k.spv": "40d10ef57fb229542539831820dbdef5a47090ecd3118b999eec8193f6130357",
+      "share/zinc/shaders/mul_mm_q6k_full.spv": "c4aaef909d90923c4fc98b3b5bd70cfe20fb878ee9626cc2c4745abf3669a836",
+      "share/zinc/shaders/mul_mm_q6k_full_down_acc.spv": "1d199cbdcc7b63d9cc58d6464419a0c20ff40dc3ef23c1307b02dbac894b0744",
+      "share/zinc/shaders/mul_mm_q6k_full_dp4a.spv": "f33d80e143eb469be8fd2b2d2a5ea1752571d47ddcdf5235693ff718431a9a44",
+      "share/zinc/shaders/mul_mm_q6k_full_dp4a_bm64_n64_acc.spv": "efd8e7950d727a377a9d1a170eae0cf6ec35ee2d723bada6a9ccd249a81df2df",
+      "share/zinc/shaders/mul_mm_q6k_full_dp4a_mmq64_n64_acc.spv": "5badeaceff4ab220c9703b66c4f8f86c97208b8d6139c32eea0894ce311d2e3d",
+      "share/zinc/shaders/mul_mm_q6k_full_dp4a_q8_1.spv": "ab93eeeeadabfc50611b8a958d509653e60f88ff072991c88e34295ac35de0a8",
+      "share/zinc/shaders/mul_mm_q6k_full_dp4a_q8_1_bm64_n64.spv": "96ea5908c2d64d9583520d75d1fca3b267630078a75355ea55823211c30ca812",
+      "share/zinc/shaders/mul_mm_q6k_tail8.spv": "b8e2c43ac8636723fd081552ff7c1b8f4954296b1ce8f2263d6a8cd414e73d14",
+      "share/zinc/shaders/mul_mm_q8_0.spv": "8a2d61570c283ddc07bb890879dbd602131f9a06a7a030bb8f4f17a1d88f7987",
+      "share/zinc/shaders/mul_mm_q8_0_full_dp4a.spv": "c66517bda57b398caa7098a68e7f4ad5c92f2e213a4029ae63a31834d0e097c4",
+      "share/zinc/shaders/norm_rope.spv": "e60ce73c18d4443c42469f5d4a5421a3491483e463667063951163456544b2d8",
+      "share/zinc/shaders/per_expert_scale.spv": "c9c406564f7859ca043ea1b47a27f941a54aa783dbbe58b286584f0a9da1e8dd",
+      "share/zinc/shaders/post_norm_residual_rms_norm.spv": "c74b5dc826c0ed865c7749aaff94ff46fa9438dab27c40a865ebdfb46a90ce96",
+      "share/zinc/shaders/qk_norm_rope_kv_write.spv": "9ef47cdff1ef221017fb56dff4311cecf261af243d34ac8ce19bbfb920fc0f94",
+      "share/zinc/shaders/qk_norm_rope_kv_write_batched.spv": "b3a8f6213eb78fe712d5e57f9e60cf6167cc2c92b76de1585684a75ddfcb3a51",
+      "share/zinc/shaders/qk_norm_rope_kv_write_batched_f16kv.spv": "de1094a13c49e0d695d6c8db8a299dfb41fae8cf951dcbf009e2b77054873031",
+      "share/zinc/shaders/qk_norm_rope_kv_write_batched_q8kv.spv": "bd3dc5c17ef9bedcf64db6e9dd8b801bd5d8928170a1d5d1322876f735e22636",
+      "share/zinc/shaders/qk_norm_rope_kv_write_f16kv.spv": "0a2f2403bfe1c48b8e7057386901f82d8e253ff9df574dab5b92f8200a0025a4",
+      "share/zinc/shaders/qk_norm_rope_kv_write_q8kv.spv": "322fd0364ed49ff9e646fbf0455a0810e6256e57e24717a179f65e967f1e8107",
+      "share/zinc/shaders/quantize_act_q8.spv": "85fe019ff53294e07780db02f9bb7718cb1d5df126f651a5393c19c92c51dd13",
+      "share/zinc/shaders/quantize_act_q8_1.spv": "3f99c1df4ef3c7c43f2a23cedadc8735b90db64e3a169c30de97230b8e47ccb1",
+      "share/zinc/shaders/quantize_q8_1.spv": "d91132a39abce10a5a2e3b7ea386e4cd539929df02b9fb63f47f6bf234311a8c",
+      "share/zinc/shaders/residual_rms_norm.spv": "5a27032988db7d2bb7835886173e494f71ec02c8322cb5dd285357936f08cd21",
+      "share/zinc/shaders/residual_rms_norm_quant_q8_1.spv": "f56e85e2a0bcbdf27e549987e3606ccce549a2274a92bee37ff19872750e8ed7",
+      "share/zinc/shaders/residual_rms_norm_wide.spv": "1b4ad79d5e2bf3f8a6b95c6ea60e27bf12bf55fc332c46cce628d98f44eff302",
+      "share/zinc/shaders/rms_norm_add.spv": "da92678fd52b01f408b3ddcacae3cc9eca241f70b0df9836c1b17196e7217163",
+      "share/zinc/shaders/rms_norm_add_vec4.spv": "bab15a9f51908cf9b595480c8a5b32f40a5398b4d5c2a2ea00dcb725a36db064",
+      "share/zinc/shaders/rms_norm_dmmv_alpha_beta_ksplit.spv": "1affe9cbf54dd73dfadeac3459e4eaad3d6d0e23e9780ca1225bbbdfad776423",
+      "share/zinc/shaders/rms_norm_dmmv_f32.spv": "f34f7a32f24312d4ad529d0ae624bfca796a5c648523e0947b25172bb69b4513",
+      "share/zinc/shaders/rms_norm_dmmv_q4k_alpha_beta.spv": "65bd66cbd389cff0998812a27d1b2c2c70ef325e0439750eb4ae2f6b884ffd79",
+      "share/zinc/shaders/rms_norm_mul.spv": "5e05c616a4c4220e24d35e37e682d75c1b91db32e677464943d8f05caf94b485",
+      "share/zinc/shaders/rms_norm_mul_wide.spv": "7158b7f8e6ab3a4372a156edf6985194d26ef74fdc0e64e287e938b77932755a",
+      "share/zinc/shaders/rms_norm_scale_dmmv_f32.spv": "3907a6e901681afd9e9f039cbe25dde12f3241247ca29409e1807eed4ce3135a",
+      "share/zinc/shaders/rms_norm_scale_dmmv_f32_batch.spv": "c95a32bdf98cc85f462001242d3751c53431d7ba3cbcc982e3186e9d832b9719",
+      "share/zinc/shaders/rms_norm_scale_dmmv_f32_topk.spv": "7f737da976b1669fbde7149495519abf4943e875d1824e7e342d16d423671155",
+      "share/zinc/shaders/rope_batched.spv": "f2667e77357f3afa4fe6f7d40493110bc3f98288a711bc847eb1253dddb07812",
+      "share/zinc/shaders/rope_fused.spv": "716c527b8e7c9abfc057568252cbd98487f7f00304aed1957f4e814de11a9ce0",
+      "share/zinc/shaders/router_f32_batch.spv": "48d29b7d322a71340d5569e1872bd0953407d2fa4f607b93cb822dc3efa63e1f",
+      "share/zinc/shaders/scale_accumulate.spv": "ae8681b4497213cc09cd0c1620f1ce322428299465bdf93848354874fe088465",
+      "share/zinc/shaders/scale_in_place.spv": "25b50fa80ec32be0ab25fe81074922b9544b1943b651691d775bd7da0954f88b",
+      "share/zinc/shaders/sigmoid_mul.spv": "0073e0a8260a47eddb75a5583e6396a1ea4000b0421bca7876f28d4ff1fe8923",
+      "share/zinc/shaders/sigmoid_scale_acc.spv": "bb56aed00f9cf65d461248d20e697d1d1fc43874f75c363344a07ed3b46ed8b2",
+      "share/zinc/shaders/sigmoid_scale_acc_batch.spv": "e02c6cdce256f19f2a7867ef8b07234d1bc0fd0941b08a1929c015658c229d1e",
+      "share/zinc/shaders/softmax_top1.spv": "4485f762d99d88de0c342960960f8fd4dc5ac5966102f223b1f1b74db14a8187",
+      "share/zinc/shaders/softmax_top1_batch.spv": "1193d78609533f9888dc3358f1a2c2cf877f1bc3e8f23dddd88e1a30f4dd1e13",
+      "share/zinc/shaders/softmax_topk.spv": "b5ee63b1a5ce896d9a5c97b43d76e2dfb8d27d0bedeadcf4eed3d869a5b318b5",
+      "share/zinc/shaders/softmax_topk_batch.spv": "c65503ddaa73f86db07d2a8445a6be68591496c1a5cb0ff6cf5631fb13a783e5",
+      "share/zinc/shaders/softmax_topk_v2.spv": "4f904faca29b40a5d1867c21a1693b19411eedb34d683fb38ada2fd6033894c4",
+      "share/zinc/shaders/ssm_conv1d.spv": "0a5ff4e73d3f5865e73c460c99778ebb6750b13a3d25551a8ae92b9e0a85778f",
+      "share/zinc/shaders/ssm_conv1d_batched.spv": "a600ab75f171bc11d76a9d3072f31b4e6c5118943fbe319ed4c6a07fecbe7ac2",
+      "share/zinc/shaders/ssm_conv1d_batched_hist.spv": "88d3521fec2ab05eccee8c56ae1508a23dc2bba78d160825b56798f5aa74ddd4",
+      "share/zinc/shaders/ssm_delta_net.spv": "fc064f4bd2d8d1c606109629c32e47a49ff133e4cd00c2868b4fd04cf706e20c",
+      "share/zinc/shaders/ssm_delta_net_cols8.spv": "b2ee7c2cbea509802abacbe6311053992d7f5c4e3ff9128ce6e91f009a43f515",
+      "share/zinc/shaders/ssm_delta_net_cols8_hist.spv": "434c7048c5d2832ff2c1dacfc182dbf9c6bb4468d6b79712cc4345eda4875f7a",
+      "share/zinc/shaders/ssm_delta_net_cols8_normed.spv": "b9d20544d20b4a1000d2e0724ec83652e6558b0b395ad308f9c778171936f6f3",
+      "share/zinc/shaders/ssm_gated_norm.spv": "0a236bbe79f457e5f14f3ce28b38f42f17e98f3d266a87ebb68481337a71e5cd",
+      "share/zinc/shaders/ssm_gated_norm_batch_tok.spv": "b28ac069c0feb1b6f1dc0a676556e25adec865e2671b23fc346f5abdecbe99be",
+      "share/zinc/shaders/ssm_gated_norm_batch_tok_fused.spv": "c89e927b9159feb629877c91280f7c2351c5f9ecd7c1656c9cf458ae23c5ca0c",
+      "share/zinc/shaders/ssm_gated_norm_batched.spv": "bde52822407891ec21af765f00c3c2e597743d37ec8a6f15381bea704579cd49",
+      "share/zinc/shaders/ssm_qk_norm.spv": "118482ea31bc32c93a1796e29886ed0b93b95ab75671677fb17a77422ef8ce4b",
+      "share/zinc/shaders/swiglu.spv": "96069e9f15af88fbea69e0be5420b66a69e26531f173f893b090a2cf0296fc4b",
+      "share/zinc/shaders/swiglu_oai.spv": "887409fecfae2ad2fe09220861b9b76bf23fa1c6205f34b241f10969b5445f6e",
+      "share/zinc/shaders/vadd.spv": "b69a967d9c0b74379d667a10952d1e359b7f280879b42644e1a0e237990fa3e0"
+    },
+    "version": "zinc 0.1.0-dev.20261109.1\ncommit: 56bec2287ed7c2bdd5e2b67bac0d12bfff79768a\ntarget: x86_64-linux-gnu\noptimize: fast\nbackends: vulkan",
+    "archive_sha256": "4e7c12b807cd7d01d89aeb33edb00cc5e4dec7279cdda8acb9a80fe105e3ec9b"
+  },
+  "harness_commit": "4120d70387e60000408d0dbd1d7760d81dce8a0c",
+  "harness_sha256": {
+    "config/benchmark-reference.json": "6727d94d70002d1eb9b91ae2c2e08827d1bac2b53b7cf88a8c75b47429a976a7",
+    "config/release/targets.json": "cbcc6c2c821396e1ff464b689125a123c039971175f22f1fa8800830cefbe43a",
+    "tools/benchmark_gemma_rocm.py": "a8fc0773d3f0ab8369c605e68749c5509129c5bee8f5e56637157192e9ba170c",
+    "tools/benchmark_intel.py": "0706ebaa78e79160ba18d9ff055d2d5cf2ee02c33de4002690d31cfffccb53ad",
+    "tools/benchmark_matched_mtp.py": "4260e469764b284eda2d1949352cf5a4ebdf2740cf9c2f7f2b6a05cf6d160e9f",
+    "tools/benchmark_metrics.py": "1cda9a7d1077993c712354643999cb4685a7073b9a72ff4caf706690c957f4da",
+    "tools/benchmark_reference.mjs": "505c7df26b73146d77667ca18018420e325cdc33a9c4b83bc74fd85bfbec8f8b",
+    "tools/benchmark_speculation.mjs": "b6b0a457ed5af218d411760ca600eae73e8ab495183d7f5023696bc0dc9fb751",
+    "tools/intel_native_probe.py": "0ab0b1b5fa38d442686b1ebdea7cf3cd775d110c97a76a7841f7ed347baf346c",
+    "tools/intel_probe_json.h": "281e99fec6f2076dd29102b4809a00766f78ce2b59d528ee1cf7f5208f5ab9db",
+    "tools/intel_sycl_environment.py": "cfa0128cc22ad6797769c8f06c9eba0f6087b88b1c800f37e0958f070bf98dee",
+    "tools/intel_sycl_probe.cpp": "23e43585d122ecf80b61497ecdcf7058412b53f02d7e1566e134db56ab5a3388",
+    "tools/intel_workloads.mjs": "b36c3bb6d4dace9bef93dae459c44e9542cffbccca3c9213f0b47014ce04a4a4",
+    "tools/parse_mtp_sample.mjs": "615644b3e61ca5be57590a9e430222e1959d42710874c8e807d4cd8840b925b6",
+    "tools/performance_suite.mjs": "99df6ac6ad6020a007ddb86d28c5abef007e05a52a537df4abd4c486f239fc12",
+    "tools/release_gpu.py": "a1bd7497e97455e8990d2527a82beddb02a8ac22e81a1329c15d7aca85148a16",
+    "tools/release_lib.py": "fbfd432c6932278d1573094e00ac1be7828d3e0fdd69894ca7ae11909ee40919",
+    "tools/validate_attention_window.c": "103e16b8ceba1c886157eaacd1b5f5fcbaa96779f423a064f5caaffd64a07346",
+    "tools/validate_dmmv_shared_cache.c": "3bb5a2f26996523b0d5695d3bba65a21353a0c2b1b1b8a961df51ecd80cdb5bd",
+    "tools/validate_gemma_router.c": "7c43c600a1e2d2ae74dadf7b2df26d9eab329b4dcc1d66412da01366b35b872b",
+    "tools/validate_q8_decode.c": "19f95548cda7c8589fc8a36f8c5da31ca9d9a7a1bfed983add8586a73cc073a4"
+  },
+  "correctness_oracle": {
+    "commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+    "backend": "vulkan"
+  },
+  "settings": {
+    "backend": "vulkan",
+    "protocol": "raw",
+    "kv_cache": "f16",
+    "mtp": "off",
+    "slots": 1,
+    "prompt_cache": false,
+    "temperature": 0,
+    "top_p": 1,
+    "seed": 0
+  },
+  "kernel_reference": {
+    "cases": 376,
+    "passed": true
+  },
+  "q8_decode_reference": {
+    "cases": 228,
+    "identical_pairs": 114,
+    "passed": true
+  },
+  "required_models": [
+    "qwen3-0.6b-q8-0",
+    "qwen36-35b-a3b-q4k-xl",
+    "qwen36-27b-q4k-m",
+    "qwen35-9b-q4k-m",
+    "gemma4-31b-q4k-m",
+    "gemma4-26b-a4b-q4k-m",
+    "qwen38-27b-q4k-m"
+  ],
+  "models": [
+    {
+      "id": "qwen3-0.6b-q8-0",
+      "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "size_bytes": 639446688,
+      "context": 2048,
+      "sliding_window": null,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            334,
+            785,
+            444,
+            57909,
+            81627,
+            748,
+            54348,
+            56177,
+            641,
+            279,
+            4746,
+            315,
+            279,
+            34235,
+            6290,
+            315
+          ],
+          "zinc_ids": [
+            334,
+            785,
+            444,
+            57909,
+            81627,
+            748,
+            54348,
+            56177,
+            641,
+            279,
+            4746,
+            315,
+            279,
+            34235,
+            6290,
+            315
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+          "reference_text_sha256": "5a566e39bb17ff154bbb031d494779e423e918dafd0d27d1c1f05f108c5e82aa",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            32,
+            44944,
+            4278,
+            553,
+            1667,
+            3070,
+            87072,
+            4802,
+            334,
+            311,
+            3070,
+            42196,
+            323,
+            21129,
+            3607,
+            334
+          ],
+          "zinc_ids": [
+            32,
+            44944,
+            4278,
+            553,
+            1667,
+            3070,
+            87072,
+            4802,
+            334,
+            311,
+            3070,
+            42196,
+            323,
+            21129,
+            3607,
+            334
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+          "reference_text_sha256": "83cdf7a43c35fa85f54871941c46900e6a65178b2081868b5769b9dba58a2b34",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 18,
+          "reference_ids": [
+            19641,
+            5711,
+            315,
+            23285,
+            2924,
+            1447,
+            16,
+            13,
+            3070,
+            29331,
+            12108,
+            18827,
+            95518,
+            42540,
+            374,
+            13570
+          ],
+          "zinc_ids": [
+            19641,
+            5711,
+            315,
+            23285,
+            2924,
+            1447,
+            16,
+            13,
+            3070,
+            29331,
+            12108,
+            18827,
+            95518,
+            42540,
+            374,
+            13570
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+          "reference_text_sha256": "f647d832be9da0f4884b4ce8b8c807c8871cacbe32312ab24d8bf961ae71ec1b",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "full_http_continuations": 9,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": null,
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "5a566e39bb17ff154bbb031d494779e423e918dafd0d27d1c1f05f108c5e82aa",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "83cdf7a43c35fa85f54871941c46900e6a65178b2081868b5769b9dba58a2b34",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "f647d832be9da0f4884b4ce8b8c807c8871cacbe32312ab24d8bf961ae71ec1b",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 18,
+              "total_tokens": 34
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    },
+    {
+      "id": "qwen36-35b-a3b-q4k-xl",
+      "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+      "size_bytes": 22360456160,
+      "context": 4096,
+      "sliding_window": null,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            11894,
+            26,
+            424,
+            58330,
+            13,
+            1049,
+            557,
+            264
+          ],
+          "zinc_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            11894,
+            26,
+            424,
+            58330,
+            13,
+            1049,
+            557,
+            264
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+          "reference_text_sha256": "240bf8e71131d3770c2f428357635e2b23670732bd9b8bddd1aef2c7340538db",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            36337,
+            310,
+            279,
+            4732,
+            4424
+          ],
+          "zinc_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            3618,
+            310,
+            279,
+            4732,
+            4424
+          ],
+          "comparison": {
+            "near_ties": [
+              {
+                "chosen_id": 3618,
+                "logprob_gap": 0.015493392944335938,
+                "position": 11,
+                "rank": 2,
+                "reference_id": 36337
+              }
+            ],
+            "tokens": 16
+          },
+          "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+          "reference_text_sha256": "92222503d7aff38f2ea4b958cee1a1db16a7713b3b50e678bf6141522567487d",
+          "validated_text_sha256": "0f584bd758021e0ccb5a21693285cde71ccdb014c88277b9bc09d2523248253c"
+        },
+        {
+          "prompt_tokens": 18,
+          "reference_ids": [
+            8160,
+            513,
+            2250,
+            4047,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ],
+          "zinc_ids": [
+            8160,
+            513,
+            2250,
+            4047,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+          "reference_text_sha256": "1ce1f82e477b0376a1dc96bd46637aa6c23c0cb8e79046a07ccc871358eaf11d",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [
+              {
+                "chosen_id": 3618,
+                "logprob_gap": 0.015493392944335938,
+                "position": 11,
+                "rank": 2,
+                "reference_id": 36337
+              }
+            ],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 47,
+        "near_tie_tokens": 1,
+        "total_tokens": 48
+      },
+      "full_http_continuations": 9,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": {
+        "passed": true,
+        "recovery_ms": 2426
+      },
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "240bf8e71131d3770c2f428357635e2b23670732bd9b8bddd1aef2c7340538db",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "0f584bd758021e0ccb5a21693285cde71ccdb014c88277b9bc09d2523248253c",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "1ce1f82e477b0376a1dc96bd46637aa6c23c0cb8e79046a07ccc871358eaf11d",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 18,
+              "total_tokens": 34
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    },
+    {
+      "id": "qwen36-27b-q4k-m",
+      "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+      "size_bytes": 16817244384,
+      "context": 4096,
+      "sliding_window": null,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            15756,
+            11894,
+            26,
+            424,
+            76454,
+            13,
+            1049,
+            1100
+          ],
+          "zinc_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            15756,
+            11894,
+            26,
+            424,
+            76454,
+            13,
+            1049,
+            1100
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+          "reference_text_sha256": "61751279ad294f2e9386cf939dcbc90e5ea63cc2bf8fafff6ac0378824d72715",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            36337,
+            310,
+            279,
+            4732,
+            4424
+          ],
+          "zinc_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            36337,
+            310,
+            279,
+            4732,
+            4424
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+          "reference_text_sha256": "92222503d7aff38f2ea4b958cee1a1db16a7713b3b50e678bf6141522567487d",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 18,
+          "reference_ids": [
+            8160,
+            513,
+            2250,
+            4047,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ],
+          "zinc_ids": [
+            8160,
+            513,
+            2250,
+            4047,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+          "reference_text_sha256": "1ce1f82e477b0376a1dc96bd46637aa6c23c0cb8e79046a07ccc871358eaf11d",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "full_http_continuations": 9,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": null,
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "61751279ad294f2e9386cf939dcbc90e5ea63cc2bf8fafff6ac0378824d72715",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "92222503d7aff38f2ea4b958cee1a1db16a7713b3b50e678bf6141522567487d",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "1ce1f82e477b0376a1dc96bd46637aa6c23c0cb8e79046a07ccc871358eaf11d",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 18,
+              "total_tokens": 34
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    },
+    {
+      "id": "qwen35-9b-q4k-m",
+      "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+      "size_bytes": 5680522464,
+      "context": 4096,
+      "sliding_window": null,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            11894,
+            26,
+            424,
+            76454,
+            13,
+            1049,
+            557,
+            264
+          ],
+          "zinc_ids": [
+            760,
+            9662,
+            383,
+            5068,
+            6451,
+            4963,
+            1467,
+            524,
+            11894,
+            26,
+            424,
+            76454,
+            13,
+            1049,
+            557,
+            264
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+          "reference_text_sha256": "aae6e8c28045cb02149d2bc3c096b24862dc360f174d563777d98ce6ab226481",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            48270,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            53494,
+            318,
+            2777,
+            488,
+            1318
+          ],
+          "zinc_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            48270,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            53494,
+            318,
+            2777,
+            488,
+            1318
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+          "reference_text_sha256": "13a258cd7cf721703b87e696f55b759211bdcf7a49b41a2a002990085c9d852d",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 18,
+          "reference_ids": [
+            34,
+            17936,
+            369,
+            264,
+            30894,
+            9041,
+            31474,
+            364,
+            1141,
+            8800,
+            19132,
+            94494,
+            11,
+            27462,
+            94494,
+            11
+          ],
+          "zinc_ids": [
+            34,
+            17936,
+            369,
+            264,
+            30894,
+            9041,
+            31474,
+            364,
+            1141,
+            8800,
+            19132,
+            94494,
+            11,
+            27462,
+            94494,
+            11
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+          "reference_text_sha256": "f3393ebc77fd02689a6a449f82e470e1c5f876356448f63fa35c138a8b627d40",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "full_http_continuations": 9,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": null,
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "aae6e8c28045cb02149d2bc3c096b24862dc360f174d563777d98ce6ab226481",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "13a258cd7cf721703b87e696f55b759211bdcf7a49b41a2a002990085c9d852d",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "f3393ebc77fd02689a6a449f82e470e1c5f876356448f63fa35c138a8b627d40",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 18,
+              "total_tokens": 34
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    },
+    {
+      "id": "gemma4-31b-q4k-m",
+      "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+      "size_bytes": 18323733440,
+      "context": 4096,
+      "sliding_window": 1024,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            818,
+            9884,
+            529,
+            708,
+            8162,
+            552,
+            4099,
+            236858,
+            236751,
+            76217,
+            691,
+            711,
+            834,
+            1623,
+            496,
+            6347
+          ],
+          "zinc_ids": [
+            818,
+            9884,
+            529,
+            708,
+            8162,
+            552,
+            4099,
+            236858,
+            236751,
+            76217,
+            691,
+            711,
+            834,
+            1623,
+            496,
+            6347
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "5698bfe495d177ab50c89732a78deee2a226bf2c1946957ce9751d4fe33416a6",
+          "reference_text_sha256": "bdde8d5a18426e9ad54d6b691116637d24974ddb5b0e55f1d381728757a168b8",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            3834,
+            1061,
+            33055,
+            1984,
+            236764,
+            496,
+            41839,
+            1677,
+            711,
+            3643,
+            623,
+            3663,
+            7445,
+            1781,
+            13884,
+            236764
+          ],
+          "zinc_ids": [
+            3834,
+            1061,
+            33055,
+            1984,
+            236764,
+            496,
+            41839,
+            1677,
+            711,
+            3643,
+            623,
+            3663,
+            7445,
+            1781,
+            13884,
+            236764
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "e094d4606c87caa130b6778499219e9d5782373b127cd1aee217113d65d34390",
+          "reference_text_sha256": "54c926107cca593846f69ca8e60d00e37732197d15532ed14af8d34b5eb36600",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            19765,
+            3364,
+            6178,
+            529,
+            14561,
+            659,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121,
+            18800
+          ],
+          "zinc_ids": [
+            19765,
+            3364,
+            6178,
+            529,
+            14561,
+            659,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121,
+            18800
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "ce249ddc5adb6ff279a898ea2f6280a8e7c046057d71e1ea87dd9b05467eb3fd",
+          "reference_text_sha256": "f10cfb47404e9000f0a1b166f9e2db4e8e4f6e0d9c853157e2afdddc267db5cd",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 1139,
+          "reference_ids": [
+            236788,
+            77938,
+            173928,
+            1602,
+            711,
+            3666,
+            506,
+            25872,
+            236793,
+            528,
+            1707,
+            236764,
+            668,
+            1053,
+            7785,
+            28959
+          ],
+          "zinc_ids": [
+            236788,
+            77938,
+            173928,
+            1602,
+            711,
+            3666,
+            506,
+            25872,
+            236793,
+            528,
+            1707,
+            236764,
+            668,
+            1053,
+            7785,
+            28959
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "1b53d7128a7396534fd61dc94a31b9d087e68ec182e80d065f68cc467d1cbce7",
+          "reference_text_sha256": "da6f7facd9dd9d2a2ec03cf0b4f24066cf96140a2783b174402c6d5acdf39626",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 1136,
+          "reference_ids": [
+            236776,
+            41839,
+            4146,
+            684,
+            18828,
+            5387,
+            699,
+            506,
+            4888,
+            529,
+            506,
+            18820,
+            532,
+            36122,
+            625,
+            1131
+          ],
+          "zinc_ids": [
+            236776,
+            41839,
+            4146,
+            684,
+            18828,
+            5387,
+            699,
+            506,
+            4888,
+            529,
+            506,
+            18820,
+            532,
+            36122,
+            625,
+            1131
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "736479b8c5731449715e04a17cb3bcf03a11473c768270f8678f9a73a1ad174c",
+          "reference_text_sha256": "0b5ab82388153645444861a40024c09124b251bc43083a3ace951c2a070b5133",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 1136,
+          "reference_ids": [
+            19765,
+            6178,
+            529,
+            14561,
+            659,
+            236787,
+            108,
+            236770,
+            236761,
+            5213,
+            109454,
+            35615,
+            1018,
+            568,
+            26303,
+            531
+          ],
+          "zinc_ids": [
+            19765,
+            6178,
+            529,
+            14561,
+            659,
+            236787,
+            108,
+            236770,
+            236761,
+            5213,
+            109454,
+            35615,
+            1018,
+            568,
+            26303,
+            531
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "352be90f23c260899786079101ac70f7589cd632d0e1ad1172312f5a1cac512c",
+          "reference_text_sha256": "4002f0b5b6743b2da2e12711a496e3db3dcaeffd7ed9ba9d2cc23a9a70b4af25",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 96,
+        "near_tie_tokens": 0,
+        "total_tokens": 96
+      },
+      "full_http_continuations": 18,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": null,
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "bdde8d5a18426e9ad54d6b691116637d24974ddb5b0e55f1d381728757a168b8",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "54c926107cca593846f69ca8e60d00e37732197d15532ed14af8d34b5eb36600",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "f10cfb47404e9000f0a1b166f9e2db4e8e4f6e0d9c853157e2afdddc267db5cd",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "da6f7facd9dd9d2a2ec03cf0b4f24066cf96140a2783b174402c6d5acdf39626",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 1139,
+              "total_tokens": 1155
+            }
+          },
+          {
+            "content_sha256": "0b5ab82388153645444861a40024c09124b251bc43083a3ace951c2a070b5133",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 1136,
+              "total_tokens": 1152
+            }
+          },
+          {
+            "content_sha256": "4002f0b5b6743b2da2e12711a496e3db3dcaeffd7ed9ba9d2cc23a9a70b4af25",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 1136,
+              "total_tokens": 1152
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    },
+    {
+      "id": "gemma4-26b-a4b-q4k-m",
+      "sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+      "size_bytes": 16868236288,
+      "context": 4096,
+      "sliding_window": 1024,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "zinc_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "5698bfe495d177ab50c89732a78deee2a226bf2c1946957ce9751d4fe33416a6",
+          "reference_text_sha256": "5ca02174014fc51f94d51135970b01ff910962d9e024588a81c0592ce7439f3d",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "zinc_ids": [
+            2021,
+            3050,
+            1217,
+            496,
+            41839,
+            4146,
+            236764,
+            506,
+            1346,
+            2132,
+            3210,
+            531,
+            13808,
+            563,
+            600,
+            5213
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "e094d4606c87caa130b6778499219e9d5782373b127cd1aee217113d65d34390",
+          "reference_text_sha256": "a4f34af5b76644cb38514c32c9a08afa3f93c6c36cd6f2bc66f1288d825315c1",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "zinc_ids": [
+            8291,
+            659,
+            1806,
+            3364,
+            6178,
+            529,
+            14561,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "ce249ddc5adb6ff279a898ea2f6280a8e7c046057d71e1ea87dd9b05467eb3fd",
+          "reference_text_sha256": "225e2837df0d2dd8097f0eb8b0a3d4e5bc4de43c93106ed56ee5daf734950e42",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 1139,
+          "reference_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "zinc_ids": [
+            818,
+            9551,
+            1602,
+            711,
+            14778,
+            2178,
+            3324,
+            506,
+            5716,
+            529,
+            103592,
+            173928,
+            236793,
+            625,
+            11742,
+            993
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "1b53d7128a7396534fd61dc94a31b9d087e68ec182e80d065f68cc467d1cbce7",
+          "reference_text_sha256": "5ca02174014fc51f94d51135970b01ff910962d9e024588a81c0592ce7439f3d",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 1136,
+          "reference_ids": [
+            236776,
+            41839,
+            4146,
+            684,
+            5213,
+            219656,
+            5387,
+            699,
+            506,
+            4888,
+            529,
+            506,
+            36316,
+            532,
+            36122,
+            625
+          ],
+          "zinc_ids": [
+            236776,
+            41839,
+            4146,
+            684,
+            5213,
+            219656,
+            5387,
+            699,
+            506,
+            4888,
+            529,
+            506,
+            36316,
+            532,
+            36122,
+            625
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "736479b8c5731449715e04a17cb3bcf03a11473c768270f8678f9a73a1ad174c",
+          "reference_text_sha256": "a238e3eb0e8acbbd3e3505674b21c32623845e3a0cd7749bc9ae288213e4b903",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 1136,
+          "reference_ids": [
+            19765,
+            6178,
+            529,
+            14561,
+            659,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121,
+            18800,
+            531
+          ],
+          "zinc_ids": [
+            19765,
+            6178,
+            529,
+            14561,
+            659,
+            236787,
+            108,
+            236770,
+            236761,
+            138,
+            1018,
+            109454,
+            80288,
+            53121,
+            18800,
+            531
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "352be90f23c260899786079101ac70f7589cd632d0e1ad1172312f5a1cac512c",
+          "reference_text_sha256": "8c4f186ae59d813db3f9d722c5099e4e17edc336d95a5fe24e9c239e3cb9b35a",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 96,
+        "near_tie_tokens": 0,
+        "total_tokens": 96
+      },
+      "full_http_continuations": 18,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": null,
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "5ca02174014fc51f94d51135970b01ff910962d9e024588a81c0592ce7439f3d",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "a4f34af5b76644cb38514c32c9a08afa3f93c6c36cd6f2bc66f1288d825315c1",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "225e2837df0d2dd8097f0eb8b0a3d4e5bc4de43c93106ed56ee5daf734950e42",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "5ca02174014fc51f94d51135970b01ff910962d9e024588a81c0592ce7439f3d",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 1139,
+              "total_tokens": 1155
+            }
+          },
+          {
+            "content_sha256": "a238e3eb0e8acbbd3e3505674b21c32623845e3a0cd7749bc9ae288213e4b903",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 1136,
+              "total_tokens": 1152
+            }
+          },
+          {
+            "content_sha256": "8c4f186ae59d813db3f9d722c5099e4e17edc336d95a5fe24e9c239e3cb9b35a",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 1136,
+              "total_tokens": 1152
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    },
+    {
+      "id": "qwen38-27b-q4k-m",
+      "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+      "size_bytes": 17106775008,
+      "context": 4096,
+      "sliding_window": null,
+      "passed": true,
+      "tokenizer_cases": 12,
+      "native_cases": [
+        {
+          "prompt_tokens": 22,
+          "reference_ids": [
+            760,
+            9662,
+            383,
+            279,
+            52441,
+            314,
+            4664,
+            8739,
+            1467,
+            524,
+            15756,
+            11894,
+            26,
+            424,
+            76454,
+            13
+          ],
+          "zinc_ids": [
+            760,
+            9662,
+            383,
+            279,
+            52441,
+            314,
+            4664,
+            8739,
+            1467,
+            524,
+            15756,
+            11894,
+            26,
+            424,
+            76454,
+            13
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "48c7dc42c90d0c859e13193e1ac6122cbcedbaa12ed0e922efcfb4543b875ba3",
+          "reference_text_sha256": "779db07c6a60d83b7f322334c38e026c99db13c8b0c407d8ba568e280db73fa8",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 19,
+          "reference_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            3618,
+            318,
+            2777,
+            488,
+            1318
+          ],
+          "zinc_ids": [
+            32,
+            43447,
+            4138,
+            539,
+            6992,
+            8364,
+            494,
+            279,
+            4613,
+            314,
+            279,
+            3618,
+            318,
+            2777,
+            488,
+            1318
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "a368ae2b19f43461d9e04bbe39761c2ac3b04248329c438597edc09f7a90e8a3",
+          "reference_text_sha256": "5eeb9f1ea9292345165fb018aeacad0bafc982b187ad4b39ec77ea2b3fb08d9f",
+          "validated_text_sha256": null
+        },
+        {
+          "prompt_tokens": 18,
+          "reference_ids": [
+            8160,
+            513,
+            2250,
+            5839,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ],
+          "zinc_ids": [
+            8160,
+            513,
+            2250,
+            5839,
+            5533,
+            314,
+            22561,
+            25,
+            271,
+            16,
+            13,
+            220,
+            2972,
+            28371,
+            11764,
+            46258
+          ],
+          "comparison": {
+            "near_ties": [],
+            "tokens": 16
+          },
+          "prompt_sha256": "403940338a4517a8ce504856f32ddbdf99c9d3f84a3fa258cc89f0f3cd099b6a",
+          "reference_text_sha256": "60dba9c7fe535a46c0cf4f12272703c0498cbb09c365140c1c632d55be7b5c67",
+          "validated_text_sha256": null
+        }
+      ],
+      "reference_agreement": {
+        "cases": [
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          },
+          {
+            "near_ties": [],
+            "tokens": 16
+          }
+        ],
+        "exact_tokens": 48,
+        "near_tie_tokens": 0,
+        "total_tokens": 48
+      },
+      "full_http_continuations": 9,
+      "http_after_cancellation": true,
+      "http_after_context_error": true,
+      "prefill_cancellation": null,
+      "raw_streaming": {
+        "cases": [
+          {
+            "content_sha256": "779db07c6a60d83b7f322334c38e026c99db13c8b0c407d8ba568e280db73fa8",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 22,
+              "total_tokens": 38
+            }
+          },
+          {
+            "content_sha256": "5eeb9f1ea9292345165fb018aeacad0bafc982b187ad4b39ec77ea2b3fb08d9f",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 19,
+              "total_tokens": 35
+            }
+          },
+          {
+            "content_sha256": "60dba9c7fe535a46c0cf4f12272703c0498cbb09c365140c1c632d55be7b5c67",
+            "finish_reason": "length",
+            "usage": {
+              "completion_tokens": 16,
+              "prompt_tokens": 18,
+              "total_tokens": 34
+            }
+          }
+        ],
+        "complete_native_replay_after_cancellation": true,
+        "passed": true
+      }
+    }
+  ],
+  "native_fp16_attempt": {
+    "qualified": false,
+    "reference_commit": "a4d4f2fd4ec85ec6a0a9ece4870416c1b6cc24f5",
+    "latest_reference_check": {
+      "checked_at": "2026-11-09T18:07:32.177912+00:00",
+      "commit": "a4d4f2fd4ec85ec6a0a9ece4870416c1b6cc24f5",
+      "observed_head": "a4d4f2fd4ec85ec6a0a9ece4870416c1b6cc24f5",
+      "scope": "frozen for this campaign"
+    },
+    "build_settings": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "GGML_CUDA": "OFF",
+      "GGML_METAL": "OFF",
+      "GGML_NATIVE": "OFF",
+      "GGML_SYCL": "ON",
+      "GGML_SYCL_DNN": "ON",
+      "GGML_SYCL_F16": "ON",
+      "GGML_SYCL_GRAPH": "ON",
+      "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+      "GGML_SYCL_SUPPORT_XMX": "ON",
+      "GGML_VULKAN": "OFF"
+    },
+    "build_cache_sha256": "fabb0c5e3abed1963641a372509d2619406707a469f135c9b46ccf98be3bccfb",
+    "stack_manifest_sha256": "54f47fc6c058918dbeeadf22534f932349372ecb6aead7f6575daa7129353de3",
+    "settings": {
+      "GGML_SYCL_ENABLE_GRAPH": "0"
+    },
+    "findings": [
+      {
+        "id": "qwen3-0.6b-q8-0",
+        "qualified": false,
+        "short_reference_validation_passed": true,
+        "retained_timing_samples": 36,
+        "error": "repeated complete outputs differ"
+      },
+      {
+        "id": "qwen36-35b-a3b-q4k-xl",
+        "qualified": false,
+        "short_reference_validation_passed": false,
+        "retained_timing_samples": 0,
+        "error": "reference exact-choice agreement is too low"
+      },
+      {
+        "id": "qwen36-27b-q4k-m",
+        "qualified": false,
+        "short_reference_validation_passed": true,
+        "retained_timing_samples": 25,
+        "error": "repeated complete outputs differ"
+      },
+      {
+        "id": "qwen35-9b-q4k-m",
+        "qualified": false,
+        "short_reference_validation_passed": true,
+        "retained_timing_samples": 21,
+        "error": "repeated complete outputs differ"
+      },
+      {
+        "id": "gemma4-31b-q4k-m",
+        "qualified": false,
+        "short_reference_validation_passed": true,
+        "retained_timing_samples": 21,
+        "error": "repeated complete outputs differ"
+      },
+      {
+        "id": "gemma4-26b-a4b-q4k-m",
+        "qualified": false,
+        "short_reference_validation_passed": true,
+        "retained_timing_samples": 17,
+        "error": "repeated complete outputs differ"
+      },
+      {
+        "id": "qwen38-27b-q4k-m",
+        "qualified": false,
+        "short_reference_validation_passed": true,
+        "retained_timing_samples": 26,
+        "error": "repeated complete outputs differ"
+      }
+    ]
+  },
+  "limitations": [
+    "The seven-model pass applies to ZINC Vulkan inference and protocol controls; actual OpenCode/OpenClaw task acceptance remains separate.",
+    "The native SYCL FP16 timing campaign retains failed agreement and repeated-output controls. It does not establish a qualified all-model baseline or a speed win.",
+    "The tested Linux development archive has raw SSE support; the published 0.1.0 archives predate this change.",
+    "The current kernel and official Intel packages are project-tested on Arch; this is not an Intel OMIX validated distribution claim.",
+    "Gemma 26B OpenClaw workspace acceptance and small-starter coding limitations remain open.",
+    "The packaged binary and all SPIR-V hashes stayed unchanged through cleanup; release-candidate certification of final publication bytes remains separate."
+  ],
+  "cleanup": "no GPU process remains",
+  "native_fp32_starter_diagnostic": {
+    "qualified": false,
+    "diagnostic_only": true,
+    "model": "qwen3-0.6b-q8-0",
+    "reference_commit": "a4d4f2fd4ec85ec6a0a9ece4870416c1b6cc24f5",
+    "server_sha256": "2dbbbdeba3577b93ec0139c355af3998085655fe5f5be26dbb8ddb42bba93a21",
+    "build": {
+      "cache_sha256": "4f589cbc29a32ff66624e9f5d03cdd1b24e19e03c35a015fb3e26b6f13fd138f",
+      "settings": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "GGML_SYCL": "ON",
+        "GGML_VULKAN": "OFF",
+        "GGML_CUDA": "OFF",
+        "GGML_METAL": "OFF",
+        "GGML_NATIVE": "OFF",
+        "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+        "GGML_SYCL_SUPPORT_XMX": "ON",
+        "GGML_SYCL_GRAPH": "ON",
+        "GGML_SYCL_DNN": "ON",
+        "GGML_SYCL_F16": "OFF"
+      }
+    },
+    "requests": 24,
+    "streams": 8,
+    "server_lifetimes": 2,
+    "output_drift": [
+      {
+        "lifetime": 0,
+        "scenario": "context-medium",
+        "repeat": 2,
+        "expected": {
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length"
+        },
+        "actual": {
+          "content_sha256": "bf8f7ceb0e19c99bbe88d4a0da89566f8b6c2b3d7bade4b557d6a61bde7c3e7f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length"
+        }
+      }
+    ],
+    "samples": [
+      {
+        "lifetime": 0,
+        "scenario": "core",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+        "usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 57,
+          "total_tokens": 153,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "core",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+        "usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 57,
+          "total_tokens": 153,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "core",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+        "usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 57,
+          "total_tokens": 153,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "context-medium",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+        "usage": {
+          "completion_tokens": 160,
+          "prompt_tokens": 167,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "context-medium",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+        "usage": {
+          "completion_tokens": 160,
+          "prompt_tokens": 167,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "context-medium",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "bf8f7ceb0e19c99bbe88d4a0da89566f8b6c2b3d7bade4b557d6a61bde7c3e7f",
+        "usage": {
+          "completion_tokens": 160,
+          "prompt_tokens": 167,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "context-long",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+        "usage": {
+          "completion_tokens": 116,
+          "prompt_tokens": 335,
+          "total_tokens": 451,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "stop"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "context-long",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+        "usage": {
+          "completion_tokens": 116,
+          "prompt_tokens": 335,
+          "total_tokens": 451,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "stop"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "context-long",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+        "usage": {
+          "completion_tokens": 116,
+          "prompt_tokens": 335,
+          "total_tokens": 451,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "stop"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "decode-extended",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+        "usage": {
+          "completion_tokens": 256,
+          "prompt_tokens": 80,
+          "total_tokens": 336,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "decode-extended",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+        "usage": {
+          "completion_tokens": 256,
+          "prompt_tokens": 80,
+          "total_tokens": 336,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 0,
+        "scenario": "decode-extended",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+        "usage": {
+          "completion_tokens": 256,
+          "prompt_tokens": 80,
+          "total_tokens": 336,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "core",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+        "usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 57,
+          "total_tokens": 153,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "core",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+        "usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 57,
+          "total_tokens": 153,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "core",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+        "usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 57,
+          "total_tokens": 153,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "context-medium",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+        "usage": {
+          "completion_tokens": 160,
+          "prompt_tokens": 167,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "context-medium",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+        "usage": {
+          "completion_tokens": 160,
+          "prompt_tokens": 167,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "context-medium",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+        "usage": {
+          "completion_tokens": 160,
+          "prompt_tokens": 167,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "context-long",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+        "usage": {
+          "completion_tokens": 116,
+          "prompt_tokens": 335,
+          "total_tokens": 451,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "stop"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "context-long",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+        "usage": {
+          "completion_tokens": 116,
+          "prompt_tokens": 335,
+          "total_tokens": 451,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "stop"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "context-long",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+        "usage": {
+          "completion_tokens": 116,
+          "prompt_tokens": 335,
+          "total_tokens": 451,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "stop"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "decode-extended",
+        "repeat": 0,
+        "warmup": true,
+        "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+        "usage": {
+          "completion_tokens": 256,
+          "prompt_tokens": 80,
+          "total_tokens": 336,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "decode-extended",
+        "repeat": 1,
+        "warmup": false,
+        "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+        "usage": {
+          "completion_tokens": 256,
+          "prompt_tokens": 80,
+          "total_tokens": 336,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      },
+      {
+        "lifetime": 1,
+        "scenario": "decode-extended",
+        "repeat": 2,
+        "warmup": false,
+        "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+        "usage": {
+          "completion_tokens": 256,
+          "prompt_tokens": 80,
+          "total_tokens": 336,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish_reason": "length"
+      }
+    ],
+    "streams_match_json": true,
+    "processes": [
+      {
+        "lifetime": 0,
+        "gpu_offload": {
+          "offloaded": 29,
+          "total": 29,
+          "backend": "sycl"
+        },
+        "native_runtime": {
+          "runtime": "level_zero",
+          "library_sha256": {
+            "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+            "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+            "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+            "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+            "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+            "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+            "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+            "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+            "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+          }
+        }
+      },
+      {
+        "lifetime": 1,
+        "gpu_offload": {
+          "offloaded": 29,
+          "total": 29,
+          "backend": "sycl"
+        },
+        "native_runtime": {
+          "runtime": "level_zero",
+          "library_sha256": {
+            "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+            "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+            "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+            "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+            "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+            "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+            "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+            "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+            "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+          }
+        }
+      }
+    ]
+  }
+}

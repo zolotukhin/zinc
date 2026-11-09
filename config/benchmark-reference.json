@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/ggml-org/llama.cpp",
-  "commit": "a4d4f2fd4ec85ec6a0a9ece4870416c1b6cc24f5",
-  "checked_at_utc": "2026-11-09T17:21:32.079Z",
+  "commit": "5f490d7bfe78844e6390c869454c149fd7e003a8",
+  "checked_at_utc": "2026-11-09T19:08:56.716Z",
   "scope": "Performance benchmarks; release correctness references have a separate policy pin."
 }
