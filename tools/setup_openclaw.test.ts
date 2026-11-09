@@ -583,15 +583,20 @@ describe('OpenClaw owned process and task result', () => {
       '#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,status:"ok"}));\n',
       { mode: 0o700 },
     );
-    const result = await runOpenClaw({
-      binary: path.relative(process.cwd(), binary),
-      project,
-      filename: 'config',
-      model: 'loaded',
-      prompt: 'task',
-    });
+    // Real Node startup can exceed Bun's default five-second test limit on
+    // a loaded CI worker. Keep a shorter owned-process deadline than the test.
+    const result = await runOpenClaw(
+      {
+        binary: path.relative(process.cwd(), binary),
+        project,
+        filename: 'config',
+        model: 'loaded',
+        prompt: 'task',
+      },
+      { deadlineMs: 10000, graceMs: 100 },
+    );
     expect(result.report.ok).toBe(true);
-  });
+  }, 15000);
   test('runs the client schema validator with the dedicated config path', async () => {
     const f = await fakeClient(
       `console.log(JSON.stringify({valid:true,args:process.argv.slice(2),config:process.env.OPENCLAW_CONFIG_PATH}));`,
