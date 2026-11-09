@@ -439,10 +439,11 @@ describe('independent local inference admission guard', () => {
       response.end('{"data":[]}');
     });
     try {
+      const marker = path.join(await temp(), 'attempts');
       const f = await fakeClient(`import {existsSync,readFileSync,writeFileSync} from 'node:fs';
 const args=process.argv.slice(2),config=JSON.parse(readFileSync(args[args.indexOf('--config')+1],'utf8'));
 await (await fetch(config.models.providers.zinc.baseUrl+'/models')).text();
-if(!existsSync('attempts')){writeFileSync('attempts','1');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+if(!existsSync(${JSON.stringify(marker)})){writeFileSync(${JSON.stringify(marker)},'1');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
 console.log(JSON.stringify({ok:true,status:'ok'}));`);
       await writeConfig(f.project, config({ model: 'loaded', baseUrl: upstream.baseUrl }));
       const result = await runOpenClaw(f.options, {
@@ -589,6 +590,38 @@ const reader=response.body.getReader();await reader.read();await reader.cancel()
     ).rejects.toThrow('OpenClaw failed');
     expect(starts).toBe(1);
   });
+
+  test('file changes and projects that cannot be fully checked prevent preparation retry', async () => {
+    for (const mode of ['write', 'delete', 'symlink', 'oversize', 'entries']) {
+      const f =
+        await fakeClient(`${mode === 'write' ? "import {writeFileSync} from 'node:fs';writeFileSync('effect.txt','changed');" : mode === 'delete' ? "import {unlinkSync} from 'node:fs';unlinkSync('protected.txt');" : ''}
+console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`);
+      await writeConfig(f.project, config({ model: 'loaded' }));
+      if (mode === 'delete') await writeFile(path.join(f.project, 'protected.txt'), 'original');
+      if (mode === 'symlink')
+        await symlink(path.join(await temp(), 'absent'), path.join(f.project, 'linked'));
+      if (mode === 'oversize')
+        await writeFile(path.join(f.project, 'large'), Buffer.alloc(16 * 1024 * 1024 + 1));
+      if (mode === 'entries')
+        await Promise.all(
+          Array.from({ length: 4096 }, (_, i) => writeFile(path.join(f.project, String(i)), '')),
+        );
+      let starts = 0;
+      await expect(
+        runOpenClaw(f.options, {
+          ...f.dependencies,
+          fetchImpl: async () => Response.json({ status: 'ok' }),
+          spawnImpl: (binary, args, options) => {
+            starts++;
+            return f.dependencies.spawnImpl(binary, args, options);
+          },
+        }),
+      ).rejects.toThrow('OpenClaw failed');
+      expect(starts).toBe(1);
+      if (mode === 'write')
+        expect(await readFile(path.join(f.project, 'effect.txt'), 'utf8')).toBe('changed');
+    }
+  });
 });
 
 test('only empty pre-admission runtime failures qualify for a preparation retry', () => {
@@ -630,9 +663,10 @@ test('only empty pre-admission runtime failures qualify for a preparation retry'
 
 describe('OpenClaw owned process and task result', () => {
   test('retries one preparation failure with fresh owned state and preserves the native report', async () => {
+    const marker = path.join(await temp(), 'attempts');
     const f = await fakeClient(`import {existsSync,readFileSync,writeFileSync} from 'node:fs';
 let input='';for await(const text of process.stdin)input+=text;
-const count=existsSync('attempts')?Number(readFileSync('attempts','utf8')):0;writeFileSync('attempts',String(count+1));
+const count=existsSync(${JSON.stringify(marker)})?Number(readFileSync(${JSON.stringify(marker)},'utf8')):0;writeFileSync(${JSON.stringify(marker)},String(count+1));
 if(count===0){console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
 console.log(JSON.stringify({ok:true,status:'ok',final:'completed',input}));`);
     await writeConfig(f.project, config({ model: 'loaded' }));
@@ -683,8 +717,9 @@ console.log(JSON.stringify({ok:true,status:'ok',final:'completed',input}));`);
     expect(process.listenerCount('SIGINT')).toBe(listeners);
   });
   test('a preparation retry keeps the original outer deadline', async () => {
+    const marker = path.join(await temp(), 'attempts');
     const f = await fakeClient(`import {existsSync,writeFileSync} from 'node:fs';
-if(!existsSync('attempts')){writeFileSync('attempts','1');await new Promise(r=>setTimeout(r,250));console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+if(!existsSync(${JSON.stringify(marker)})){writeFileSync(${JSON.stringify(marker)},'1');await new Promise(r=>setTimeout(r,250));console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
 await new Promise(r=>setTimeout(r,450));console.log(JSON.stringify({ok:true,status:'ok'}));`);
     await writeConfig(f.project, config({ model: 'loaded' }));
     let starts = 0;
@@ -939,15 +974,20 @@ await new Promise(r=>setTimeout(r,450));console.log(JSON.stringify({ok:true,stat
       '#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,status:"ok"}));\n',
       { mode: 0o700 },
     );
-    const result = await runOpenClaw({
-      binary: path.relative(process.cwd(), binary),
-      project,
-      filename: 'config',
-      model: 'loaded',
-      prompt: 'task',
-    });
+    // Real Node startup can exceed Bun's default five-second test limit on
+    // a loaded CI worker. Keep a shorter owned-process deadline than the test.
+    const result = await runOpenClaw(
+      {
+        binary: path.relative(process.cwd(), binary),
+        project,
+        filename: 'config',
+        model: 'loaded',
+        prompt: 'task',
+      },
+      { deadlineMs: 10000, graceMs: 100 },
+    );
     expect(result.report.ok).toBe(true);
-  });
+  }, 15000);
   test('runs the client schema validator with the dedicated config path', async () => {
     const f = await fakeClient(
       `console.log(JSON.stringify({valid:true,args:process.argv.slice(2),config:process.env.OPENCLAW_CONFIG_PATH}));`,

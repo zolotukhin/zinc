@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { Agent, createServer, request as httpRequest } from 'node:http';
-import { link, lstat, mkdtemp, open, readFile, rename, rm, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import {
+  link,
+  lstat,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 export const CONFIG_NAME = 'openclaw.zinc.json';
@@ -481,7 +492,6 @@ async function localAdmissionGuard(config) {
         outgoing.end('{"error":{"message":"ZINC forwarding failed"}}');
       }
     });
-    incoming.on('aborted', () => upstream.destroy());
     incoming.on('error', () => upstream.destroy());
     outgoing.on('error', () => upstream.destroy());
     outgoing.on('close', () => {
@@ -787,6 +797,54 @@ export function isRuntimePreparationFailure(error) {
   );
 }
 
+async function preparationProjectFingerprint(project) {
+  // Bound this extra check. Large, unreadable or linked projects simply keep
+  // the original failure. Never follow links outside the task's directory.
+  const hash = createHash('sha256');
+  let entries = 0,
+    bytes = 0;
+  async function visit(relative) {
+    if (++entries > 4096) throw new Error('snapshot limit');
+    const filename = path.join(project, relative),
+      metadata = await lstat(filename);
+    if (metadata.isSymbolicLink()) throw new Error('linked project');
+    hash.update(JSON.stringify([relative, metadata.mode]));
+    if (metadata.isDirectory()) {
+      for (const name of (await readdir(filename)).sort()) await visit(path.join(relative, name));
+    } else if (metadata.isFile()) {
+      bytes += metadata.size;
+      if (bytes > 16 * 1024 * 1024) throw new Error('snapshot limit');
+      const file = await open(
+        filename,
+        constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),
+      );
+      try {
+        if (!(await file.stat()).isFile()) throw new Error('file changed');
+        const buffer = Buffer.alloc(64 * 1024);
+        const contentHash = createHash('sha256');
+        let size = 0;
+        for (;;) {
+          const { bytesRead } = await file.read(buffer, 0, buffer.length);
+          if (bytesRead === 0) break;
+          size += bytesRead;
+          if (size > metadata.size) throw new Error('file changed');
+          contentHash.update(buffer.subarray(0, bytesRead));
+        }
+        if (size !== metadata.size) throw new Error('file changed');
+        hash.update(JSON.stringify([size, contentHash.digest('hex')]));
+      } finally {
+        await file.close();
+      }
+    } else throw new Error('unsupported project entry');
+  }
+  try {
+    await visit('');
+    return hash.digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 export async function runOpenClaw(
   { binary = 'openclaw', filename, model, project, prompt, timeout = 600 },
   dependencies,
@@ -801,6 +859,7 @@ export async function runOpenClaw(
     process.on('SIGINT', interrupt);
     process.on('SIGTERM', interrupt);
     try {
+      const before = guard ? await preparationProjectFingerprint(project) : null;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           if (interrupted)
@@ -846,6 +905,9 @@ export async function runOpenClaw(
             !interrupted &&
             guard?.canRetry() === true &&
             isRuntimePreparationFailure(error) &&
+            before !== null &&
+            before === (await preparationProjectFingerprint(project)) &&
+            !interrupted &&
             performance.now() < expires
           ) {
             failures.push(error.diagnostics);

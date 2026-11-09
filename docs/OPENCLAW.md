@@ -111,7 +111,10 @@ preparation error once, within the original deadline. An empty report with no
 selected model/provider, payloads, usage or tool activity is required, together
 with an independent local forwarding check that no inference request was sent.
 The forwarder preserves response bytes and streaming; any non-metadata request
-blocks a retry. Remote or HTTPS connections retain their normal failure result. Each attempt owns and removes its client
+blocks a retry. The helper also requires the project file fingerprint to stay
+unchanged. Linked, unreadable or oversized projects retain the original failure;
+the bounded check covers at most 4,096 entries and 16 MiB of files. Remote or
+HTTPS connections retain their normal failure result. Each attempt owns and removes its client
 state. The evaluator retains the first failure in a private diagnostics file
 and records `preparationRetries` in the task summary. Ordinary task failures
 keep their existing failure outcome.
