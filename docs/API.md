@@ -70,6 +70,13 @@ For portable clients, set `stream` explicitly, get the loaded model from
   `session_id` when this is true. Missing or false capability means full
   requests without assumed cache support; changed or displaced prefixes fall
   back to full prefill.
+- Development Vulkan builds have an opt-in `ZINC_CHAT_PREFIX_ROLLBACK=1`
+  control for re-rendered attention-only history. It preserves only the exact
+  shared prefix and recomputes the changed suffix, including a dropped Gemma
+  thinking header. It requires the same resident session/model and live KV
+  pages, excludes recurrent and MTP state, and leaves at least one prompt token
+  to refresh logits. This experimental control needs cached/full-prefill and
+  actual-client qualification before becoming a default.
 - Tool calling depends on the model's chat template and output quality. Qwen
   uses ChatML/JSON tool envelopes; Gemma uses its native tool protocol. ZINC
   returns tool calls and accepts tool results; the client executes the tools.
