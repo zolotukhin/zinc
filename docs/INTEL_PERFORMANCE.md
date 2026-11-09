@@ -365,6 +365,39 @@ acceptance.
 
 ## Native Intel compute after the Vulkan milestone
 
+Native stack bring-up can proceed while the remaining Vulkan performance gaps
+are investigated. The administrator tool at
+[`scripts/upgrade_intel_stack.py`](https://github.com/zolotukhin/zinc/blob/main/scripts/upgrade_intel_stack.py)
+targets the existing Arch/GRUB worker. Run it without arguments for a plan. Its
+explicit `--apply` mode requires root, preserves the running kernel and modules
+behind a separate GRUB fallback, saves signed rollback package archives, and
+performs a full Arch update without rebooting. System library rollback still
+requires reviewing the complete transaction.
+
+Recovery retains the original package-manager failure and reports secondary
+module/GRUB errors separately. A same-release successful reinstall keeps its
+installed modules; a different kernel image reusing that release stops recovery
+for administrator review. Old unowned module directories still receive their
+saved contents. Cached and downloaded rollback archives both require valid
+signatures, and package verification retains Arch epochs and release suffixes.
+
+The November 7 live plan found Arch kernel `7.2.14` versus upstream stable
+`7.3.3`, and Arch oneAPI `2026.0` versus Intel `2026.2`. The script refreshes
+the kernel and Arch metadata at runtime; its Intel compiler reference is dated
+in the source. Applying a lagging distribution stack requires the explicit
+`--allow-distro-lag` option and does not qualify it as the latest upstream stack.
+It never adds Ubuntu repositories to Arch or installs a release-candidate kernel.
+
+For repeatable low-level validation, compile `tools/intel_sycl_probe.cpp` with
+`icpx -std=c++17 -fsycl -O2 tools/intel_sycl_probe.cpp -o zinc-sycl-probe` on the remote worker after loading
+the oneAPI environment. Pass its absolute binary path to
+`tools/intel_native_probe.py --probe <binary> --reservation <worker-reservation>
+--output <report.json>`, reusing the worker's existing reservation path. The
+probe requires exactly one Intel Level Zero GPU and checks both queue modes,
+explicit event dependencies, tail elements, copies and output guards. Its
+78 cases are readiness evidence; they do not qualify a ZINC inference backend
+or establish model throughput.
+
 After the coverage and Vulkan performance work, add a separate native Intel
 backend using Intel's Level Zero runtime and compiler toolchain, with SYCL/XMX
 kernels where measurements justify them. Intel's
