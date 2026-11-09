@@ -1,8 +1,10 @@
 """CPU fixtures for native-baseline isolation; no Intel SDK or GPU is used."""
 import json
+import ctypes
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 import intel_sycl_environment as sycl
@@ -15,19 +17,75 @@ class SyclEnvironmentTest(unittest.TestCase):
             (prefix / "bin/icpx").write_bytes(b"fixture")
             base = {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/old", "GGML_SYCL_ENABLE_XMX": "0",
                     "SYCL_DEVICE_FILTER": "cpu", "ONEAPI_DEVICE_SELECTOR": "opencl:cpu", "ZE_AFFINITY_MASK": "other",
-                    "ZINC_MTP": "0"}
+                    "ZINC_MTP": "0", "OCL_ICD_FILENAMES": "cpu.icd", "OPENCL_VENDOR_PATH": "/old-vendors"}
             original = dict(base); result = sycl.environment(prefix, base)
             self.assertEqual(base, original)
             self.assertEqual(result["ONEAPI_DEVICE_SELECTOR"], "level_zero:gpu")
             self.assertEqual(result["LD_LIBRARY_PATH"], str(prefix.resolve() / "lib"))
             self.assertTrue(result["PATH"].startswith(str(prefix.resolve() / "bin")))
-            for key in ("GGML_SYCL_ENABLE_XMX", "SYCL_DEVICE_FILTER", "ZE_AFFINITY_MASK"):
+            for key in ("GGML_SYCL_ENABLE_XMX", "SYCL_DEVICE_FILTER", "ZE_AFFINITY_MASK", "OCL_ICD_FILENAMES", "OPENCL_VENDOR_PATH"):
                 self.assertNotIn(key, result)
+            self.assertEqual(result["OCL_ICD_VENDORS"], "/etc/OpenCL/vendors")
             self.assertEqual(result["ZINC_MTP"], "0")
             self.assertEqual(result["GGML_SYCL_ENABLE_GRAPH"], "0")
             self.assertEqual(sycl.environment(prefix, base, graphs=True)["GGML_SYCL_ENABLE_GRAPH"], "1")
             with self.assertRaisesRegex(ValueError, "graph selection"):
                 sycl.environment(prefix, base, graphs="0")
+
+    def probe(self, *, gpu_count=1, vendor=0x8086, platform_count=1):
+        def platforms(count, data, actual):
+            if actual is not None: actual._obj.value = platform_count
+            if data is not None:
+                for index in range(platform_count): data[index] = index + 1
+            return 0
+        def devices(platform, kind, count, data, actual):
+            self.assertEqual(kind, 4, "only GPU devices may qualify")
+            if gpu_count == 0: return -1
+            if actual is not None: actual._obj.value = gpu_count
+            if data is not None:
+                for index in range(gpu_count): data[index] = index + 10
+            return 0
+        fields = []
+        def info(device, field, size, data, actual):
+            fields.append(field)
+            self.assertIn(field, (0x1001, 0x102B, 0x102D), "never query UUIDs or PCI identifiers")
+            if field == 0x1001:
+                data._obj.value = vendor
+            else:
+                text = b"Intel test GPU\0" if field == 0x102B else b"driver test\0"
+                if actual is not None: actual._obj.value = len(text)
+                if data is not None: ctypes.memmove(data, text, len(text))
+            return 0
+        api = Mock(clGetPlatformIDs=Mock(side_effect=platforms), clGetDeviceIDs=Mock(side_effect=devices), clGetDeviceInfo=Mock(side_effect=info))
+        with tempfile.TemporaryDirectory() as directory:
+            library = Path(directory) / "libOpenCL.so.1"; library.write_bytes(b"fixture")
+            with patch.object(sycl.ctypes, "CDLL", return_value=api), \
+                    patch.object(sycl, "opencl_driver_evidence", return_value={"libigdrcl.so": "a" * 64}):
+                result = sycl.opencl_gpu_probe(library)
+            self.assertNotIn(directory, json.dumps(result))
+        return result, fields
+
+    def test_opencl_readiness_requires_a_real_intel_gpu_and_avoids_unique_identifiers(self):
+        result, fields = self.probe()
+        self.assertEqual(result["device_type"], "gpu")
+        self.assertEqual(result["vendor_id"], 0x8086)
+        self.assertEqual(result["device_name"], "Intel test GPU")
+        self.assertRegex(result["library_sha256"], r"^[a-f0-9]{64}$")
+        for options in ({"gpu_count": 0}, {"gpu_count": 2}, {"vendor": 0x10DE}, {"platform_count": 0}, {"platform_count": 65}):
+            with self.subTest(options=options), self.assertRaises(ValueError): self.probe(**options)
+
+    def test_live_opencl_driver_hashes_hide_paths_and_detect_replacements(self):
+        with tempfile.TemporaryDirectory(prefix="driver maps ") as directory:
+            root = Path(directory); driver = root / "libigdrcl.so"; driver.write_bytes(b"driver-v1")
+            line = "00001000-00002000 r-xp 00000000 00:00 0 " + str(driver)
+            before = sycl.opencl_driver_evidence(line)
+            self.assertEqual(set(before), {"libigdrcl.so"}); self.assertNotIn(directory, json.dumps(before))
+            driver.write_bytes(b"driver-v2")
+            self.assertNotEqual(before, sycl.opencl_driver_evidence(line))
+            with self.assertRaisesRegex(ValueError, "changed during"):
+                sycl.opencl_driver_evidence(line + " (deleted)")
+            with self.assertRaisesRegex(ValueError, "was not loaded"):
+                sycl.opencl_driver_evidence("")
 
     def test_build_identity_distinguishes_fp16_and_rejects_fallback_or_other_sources(self):
         with tempfile.TemporaryDirectory(prefix="native build ") as directory:

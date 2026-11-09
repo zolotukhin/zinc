@@ -57,7 +57,7 @@ def performance_reference_command(args, port):
     return [str(args.llama_bin / "llama-server"), "-m", str(args.model), "--device", args.reference_device,
             "-ngl", "999", "--host", "127.0.0.1", "--port", str(port), "-c", str(args.context), "--parallel", "1",
             "-ctk", "f16", "-ctv", "f16", "-b", "4096", "-ub", "1024", "--flash-attn", "on",
-            "--spec-type", "none", "--no-cache-prompt", "-lv", "4", "-t", "4", "-tb", "4"]
+            "--spec-type", "none", "--no-cache-prompt", "--cache-ram", "0", "-lv", "4", "-t", "4", "-tb", "4"]
 
 
 def raw_scenarios(args, scenarios, work, env):
@@ -483,6 +483,10 @@ def main():
                 report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source)
                 report["settings"]["native_runtime"] = {"GGML_SYCL_ENABLE_GRAPH": "1" if args.sycl_graphs else "0"}
                 report["native_probe"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
+                report["native_opencl"] = json.loads(gpu.output([sys.executable, str(ROOT / "tools/intel_sycl_environment.py"),
+                                      "--probe-opencl", str(args.sycl_prefix / "lib/libOpenCL.so.1")], reference_env, timeout=60))
+                require(report["native_opencl"]["device_name"] == report["native_probe"]["device_name"],
+                        "OpenCL and Level Zero GPU identities differ")
                 report["settings"]["native_stack_verified"] = True
             print("Correctness: 376 numerical shader cases", flush=True)
             gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
@@ -583,8 +587,10 @@ def main():
                 report["native_stack_after"] = sycl.stack_manifest(args.sycl_prefix)
                 report["native_build_after"] = sycl.build_manifest(args.llama_bin, args.llama_source)
                 report["native_probe_after"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
+                report["native_opencl_after"] = json.loads(gpu.output([sys.executable, str(ROOT / "tools/intel_sycl_environment.py"),
+                                            "--probe-opencl", str(args.sycl_prefix / "lib/libOpenCL.so.1")], reference_env, timeout=60))
                 require(report["native_stack_after"] == report["native_stack"] and report["native_probe_after"] == report["native_probe"]
-                        and report["native_build_after"] == report["native_build"],
+                        and report["native_build_after"] == report["native_build"] and report["native_opencl_after"] == report["native_opencl"],
                         "native runtime, packages or GPU changed during the campaign")
         report.update(passed=all(model["passed"] for model in report["models"]), cleanup="no GPU process remains")
         report.update(campaign_outcome(report))

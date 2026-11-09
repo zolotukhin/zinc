@@ -506,6 +506,19 @@ settings. It verifies the live server's SYCL and Level Zero libraries come from
 the selected environment. Those identities are checked again after cleanup.
 ZINC and the frozen Vulkan oracle keep their own loader environments.
 
+Conda's OpenCL loader initially exposed only the bundled CPU ICD. Short SYCL
+continuations passed, but a 167-token prompt aborted when oneDNN needed its
+matching GPU OpenCL device. The reference environment now scopes
+`OCL_ICD_VENDORS=/etc/OpenCL/vendors` to the system's existing GPU driver.
+This changes no system files. A preflight child requires exactly one Intel
+OpenCL GPU and checks its name against Level Zero; CPU-only discovery fails.
+Only names, versions and library hashes are retained, never device UUIDs or PCI
+identifiers. The fixed FP16 starter diagnostic passes all four workloads:
+12 JSON requests and four raw SSE probes, with the Intel GPU OpenCL library
+confirmed in the live process. The interrupted campaign remains separate.
+The performance server also uses `--cache-ram 0`, so unused automatic RAM prompt
+caches cannot inflate the competitor's memory or request latency.
+
 The exact timed SYCL configuration must pass complete frozen-reference
 continuations, including Gemma's extended window prompts. An allowed near tie
 requires an independently teacher-forced oracle suffix and matching decoded
