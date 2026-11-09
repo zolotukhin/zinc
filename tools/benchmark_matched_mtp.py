@@ -35,16 +35,19 @@ def text_hash(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def measure(engine, mode, child, port, log, scenario, directory, number, require_full_budget=True):
+def measure(engine, mode, child, port, log, scenario, directory, number, require_full_budget=True, completion_mode="chat"):
+    if completion_mode not in ("chat", "raw"):
+        raise ValueError("unknown completion measurement mode")
     offset = log.stat().st_size
     started = time.monotonic()
-    with gpu.request(port, "/v1/chat/completions", scenario["body"], timeout=600) as response:
+    endpoint = "/v1/completions" if completion_mode == "raw" else "/v1/chat/completions"
+    with gpu.request(port, endpoint, scenario["body"], timeout=600) as response:
         body = json.load(response)
     latency = (time.monotonic() - started) * 1000
     if body.get("error"):
         raise ValueError("engine returned an API error")
     choice = body.get("choices", [{}])[0]
-    content = choice.get("message", {}).get("content") or ""
+    content = (choice.get("text") if completion_mode == "raw" else choice.get("message", {}).get("content")) or ""
     if not content or "\ufffd" in content:
         raise ValueError("empty or corrupted generated content")
     body_file = directory / f"{number}.json"
