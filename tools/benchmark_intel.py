@@ -563,9 +563,9 @@ def main():
                     current["passed"] = True
                     current["performance_comparison"] = performance_comparison(current, report["settings"])
                     save()
-                except (ValueError, AssertionError) as error:
+                except (ValueError, AssertionError, OSError) as error:
                     current["passed"] = False
-                    current["error"] = str(error)
+                    current["error"] = str(error) if type(error) in (ValueError, AssertionError) else type(error).__name__
                     save()
                     if not args.keep_going:
                         raise
