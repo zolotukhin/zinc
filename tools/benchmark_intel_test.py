@@ -3,6 +3,7 @@ import copy
 import datetime
 import io
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -28,14 +29,16 @@ class IntelMetricsTest(unittest.TestCase):
             memory.assert_called_once(); runtime.assert_called_once()
 
     def test_missing_observations_do_not_mask_the_primary_failure_or_skip_other_collectors(self):
-        failure = ValueError("complete output changed")
-        record, runtime = {}, Mock(return_value={"runtime": "level_zero"})
-        with self.assertRaises(ValueError) as caught:
-            with benchmark_intel.process_observations(record, [("memory", Mock(side_effect=OSError("private diagnostic"))), ("native_runtime", runtime)]):
-                raise failure
-        self.assertIs(caught.exception, failure)
-        self.assertEqual(record, {"memory_error": "OSError", "native_runtime": {"runtime": "level_zero"}})
-        runtime.assert_called_once()
+        for failure in (ValueError("complete output changed"), KeyboardInterrupt()):
+            for observation_error in (OSError("private diagnostic"), RuntimeError("probe failure"), KeyError("missing key"), subprocess.TimeoutExpired("probe", 1)):
+                with self.subTest(primary=type(failure), observation=type(observation_error)):
+                    record, runtime = {}, Mock(return_value={"runtime": "level_zero"})
+                    with self.assertRaises(type(failure)) as caught:
+                        with benchmark_intel.process_observations(record, [("memory", Mock(side_effect=observation_error)), ("native_runtime", runtime)]):
+                            raise failure
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(record, {"memory_error": type(observation_error).__name__, "native_runtime": {"runtime": "level_zero"}})
+                    runtime.assert_called_once()
 
     def test_successful_measurements_still_fail_if_required_observation_is_missing(self):
         record = {}

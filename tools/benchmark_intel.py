@@ -33,7 +33,7 @@ HARNESS += ("tools/intel_sycl_environment.py", "tools/intel_native_probe.py", "t
 
 @contextmanager
 def process_observations(record, collectors):
-    """Save diagnostics while the process is alive, including rejected requests."""
+    """Save diagnostics inside the owned process context, before its cleanup."""
     failed = False
     try:
         yield
@@ -45,7 +45,7 @@ def process_observations(record, collectors):
         for key, collect in collectors:
             try:
                 record[key] = collect()
-            except (ValueError, AssertionError, OSError) as error:
+            except Exception as error:
                 # A dying process can lose /proc entries. Retain that fact
                 # without replacing the measurement/cancellation that failed.
                 record[key + "_error"] = type(error).__name__
@@ -605,7 +605,7 @@ def main():
                                 current["processes"].append(process)
                                 collectors = [("memory", memory.snapshot)]
                                 if engine == "llama" and args.reference_backend == "sycl":
-                                    collectors.append(("native_runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix)))
+                                    collectors.append(("native_runtime", lambda pid=child.pid, prefix=args.sycl_prefix: sycl.runtime_evidence(pid, prefix)))
                                 with process_observations(process, collectors):
                                     for scenario in scenarios:
                                         for iteration in range(args.warmup + args.runs):
