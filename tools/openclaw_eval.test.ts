@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createFixture, evaluate, verifyFixture } from './openclaw_eval.mjs';
@@ -57,6 +57,64 @@ test('cancelling a task cannot start a subsequent recovery client', async () => 
     expect(report.passed).toBe(false);
     expect(report.healthyAfter).toBeNull();
     expect(report.results).toHaveLength(1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('acceptance discloses preparation retries and retains their private diagnostics', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'zinc-openclaw-preparation-'));
+  const output = path.join(root, 'trial');
+  const failed = {
+    code: 1,
+    signal: null,
+    stdout: 'preparation diagnostic',
+    stderr: 'pre-admission failure',
+  };
+  let calls = 0;
+  try {
+    const summary = await evaluate(
+      { output, baseUrl: 'http://127.0.0.1:9090/v1' },
+      {
+        discover: async () => ({
+          baseUrl: 'http://127.0.0.1:9090/v1',
+          model: 'fixture',
+          context: 16384,
+        }),
+        validate: async () => {},
+        run: async ({ project }) => {
+          calls++;
+          if (calls === 2) {
+            const { receipt } = JSON.parse(
+              await readFile(path.join(project, 'contract.json'), 'utf8'),
+            );
+            await writeFile(
+              path.join(project, 'feature.mjs'),
+              "export function normalizeTag(value){return value.trim().toLowerCase().replace(/\\s+/g,'-');}\n",
+            );
+            await writeFile(path.join(project, 'receipt.txt'), receipt + '\n');
+          }
+          return {
+            report: {
+              final:
+                calls === 1
+                  ? 'ZINC_OPENCLAW_OK'
+                  : calls === 3
+                    ? 'ZINC_OPENCLAW_RECOVERED'
+                    : 'tests passed',
+            },
+            stderr: '',
+            ...(calls === 1 ? { preparationFailures: [failed] } : {}),
+          };
+        },
+      },
+    );
+    expect(summary.passed).toBe(true);
+    expect(summary.results[0].preparationRetries).toBe(1);
+    expect(summary.results[1].checks.tests).toBe(true);
+    const filename = path.join(output, 'text-preparation-failures-private.json');
+    expect(JSON.parse(await readFile(filename, 'utf8'))).toEqual([failed]);
+    expect((await stat(filename)).mode & 0o777).toBe(0o600);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

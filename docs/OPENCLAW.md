@@ -99,11 +99,22 @@ node tools/setup_openclaw.mjs run --project ../my-project --timeout 300 -- \
 
 The helper invokes `openclaw agent exec` with the project directory, explicit
 config and model, direct tools, the lean local-model prompt, and thinking off.
-Each task gets temporary client state. Exit failure, timeout, interruption,
+Each task gets temporary client state. Task failure, timeout, interruption,
 oversized diagnostics or an unsuccessful JSON task report makes the helper
 fail. It stops its process group and removes that state on completion.
 An interrupted evaluation also writes a partial summary and stops before
 starting another task.
+
+OpenClaw 2026.11.1 can reject its prepared model runtime before admitting the
+agent run. For a local HTTP ZINC connection, the helper retries that exact
+preparation error once, within the original deadline. An empty report with no
+selected model/provider, payloads, usage or tool activity is required, together
+with an independent local forwarding check that no inference request was sent.
+The forwarder preserves response bytes and streaming; any non-metadata request
+blocks a retry. Remote or HTTPS connections retain their normal failure result. Each attempt owns and removes its client
+state. The evaluator retains the first failure in a private diagnostics file
+and records `preparationRetries` in the task summary. Ordinary task failures
+keep their existing failure outcome.
 
 The helper also queries ZINC's optional `chat_session_reuse` health capability
 before a run. On qualified attention-only Vulkan models, successive tool turns

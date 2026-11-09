@@ -104,7 +104,11 @@ export async function evaluate(
   ]) {
     const started = Date.now();
     try {
-      const { report, stderr } = await run({
+      const {
+        report,
+        stderr,
+        preparationFailures = [],
+      } = await run({
         binary,
         filename,
         project,
@@ -118,6 +122,12 @@ export async function evaluate(
         { mode: 0o600 },
       );
       await writeFile(path.join(directory, `${name}-stderr-private.log`), stderr, { mode: 0o600 });
+      if (preparationFailures.length)
+        await writeFile(
+          path.join(directory, `${name}-preparation-failures-private.json`),
+          JSON.stringify(preparationFailures, null, 2) + '\n',
+          { mode: 0o600 },
+        );
       const verification =
         name === 'workspace'
           ? await verifyFixture(project, fixture)
@@ -132,13 +142,19 @@ export async function evaluate(
         passed: verification.passed,
         ...(verification.checks ? { checks: verification.checks } : {}),
         toolSummary: report.toolSummary ?? null,
+        ...(preparationFailures.length ? { preparationRetries: preparationFailures.length } : {}),
         seconds: (Date.now() - started) / 1000,
       });
     } catch (error) {
       await writeFile(
         path.join(directory, `${name}-failure-private.json`),
         JSON.stringify(
-          { message: error.message, code: error.code, diagnostics: error.diagnostics },
+          {
+            message: error.message,
+            code: error.code,
+            diagnostics: error.diagnostics,
+            preparationFailures: error.preparationFailures,
+          },
           null,
           2,
         ) + '\n',
@@ -148,6 +164,9 @@ export async function evaluate(
         name,
         completed: false,
         passed: false,
+        ...(error.preparationFailures?.length
+          ? { preparationRetries: error.preparationFailures.length }
+          : {}),
         seconds: (Date.now() - started) / 1000,
       });
       // Cancellation ends the suite too; starting a recovery task here would

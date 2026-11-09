@@ -2,11 +2,13 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import path from 'node:path';
 import {
   buildConfig,
   CONFIG_NAME,
   discoverServer,
+  isRuntimePreparationFailure,
   loadConfig,
   normalizeBaseUrl,
   parseArgs,
@@ -390,7 +392,361 @@ async function fakeClient(source: string) {
   };
 }
 
+const preparationReport = () => ({
+  ok: false,
+  status: 'error',
+  final: '',
+  payloads: [],
+  model: null,
+  provider: null,
+  error: {
+    kind: 'exception',
+    message: 'Model runtime changed during both preparation attempts; retry the request',
+  },
+});
+const preparationStderr =
+  '[agents/prepared-model-runtime] auth-triggered model runtime refresh failed';
+const preparationError = (report = preparationReport()) =>
+  Object.assign(new Error('client failed'), {
+    diagnostics: {
+      code: 1,
+      signal: null,
+      stdout: JSON.stringify(report),
+      stderr: preparationStderr,
+    },
+  });
+
+async function httpFixture(handler: Parameters<typeof createServer>[0]) {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (typeof address !== 'object' || address === null)
+    throw new Error('HTTP fixture did not listen');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/proxy/v1`,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+describe('independent local inference admission guard', () => {
+  test('metadata discovery can precede one preparation retry', async () => {
+    const paths: string[] = [];
+    const upstream = await httpFixture((request, response) => {
+      paths.push(request.url!);
+      response.end('{"data":[]}');
+    });
+    try {
+      const f = await fakeClient(`import {existsSync,readFileSync,writeFileSync} from 'node:fs';
+const args=process.argv.slice(2),config=JSON.parse(readFileSync(args[args.indexOf('--config')+1],'utf8'));
+await (await fetch(config.models.providers.zinc.baseUrl+'/models')).text();
+if(!existsSync('attempts')){writeFileSync('attempts','1');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+console.log(JSON.stringify({ok:true,status:'ok'}));`);
+      await writeConfig(f.project, config({ model: 'loaded', baseUrl: upstream.baseUrl }));
+      const result = await runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+      });
+      expect(result.preparationFailures).toHaveLength(1);
+      expect(paths).toEqual(['/proxy/v1/models', '/proxy/v1/models']);
+      expect((await readdir(f.project)).some((name) => name.endsWith('.run'))).toBe(false);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test('an inference POST prevents retry even when the client report omits all activity', async () => {
+    const requests: string[] = [];
+    const upstream = await httpFixture((request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      request.resume();
+      response.end('{"choices":[]}');
+    });
+    try {
+      const f = await fakeClient(`import {readFileSync} from 'node:fs';
+const args=process.argv.slice(2),config=JSON.parse(readFileSync(args[args.indexOf('--config')+1],'utf8'));
+await (await fetch(config.models.providers.zinc.baseUrl+'/chat/completions',{method:'POST',body:'{"stream":true}'})).text();
+console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`);
+      await writeConfig(f.project, config({ model: 'loaded', baseUrl: upstream.baseUrl }));
+      let starts = 0;
+      await expect(
+        runOpenClaw(f.options, {
+          ...f.dependencies,
+          fetchImpl: async () => Response.json({ status: 'ok' }),
+          spawnImpl: (binary, args, options) => {
+            starts++;
+            return f.dependencies.spawnImpl(binary, args, options);
+          },
+        }),
+      ).rejects.toThrow('OpenClaw failed');
+      expect(starts).toBe(1);
+      expect(requests).toEqual(['POST /proxy/v1/chat/completions']);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test('forwarding preserves Unicode SSE bytes, response status, headers and authorization', async () => {
+    const sse = 'data: {"choices":[{"text":"café 東京"}]}\n\ndata: [DONE]\n\n';
+    const received: any[] = [];
+    const upstream = await httpFixture((request, response) => {
+      const parts: Buffer[] = [];
+      request.on('data', (part) => parts.push(part));
+      request.on('end', () => {
+        received.push({
+          url: request.url,
+          auth: request.headers.authorization,
+          body: Buffer.concat(parts).toString(),
+        });
+        response.writeHead(201, { 'content-type': 'text/event-stream', 'x-fixture': 'unchanged' });
+        const bytes = Buffer.from(sse),
+          split = bytes.indexOf(Buffer.from('é')) + 1;
+        response.write(bytes.subarray(0, split));
+        setTimeout(() => response.end(bytes.subarray(split)), 10);
+      });
+    });
+    try {
+      const f = await fakeClient(`import {readFileSync} from 'node:fs';
+const args=process.argv.slice(2),config=JSON.parse(readFileSync(args[args.indexOf('--config')+1],'utf8'));
+const response=await fetch(config.models.providers.zinc.baseUrl+'/completions?fixture=1',{method:'POST',headers:{authorization:'Bearer fixture-key','content-type':'application/json'},body:'{"prompt":"東京","stream":true}'});
+console.log(JSON.stringify({ok:true,status:'ok',http:response.status,header:response.headers.get('x-fixture'),type:response.headers.get('content-type'),text:await response.text()}));`);
+      await writeConfig(f.project, config({ model: 'loaded', baseUrl: upstream.baseUrl }));
+      const result = await runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+      });
+      expect(result.report).toEqual({
+        ok: true,
+        status: 'ok',
+        http: 201,
+        header: 'unchanged',
+        type: 'text/event-stream',
+        text: sse,
+      });
+      expect(received).toEqual([
+        {
+          url: '/proxy/v1/completions?fixture=1',
+          auth: 'Bearer fixture-key',
+          body: '{"prompt":"東京","stream":true}',
+        },
+      ]);
+      expect(
+        JSON.parse(await readFile(f.options.filename, 'utf8')).models.providers.zinc.baseUrl,
+      ).toBe(upstream.baseUrl);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test('client disconnect closes the owned upstream stream', async () => {
+    let disconnected = false;
+    const upstream = await httpFixture((request, response) => {
+      request.resume();
+      response.on('close', () => {
+        disconnected = true;
+      });
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.write('data: first\n\n');
+    });
+    try {
+      const f = await fakeClient(`import {readFileSync} from 'node:fs';
+const args=process.argv.slice(2),config=JSON.parse(readFileSync(args[args.indexOf('--config')+1],'utf8'));
+const response=await fetch(config.models.providers.zinc.baseUrl+'/completions',{method:'POST',body:'{}'});
+const reader=response.body.getReader();await reader.read();await reader.cancel();console.log(JSON.stringify({ok:true,status:'ok'}));`);
+      await writeConfig(f.project, config({ model: 'loaded', baseUrl: upstream.baseUrl }));
+      await runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+      });
+      for (let i = 0; i < 100 && !disconnected; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(disconnected).toBe(true);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test('a connection without an independent local guard cannot retry', async () => {
+    const f = await fakeClient(
+      `console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
+    );
+    await writeConfig(
+      f.project,
+      config({ model: 'loaded', baseUrl: 'https://example.invalid/v1' }),
+    );
+    let starts = 0;
+    await expect(
+      runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          return f.dependencies.spawnImpl(binary, args, options);
+        },
+      }),
+    ).rejects.toThrow('OpenClaw failed');
+    expect(starts).toBe(1);
+  });
+});
+
+test('only empty pre-admission runtime failures qualify for a preparation retry', () => {
+  expect(isRuntimePreparationFailure(preparationError())).toBe(true);
+  const nested = preparationReport();
+  nested.error.message +=
+    ' | prepared model runtime publication was superseded for <runtime-owner>';
+  expect(isRuntimePreparationFailure(preparationError(nested))).toBe(true);
+  for (const changes of [
+    { ok: true },
+    { status: 'ok' },
+    { final: 'partial answer' },
+    { model: 'loaded' },
+    { provider: 'zinc' },
+    { payloads: [{ text: 'ran a task' }] },
+    { usage: {} },
+    { toolSummary: { calls: 0 } },
+    { error: null },
+    { error: { kind: 'exception', message: 'an unrelated task failure' } },
+  ])
+    expect(
+      isRuntimePreparationFailure(preparationError({ ...preparationReport(), ...changes })),
+    ).toBe(false);
+  for (const changes of [
+    { code: 0 },
+    { code: 7 },
+    { signal: 'SIGTERM' },
+    { stderr: '' },
+    { stdout: 'invalid' },
+  ]) {
+    const error = preparationError();
+    Object.assign(error.diagnostics, changes);
+    expect(isRuntimePreparationFailure(error)).toBe(false);
+  }
+  for (const code of ['OPENCLAW_TIMEOUT', 'OPENCLAW_INTERRUPTED', 'OPENCLAW_OUTPUT_LIMIT'])
+    expect(isRuntimePreparationFailure(Object.assign(preparationError(), { code }))).toBe(false);
+  expect(isRuntimePreparationFailure(null)).toBe(false);
+});
+
 describe('OpenClaw owned process and task result', () => {
+  test('retries one preparation failure with fresh owned state and preserves the native report', async () => {
+    const f = await fakeClient(`import {existsSync,readFileSync,writeFileSync} from 'node:fs';
+let input='';for await(const text of process.stdin)input+=text;
+const count=existsSync('attempts')?Number(readFileSync('attempts','utf8')):0;writeFileSync('attempts',String(count+1));
+if(count===0){console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+console.log(JSON.stringify({ok:true,status:'ok',final:'completed',input}));`);
+    await writeConfig(f.project, config({ model: 'loaded' }));
+    const states: string[] = [];
+    const result = await runOpenClaw(f.options, {
+      ...f.dependencies,
+      fetchImpl: async () => Response.json({ status: 'ok' }),
+      spawnImpl: (binary, args, options) => {
+        states.push(options.env.OPENCLAW_STATE_DIR);
+        return f.dependencies.spawnImpl(binary, args, options);
+      },
+    });
+    expect(result.report).toEqual({
+      ok: true,
+      status: 'ok',
+      final: 'completed',
+      input: f.options.prompt,
+    });
+    expect(result.preparationFailures).toHaveLength(1);
+    expect(result.preparationFailures[0].stdout).toContain('both preparation attempts');
+    expect(states).toHaveLength(2);
+    expect(states[0]).not.toBe(states[1]);
+    for (const state of states) await expect(stat(state)).rejects.toThrow();
+  });
+  test('a repeated preparation failure stops after two processes and retains both diagnostics', async () => {
+    const f = await fakeClient(
+      `console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
+    );
+    await writeConfig(f.project, config({ model: 'loaded' }));
+    let starts = 0;
+    const listeners = process.listenerCount('SIGINT');
+    let failure: any;
+    try {
+      await runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          return f.dependencies.spawnImpl(binary, args, options);
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(starts).toBe(2);
+    expect(failure.preparationFailures).toHaveLength(1);
+    expect(failure.diagnostics.stdout).toContain('both preparation attempts');
+    expect(process.listenerCount('SIGINT')).toBe(listeners);
+  });
+  test('a preparation retry keeps the original outer deadline', async () => {
+    const f = await fakeClient(`import {existsSync,writeFileSync} from 'node:fs';
+if(!existsSync('attempts')){writeFileSync('attempts','1');await new Promise(r=>setTimeout(r,250));console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);}
+await new Promise(r=>setTimeout(r,450));console.log(JSON.stringify({ok:true,status:'ok'}));`);
+    await writeConfig(f.project, config({ model: 'loaded' }));
+    let starts = 0;
+    let failure: any;
+    try {
+      await runOpenClaw(f.options, {
+        ...f.dependencies,
+        fetchImpl: async () => Response.json({ status: 'ok' }),
+        deadlineMs: 600,
+        graceMs: 100,
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          return f.dependencies.spawnImpl(binary, args, options);
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(starts).toBe(2);
+    expect(failure?.code).toBe('OPENCLAW_TIMEOUT');
+    expect(failure?.preparationFailures).toHaveLength(1);
+  });
+  test('an admitted failure cannot replay a task that may have changed files', async () => {
+    const report = { ...preparationReport(), model: 'loaded', provider: 'zinc' };
+    const f = await fakeClient(
+      `import {writeFileSync} from 'node:fs';writeFileSync('effect.txt','one task');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(report))});process.exit(1);`,
+    );
+    let starts = 0;
+    await expect(
+      runOpenClaw(f.options, {
+        ...f.dependencies,
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          return f.dependencies.spawnImpl(binary, args, options);
+        },
+      }),
+    ).rejects.toThrow('OpenClaw failed');
+    expect(starts).toBe(1);
+    expect(await readFile(path.join(f.project, 'effect.txt'), 'utf8')).toBe('one task');
+  });
+  test('interruption while preparation state is retiring cannot launch another attempt', async () => {
+    const f = await fakeClient(
+      `import {writeFileSync} from 'node:fs';import path from 'node:path';for(let i=0;i<120;i++)writeFileSync(path.join(process.env.OPENCLAW_STATE_DIR,String(i)),'state');console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
+    );
+    let starts = 0;
+    let failure: any;
+    try {
+      await runOpenClaw(f.options, {
+        ...f.dependencies,
+        spawnImpl: (binary, args, options) => {
+          starts++;
+          const child = f.dependencies.spawnImpl(binary, args, options);
+          child.once('close', () => setImmediate(() => process.emit('SIGINT')));
+          return child;
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(starts).toBe(1);
+    expect(failure?.code).toBe('OPENCLAW_INTERRUPTED');
+  });
   test('uses a private temporary sibling config and removes it without changing the saved file', async () => {
     const f = await fakeClient(
       `import {readFileSync,statSync} from 'node:fs';let input='';for await(const s of process.stdin)input+=s;const args=process.argv.slice(2),filename=args[args.indexOf('--config')+1];console.log(JSON.stringify({ok:true,status:'ok',filename,config:JSON.parse(readFileSync(filename,'utf8')),mode:statSync(filename).mode&511}));`,

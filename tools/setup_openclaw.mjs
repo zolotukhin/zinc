@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
+import { Agent, createServer, request as httpRequest } from 'node:http';
 import { link, lstat, mkdtemp, open, readFile, rename, rm, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -394,6 +395,145 @@ export async function sessionRuntimeConfig(
   return live;
 }
 
+async function localAdmissionGuard(config) {
+  let target;
+  try {
+    target = new URL(normalizeBaseUrl(config?.models?.providers?.zinc?.baseUrl));
+    if (
+      target.protocol !== 'http:' ||
+      !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) ||
+      config.models.providers.zinc.api !== 'openai-completions'
+    )
+      return null;
+  } catch {
+    return null;
+  }
+  // A failed CLI report can omit earlier work. Observe requests independently
+  // before allowing its preparation retry; forwarded responses stay bytewise.
+  let admitted = false,
+    active = false,
+    attempt = 0;
+  const sockets = new Set(),
+    upstreams = new Set();
+  const agent = new Agent({ keepAlive: false });
+  const headers = (original) => {
+    const result = { ...original };
+    const connection = String(result.connection ?? '')
+      .split(',')
+      .map((name) => name.trim().toLowerCase());
+    for (const name of [
+      ...connection,
+      'connection',
+      'keep-alive',
+      'proxy-authenticate',
+      'proxy-authorization',
+      'te',
+      'trailer',
+      'transfer-encoding',
+      'upgrade',
+    ])
+      delete result[name];
+    return result;
+  };
+  const server = createServer((incoming, outgoing) => {
+    if (
+      !active ||
+      incoming.socket.destroyed ||
+      incoming.socket.admissionAttempt !== attempt ||
+      !incoming.url?.startsWith('/') ||
+      incoming.url.startsWith('//')
+    ) {
+      outgoing.writeHead(400);
+      outgoing.end();
+      return;
+    }
+    const url = new URL(incoming.url, target.origin);
+    if (url.origin !== target.origin) {
+      outgoing.writeHead(400);
+      outgoing.end();
+      return;
+    }
+    const metadata =
+      ['GET', 'HEAD'].includes(incoming.method) &&
+      (url.pathname === target.pathname + '/models' ||
+        url.pathname === target.pathname.replace(/\/v1$/, '/health'));
+    if (!metadata) admitted = true;
+    const upstream = httpRequest(
+      url,
+      { method: incoming.method, headers: { ...headers(incoming.headers), host: url.host }, agent },
+      (response) => {
+        if (outgoing.destroyed) {
+          response.destroy();
+          return;
+        }
+        outgoing.writeHead(response.statusCode, headers(response.headers));
+        response.on('error', () => outgoing.destroy());
+        response.pipe(outgoing);
+      },
+    );
+    upstreams.add(upstream);
+    upstream.on('close', () => upstreams.delete(upstream));
+    upstream.on('error', () => {
+      if (outgoing.destroyed || outgoing.writableEnded) return;
+      if (outgoing.headersSent) outgoing.destroy();
+      else {
+        outgoing.writeHead(502, { 'content-type': 'application/json' });
+        outgoing.end('{"error":{"message":"ZINC forwarding failed"}}');
+      }
+    });
+    incoming.on('aborted', () => upstream.destroy());
+    incoming.on('error', () => upstream.destroy());
+    outgoing.on('error', () => upstream.destroy());
+    outgoing.on('close', () => {
+      if (!outgoing.writableFinished) upstream.destroy();
+    });
+    incoming.pipe(upstream);
+  });
+  server.on('connection', (socket) => {
+    socket.admissionAttempt = attempt;
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  const retire = () => {
+    active = false;
+    for (const socket of sockets) socket.destroy();
+    for (const request of upstreams) request.destroy();
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.removeListener('error', reject);
+        resolve();
+      });
+    });
+  } catch {
+    retire();
+    agent.destroy();
+    return null;
+  }
+  server.on('error', () => {
+    admitted = true;
+    retire();
+  });
+  const live = structuredClone(config);
+  live.models.providers.zinc.baseUrl = `http://127.0.0.1:${server.address().port}${target.pathname}`;
+  return {
+    config: live,
+    begin: () => {
+      attempt++;
+      active = true;
+    },
+    end: retire,
+    canRetry: () => !admitted,
+    close: async () => {
+      retire();
+      agent.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 async function withSessionConfig(filename, model, dependencies, run) {
   let config;
   try {
@@ -403,7 +543,9 @@ async function withSessionConfig(filename, model, dependencies, run) {
     // Let the actual client retain its normal config validation/error contract.
     return run(filename);
   }
-  const live = await sessionRuntimeConfig(config, model, dependencies);
+  const session = await sessionRuntimeConfig(config, model, dependencies);
+  const guard = await localAdmissionGuard(session);
+  const live = guard?.config ?? session;
   if (live === config) return run(filename);
   // Keep the same parent directory so relative includes and plugin paths keep
   // their meaning. Copy raw environment references, never resolved secrets.
@@ -431,13 +573,17 @@ async function withSessionConfig(filename, model, dependencies, run) {
       await handle.close();
     }
   } catch {
-    if (created) await removeTemporary();
+    try {
+      if (created) await removeTemporary();
+    } finally {
+      await guard?.close();
+    }
     return run(filename);
   }
   let runFailed = false;
   let runFailure;
   try {
-    return await run(temporary);
+    return await run(temporary, guard);
   } catch (error) {
     runFailed = true;
     runFailure = error;
@@ -459,9 +605,13 @@ async function withSessionConfig(filename, model, dependencies, run) {
         );
         if (runFailure?.code !== undefined) combined.code = runFailure.code;
         if (runFailure?.diagnostics !== undefined) combined.diagnostics = runFailure.diagnostics;
+        if (runFailure?.preparationFailures !== undefined)
+          combined.preparationFailures = runFailure.preparationFailures;
         throw combined;
       }
       throw cleanupError;
+    } finally {
+      await guard?.close();
     }
   }
 }
@@ -598,24 +748,117 @@ export async function validateClient({ binary = 'openclaw', filename, project },
   return result;
 }
 
+export function isRuntimePreparationFailure(error) {
+  // OpenClaw 2026.11.1 can supersede its prepared-runtime lease before a run
+  // is admitted. Its own error asks for a retry. Never replay an ordinary
+  // failed task, a timeout, or a report that could have produced side effects.
+  const diagnostic = error?.diagnostics;
+  if (
+    error?.code ||
+    diagnostic?.code !== 1 ||
+    diagnostic.signal !== null ||
+    typeof diagnostic.stdout !== 'string' ||
+    typeof diagnostic.stderr !== 'string' ||
+    !diagnostic.stderr.includes('[agents/prepared-model-runtime]')
+  )
+    return false;
+  let report;
+  try {
+    report = JSON.parse(diagnostic.stdout);
+  } catch {
+    return false;
+  }
+  const message = report?.error?.message;
+  const prefix = 'Model runtime changed during both preparation attempts; retry the request';
+  return (
+    report?.ok === false &&
+    report.status === 'error' &&
+    report.final === '' &&
+    report.model === null &&
+    report.provider === null &&
+    Array.isArray(report.payloads) &&
+    report.payloads.length === 0 &&
+    !Object.hasOwn(report, 'usage') &&
+    !Object.hasOwn(report, 'toolSummary') &&
+    report.error?.kind === 'exception' &&
+    typeof message === 'string' &&
+    (message === prefix ||
+      message.startsWith(prefix + ' | prepared model runtime publication was superseded for '))
+  );
+}
+
 export async function runOpenClaw(
   { binary = 'openclaw', filename, model, project, prompt, timeout = 600 },
   dependencies,
 ) {
-  return withSessionConfig(filename, model, dependencies, async (runtimeFilename) => {
-    const result = await clientCommand(
-      {
-        binary,
-        args: runArguments(runtimeFilename, model, project, timeout),
-        project,
-        input: prompt,
-        timeout,
-      },
-      dependencies,
-    );
-    if (result.report.ok !== true || result.report.status !== 'ok' || result.report.error)
-      throw new Error('OpenClaw did not report a successful completed task');
-    return result;
+  return withSessionConfig(filename, model, dependencies, async (runtimeFilename, guard) => {
+    const failures = [];
+    const expires = performance.now() + (dependencies?.deadlineMs ?? (timeout + 30) * 1000);
+    let interrupted = false;
+    const interrupt = () => {
+      interrupted = true;
+    };
+    process.on('SIGINT', interrupt);
+    process.on('SIGTERM', interrupt);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          if (interrupted)
+            throw Object.assign(new Error('OpenClaw was interrupted'), { code: INTERRUPTED_CODE });
+          const remaining = expires - performance.now();
+          if (remaining <= 0)
+            throw Object.assign(new Error('OpenClaw exceeded its task timeout'), {
+              code: 'OPENCLAW_TIMEOUT',
+            });
+          let result;
+          guard?.begin();
+          try {
+            result = await clientCommand(
+              {
+                binary,
+                args: runArguments(runtimeFilename, model, project, timeout),
+                project,
+                input: prompt,
+                timeout,
+              },
+              { ...dependencies, deadlineMs: remaining },
+            );
+          } finally {
+            guard?.end();
+          }
+          if (interrupted)
+            throw Object.assign(new Error('OpenClaw was interrupted'), { code: INTERRUPTED_CODE });
+          if (result.report.ok !== true || result.report.status !== 'ok' || result.report.error)
+            throw new Error('OpenClaw did not report a successful completed task');
+          return failures.length ? { ...result, preparationFailures: failures } : result;
+        } catch (error) {
+          // A signal can arrive while clientCommand retires its state after
+          // removing the child's signal handlers. Preserve cancellation even
+          // when the process itself had already returned a preparation error.
+          if (interrupted && error.code !== INTERRUPTED_CODE) {
+            const stopped = new Error('OpenClaw was interrupted', { cause: error });
+            stopped.code = INTERRUPTED_CODE;
+            if (error.diagnostics) stopped.diagnostics = error.diagnostics;
+            error = stopped;
+          }
+          if (
+            attempt === 0 &&
+            !interrupted &&
+            guard?.canRetry() === true &&
+            isRuntimePreparationFailure(error) &&
+            performance.now() < expires
+          ) {
+            failures.push(error.diagnostics);
+            continue;
+          }
+          if (failures.length) error.preparationFailures = failures;
+          throw error;
+        }
+      }
+    } finally {
+      process.removeListener('SIGINT', interrupt);
+      process.removeListener('SIGTERM', interrupt);
+    }
   });
 }
 
@@ -677,6 +920,8 @@ export async function main(argv = process.argv.slice(2)) {
     prompt: opts.prompt,
     timeout: opts.timeout,
   });
+  if (result.preparationFailures?.length)
+    console.error('OpenClaw retried one runtime preparation failure before the task started.');
   console.log(JSON.stringify(result.report, null, 2));
 }
 
