@@ -165,6 +165,23 @@ pub fn ssmCheckpointInvalidate(_engine: *InferenceEngine) void {
     if (comptime gpu.is_vulkan) _engine.ssmCheckpointInvalidate();
 }
 
+/// A canonical suffix may overwrite old KV rows only when there is no
+/// recurrent or draft state to restore. An enabled lazy draft counts too.
+pub fn canRewindAttentionPrefix(_engine: *const InferenceEngine) bool {
+    if (comptime gpu.is_vulkan) {
+        return @import("session_reuse_policy.zig").canRewindPrefix(true, _engine.model.config.ssm_d_inner, _engine.mtp != null or _engine.mtpEnabled(), _engine.active_kv_page_ids != null);
+    }
+    return false;
+}
+
+pub fn canonicalPrefixDefault(_engine: *const InferenceEngine) bool {
+    if (comptime gpu.is_vulkan) {
+        const cfg = _engine.model.config;
+        return @import("session_reuse_policy.zig").defaultRewind(true, _engine.gpu_config.vendor == .intel_arc_xe2, cfg.architecture == .gemma, cfg.n_experts, cfg.ssm_d_inner);
+    }
+    return false;
+}
+
 /// Forget captured prefill rows so the next prefill's capture starts at row 0.
 pub fn mtpResetCapture(_engine: *InferenceEngine) void {
     if (comptime gpu.is_vulkan) _engine.mtpResetCapture();

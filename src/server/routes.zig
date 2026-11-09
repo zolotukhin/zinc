@@ -220,6 +220,15 @@ const ChatReuseCache = struct {
         return null;
     }
 
+    /// A canonical edit invalidates only its suffix on attention-only models.
+    /// Residency and model ownership still apply; this never revives an entry
+    /// after a one-off request, cancellation, model switch, or idle expiry.
+    fn attentionPrefixLen(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8, prompt: []const u32, now_ns: i128) usize {
+        self.pruneExpired(now_ns);
+        const stored = self.residentEntryTokens(session_id, model_path) orelse return 0;
+        return session_reuse_policy.rewindPrefixLen(stored, prompt);
+    }
+
     /// Tokens of the transcript stored for `session_id`, regardless of
     /// residency. Diagnostics only.
     fn entryTokens(self: *ChatReuseCache, session_id: []const u8) ?[]const u32 {
@@ -3049,7 +3058,8 @@ fn handleChatCompletions(
     // the end of the previous generation.
     var checkpoint_pos: ?u32 = if (cacheable_session) server_state.chat_reuse_cache.checkpointPosFor(parsed.session_id, resources.model_path) else null;
     if (cacheable_session) {
-        if (server_state.chat_reuse_cache.matchSession(parsed.session_id, resources.model_path, prompt_tokens, host_io.nanoTimestamp())) |m| {
+        const match_ns = host_io.nanoTimestamp();
+        if (server_state.chat_reuse_cache.matchSession(parsed.session_id, resources.model_path, prompt_tokens, match_ns)) |m| {
             if (m.consumed == m.reused) {
                 reused_prefix_len = m.reused;
             } else if (server_state.chat_reuse_cache.entryTokens(parsed.session_id)) |stored| {
@@ -3074,8 +3084,27 @@ fn handleChatCompletions(
                 } else |_| {}
             }
         } else if (server_state.chat_reuse_cache.residentEntryTokens(parsed.session_id, resources.model_path)) |stored| {
-            const by_text = spliceByText(allocator, tokenizer, stored, prompt_tokens) catch null;
-            if (by_text) |buf| {
+            // A dropped Gemma thought header can change the canonical history
+            // without changing thousands of preceding prompt tokens. Keep the
+            // exact prefix and overwrite every KV row from the first mismatch.
+            // Default only on the Intel Gemma MoE profile; the independent
+            // state guard still excludes recurrent or speculative state.
+            const rewind_enabled = session_reuse_policy.rewindRequested(host_io.getenv("ZINC_CHAT_PREFIX_ROLLBACK"), runtime.canonicalPrefixDefault(engine));
+            const rewind_len = if (rewind_enabled and runtime.canRewindAttentionPrefix(engine))
+                server_state.chat_reuse_cache.attentionPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, match_ns)
+            else
+                0;
+            const by_text = if (rewind_len == 0) spliceByText(allocator, tokenizer, stored, prompt_tokens) catch null else null;
+            if (rewind_len > 0) {
+                reused_prefix_len = rewind_len;
+                checkpoint_pos = null;
+                runtime.ssmCheckpointInvalidate(engine);
+                log.info("chat cache canonical prefix: session={s} reused={d} replayed={d}", .{
+                    parsed.session_id,
+                    rewind_len,
+                    prompt_tokens.len - rewind_len,
+                });
+            } else if (by_text) |buf| {
                 spliced_prompt = buf;
                 engine_prompt_tokens = buf;
                 reused_prefix_len = stored.len;
@@ -6194,6 +6223,29 @@ test "ChatReuseCache reuses only the session resident in the engine" {
     // resident, and its prefix is reusable once more.
     try cache.store("session-a", "/tmp/model.gguf", &.{ 1, 2, 3 }, 40);
     try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 41));
+}
+
+test "canonical prefix rewind retains resident ownership and rejects stale KV" {
+    var cache = ChatReuseCache.init(std.testing.allocator);
+    defer cache.deinit();
+    const engine_tokens = [_]u32{ 1, 2, 3, 90, 91, 4, 5 };
+    const canonical = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    try cache.store("session-a", "gemma.gguf", &engine_tokens, 10);
+    try std.testing.expectEqual(@as(usize, 3), cache.attentionPrefixLen("session-a", "gemma.gguf", &canonical, 11));
+    try std.testing.expectEqual(@as(usize, 0), cache.attentionPrefixLen("session-a", "other.gguf", &canonical, 12));
+    try std.testing.expectEqual(@as(usize, 0), cache.attentionPrefixLen("session-b", "gemma.gguf", &canonical, 13));
+
+    // An intervening client owns the physical KV even though session-a still
+    // has a transcript in the table. A common system prompt is insufficient.
+    try cache.store("session-b", "gemma.gguf", &engine_tokens, 20);
+    try std.testing.expectEqual(@as(usize, 0), cache.attentionPrefixLen("session-a", "gemma.gguf", &canonical, 21));
+    try std.testing.expectEqual(@as(usize, 3), cache.attentionPrefixLen("session-b", "gemma.gguf", &canonical, 22));
+    cache.clearLive();
+    try std.testing.expectEqual(@as(usize, 0), cache.attentionPrefixLen("session-b", "gemma.gguf", &canonical, 23));
+
+    try cache.store("session-a", "gemma.gguf", &engine_tokens, 30);
+    try std.testing.expectEqual(@as(usize, 0), cache.attentionPrefixLen("session-a", "gemma.gguf", &canonical, 30 + chat_reuse_idle_timeout_ns));
+    try std.testing.expectEqual(@as(usize, 0), cache.count());
 }
 
 test "ChatReuseCache residency is dropped by a generation that stores nothing" {
