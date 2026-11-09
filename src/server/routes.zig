@@ -15,6 +15,7 @@ const Model = runtime.Model;
 const memory_plan = @import("../gpu/memory_plan.zig");
 const tool_format = @import("tool_format.zig");
 const session_reuse_policy = @import("session_reuse_policy.zig");
+const raw_completion_stream = @import("raw_completion_stream.zig");
 
 const log = std.log.scoped(.routes);
 const inference_timing_log = std.log.scoped(.forward);
@@ -3739,6 +3740,11 @@ fn handleCompletions(
     var req_id_buf: [32]u8 = undefined;
     const req_id = std.fmt.bufPrint(&req_id_buf, "cmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "cmpl-0";
 
+    if (parsed.stream) {
+        try handleRawCompletionStream(conn, engine, tokenizer, server_state, prompt_tokens, request_budget, parsed.max_tokens, parsed.include_usage, req_id, ts, model_name, allocator);
+        return;
+    }
+
     const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), tokenizer.eog_ids, allocator) catch |err| {
         log.err("Completion generation failed: {s}", .{@errorName(err)});
         try conn.sendError(500, "internal_error", "Generation failed");
@@ -3773,6 +3779,106 @@ fn handleCompletions(
         output_tokens.len, prompt_tokens.len + output_tokens.len,
     });
     try conn.sendJson(200, wb.items);
+}
+
+const RawCompletionTokenSource = struct {
+    engine: *runtime.InferenceEngine,
+    state: *runtime.DecodeState,
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    server_state: *ServerState,
+    allocator: std.mem.Allocator,
+    max_tokens: u32,
+    previous: ?u32 = null,
+    mtp: runtime.MtpSource,
+    prng: std.Random.DefaultPrng = .init(0),
+    decode_buf: [512]u8 = undefined,
+
+    pub fn next(self: *@This()) !raw_completion_stream.Piece {
+        // Raw non-streaming completions are greedy; preserve the same sampling
+        // and chained-decode path when emitting their output incrementally.
+        const sampling = runtime.SamplingParams{ .temperature = 0, .top_p = 1, .repetition_penalty = 1 };
+        const token = if (self.previous) |previous|
+            try self.mtp.step(self.engine, self.state, previous, self.max_tokens - @as(u32, @intCast(self.state.generated_tokens.items.len)), sampling, self.prng.random())
+        else
+            runtime.sample(self.engine, self.state, sampling, self.prng.random());
+        try self.state.generated_tokens.append(self.allocator, token);
+        self.previous = token;
+        self.server_state.setActiveContextTokens(self.state.position);
+        return .{ .bytes = self.tokenizer.decodeToken(token, &self.decode_buf), .eog = self.tokenizer.isEndOfGeneration(token) };
+    }
+};
+
+fn rawStreamFailure(conn: *http.Connection) void {
+    // Once SSE headers are sent, a JSON HTTP error would corrupt the stream.
+    // Emit an explicit error so a failed generation cannot look successful.
+    conn.writeSseEvent("{\"error\":{\"type\":\"internal_error\",\"message\":\"Generation failed\"}}") catch return;
+    conn.writeSseDone() catch {};
+}
+
+fn handleRawCompletionStream(
+    conn: *http.Connection,
+    engine: *runtime.InferenceEngine,
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    server_state: *ServerState,
+    prompt_tokens: []const u32,
+    request_budget: memory_plan.RequestBudget,
+    requested_max_tokens: u32,
+    include_usage: bool,
+    req_id: []const u8,
+    ts: i64,
+    model_name: []const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    var state = runtime.DecodeState.init(allocator);
+    defer state.deinit();
+    state.requested_context_tokens = request_budget.target_context_tokens;
+    conn.sendSseStart() catch return;
+    var progress = @import("prefill_progress.zig").ConnectionProgress(http.Connection){
+        .conn = conn,
+        .last_keepalive_ns = host_io.nanoTimestamp(),
+    };
+    runtime.setPrefillControl(engine, .{ .context = &progress, .poll = @TypeOf(progress).poll });
+    defer runtime.setPrefillControl(engine, null);
+    runtime.ssmCheckpointInvalidate(engine);
+    runtime.mtpBeginRequest(engine);
+    runtime.mtpSetPrimeDuringPrefill(engine, true);
+    const prefill_start = host_io.nanoTimestamp();
+    engine.prefillBatched(&state, prompt_tokens) catch |err| {
+        if (err != error.RequestCancelled) {
+            log.err("Raw streaming prefill failed: {s}", .{@errorName(err)});
+            rawStreamFailure(conn);
+        }
+        return;
+    };
+    logPrefillTiming(prompt_tokens.len, prefill_start, host_io.nanoTimestamp());
+    var source = RawCompletionTokenSource{
+        .engine = engine,
+        .state = &state,
+        .tokenizer = tokenizer,
+        .server_state = server_state,
+        .allocator = allocator,
+        .max_tokens = request_budget.completion_tokens,
+        .mtp = .{ .active = runtime.mtpPrime(engine, &state, prompt_tokens), .eos_id = tokenizer.eos_id },
+    };
+    defer source.mtp.finish(engine);
+    const decode_start = host_io.nanoTimestamp();
+    const generated = raw_completion_stream.run(conn, &source, .{
+        .id = req_id,
+        .created = ts,
+        .model = model_name,
+        .prompt_tokens = prompt_tokens.len,
+        .requested_max_tokens = requested_max_tokens,
+        .max_tokens = request_budget.completion_tokens,
+        .include_usage = include_usage,
+    }) catch |err| {
+        if (err != error.RequestCancelled and err != error.BrokenPipe and err != error.ConnectionResetByPeer) {
+            log.err("Raw streaming generation failed: {s}", .{@errorName(err)});
+            rawStreamFailure(conn);
+        }
+        return;
+    };
+    logGeneratedTiming(generated, decode_start, host_io.nanoTimestamp());
+    runtime.mtpLogRequest(engine);
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -3906,6 +4012,7 @@ const RawRequestBody = struct {
     prompt: []const u8 = "",
     max_tokens: u32 = 256,
     stream: bool = false,
+    stream_options: ?struct { include_usage: bool = false } = null,
     temperature: f32 = 1.0,
 };
 
@@ -3920,6 +4027,7 @@ const ParsedRequest = struct {
     prompt: []u8 = &[_]u8{},
     max_tokens: u32 = 256,
     stream: bool = false,
+    include_usage: bool = false,
     temperature: f32 = 1.0,
     allocator: std.mem.Allocator,
 
@@ -3951,6 +4059,7 @@ fn parseRequestBody(body: []const u8, allocator: std.mem.Allocator) !ParsedReque
     result.model_id = try decodeJsonText(allocator, parsed.value.model);
     result.max_tokens = parsed.value.max_tokens;
     result.stream = parsed.value.stream;
+    result.include_usage = if (parsed.value.stream_options) |options| options.include_usage else false;
     result.temperature = parsed.value.temperature;
     result.prompt = try decodeJsonText(allocator, parsed.value.prompt);
 
@@ -3965,6 +4074,20 @@ fn parseRequestBody(body: []const u8, allocator: std.mem.Allocator) !ParsedReque
     }
 
     return result;
+}
+
+test "raw completions honor explicit streaming and optional usage without changing JSON defaults" {
+    for ([_][]const u8{
+        "{\"prompt\":\"raw prompt\"}",
+        "{\"prompt\":\"raw prompt\",\"stream\":false}",
+        "{\"prompt\":\"raw prompt\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    }, 0..) |body, index| {
+        var parsed = try parseRequestBody(body, std.testing.allocator);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("raw prompt", parsed.prompt);
+        try std.testing.expectEqual(index == 2, parsed.stream);
+        try std.testing.expectEqual(index == 2, parsed.include_usage);
+    }
 }
 
 fn decodeJsonText(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -4238,11 +4361,7 @@ pub fn streamText(
 /// A token budget can stop in the middle of a character. Keep its complete
 /// prefix for both JSON and SSE; interior invalid bytes are validated by callers.
 pub fn completeUtf8Prefix(text: []const u8) []const u8 {
-    if (text.len == 0) return text;
-    var start = text.len - 1;
-    while (start > 0 and text[start] & 0xc0 == 0x80) : (start -= 1) {}
-    const length = std.unicode.utf8ByteSequenceLength(text[start]) catch return text;
-    return if (text.len - start < length) text[0..start] else text;
+    return raw_completion_stream.completeUtf8Prefix(text);
 }
 
 test "response token budgets retain only complete Unicode characters" {
