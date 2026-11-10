@@ -690,3 +690,17 @@ The previous source and three binary trees are preserved separately. A fresh
 selection of upstream `cf6463ac` was recorded before rebuilding its FP32,
 FP16 and Vulkan references. That rebuild is a separate attempt; it does not
 relabel these frozen controls or their failures.
+
+### Starter native feature controls
+
+The [later starter controls](/zinc/validation/intel-native-starter-controls-2026-11-10.json)
+use the same `cf6463ac` build and official package identities as the packed-Q8
+campaign. The unchanged default, disabled asynchronous copies, disabled fusion
+and disabled wide-Q8 kernel each pass this limited attempt: two server lifetimes,
+24 repeated JSON requests, eight short JSON/SSE controls and three initial
+native-reference continuations per treatment.
+
+The unchanged default passing here does not erase its earlier medium-context
+drift. These results show that the issue is intermittent; they do not identify
+a corrective setting or qualify the seven-model performance baseline. The
+earlier failures and all later samples remain separate records.
