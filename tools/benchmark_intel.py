@@ -135,35 +135,50 @@ def raw_scenarios(args, scenarios, work, env):
     return result
 
 
-def native_reference_validation(args, work, env, reference_env):
+def native_reference_validation(args, work, env, reference_env, record=None):
     """Check the timed SYCL configuration against the frozen Vulkan oracle."""
+    # Attach this object to the parent before calling. A rejected configuration
+    # must retain its obtained continuations and live runtime, without becoming
+    # an accepted baseline just because the process returned usable text.
+    # Each retry needs a fresh record; clearing a used one would erase evidence.
+    record = {} if record is None else record
+    require(isinstance(record, dict) and not record, "native preflight record must be fresh")
+    record.update(passed=False, backend="sycl", oracle_backend="vulkan", oracle_commit=policy()["reference"]["commit"],
+                  performance_configuration_checked=False, validation_stage="startup", cases=[])
     samples = json.loads((work / "reference-samples.json").read_text())
     require(samples, "native reference validation needs frozen oracle samples")
-    port, cases, pending = gpu.free_port(), [], []
+    port, cases, pending = gpu.free_port(), record["cases"], []
     log = work / "native-reference-validation.log"
     with gpu.process(performance_reference_command(args, port), log, work,
                      gpu.reference_environment(args.llama_bin, reference_env)) as child:
-        gpu.ready(child, port, require_ok=True)
-        offload = native_gpu_layers(log.read_text(errors="replace"), "sycl")
-        for index, sample in enumerate(samples):
-            prompt, expected = sample["prompt"], sample["expected"]
-            wanted = gpu.reference_generated_ids(expected)
-            actual = gpu.json_request(port, "/completion", {"prompt": prompt, "n_predict": len(wanted),
-                                      "temperature": 0, "n_probs": 2, "cache_prompt": False})
-            write_json(work / f"native-reference-case-{index}.json", {"prompt": prompt, "expected": expected, "actual": actual})
-            ids = gpu.reference_generated_ids(actual)
-            require(len(ids) == len(wanted), "SYCL reference continuation count differs")
-            comparison = {"tokens": len(ids), "near_ties": []}
-            if ids == wanted:
-                require(actual.get("content") == expected.get("content"), "SYCL reference continuation text differs")
-            else:
-                tie = gpu.reference_near_tie(ids, expected)
-                comparison["near_ties"].append(tie)
-                pending.append((prompt, actual, ids, tie))
-            cases.append({"reference_ids": wanted, "native_ids": ids, "content": actual.get("content"), "comparison": comparison})
-        runtime = sycl.runtime_evidence(child.pid, args.sycl_prefix)
-    agreement = reference_agreement([case["comparison"] for case in cases], expected_cases=len(samples))
+        with process_observations(record, [("runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix))]):
+            gpu.ready(child, port, require_ok=True)
+            record["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"), "sycl")
+            record["performance_configuration_checked"] = True
+            record["validation_stage"] = "native_continuations"
+            for index, sample in enumerate(samples):
+                prompt, expected = sample["prompt"], sample["expected"]
+                wanted = gpu.reference_generated_ids(expected)
+                actual = gpu.json_request(port, "/completion", {"prompt": prompt, "n_predict": len(wanted),
+                                          "temperature": 0, "n_probs": 2, "cache_prompt": False})
+                write_json(work / f"native-reference-case-{index}.json", {"prompt": prompt, "expected": expected, "actual": actual})
+                case = {"reference_ids": wanted, "native_ids": [], "content": actual.get("content"), "comparison": {"tokens": 0, "near_ties": []}}
+                cases.append(case)
+                ids = gpu.reference_generated_ids(actual)
+                case["native_ids"] = ids
+                comparison = case["comparison"]
+                comparison["tokens"] = len(ids)
+                require(len(ids) == len(wanted), "SYCL reference continuation count differs")
+                if ids == wanted:
+                    require(actual.get("content") == expected.get("content"), "SYCL reference continuation text differs")
+                else:
+                    tie = gpu.reference_near_tie(ids, expected)
+                    comparison["near_ties"].append(tie)
+                    pending.append((prompt, actual, ids, tie))
+    record["validation_stage"] = "aggregate_agreement"
+    record["agreement"] = reference_agreement([case["comparison"] for case in cases], expected_cases=len(samples))
     if pending:
+        record["validation_stage"] = "oracle_branches"
         # The native process has exited before this oracle launch. A close
         # first choice still requires an independently checked complete tail.
         generation = policy()["reference"]["generation"]
@@ -186,8 +201,8 @@ def native_reference_validation(args, work, env, reference_env):
                     require(gpu.reference_generated_ids(tail) == ids[start:], "SYCL continuation after the near tie differs")
                 text = gpu.json_request(port, "/detokenize", {"tokens": ids}).get("content")
                 require(text == actual.get("content"), "SYCL reference near-tie text differs")
-    return {"passed": True, "backend": "sycl", "oracle_backend": "vulkan", "oracle_commit": policy()["reference"]["commit"],
-            "performance_configuration_checked": True, "agreement": agreement, "cases": cases, "gpu_offload": offload, "runtime": runtime}
+    record.update(passed=True, validation_stage="complete")
+    return record
 
 
 def raw_stream_parity(transcript, baseline):
@@ -584,7 +599,8 @@ def main():
                     current["raw_streaming"] = raw_stream_validation(args, model_work, env)
                     if args.reference_backend == "sycl":
                         print("Correctness: timed SYCL configuration versus frozen Vulkan oracle", flush=True)
-                        current["native_reference_validation"] = native_reference_validation(args, model_work, env, reference_env)
+                        current["native_reference_validation"] = {}
+                        native_reference_validation(args, model_work, env, reference_env, current["native_reference_validation"])
                     scenarios = run_json(["bun", str(ROOT / "tools/intel_workloads.mjs"), identifier])
                     scenarios = raw_scenarios(args, scenarios, model_work, env)
                     current["scenarios"] = [{k: v for k, v in row.items() if k != "body"} | {"request_sha256": text_hash(json.dumps(row["body"], sort_keys=True))} for row in scenarios]
