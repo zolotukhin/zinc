@@ -455,6 +455,8 @@ pub fn build(b: *std.Build) void {
         "mul_mm_q4k_gate_up_swiglu",
         "mul_mm_q4k_gate_up_geglu",
         "mul_mm_q4k_gate_up_geglu_full",
+        "mul_mm_q4k_gate_up_geglu_intel",
+        "mul_mm_q4k_gate_up_geglu_intel_full",
         "mul_mm_q4k_gate_up_geglu_tail8",
         "mul_mm_q6k",
         "mul_mm_q6k_tail8",

@@ -176,6 +176,34 @@ fn createQ8PrefillPipeline(
     return pipeline;
 }
 
+fn createGemmaGegluPrefillPipeline(
+    instance: *const Instance,
+    shader_dir: []const u8,
+    intel_tiling: bool,
+    full: bool,
+    options: pipeline_mod.PipelineOptions,
+    allocator: std.mem.Allocator,
+) !Pipeline {
+    var path_buf: [512]u8 = undefined;
+    const suffix = if (full) "_full" else "";
+    const kind = if (full) "full" else "ragged";
+    if (intel_tiling) {
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_geglu_intel{s}.spv", .{ shader_dir, suffix });
+        if (pipeline_mod.createFromSpirvWithOptions(instance, path, 4, @sizeOf(MulMmQ4KPush), &.{}, options, allocator)) |pipeline| {
+            log.info("Q4_K Intel Gemma GEGLU {s} prefill shader loaded (WG64, 32x32, TM2/TN8)", .{kind});
+            return pipeline;
+        } else |err| {
+            // A stale asset directory or rejected driver compilation retains
+            // working prefill. Do not infer that the Intel asset was selected.
+            log.warn("Intel Gemma GEGLU {s} prefill unavailable; using generic shader: {s}", .{ kind, @errorName(err) });
+        }
+    }
+    const fallback = try std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_geglu{s}.spv", .{ shader_dir, suffix });
+    const pipeline = try pipeline_mod.createFromSpirvWithOptions(instance, fallback, 4, @sizeOf(MulMmQ4KPush), &.{}, options, allocator);
+    log.info("Q4_K generic Gemma GEGLU {s} prefill shader loaded (WG64, 32x32, TM4/TN4)", .{kind});
+    return pipeline;
+}
+
 pub const ProjectionSpecializations = @import("projection_specializations.zig").ProjectionSpecializations;
 
 fn createProjectionSpecialization(
@@ -1140,7 +1168,7 @@ pub const DmmvDispatch = struct {
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         // Standalone kernel benchmarks retain every supported specialization.
-        return initWithSpecializations(instance, gpu_config, shader_dir, max_k, .all(), false, allocator);
+        return initWithSpecializations(instance, gpu_config, shader_dir, max_k, .all(), false, false, allocator);
     }
 
     /// Initialize a loaded model with only its applicable fixed-K variants.
@@ -1151,6 +1179,7 @@ pub const DmmvDispatch = struct {
         max_k: u32,
         projection_demand: ProjectionSpecializations,
         qualified_q8_rows_default: bool,
+        qualified_intel_gemma_geglu: bool,
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         const use_wave64 = gpu_config.wave_size == 64;
@@ -1840,22 +1869,15 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q4k_gate_up_swiglu != null) {
             log.info("mul_mm_q4k_gate_up_swiglu pipeline loaded (Qwen dense-hybrid 27B batched FFN)", .{});
         }
-        const mul_mm_q4k_gate_up_geglu_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_geglu.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k_gate_up_geglu = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gate_up_geglu_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const intel_gemma_geglu = qualified_intel_gemma_geglu and gpu_config.vendor == .intel_arc_xe2;
+        const pipeline_mul_mm_q4k_gate_up_geglu = createGemmaGegluPrefillPipeline(instance, shader_dir, intel_gemma_geglu, false, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
-        if (pipeline_mul_mm_q4k_gate_up_geglu != null) {
-            log.info("mul_mm_q4k_gate_up_geglu pipeline loaded (Gemma 4 batched dense FFN)", .{});
-        }
-        const mul_mm_q4k_gate_up_geglu_full_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_geglu_full.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k_gate_up_geglu_full = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gate_up_geglu_full_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_geglu_full = createGemmaGegluPrefillPipeline(instance, shader_dir, intel_gemma_geglu, true, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_full shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
-        if (pipeline_mul_mm_q4k_gate_up_geglu_full != null) {
-            log.info("mul_mm_q4k_gate_up_geglu_full pipeline loaded (branchless Gemma 4 dense FFN full tiles)", .{});
-        }
         const mul_mm_q4k_gate_up_geglu_tail8_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_geglu_tail8.spv", .{shader_dir}) catch unreachable;
         const pipeline_mul_mm_q4k_gate_up_geglu_tail8 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gate_up_geglu_tail8_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_geglu_tail8 shader not loaded: {s}", .{@errorName(err)});

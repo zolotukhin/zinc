@@ -1,0 +1,2228 @@
+{
+  "all_models_all_dimensions_better": false,
+  "build_completed_at_utc": "2026-11-10T04:49:33.286548Z",
+  "build_started_at_utc": "2026-11-10T04:40:20.417476Z",
+  "cleanup": "no GPU process remains",
+  "complete_model_matrix": false,
+  "completed": true,
+  "date": "2026-11-10",
+  "environment_source_commit": "c1c3bd5f4427137676051f1cfb19e3ff20aaf4fe",
+  "environment_source_sha256": "bc8524c10c43a6d69f1ea95d0c7dc78f870d9100c731c47a9c510acc9957713e",
+  "hardware": {
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.6-arch1.1",
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.14-arch1-1"
+  },
+  "hardware_after": {
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.6-arch1.1",
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.14-arch1-1"
+  },
+  "hardware_unchanged": true,
+  "harness_commit": "c73ed59457c1943f5cbbf148515968056a194104",
+  "limitations": [
+    "Each control changes one runtime option while preserving the frozen source, binary and official package identities.",
+    "The earlier default attempt is separate; these controls are not an interleaved causal experiment or a complete performance campaign.",
+    "Runtime options are recorded from the runner environment passed to each child. Fusion-disabled correctness failed before the timed-process environment snapshot could run.",
+    "Every obtained response and observation is retained. The fusion-disabled attempt fails initial frozen-oracle agreement, so it has no timing samples, streams or returned live-runtime observation."
+  ],
+  "native_build": {
+    "cache_sha256": "d40518ad9a83f288de178536e3ef86ee71684120660733fcdf979e5f4ddca798",
+    "settings": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "GGML_CUDA": "OFF",
+      "GGML_METAL": "OFF",
+      "GGML_NATIVE": "OFF",
+      "GGML_SYCL": "ON",
+      "GGML_SYCL_DNN": "ON",
+      "GGML_SYCL_F16": "OFF",
+      "GGML_SYCL_GRAPH": "ON",
+      "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+      "GGML_SYCL_SUPPORT_XMX": "ON",
+      "GGML_VULKAN": "OFF"
+    }
+  },
+  "native_stack": {
+    "packages": [
+      {
+        "build": "20_gnu",
+        "channel": "conda-forge",
+        "name": "_openmp_mutex",
+        "sha256": "1dd3fffd892081df9726d7eb7e0dea6198962ba775bd88842135a4ddb4deb3c9",
+        "version": "4.5"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "compiler_shared",
+        "sha256": "4d4c1e6ef39d7db2b486f5c6e2a383ca8a906954d25a0c494f33375c9ba0218a",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "dpcpp-cpp-rt",
+        "sha256": "60fdd8f2117cfb75cfc08f37a10557297069d81b02c137d6a6e67edff63314d5",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "dpcpp_impl_linux-64",
+        "sha256": "c6d6a384c79ccbc1e4808e7dc5d4257d843a90439c2f52c1af548084c30cd5e0",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "dpcpp_linux-64",
+        "sha256": "d9f95ab18d3b581222a86b8a9f09337081f8b2f478034e28eebf70a3b7c05ed6",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "intel-cmplr-lib-rt",
+        "sha256": "67ab584b5e1143cc6d988340f36eeb532c7659e5c6485cb93f68ad2b0bdf6479",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "intel-cmplr-lib-ur",
+        "sha256": "44234982702d073d487b04bcbaf93131b9678e23851c5eab0ee7e984875a2a43",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "intel-cmplr-lic-rt",
+        "sha256": "75ffce0f5dd4236da23ab2d27bdd56f6665c3c0a259d0eea0f2cb6f670f40e28",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "intel-opencl-rt",
+        "sha256": "4330fecfa277d941ecc261c2ed33cd690d4eec28f593d828a6afb85b1f35cdb2",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "intel-openmp",
+        "sha256": "9712fc215d7cf044e7cb48e5ce32ecc75c5af78dad51401914d4c5585e242e01",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_863",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "intel-sycl-rt",
+        "sha256": "f04af77bc105465be86be2f79ed4b09c2e708480348da3fa863dbc31c94ec378",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "he073ed8_9",
+        "channel": "conda-forge",
+        "name": "kernel-headers_linux-64",
+        "sha256": "41557eeadf641de6aeae49486cef30d02a6912d8da98585d687894afd65b356a",
+        "version": "4.18.0"
+      },
+      {
+        "build": "ha9f2e26_7",
+        "channel": "conda-forge",
+        "name": "libgcc",
+        "sha256": "e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea",
+        "version": "16.2.0"
+      },
+      {
+        "build": "h69a702a_7",
+        "channel": "conda-forge",
+        "name": "libgcc-ng",
+        "sha256": "03b54d7008de080a17cc2174b0e4acd6d06e1c981b2eb19846f46d8f59966034",
+        "version": "16.2.0"
+      },
+      {
+        "build": "he0feb66_7",
+        "channel": "conda-forge",
+        "name": "libgomp",
+        "sha256": "92a0bb350c7be6a4eedcb4e111c60aefd176018e6b1c009a6e025dbe9bbcd758",
+        "version": "16.2.0"
+      },
+      {
+        "build": "h934c35e_7",
+        "channel": "conda-forge",
+        "name": "libstdcxx",
+        "sha256": "fa7018298629fc429971fffd6ecba3d27a7b02e4e890d6a93ea01ffebe8cb745",
+        "version": "16.2.0"
+      },
+      {
+        "build": "hdf11a46_7",
+        "channel": "conda-forge",
+        "name": "libstdcxx-ng",
+        "sha256": "337f481db36cc357884f05f404ccd1b3a7e0fc1ee48ec5c884e4281d213bc863",
+        "version": "16.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "mkl",
+        "sha256": "cc38f827bea215ecc7ba44e043c09797c51c463dd50c5b1059774c778ddf120f",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "mkl-devel",
+        "sha256": "085ad403d68040057a3d79bbbc1f5cec02090090fb51ada273e891d6850a7f2f",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "mkl-devel-dpcpp",
+        "sha256": "6e367c401b159ff0007e6e0b04e56206804866dfceabb656907d360c0f140925",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "mkl-dpcpp",
+        "sha256": "d3594c03ad8d0eac1005008e16ae625e482065c7db7b4e497e6721bb2e68fac8",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "mkl-include",
+        "sha256": "7684785ef069d1660bd4cf0724b6058c61bc0b266c582dbf8f5d967f5894f522",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "hb03c661_1",
+        "channel": "conda-forge",
+        "name": "ocl-icd",
+        "sha256": "75f3bf733523a338f73d6c276c4a26634877cd970edb558f2769d9fa52b100a9",
+        "version": "2.3.4"
+      },
+      {
+        "build": "intel_617",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onednn",
+        "sha256": "7304c7ea0a50e7957b04fe1a5b84c033c1564be53500a530e3fe4a673e732034",
+        "version": "2026.1.0"
+      },
+      {
+        "build": "intel_154",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onedpl-devel",
+        "sha256": "8ca225ba232bf642c7622d8b3291f8694beab978ed01de4fe5725a8ea86aca2c",
+        "version": "2022.14.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-blas",
+        "sha256": "fab2909a21351f5b35c56871d13f9d873afacbc621824afc69b67c79caac9650",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-datafitting",
+        "sha256": "c4ff4fdda123a869accba80ebefd30032c548bf82bfc22766f9a00c5d9942524",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-dft",
+        "sha256": "471099d505965a2dda70061883871d439eedc2cec0a7ef69a70930b05289395c",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-include",
+        "sha256": "d6e53ebf14eb74f9c18e0f7e115a513d8161e49ed4ab619998048463e531081c",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-lapack",
+        "sha256": "4db6a285d3bb67f786a46286e8d436774911f9f0ff88e306065b5685deddf506",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-rng",
+        "sha256": "2cf1e4a4caf33728ab2acda4cdf7b6e7adb6d4025ac723d57a38ef919685d951",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-sparse",
+        "sha256": "d9e3dd4794fb93e321802c06e1e929714254bcb7cfb846b85ddcfee6d3fa1309",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-stats",
+        "sha256": "5182415312d748f429cd63b6d0e80d4a1bf0452083c24030280b4675dab53c95",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "intel_881",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "onemkl-sycl-vm",
+        "sha256": "2b10ff2c024604f19b0cd3a61bbd926b62cecd32e8b316771968d1da7a07679e",
+        "version": "2026.2.0"
+      },
+      {
+        "build": "hecca717_0",
+        "channel": "conda-forge",
+        "name": "opencl-headers",
+        "sha256": "8de2f0cd8a659b01abf86e7fbb8cea4f28ada62fd288429a2bbc040db1b98dd0",
+        "version": "2025.06.13"
+      },
+      {
+        "build": "h4ee821c_9",
+        "channel": "conda-forge",
+        "name": "sysroot_linux-64",
+        "sha256": "c47299fe37aebb0fcf674b3be588e67e4afb86225be4b0d452c7eb75c086b851",
+        "version": "2.28"
+      },
+      {
+        "build": "intel_492",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "tbb",
+        "sha256": "85440a18f6a964e0b2c8a2533094171d087e1c13e1b3ba09f6dc715d61c8a711",
+        "version": "2023.2.0"
+      },
+      {
+        "build": "intel_492",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "tbb-devel",
+        "sha256": "780032954fae12646aaad57b5818fafdc8e934573cfc80fe7ea5910fc27b73fd",
+        "version": "2023.2.0"
+      },
+      {
+        "build": "intel_178",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "tcm",
+        "sha256": "78100b8543752df2f4c8bb4153b6badd815fffcf636c9a5327ba0f54a29bfab4",
+        "version": "1.6.0"
+      },
+      {
+        "build": "h5d301ff_0",
+        "channel": "conda-forge",
+        "name": "tzdata",
+        "sha256": "2b7ca858879f183ce2dcc65b300f48a0133d5430550f35b23d80d405a0788dbf",
+        "version": "2026e"
+      },
+      {
+        "build": "intel_116",
+        "channel": "https://software.repos.intel.com/python/conda",
+        "name": "umf",
+        "sha256": "c03620790e30221f2087fbc843c7a40c2bbe38c1c3ffb6b48b997b8607d1807b",
+        "version": "1.2.0"
+      }
+    ],
+    "sha256": "54f47fc6c058918dbeeadf22534f932349372ecb6aead7f6575daa7129353de3"
+  },
+  "native_zinc_backend": false,
+  "passed": false,
+  "performance_qualified": false,
+  "previous_default": "/zinc/validation/intel-native-exact-cadence-2026-11-10.json",
+  "reference": {
+    "commit": "3b4d6ab3f79651935fba1dd93732f29022a7f5f5",
+    "library_sha256": {
+      "libggml-base.so": "1bc7cdf601cfa0bd25a4deb0cc637f37bbab982151c835cfb0dfeaec29cc0e24",
+      "libggml-base.so.0": "1bc7cdf601cfa0bd25a4deb0cc637f37bbab982151c835cfb0dfeaec29cc0e24",
+      "libggml-base.so.0.29.0": "1bc7cdf601cfa0bd25a4deb0cc637f37bbab982151c835cfb0dfeaec29cc0e24",
+      "libggml-cpu.so": "375f99d89030e351f558259c42a84ba17a67ba9c53d141f398538f7c392c630a",
+      "libggml-cpu.so.0": "375f99d89030e351f558259c42a84ba17a67ba9c53d141f398538f7c392c630a",
+      "libggml-cpu.so.0.29.0": "375f99d89030e351f558259c42a84ba17a67ba9c53d141f398538f7c392c630a",
+      "libggml-sycl.so": "eba25e97345c497aa2f32ba5ad8d7be91cdbc5fcee623f6f942d9a3bed9f70ce",
+      "libggml-sycl.so.0": "eba25e97345c497aa2f32ba5ad8d7be91cdbc5fcee623f6f942d9a3bed9f70ce",
+      "libggml-sycl.so.0.29.0": "eba25e97345c497aa2f32ba5ad8d7be91cdbc5fcee623f6f942d9a3bed9f70ce",
+      "libggml.so": "c2ab7e4128585770e23a261a7b96710e18c45a903d1ed210fec0fb46bba8aa10",
+      "libggml.so.0": "c2ab7e4128585770e23a261a7b96710e18c45a903d1ed210fec0fb46bba8aa10",
+      "libggml.so.0.29.0": "c2ab7e4128585770e23a261a7b96710e18c45a903d1ed210fec0fb46bba8aa10",
+      "libllama-cli-impl.so": "c2913beeb97c7f51ccb53c09dcdc167ddb48c750b7f57f9f9e1ac7d30edb57ba",
+      "libllama-common.so": "bae27b3e7aab81b9e9bf22afc56be07c1ce7616e59a701a64a80322eeb99b09f",
+      "libllama-common.so.0": "bae27b3e7aab81b9e9bf22afc56be07c1ce7616e59a701a64a80322eeb99b09f",
+      "libllama-common.so.0.9.0": "bae27b3e7aab81b9e9bf22afc56be07c1ce7616e59a701a64a80322eeb99b09f",
+      "libllama-server-impl.so": "4a8507e9ba3f95f4c26f3f83207f8a1a8ae2a8a257ea6630db2c0e5027783c3c",
+      "libllama.so": "6ad237263ff5ca87f1943c6aa2679f61c12ea39b0628453db8c0f852478b3e55",
+      "libllama.so.0": "6ad237263ff5ca87f1943c6aa2679f61c12ea39b0628453db8c0f852478b3e55",
+      "libllama.so.0.9.0": "6ad237263ff5ca87f1943c6aa2679f61c12ea39b0628453db8c0f852478b3e55"
+    },
+    "server_sha256": "5b0828b9ad7d7609d24b48a0175b97d2436fa370f71499963bcd00ab4f6dbe78",
+    "tokenizer_sha256": "80b9809a67b81c2f27151ebccbd04fc76b1821116c10a9dc6eb487bfcbe7f54b"
+  },
+  "reference_selection": {
+    "checked_at_utc": "2026-11-10T04:39:54.624794Z",
+    "commit": "3b4d6ab3f79651935fba1dd93732f29022a7f5f5"
+  },
+  "release_qualification": false,
+  "schema_version": 1,
+  "scope": "Separate 35B exact-cadence native feature controls; frozen default failures remain in the linked earlier record.",
+  "settings": {
+    "extra_json_control_before_sse": false,
+    "kv_cache": "f16",
+    "measured_per_workload_per_lifetime": 3,
+    "mtp": "off",
+    "native_runtime": {
+      "GGML_SYCL_ENABLE_DNN": "1",
+      "GGML_SYCL_ENABLE_GRAPH": "0",
+      "GGML_SYCL_FA_ONEDNN": "1"
+    },
+    "prompt_cache": false,
+    "ram_cache_bytes": 0,
+    "reference_backend": "sycl",
+    "runtime": "level_zero",
+    "server_lifetimes_per_model": 2,
+    "startup_poll_interval_ms": 10,
+    "warmup_per_workload_per_lifetime": 1,
+    "workloads": 4
+  },
+  "treatments": [
+    {
+      "cleanup": "no GPU process remains",
+      "completed_at_utc": "2026-11-10T05:47:32.326124+00:00",
+      "hardware_unchanged": true,
+      "id": "synchronous-copy",
+      "live_environment_checked": false,
+      "models": [
+        {
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+          "native_reference_validation": {
+            "agreement": {
+              "cases": [
+                {
+                  "near_ties": [
+                    {
+                      "chosen_id": 11679,
+                      "logprob_gap": 0.012231826782226562,
+                      "position": 1,
+                      "rank": 2,
+                      "reference_id": 9662
+                    }
+                  ],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                {
+                  "near_ties": [],
+                  "tokens": 16
+                }
+              ],
+              "exact_tokens": 47,
+              "near_tie_tokens": 1,
+              "total_tokens": 48
+            },
+            "backend": "sycl",
+            "cases": [
+              {
+                "comparison": {
+                  "near_ties": [
+                    {
+                      "chosen_id": 11679,
+                      "logprob_gap": 0.012231826782226562,
+                      "position": 1,
+                      "rank": 2,
+                      "reference_id": 9662
+                    }
+                  ],
+                  "tokens": 16
+                },
+                "content": "The salt did not just sit on the skin; it worked its way into the",
+                "native_ids": [
+                  760,
+                  11679,
+                  1467,
+                  524,
+                  1066,
+                  2364,
+                  383,
+                  279,
+                  6574,
+                  26,
+                  424,
+                  6237,
+                  1141,
+                  1560,
+                  1083,
+                  279
+                ],
+                "reference_ids": [
+                  760,
+                  9662,
+                  383,
+                  5068,
+                  6451,
+                  4963,
+                  1467,
+                  524,
+                  11894,
+                  26,
+                  424,
+                  58330,
+                  13,
+                  1049,
+                  557,
+                  264
+                ]
+              },
+              {
+                "comparison": {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                "content": "A refrigerator works by moving heat from the inside of the fridge to the outside environment",
+                "native_ids": [
+                  32,
+                  43447,
+                  4138,
+                  539,
+                  6992,
+                  8364,
+                  494,
+                  279,
+                  4613,
+                  314,
+                  279,
+                  36337,
+                  310,
+                  279,
+                  4732,
+                  4424
+                ],
+                "reference_ids": [
+                  32,
+                  43447,
+                  4138,
+                  539,
+                  6992,
+                  8364,
+                  494,
+                  279,
+                  4613,
+                  314,
+                  279,
+                  36337,
+                  310,
+                  279,
+                  4732,
+                  4424
+                ]
+              },
+              {
+                "comparison": {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                "content": "Here are three common uses of copper:\n\n1.  **Electrical Wiring",
+                "native_ids": [
+                  8160,
+                  513,
+                  2250,
+                  4047,
+                  5533,
+                  314,
+                  22561,
+                  25,
+                  271,
+                  16,
+                  13,
+                  220,
+                  2972,
+                  28371,
+                  11764,
+                  46258
+                ],
+                "reference_ids": [
+                  8160,
+                  513,
+                  2250,
+                  4047,
+                  5533,
+                  314,
+                  22561,
+                  25,
+                  271,
+                  16,
+                  13,
+                  220,
+                  2972,
+                  28371,
+                  11764,
+                  46258
+                ]
+              }
+            ],
+            "gpu_offload": {
+              "backend": "sycl",
+              "offloaded": 41,
+              "total": 41
+            },
+            "oracle_backend": "vulkan",
+            "oracle_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+            "passed": true,
+            "performance_configuration_checked": true,
+            "runtime": {
+              "library_sha256": {
+                "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+                "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+                "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+                "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+                "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+                "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+                "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+                "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+                "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+              },
+              "runtime": "level_zero"
+            }
+          },
+          "output_drift": [
+            {
+              "actual": {
+                "content_sha256": "3d57f294046223a95c4c7e7f70d999633606ff6dfbb385bfe428d25b600976b7",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 0,
+              "repeat": 1,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "3d57f294046223a95c4c7e7f70d999633606ff6dfbb385bfe428d25b600976b7",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 0,
+              "repeat": 2,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "e01fb057407a32b8540947b55b0e95a3e05561472fe7f7a88194985cca4c19b1",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 0,
+              "repeat": 3,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "5404aaefa77e3a26f636b5b1f41416eccff6c47bb03c5782f117ea636ea31b4f",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 0,
+              "repeat": 1,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "ec3da64cff258c9dd046e70c06988e2b85d1decb3428d776b3215d4131d61d23",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 0,
+              "repeat": 2,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "1cdd4856f9289dba61b7233a6693add7b31594f201736afcdff55324afbf69bc",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 0,
+              "repeat": 3,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "68d96cab4c9bd971f12dd9481f8adb198eea37a8337dbadec720f1984b0b131c",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "expected": {
+                "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "lifetime": 0,
+              "repeat": 1,
+              "scenario": "context-long"
+            },
+            {
+              "actual": {
+                "content_sha256": "294eab0eb6ada18352c5a370082a17a6095c3c0b8760ce7e2be8f255f8f674a4",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "expected": {
+                "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "lifetime": 0,
+              "repeat": 2,
+              "scenario": "context-long"
+            },
+            {
+              "actual": {
+                "content_sha256": "294eab0eb6ada18352c5a370082a17a6095c3c0b8760ce7e2be8f255f8f674a4",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "expected": {
+                "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "lifetime": 0,
+              "repeat": 3,
+              "scenario": "context-long"
+            },
+            {
+              "actual": {
+                "content_sha256": "1fc8fab5206e1579205f1ae8c8805bbb8d247ef7e16705841795a84c4788dd6f",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 1,
+              "repeat": 0,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "2b596c4678857b6457e1ceda9ba95aae0cc7707d732e8a641ab298be5c61a981",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 1,
+              "repeat": 1,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "d1f1e3b9230898d10bee0d612919daf8abd2230ec776e280bf89b14080056679",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 1,
+              "repeat": 2,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "614f2811307c6127382bbae88ec049f1509e62e9934f5022a85f2e792dd00d2c",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "expected": {
+                "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+                "finish_reason": "length",
+                "generatedTokens": 96,
+                "promptTokens": 58
+              },
+              "lifetime": 1,
+              "repeat": 3,
+              "scenario": "core"
+            },
+            {
+              "actual": {
+                "content_sha256": "31ba3360d893088629b03525ce3574b7cd04693a0444999f3f1b881a6a1a44fc",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 1,
+              "repeat": 0,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "43ddad6694800b2fbea3ee7161452050523d548cafc6e2a04717fc93e7707c01",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 1,
+              "repeat": 1,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "341b7fcb658ec1e0f3f1721013e2503cbb6ec48d8af8bdc8055ac580010e53c5",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 1,
+              "repeat": 2,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "43ddad6694800b2fbea3ee7161452050523d548cafc6e2a04717fc93e7707c01",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "expected": {
+                "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+                "finish_reason": "length",
+                "generatedTokens": 160,
+                "promptTokens": 183
+              },
+              "lifetime": 1,
+              "repeat": 3,
+              "scenario": "context-medium"
+            },
+            {
+              "actual": {
+                "content_sha256": "91322f6aa9e59f4eb9fa532c4e86103fca3051f0b781a27eb73aded6fc43019e",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "expected": {
+                "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "lifetime": 1,
+              "repeat": 2,
+              "scenario": "context-long"
+            },
+            {
+              "actual": {
+                "content_sha256": "3e18596e3bfd7dfbefc3dc8f0379394f04476c0cc384569a69f790f0bae1579c",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "expected": {
+                "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+                "finish_reason": "length",
+                "generatedTokens": 128,
+                "promptTokens": 349
+              },
+              "lifetime": 1,
+              "repeat": 3,
+              "scenario": "context-long"
+            }
+          ],
+          "passed": false,
+          "processes": [
+            {
+              "gpu_offload": {
+                "backend": "sycl",
+                "offloaded": 41,
+                "total": 41
+              },
+              "lifetime": 0,
+              "memory": {
+                "gpu_memory_available": true,
+                "observed_peak": {
+                  "gpu_resident_gtt_bytes": 182468608,
+                  "gpu_resident_system_bytes": 0,
+                  "gpu_resident_vram_bytes": 22685184000,
+                  "gpu_total_gtt_bytes": 182468608,
+                  "gpu_total_system_bytes": 0,
+                  "gpu_total_vram_bytes": 22685184000,
+                  "host_anonymous_bytes": 405053440,
+                  "host_file_bytes": 22483648512,
+                  "host_peak_rss_bytes": 22623887360,
+                  "host_rss_bytes": 22623887360
+                },
+                "sample_interval_ms": 50,
+                "source": "Linux process status and DRM fdinfo"
+              },
+              "native_runtime": {
+                "library_sha256": {
+                  "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+                  "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+                  "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+                  "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+                  "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+                  "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+                  "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+                  "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+                  "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+                },
+                "runtime": "level_zero"
+              }
+            },
+            {
+              "gpu_offload": {
+                "backend": "sycl",
+                "offloaded": 41,
+                "total": 41
+              },
+              "lifetime": 1,
+              "memory": {
+                "gpu_memory_available": true,
+                "observed_peak": {
+                  "gpu_resident_gtt_bytes": 182468608,
+                  "gpu_resident_system_bytes": 0,
+                  "gpu_resident_vram_bytes": 22685175808,
+                  "gpu_total_gtt_bytes": 182468608,
+                  "gpu_total_system_bytes": 0,
+                  "gpu_total_vram_bytes": 22685175808,
+                  "host_anonymous_bytes": 405397504,
+                  "host_file_bytes": 22483636224,
+                  "host_peak_rss_bytes": 22623887360,
+                  "host_rss_bytes": 22623887360
+                },
+                "sample_interval_ms": 50,
+                "source": "Linux process status and DRM fdinfo"
+              },
+              "native_runtime": {
+                "library_sha256": {
+                  "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+                  "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+                  "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+                  "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+                  "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+                  "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+                  "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+                  "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+                  "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+                },
+                "runtime": "level_zero"
+              }
+            }
+          ],
+          "reference_samples_sha256": "dbb4cc1394190de6bd4cd5f0880a12bc8ce24d63d975db430825eeabba8a23a5",
+          "samples": [
+            {
+              "content_sha256": "0fabb91a6f7ef9c5f37f98de9c6c3dd5402e7ac9d151a8141b445b7c3bbe0409",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 0,
+              "promptTokens": 58,
+              "repeat": 0,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1524.1490000000001,
+                "predicted_n": 96,
+                "predicted_per_second": 62.329864074969045,
+                "predicted_per_token_ms": 16.04367368421053,
+                "prompt_ms": 685.825,
+                "prompt_n": 58,
+                "prompt_per_second": 84.56967885393503,
+                "prompt_per_token_ms": 11.824568965517242
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "3d57f294046223a95c4c7e7f70d999633606ff6dfbb385bfe428d25b600976b7",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 0,
+              "promptTokens": 58,
+              "repeat": 1,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 992.934,
+                "predicted_n": 96,
+                "predicted_per_second": 95.67604694773269,
+                "predicted_per_token_ms": 10.451936842105264,
+                "prompt_ms": 170.597,
+                "prompt_n": 58,
+                "prompt_per_second": 339.98253193198,
+                "prompt_per_token_ms": 2.9413275862068966
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "3d57f294046223a95c4c7e7f70d999633606ff6dfbb385bfe428d25b600976b7",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 0,
+              "promptTokens": 58,
+              "repeat": 2,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 991.789,
+                "predicted_n": 96,
+                "predicted_per_second": 95.7865029759354,
+                "predicted_per_token_ms": 10.439884210526316,
+                "prompt_ms": 161.42600000000002,
+                "prompt_n": 58,
+                "prompt_per_second": 359.2977587253602,
+                "prompt_per_token_ms": 2.7832068965517243
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "e01fb057407a32b8540947b55b0e95a3e05561472fe7f7a88194985cca4c19b1",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 0,
+              "promptTokens": 58,
+              "repeat": 3,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 990.818,
+                "predicted_n": 96,
+                "predicted_per_second": 95.88037359030619,
+                "predicted_per_token_ms": 10.429663157894737,
+                "prompt_ms": 161.705,
+                "prompt_n": 58,
+                "prompt_per_second": 358.6778392752234,
+                "prompt_per_token_ms": 2.7880172413793107
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "82392d2e63ae3c4c186608afccf8078b40892166a09a32956bd1b40ba7e65855",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 0,
+              "promptTokens": 183,
+              "repeat": 0,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1659.2350000000001,
+                "predicted_n": 160,
+                "predicted_per_second": 95.82729390351577,
+                "predicted_per_token_ms": 10.435440251572327,
+                "prompt_ms": 419.677,
+                "prompt_n": 183,
+                "prompt_per_second": 436.04962864298017,
+                "prompt_per_token_ms": 2.2933169398907105
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "5404aaefa77e3a26f636b5b1f41416eccff6c47bb03c5782f117ea636ea31b4f",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 0,
+              "promptTokens": 183,
+              "repeat": 1,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1658.5240000000001,
+                "predicted_n": 160,
+                "predicted_per_second": 95.86837453060673,
+                "predicted_per_token_ms": 10.43096855345912,
+                "prompt_ms": 365.89300000000003,
+                "prompt_n": 183,
+                "prompt_per_second": 500.1462176100663,
+                "prompt_per_token_ms": 1.9994153005464483
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "ec3da64cff258c9dd046e70c06988e2b85d1decb3428d776b3215d4131d61d23",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 0,
+              "promptTokens": 183,
+              "repeat": 2,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1656.9270000000001,
+                "predicted_n": 160,
+                "predicted_per_second": 95.96077558033636,
+                "predicted_per_token_ms": 10.420924528301887,
+                "prompt_ms": 365.526,
+                "prompt_n": 183,
+                "prompt_per_second": 500.64838068974575,
+                "prompt_per_token_ms": 1.9974098360655739
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "1cdd4856f9289dba61b7233a6693add7b31594f201736afcdff55324afbf69bc",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 0,
+              "promptTokens": 183,
+              "repeat": 3,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1659.53,
+                "predicted_n": 160,
+                "predicted_per_second": 95.81025953131308,
+                "predicted_per_token_ms": 10.437295597484276,
+                "prompt_ms": 365.189,
+                "prompt_n": 183,
+                "prompt_per_second": 501.11038393817995,
+                "prompt_per_token_ms": 1.995568306010929
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 0,
+              "promptTokens": 349,
+              "repeat": 0,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1322.7250000000001,
+                "predicted_n": 128,
+                "predicted_per_second": 96.01391067682246,
+                "predicted_per_token_ms": 10.415157480314962,
+                "prompt_ms": 628.7620000000001,
+                "prompt_n": 349,
+                "prompt_per_second": 555.0589889338096,
+                "prompt_per_token_ms": 1.8016103151862466
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "68d96cab4c9bd971f12dd9481f8adb198eea37a8337dbadec720f1984b0b131c",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 0,
+              "promptTokens": 349,
+              "repeat": 1,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1324.867,
+                "predicted_n": 128,
+                "predicted_per_second": 95.85867864472434,
+                "predicted_per_token_ms": 10.432023622047243,
+                "prompt_ms": 589.878,
+                "prompt_n": 349,
+                "prompt_per_second": 591.6477644529886,
+                "prompt_per_token_ms": 1.690194842406877
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "294eab0eb6ada18352c5a370082a17a6095c3c0b8760ce7e2be8f255f8f674a4",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 0,
+              "promptTokens": 349,
+              "repeat": 2,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1322.292,
+                "predicted_n": 128,
+                "predicted_per_second": 96.04535155623721,
+                "predicted_per_token_ms": 10.411748031496062,
+                "prompt_ms": 591.626,
+                "prompt_n": 349,
+                "prompt_per_second": 589.8997001484046,
+                "prompt_per_token_ms": 1.6952034383954153
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "294eab0eb6ada18352c5a370082a17a6095c3c0b8760ce7e2be8f255f8f674a4",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 0,
+              "promptTokens": 349,
+              "repeat": 3,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1325.268,
+                "predicted_n": 128,
+                "predicted_per_second": 95.82967369618824,
+                "predicted_per_token_ms": 10.435181102362204,
+                "prompt_ms": 591.541,
+                "prompt_n": 349,
+                "prompt_per_second": 589.9844643059398,
+                "prompt_per_token_ms": 1.6949598853868197
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 0,
+              "promptTokens": 80,
+              "repeat": 0,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2659.473,
+                "predicted_n": 256,
+                "predicted_per_second": 95.88365815332587,
+                "predicted_per_token_ms": 10.42930588235294,
+                "prompt_ms": 204.876,
+                "prompt_n": 80,
+                "prompt_per_second": 390.4800952771432,
+                "prompt_per_token_ms": 2.56095
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 0,
+              "promptTokens": 80,
+              "repeat": 1,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2660.34,
+                "predicted_n": 256,
+                "predicted_per_second": 95.85240984235097,
+                "predicted_per_token_ms": 10.432705882352941,
+                "prompt_ms": 201.317,
+                "prompt_n": 80,
+                "prompt_per_second": 397.3832314210921,
+                "prompt_per_token_ms": 2.5164625000000003
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 0,
+              "promptTokens": 80,
+              "repeat": 2,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2657.13,
+                "predicted_n": 256,
+                "predicted_per_second": 95.96820629777241,
+                "predicted_per_token_ms": 10.420117647058824,
+                "prompt_ms": 200.89600000000002,
+                "prompt_n": 80,
+                "prompt_per_second": 398.21599235425293,
+                "prompt_per_token_ms": 2.5112
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 0,
+              "promptTokens": 80,
+              "repeat": 3,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2659.333,
+                "predicted_n": 256,
+                "predicted_per_second": 95.88870592738856,
+                "predicted_per_token_ms": 10.428756862745098,
+                "prompt_ms": 201.333,
+                "prompt_n": 80,
+                "prompt_per_second": 397.3516512444557,
+                "prompt_per_token_ms": 2.5166625
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "1fc8fab5206e1579205f1ae8c8805bbb8d247ef7e16705841795a84c4788dd6f",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 1,
+              "promptTokens": 58,
+              "repeat": 0,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1525.188,
+                "predicted_n": 96,
+                "predicted_per_second": 62.28740325782788,
+                "predicted_per_token_ms": 16.05461052631579,
+                "prompt_ms": 675.0120000000001,
+                "prompt_n": 58,
+                "prompt_per_second": 85.92439838106581,
+                "prompt_per_token_ms": 11.638137931034484
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "2b596c4678857b6457e1ceda9ba95aae0cc7707d732e8a641ab298be5c61a981",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 1,
+              "promptTokens": 58,
+              "repeat": 1,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 992.424,
+                "predicted_n": 96,
+                "predicted_per_second": 95.7252142229531,
+                "predicted_per_token_ms": 10.446568421052632,
+                "prompt_ms": 161.872,
+                "prompt_n": 58,
+                "prompt_per_second": 358.3077987545715,
+                "prompt_per_token_ms": 2.790896551724138
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "d1f1e3b9230898d10bee0d612919daf8abd2230ec776e280bf89b14080056679",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 1,
+              "promptTokens": 58,
+              "repeat": 2,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 993.3870000000001,
+                "predicted_n": 96,
+                "predicted_per_second": 95.63241717477679,
+                "predicted_per_token_ms": 10.456705263157895,
+                "prompt_ms": 161.979,
+                "prompt_n": 58,
+                "prompt_per_second": 358.0711079831336,
+                "prompt_per_token_ms": 2.7927413793103453
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "614f2811307c6127382bbae88ec049f1509e62e9934f5022a85f2e792dd00d2c",
+              "finish_reason": "length",
+              "generatedTokens": 96,
+              "lifetime": 1,
+              "promptTokens": 58,
+              "repeat": 3,
+              "scenario": "core",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 988.188,
+                "predicted_n": 96,
+                "predicted_per_second": 96.13555315385332,
+                "predicted_per_token_ms": 10.401978947368422,
+                "prompt_ms": 161.719,
+                "prompt_n": 58,
+                "prompt_per_second": 358.646788565351,
+                "prompt_per_token_ms": 2.788258620689655
+              },
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 58,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 154
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "31ba3360d893088629b03525ce3574b7cd04693a0444999f3f1b881a6a1a44fc",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 1,
+              "promptTokens": 183,
+              "repeat": 0,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1655.326,
+                "predicted_n": 160,
+                "predicted_per_second": 96.0535870275704,
+                "predicted_per_token_ms": 10.41085534591195,
+                "prompt_ms": 418.75100000000003,
+                "prompt_n": 183,
+                "prompt_per_second": 437.0138817578943,
+                "prompt_per_token_ms": 2.288256830601093
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "43ddad6694800b2fbea3ee7161452050523d548cafc6e2a04717fc93e7707c01",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 1,
+              "promptTokens": 183,
+              "repeat": 1,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1653.631,
+                "predicted_n": 160,
+                "predicted_per_second": 96.15204359376426,
+                "predicted_per_token_ms": 10.40019496855346,
+                "prompt_ms": 365.009,
+                "prompt_n": 183,
+                "prompt_per_second": 501.3575007739535,
+                "prompt_per_token_ms": 1.994584699453552
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "341b7fcb658ec1e0f3f1721013e2503cbb6ec48d8af8bdc8055ac580010e53c5",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 1,
+              "promptTokens": 183,
+              "repeat": 2,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1654.868,
+                "predicted_n": 160,
+                "predicted_per_second": 96.08017074473614,
+                "predicted_per_token_ms": 10.407974842767295,
+                "prompt_ms": 365.839,
+                "prompt_n": 183,
+                "prompt_per_second": 500.2200421496888,
+                "prompt_per_token_ms": 1.999120218579235
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "43ddad6694800b2fbea3ee7161452050523d548cafc6e2a04717fc93e7707c01",
+              "finish_reason": "length",
+              "generatedTokens": 160,
+              "lifetime": 1,
+              "promptTokens": 183,
+              "repeat": 3,
+              "scenario": "context-medium",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1648.858,
+                "predicted_n": 160,
+                "predicted_per_second": 96.43037787365559,
+                "predicted_per_token_ms": 10.37017610062893,
+                "prompt_ms": 365.673,
+                "prompt_n": 183,
+                "prompt_per_second": 500.44712078824523,
+                "prompt_per_token_ms": 1.9982131147540985
+              },
+              "usage": {
+                "completion_tokens": 160,
+                "prompt_tokens": 183,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 343
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 1,
+              "promptTokens": 349,
+              "repeat": 0,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1316.118,
+                "predicted_n": 128,
+                "predicted_per_second": 96.49590690196472,
+                "predicted_per_token_ms": 10.363133858267716,
+                "prompt_ms": 632.926,
+                "prompt_n": 349,
+                "prompt_per_second": 551.4072735201271,
+                "prompt_per_token_ms": 1.813541547277937
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "a0c0f0ea3521af1912fbc2df446800ed304414b270c804aa6437aa6887576023",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 1,
+              "promptTokens": 349,
+              "repeat": 1,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1316.463,
+                "predicted_n": 128,
+                "predicted_per_second": 96.47061861974093,
+                "predicted_per_token_ms": 10.365850393700788,
+                "prompt_ms": 593.867,
+                "prompt_n": 349,
+                "prompt_per_second": 587.6736710408223,
+                "prompt_per_token_ms": 1.7016246418338108
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "91322f6aa9e59f4eb9fa532c4e86103fca3051f0b781a27eb73aded6fc43019e",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 1,
+              "promptTokens": 349,
+              "repeat": 2,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1319.204,
+                "predicted_n": 128,
+                "predicted_per_second": 96.27017504495136,
+                "predicted_per_token_ms": 10.387433070866141,
+                "prompt_ms": 593.4490000000001,
+                "prompt_n": 349,
+                "prompt_per_second": 588.0876031470269,
+                "prompt_per_token_ms": 1.7004269340974214
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "3e18596e3bfd7dfbefc3dc8f0379394f04476c0cc384569a69f790f0bae1579c",
+              "finish_reason": "length",
+              "generatedTokens": 128,
+              "lifetime": 1,
+              "promptTokens": 349,
+              "repeat": 3,
+              "scenario": "context-long",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 1320.542,
+                "predicted_n": 128,
+                "predicted_per_second": 96.17263214649743,
+                "predicted_per_token_ms": 10.397968503937006,
+                "prompt_ms": 593.219,
+                "prompt_n": 349,
+                "prompt_per_second": 588.3156136266707,
+                "prompt_per_token_ms": 1.6997679083094557
+              },
+              "usage": {
+                "completion_tokens": 128,
+                "prompt_tokens": 349,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 477
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 1,
+              "promptTokens": 80,
+              "repeat": 0,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2653.21,
+                "predicted_n": 256,
+                "predicted_per_second": 96.10999506258456,
+                "predicted_per_token_ms": 10.404745098039216,
+                "prompt_ms": 204.428,
+                "prompt_n": 80,
+                "prompt_per_second": 391.3358248380848,
+                "prompt_per_token_ms": 2.55535
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": true
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 1,
+              "promptTokens": 80,
+              "repeat": 1,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2657.26,
+                "predicted_n": 256,
+                "predicted_per_second": 95.96351128606157,
+                "predicted_per_token_ms": 10.420627450980392,
+                "prompt_ms": 201.059,
+                "prompt_n": 80,
+                "prompt_per_second": 397.8931557403548,
+                "prompt_per_token_ms": 2.5132375
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 1,
+              "promptTokens": 80,
+              "repeat": 2,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2654.292,
+                "predicted_n": 256,
+                "predicted_per_second": 96.07081662454621,
+                "predicted_per_token_ms": 10.408988235294117,
+                "prompt_ms": 201.144,
+                "prompt_n": 80,
+                "prompt_per_second": 397.7250129260629,
+                "prompt_per_token_ms": 2.5143
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": false
+            },
+            {
+              "content_sha256": "09f059d78802b65505b5424631b44917ee65dc57859c61f92eb99dd22435b9a1",
+              "finish_reason": "length",
+              "generatedTokens": 256,
+              "lifetime": 1,
+              "promptTokens": 80,
+              "repeat": 3,
+              "scenario": "decode-extended",
+              "server_timings": {
+                "cache_n": 0,
+                "predicted_ms": 2657.074,
+                "predicted_n": 256,
+                "predicted_per_second": 95.97022890593186,
+                "predicted_per_token_ms": 10.419898039215687,
+                "prompt_ms": 200.84,
+                "prompt_n": 80,
+                "prompt_per_second": 398.32702648874726,
+                "prompt_per_token_ms": 2.5105
+              },
+              "usage": {
+                "completion_tokens": 256,
+                "prompt_tokens": 80,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "total_tokens": 336
+              },
+              "warmup": false
+            }
+          ],
+          "stream_drift": [
+            {
+              "actual": "638f927ef4ae0001ddcec4e8108f52a18b815c323e75a34529315cd11c3462cd",
+              "expected": "6e9ac36829087e09f8f733d17ac6ca671a80cd23fed8c950aa524272b5a6342e",
+              "lifetime": 1,
+              "scenario": "core"
+            }
+          ],
+          "streams": [
+            {
+              "content_bytes": 82,
+              "content_sha256": "6e9ac36829087e09f8f733d17ac6ca671a80cd23fed8c950aa524272b5a6342e",
+              "first_usable_content_ms": 162.77939199790126,
+              "lifetime": 0,
+              "output_cap": 16,
+              "scenario": "core",
+              "total_latency_ms": 320.29594000050565
+            },
+            {
+              "content_bytes": 67,
+              "content_sha256": "7fbbc07229787383f06f1a5a2ecc4be7695f9bcacbb7df00bff611e8d081a476",
+              "first_usable_content_ms": 367.4451010010671,
+              "lifetime": 0,
+              "output_cap": 16,
+              "scenario": "context-medium",
+              "total_latency_ms": 524.9444209985086
+            },
+            {
+              "content_bytes": 87,
+              "content_sha256": "a9932c4c198b465907b4fb945c4a764c8ebd17475f87b8171b2d634189c4d2ed",
+              "first_usable_content_ms": 594.6941389993299,
+              "lifetime": 0,
+              "output_cap": 16,
+              "scenario": "context-long",
+              "total_latency_ms": 752.0790550042875
+            },
+            {
+              "content_bytes": 69,
+              "content_sha256": "cda76b44327ea2497cafa56ccfa0e685bbdf11071ff1a4318082bddfc825233b",
+              "first_usable_content_ms": 201.97941600054037,
+              "lifetime": 0,
+              "output_cap": 16,
+              "scenario": "decode-extended",
+              "total_latency_ms": 358.7634080031421
+            },
+            {
+              "content_bytes": 77,
+              "content_sha256": "638f927ef4ae0001ddcec4e8108f52a18b815c323e75a34529315cd11c3462cd",
+              "first_usable_content_ms": 162.88299499865388,
+              "lifetime": 1,
+              "output_cap": 16,
+              "scenario": "core",
+              "total_latency_ms": 319.36491299711633
+            },
+            {
+              "content_bytes": 67,
+              "content_sha256": "7fbbc07229787383f06f1a5a2ecc4be7695f9bcacbb7df00bff611e8d081a476",
+              "first_usable_content_ms": 366.2513840026804,
+              "lifetime": 1,
+              "output_cap": 16,
+              "scenario": "context-medium",
+              "total_latency_ms": 522.2674579999875
+            },
+            {
+              "content_bytes": 87,
+              "content_sha256": "a9932c4c198b465907b4fb945c4a764c8ebd17475f87b8171b2d634189c4d2ed",
+              "first_usable_content_ms": 588.1403940002201,
+              "lifetime": 1,
+              "output_cap": 16,
+              "scenario": "context-long",
+              "total_latency_ms": 745.2516319972347
+            },
+            {
+              "content_bytes": 69,
+              "content_sha256": "cda76b44327ea2497cafa56ccfa0e685bbdf11071ff1a4318082bddfc825233b",
+              "first_usable_content_ms": 202.32105100149056,
+              "lifetime": 1,
+              "output_cap": 16,
+              "scenario": "decode-extended",
+              "total_latency_ms": 359.22603600192815
+            }
+          ]
+        }
+      ],
+      "passed": false,
+      "postflight": null,
+      "protocol_completed": true,
+      "requested_environment": {
+        "GGML_SYCL_USE_ASYNC_MEM_OP": "0"
+      },
+      "scope": "Disable only asynchronous native SYCL memory operations for the previously failing 35B model, retaining the exact request cadence and all drift. No performance qualification or causal claim.",
+      "source_report_sha256": "60dc360c0cbb95b70f404f1e3469384f82551fa60ebf38fad933516ac0c13c75",
+      "started_at_utc": "2026-11-10T05:44:13.858129+00:00"
+    },
+    {
+      "cleanup": "no GPU process remains",
+      "completed_at_utc": "2026-11-10T05:49:34.589765+00:00",
+      "hardware_unchanged": true,
+      "id": "unfused",
+      "live_environment_checked": false,
+      "models": [
+        {
+          "context": 4096,
+          "id": "qwen36-35b-a3b-q4k-xl",
+          "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+          "native_reference_validation": {
+            "cases": [
+              {
+                "comparison": {
+                  "near_ties": [
+                    {
+                      "chosen_id": 11679,
+                      "logprob_gap": 0.012231826782226562,
+                      "position": 1,
+                      "rank": 2,
+                      "reference_id": 9662
+                    }
+                  ],
+                  "tokens": 16
+                },
+                "native_content_sha256": "7d7fcea1bf5498a18a49f1db2fdef09e633984029e0951d0f87559151925c993",
+                "native_ids": [
+                  760,
+                  11679,
+                  1467,
+                  524,
+                  1066,
+                  2364,
+                  383,
+                  279,
+                  6574,
+                  26,
+                  424,
+                  6237,
+                  1141,
+                  1560,
+                  1083,
+                  279
+                ],
+                "reference_content_sha256": "240bf8e71131d3770c2f428357635e2b23670732bd9b8bddd1aef2c7340538db",
+                "reference_ids": [
+                  760,
+                  9662,
+                  383,
+                  5068,
+                  6451,
+                  4963,
+                  1467,
+                  524,
+                  11894,
+                  26,
+                  424,
+                  58330,
+                  13,
+                  1049,
+                  557,
+                  264
+                ],
+                "source_case_sha256": "89b6c18bfc3411f9f6c8ac34f8a9116ee3af37620078ce295a7d29da3c082af8",
+                "tail_qualified": false
+              },
+              {
+                "comparison": {
+                  "near_ties": [
+                    {
+                      "chosen_id": 3618,
+                      "logprob_gap": 0.015493392944335938,
+                      "position": 11,
+                      "rank": 2,
+                      "reference_id": 36337
+                    }
+                  ],
+                  "tokens": 16
+                },
+                "native_content_sha256": "0f584bd758021e0ccb5a21693285cde71ccdb014c88277b9bc09d2523248253c",
+                "native_ids": [
+                  32,
+                  43447,
+                  4138,
+                  539,
+                  6992,
+                  8364,
+                  494,
+                  279,
+                  4613,
+                  314,
+                  279,
+                  3618,
+                  310,
+                  279,
+                  4732,
+                  4424
+                ],
+                "reference_content_sha256": "92222503d7aff38f2ea4b958cee1a1db16a7713b3b50e678bf6141522567487d",
+                "reference_ids": [
+                  32,
+                  43447,
+                  4138,
+                  539,
+                  6992,
+                  8364,
+                  494,
+                  279,
+                  4613,
+                  314,
+                  279,
+                  36337,
+                  310,
+                  279,
+                  4732,
+                  4424
+                ],
+                "source_case_sha256": "11d90cb465bc627937ea18397ce5c9cca14301d0181d83b8b4eaf722dda3585a",
+                "tail_qualified": false
+              },
+              {
+                "comparison": {
+                  "near_ties": [],
+                  "tokens": 16
+                },
+                "native_content_sha256": "1ce1f82e477b0376a1dc96bd46637aa6c23c0cb8e79046a07ccc871358eaf11d",
+                "native_ids": [
+                  8160,
+                  513,
+                  2250,
+                  4047,
+                  5533,
+                  314,
+                  22561,
+                  25,
+                  271,
+                  16,
+                  13,
+                  220,
+                  2972,
+                  28371,
+                  11764,
+                  46258
+                ],
+                "reference_content_sha256": "1ce1f82e477b0376a1dc96bd46637aa6c23c0cb8e79046a07ccc871358eaf11d",
+                "reference_ids": [
+                  8160,
+                  513,
+                  2250,
+                  4047,
+                  5533,
+                  314,
+                  22561,
+                  25,
+                  271,
+                  16,
+                  13,
+                  220,
+                  2972,
+                  28371,
+                  11764,
+                  46258
+                ],
+                "source_case_sha256": "d1dfe3dfc6157e11a1caa7e70bccd3ee99ebd3203a00d5a79eb0a2c973fc2ff0",
+                "tail_qualified": true
+              }
+            ],
+            "failed_gate": "native_frozen_oracle",
+            "failure": "reference exact-choice agreement is too low",
+            "passed": false,
+            "tail_qualification_completed": false
+          },
+          "output_drift": [],
+          "passed": false,
+          "processes": [],
+          "reference_samples_sha256": "dbb4cc1394190de6bd4cd5f0880a12bc8ce24d63d975db430825eeabba8a23a5",
+          "samples": [],
+          "stream_drift": [],
+          "streams": []
+        }
+      ],
+      "passed": false,
+      "postflight": {
+        "cleanup": "no GPU process remains",
+        "hardware_unchanged": true,
+        "native_stack_unchanged": true,
+        "reference_unchanged": true,
+        "source_report_sha256": "c9e513451368f40367b82439a2a8e19a14ea3546c377ec7199a9f5d7274262b6"
+      },
+      "protocol_completed": false,
+      "requested_environment": {
+        "GGML_SYCL_ENABLE_FUSION": "0"
+      },
+      "scope": "Disable native SYCL graph fusion for the previously failing 35B model, retaining the exact request cadence and all drift. No performance qualification or causal claim.",
+      "source_report_sha256": "acd28c9d69a98367b779c8ef7e6a18cb6bb59638ee212b89ba7d1612c2a32fff",
+      "started_at_utc": "2026-11-10T05:49:16.831109+00:00"
+    }
+  ]
+}

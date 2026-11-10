@@ -6,10 +6,12 @@ Both engines must offload the model to that GPU. There is no CPU-only inference
 baseline. CPU unit tests and numerical shader references remain correctness
 checks, separate from performance comparisons.
 
-The [prefill CI archive replay](/zinc/validation/intel-q8-prefill-package-support-2026-11-10.json)
-passes all seven ZINC model support gates, fourteen selected-kernel prefill
-boundary checks, an explicit opt-out and a missing-asset fallback. All 215
-packaged shader identities and the final hardware checks remain unchanged.
+The [Gemma-prefill CI archive replay](/zinc/validation/intel-gemma-prefill-package-support-2026-11-10.json)
+passes all seven ZINC model support gates and 808 numerical GPU cases. Separate
+controls pass the generic opt-out and each missing Intel shader. All 217
+packaged shader identities and the final hardware checks remain verified.
+The [preceding Q8 replay](/zinc/validation/intel-q8-prefill-package-support-2026-11-10.json)
+retains its fourteen full-vocabulary prefill boundary checks and separate archive.
 
 The [preceding packed-Q8 campaign](/zinc/validation/intel-native-sycl-fp32-packed-q8-2026-11-10.json)
 also attempts a fresh native SYCL FP32 baseline at `cf6463ac`, selected before
@@ -107,6 +109,62 @@ within this contract. This read-only metadata audit is separate from inference
 qualification and performance measurements. The GPU records above retain
 their exact archive/source identities; host range policy has independent CPU
 boundary tests, including 4,032 wide-integer comparisons.
+
+## Intel dense-Gemma prefill
+
+The dense Gemma 4 31B graph uses separate Intel Xe2 gate/up GEGLU shaders with
+two output rows and eight prompt tokens per thread. The dispatch remains a
+32×32 tile with WG64. Weight staging stays F16, activations and accumulators
+stay F32, and each output retains the existing FMA order and GELU calculation.
+
+The [three-round tiling A/B](/zinc/validation/intel-gemma-prefill-tiling-2026-11-10.json)
+retains the same CI binary and changes only the two shader assets. All 96
+requests produce identical complete outputs, and 72 native-answer checks pass
+before/after six server lifetimes, including sliding-window boundaries.
+Prefill improves 12.3–15.0% in every workload/round pair; decode stays within
+0.2%. The medians across all nine measured requests per arm are:
+
+| Workload        | Generic prefill (tokens/s) | Intel tiling (tokens/s) |
+| --------------- | -------------------------: | ----------------------: |
+| Core            |                      52.93 |                   60.33 |
+| Medium context  |                      59.29 |                   66.63 |
+| Long context    |                      58.65 |                   66.19 |
+| Extended decode |                      52.19 |                   59.99 |
+
+This isolates an internal ZINC prefill gain on the shader-overlay prototype.
+It does not establish a llama.cpp win, native ZINC SYCL support, or measurements
+of startup, memory or streaming latency. The timing record retains its original
+shader-overlay archive and binary identities.
+
+The [actual CI archive qualification](/zinc/validation/intel-gemma-prefill-package-support-2026-11-10.json)
+binds source `a9673e01`, archive SHA-256 `59acd92f…` and all 217 shader assets.
+Both Intel SPVs are byte-identical to the measured A/B candidate; the previous
+215 assets remain unchanged. All seven models pass 27 complete CLI continuations,
+81 full HTTP continuations and 27 JSON/SSE controls, including both Gemma window
+boundaries and cancellation/context recovery. The opt-out and two separate
+missing-asset controls pass six more CLI continuations, eighteen HTTP
+continuations and six JSON/SSE controls. Each control includes a short prompt
+and one beyond the sliding window. Actual selected-pipeline logs are checked
+in every owned ZINC process.
+
+Selection requires the qualified dense 5,376×21,504 graph and push descriptors.
+Leaving `ZINC_INTEL_GEMMA_PREFILL` unset, or setting it to exactly `1`, enables
+this qualified path. Every other explicit value, including `0`, selects the
+generic shaders. The shape gate intentionally limits rollout to Gemma 4 31B;
+other shapes require their own numerical and whole-model qualification.
+Missing or rejected
+Intel pipelines fall back independently to their generic counterparts, with
+explicit selected-pipeline logs. Other GPU families and model graphs retain
+the generic shaders.
+
+Intel package and benchmark validation checks both new assets against native
+Q4_K quantization, an independent F16-weight/F32-activation mathematical
+reference and the unchanged generic kernels: 204 numerical/offset/stride/guard
+cases and 102 bitwise-equal output pairs, including partial tiles. Older archives
+without either Intel asset retain their original validation; a partially
+installed pair fails package qualification.
+
+## Matched GPU benchmarks
 
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
@@ -806,3 +864,39 @@ The 35B failures remain included. Zero prompt-cache hits do not identify the
 cause or exclude other internal caches. The passing starter does not establish
 a corrective setting or erase its earlier failure. This two-model diagnostic
 qualifies neither a competitor speed win nor a native ZINC backend.
+
+### Native 35B memory and fusion controls
+
+The [separate 35B controls](/zinc/validation/intel-native-35b-copy-fusion-controls-2026-11-10.json)
+retain the same `3b4d6ab3` FP32 reference and official oneAPI packages.
+Request cadence, catalog context and generation settings remain fixed.
+
+With `GGML_SYCL_USE_ASYNC_MEM_OP=0`, initial native correctness passes, but
+19 of 32 full responses and one of eight short streams change across the
+replay. Zero reported prompt-cache hits remain recorded. This runtime option
+does not fix the observed repeatability failure.
+
+With `GGML_SYCL_ENABLE_FUSION=0`, the initial frozen-oracle check fails its
+aggregate exact-choice requirement. All three obtained 16-token continuations
+remain available, including two near-tie divergences. Their remaining
+branches are unqualified; no timed server, timing sample or streaming probe
+starts after the rejection. A separate postflight verifies unchanged artifacts,
+SDK and hardware, with no GPU process left running.
+
+The default attempt remains a separate record. These are one-option diagnostics,
+not an interleaved causal experiment. Neither qualifies a corrective setting,
+competitor speed win or native ZINC SYCL backend.
+
+### Native recurrent-operator checks
+
+The [upstream Gated Delta Net probe](/zinc/validation/intel-native-gdn-operators-2026-11-10.json)
+passes all 48 selected numerical cases on the same `3b4d6ab3` FP32
+SYCL/Level Zero build: 43 recurrent cases and five cache-fusion cases. Coverage
+includes decode, chunk boundaries, long sequences, permuted inputs, vector gates
+and state snapshots. The source and executable hashes, live runtime libraries,
+official package identities and unchanged hardware checks are retained.
+
+These tests compare individual GPU operations with upstream's reference
+arithmetic. They do not reproduce a whole model's server state or request
+history. Their passing result leaves the separately recorded 35B repeatability
+failure unresolved and does not qualify a competitor performance baseline.
