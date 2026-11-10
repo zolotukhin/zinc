@@ -53,6 +53,23 @@ does not replace the three-round internal A/B or qualify the rejected native
 comparison. The new replay retains all failed samples and their final process
 memory/runtime observations.
 
+### Intel dense-Q8 prefill
+
+The [separate prefill A/B](/zinc/validation/intel-q8-prefill-packed-2026-11-10.json)
+uses the same packaged binary with only the Q8 GEMM shader changed. Two-byte
+packed weight reads and a 2×8 output strip per thread retain the 32×32 dispatch
+tile, WG64 and each output's FMA order. Fourteen full-vocabulary F32-KV boundary
+checks pass per arm; all 96 F16-KV server requests retain identical complete
+outputs across three balanced rounds. Prefill improves 10–19% in every workload
+and round; decode stays within 1%.
+
+Production selects the separate Intel shader only for the qualified all-Q8
+dense Qwen graph, currently the managed starter. `ZINC_INTEL_Q8_PREFILL=0` keeps
+the generic shader, as does a missing or rejected Intel pipeline. Other GPUs
+and mixed-quantization/recurrent graphs retain their existing shader. These
+results establish an internal prefill gain, with natural EOS retained; they
+make no llama.cpp, all-model, memory, startup or streaming-latency claim.
+
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
 workloads: short chat, medium context, long context, and extended decode. It first

@@ -490,6 +490,7 @@ pub fn build(b: *std.Build) void {
         "mul_mm_q5k",
         "mul_mm_q5k_wide",
         "mul_mm_q8_0",
+        "mul_mm_q8_0_intel",
         "mul_mm_q8_0_full_dp4a",
         "mul_mm_q6k_full_dp4a",
         "mul_mm_q6k_full_dp4a_bm64_n64_acc",
