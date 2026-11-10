@@ -54,6 +54,36 @@ fn intelQ8RowDecodeEnabled(vendor: GpuVendor, legacy_subgroup_size: u32, can_req
     return if (setting) |value| std.mem.eql(u8, value, "1") else qualified_default;
 }
 
+fn intelQ8PackedPrefillEnabled(vendor: GpuVendor, qualified_dense_q8: bool, setting: ?[]const u8) bool {
+    // The measured default is the all-Q8 dense Qwen graph, currently the
+    // managed starter. Mixed-quantization/recurrent graphs keep the generic
+    // GEMM even with an override; they need separate numerical qualification.
+    if (vendor != .intel_arc_xe2 or !qualified_dense_q8) return false;
+    return if (setting) |value| std.mem.eql(u8, value, "1") else true;
+}
+
+test "packed Q8 prefill stays on qualified Intel dense graphs with an opt-out" {
+    try std.testing.expect(intelQ8PackedPrefillEnabled(.intel_arc_xe2, true, null));
+    try std.testing.expect(intelQ8PackedPrefillEnabled(.intel_arc_xe2, true, "1"));
+    for ([_][]const u8{ "0", "", "false", "off", "true", "2", "01" }) |setting| {
+        try std.testing.expect(!intelQ8PackedPrefillEnabled(.intel_arc_xe2, true, setting));
+    }
+    for (std.enums.values(GpuVendor)) |vendor| {
+        try std.testing.expect(!intelQ8PackedPrefillEnabled(vendor, false, null));
+        try std.testing.expect(!intelQ8PackedPrefillEnabled(vendor, false, "1"));
+        if (vendor == .intel_arc_xe2) continue;
+        try std.testing.expect(!intelQ8PackedPrefillEnabled(vendor, true, null));
+        try std.testing.expect(!intelQ8PackedPrefillEnabled(vendor, true, "1"));
+    }
+}
+
+test "packed Q8 prefill rejects odd weight offsets without GPU access" {
+    const dispatch = std.mem.zeroes(DmmvDispatch);
+    var command = std.mem.zeroes(CommandBuffer);
+    try std.testing.expectError(error.InvalidArgument, dispatch.recordMulMmQ8_0(&command, null, null, 0, null, 0, null, 0, 1, 1, 32, 32, 1, 1, 0, 0));
+    try std.testing.expectError(error.PipelineNotLoaded, dispatch.recordMulMmQ8_0(&command, null, null, 0, null, 0, null, 0, 1, 1, 32, 32, 1, 2, 0, 0));
+}
+
 test "Intel Q8 row decode requires enforceable SIMD32 and honors the control" {
     try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, true, null));
     try std.testing.expect(intelQ8RowDecodeEnabled(.intel_arc_xe2, 32, true, true, true, "1"));
@@ -102,6 +132,33 @@ fn createQ8DecodePipeline(
     }
     const fallback = try std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir});
     return pipeline_mod.createFromSpirvWithOptions(instance, fallback, 3, @sizeOf(DmmvPushConstants), spec_constants, options, allocator);
+}
+
+fn createQ8PrefillPipeline(
+    instance: *const Instance,
+    shader_dir: []const u8,
+    intel_packed: bool,
+    options: pipeline_mod.PipelineOptions,
+    allocator: std.mem.Allocator,
+) !Pipeline {
+    var path_buf: [512]u8 = undefined;
+    if (intel_packed) {
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q8_0_intel.spv", .{shader_dir});
+        if (pipeline_mod.createFromSpirvWithOptions(instance, path, 3, @sizeOf(MulMmQ4KPush), &.{}, options, allocator)) |pipeline| {
+            log.info("Q8_0 Intel packed prefill shader loaded (WG64, 32x32, TM2/TN8)", .{});
+            return pipeline;
+        } else |err| {
+            // Older shader directories and rejected driver compilation retain
+            // the generic GEMM rather than disabling working batched prefill.
+            log.warn("Intel Q8 packed prefill unavailable; using the generic shader: {s}", .{@errorName(err)});
+        }
+    }
+    const fallback = try std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q8_0.spv", .{shader_dir});
+    const pipeline = try pipeline_mod.createFromSpirvWithOptions(instance, fallback, 3, @sizeOf(MulMmQ4KPush), &.{}, options, allocator);
+    // Exactly one pipeline is stored for every subsequent Q8 GEMM dispatch.
+    // Report both selections so controls/qualification can detect fallback.
+    log.info("Q8_0 generic prefill shader loaded (WG64, 32x32, TM4/TN4)", .{});
+    return pipeline;
 }
 
 pub const ProjectionSpecializations = @import("projection_specializations.zig").ProjectionSpecializations;
@@ -1848,8 +1905,8 @@ pub const DmmvDispatch = struct {
         if (pipeline_mul_mm_q5k_wide != null) {
             log.info("mul_mm_q5k_wide pipeline loaded (BN=64 Q5_K SSM prefill projection)", .{});
         }
-        const mul_mm_q8_0_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q8_0_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const intel_q8_prefill = intelQ8PackedPrefillEnabled(gpu_config.vendor, qualified_q8_rows_default, host_io.getenv("ZINC_INTEL_Q8_PREFILL"));
+        const pipeline_mul_mm_q8_0 = createQ8PrefillPipeline(instance, shader_dir, intel_q8_prefill, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -4650,6 +4707,7 @@ pub const DmmvDispatch = struct {
         b_offset: u32,
         d_offset: u32,
     ) !void {
+        try validateQ8WeightOffset(.q8_0, a_offset);
         const pip = if (self.pipeline_mul_mm_q8_0) |*p| p else return error.PipelineNotLoaded;
         if (K == 0 or (K & 31) != 0) return error.InvalidArgument;
         if (M == 0 or N == 0) return error.InvalidArgument;

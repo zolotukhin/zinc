@@ -2049,6 +2049,9 @@ pub const InferenceEngine = struct {
             projection_demand.includeTensor(tensor.info);
             q8_decode_demand.includeTensor(tensor.info);
         }
+        // This scans every matrix and requires a dense, all-Q8 Qwen graph;
+        // MoE, SSM and sliding-window graphs are excluded. Packed prefill uses
+        // that graph qualification independently of decode's SIMD32 gate.
         const q8_rows_default = q8_decode_demand.qualified(config.*);
         var dmmv = try DmmvDispatch.initWithSpecializations(instance, &gpu_config, shader_dir, max_k, projection_demand, q8_rows_default, allocator);
         errdefer dmmv.deinit();

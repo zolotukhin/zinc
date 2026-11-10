@@ -1,0 +1,151 @@
+#version 460
+// ZINC - Intel Xe2 packed Q8_0 dense GEMM for layer-major prefill.
+//
+// Computes D[M, N] = A[M, K] (Q8_0) x B[K, N] (f32) with column-major
+// activations/output:
+//   B[col][k] = b_data[b_offset + col * stride_b + k]
+//   D[col][row] = d_data[d_offset + col * stride_d + row]
+//
+// The host enables this only for qualified all-Q8 dense Qwen graphs.
+// Mixed-quantization/recurrent graphs and other GPUs retain mul_mm_q8_0.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+
+const uint BM = 32u;
+const uint BN = 32u;
+const uint BK = 32u;
+// Keep the dispatch tile and WG64 fixed while testing a wider per-thread
+// output strip on Intel. Each output still visits K in the same FMA order.
+const uint TM = 2u;
+const uint TN = 8u;
+const uint WG_SIZE = 64u;
+const uint TPR_M = BM / TM;
+const uint TPR_N = BN / TN;
+
+const uint Q8_0_BLOCK_SIZE = 32u;
+const uint Q8_0_BYTES = 34u;
+
+// Retain the generic kernel's +1 shared-memory stride. The Intel A/B changes
+// packed weight loads and the output strip; it does not isolate this padding.
+const uint STRIDE_A = BK + 1u;
+const uint STRIDE_B = BK + 1u;
+
+layout(local_size_x = WG_SIZE) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint stride_b;
+    uint stride_d;
+    uint a_offset;   // bytes
+    uint b_offset;   // floats
+    uint d_offset;   // floats
+};
+
+// Tensor-local buffer offsets are checked by the host. The 34-byte Q8_0
+// blocks remain half-word aligned when an odd block count makes rows 2 mod 4.
+// Only the input loads change; dequantization and the FMA sequence stay intact.
+layout(set = 0, binding = 0) readonly buffer MatA { uint16_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatB { float b_data[]; };
+layout(set = 0, binding = 2) writeonly buffer MatD { float d_data[]; };
+
+shared float buf_a[BM * STRIDE_A];
+shared float buf_b[BN * STRIDE_B];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint ir = gl_WorkGroupID.x;
+    const uint ic = gl_WorkGroupID.y;
+
+    const uint tiwr = tid % TPR_M;
+    const uint tiwc = tid / TPR_M;
+
+    float sums[TM][TN];
+    [[unroll]] for (uint m = 0u; m < TM; m++) {
+        [[unroll]] for (uint n = 0u; n < TN; n++) {
+            sums[m][n] = 0.0;
+        }
+    }
+
+    const uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
+
+    for (uint k_outer = 0u; k_outer < K; k_outer += BK) {
+        const uint blk = k_outer / Q8_0_BLOCK_SIZE;
+
+        // Load A tile: 64 threads x 16 values = 32 rows x 32 K values.
+        {
+            const uint row_local = tid / 2u;
+            const uint k_in_tile = (tid & 1u) * 16u;
+            const uint row_global = ir * BM + row_local;
+            const uint base_a = row_local * STRIDE_A + k_in_tile;
+
+            if (row_global < M) {
+                const uint byte_off = a_offset +
+                    (row_global * blocks_per_row + blk) * Q8_0_BYTES;
+                const uint d_bits = uint(a_data[byte_off / 2u]);
+                const float d = unpackHalf2x16(d_bits).x;
+                const uint qs = (byte_off + 2u + k_in_tile) / 2u;
+
+                [[unroll]] for (uint i = 0u; i < 8u; i++) {
+                    const int packed = int(a_data[qs + i]);
+                    buf_a[base_a + 2u * i] = d * float(bitfieldExtract(packed, 0, 8));
+                    buf_a[base_a + 2u * i + 1u] = d * float(bitfieldExtract(packed, 8, 8));
+                }
+            } else {
+                [[unroll]] for (uint i = 0u; i < 16u; i++) {
+                    buf_a[base_a + i] = 0.0;
+                }
+            }
+        }
+
+        // Load B tile.
+        {
+            const uint col_local = tid / 2u;
+            const uint k_in_tile_b = (tid & 1u) * 16u;
+            const uint col_global = ic * BN + col_local;
+            const uint b_col_base = b_offset + col_global * stride_b;
+            const uint base_b = col_local * STRIDE_B + k_in_tile_b;
+
+            [[unroll]] for (uint i = 0u; i < 16u; i++) {
+                float v = 0.0;
+                if (col_global < N) {
+                    v = b_data[b_col_base + k_outer + k_in_tile_b + i];
+                }
+                buf_b[base_b + i] = v;
+            }
+        }
+
+        barrier();
+
+        [[unroll]] for (uint k = 0u; k < BK; k++) {
+            float a_reg[TM];
+            [[unroll]] for (uint m = 0u; m < TM; m++) {
+                a_reg[m] = buf_a[(tiwr * TM + m) * STRIDE_A + k];
+            }
+            float b_reg[TN];
+            [[unroll]] for (uint n = 0u; n < TN; n++) {
+                b_reg[n] = buf_b[(tiwc * TN + n) * STRIDE_B + k];
+            }
+            [[unroll]] for (uint m = 0u; m < TM; m++) {
+                [[unroll]] for (uint n = 0u; n < TN; n++) {
+                    sums[m][n] = fma(a_reg[m], b_reg[n], sums[m][n]);
+                }
+            }
+        }
+
+        barrier();
+    }
+
+    [[unroll]] for (uint m = 0u; m < TM; m++) {
+        [[unroll]] for (uint n = 0u; n < TN; n++) {
+            const uint row_g = ir * BM + tiwr * TM + m;
+            const uint col_g = ic * BN + tiwc * TN + n;
+            if (row_g < M && col_g < N) {
+                d_data[d_offset + col_g * stride_d + row_g] = sums[m][n];
+            }
+        }
+    }
+}

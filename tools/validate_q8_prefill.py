@@ -43,6 +43,22 @@ def validated_logits(log, tokens):
             "tolerance": tolerance, "nonfinite": int(nonfinite)}
 
 
+def selected_q8_shader(log, tree):
+    """Identify the loaded GEMM, including opt-out/fallback and older archives."""
+    packed = "Q8_0 Intel packed prefill shader loaded (" in log
+    generic = "Q8_0 generic prefill shader loaded (" in log
+    require(not (packed and generic), "Q8 prefill pipeline selection is ambiguous")
+    directory = tree / "share/zinc/shaders"
+    # Old archives have only the generic asset and predate selection telemetry.
+    # A new archive must report which pipeline it loaded instead of labelling
+    # the generic file's hash as the selected packed Intel kernel.
+    if (directory / "mul_mm_q8_0_intel.spv").is_file():
+        require(packed or generic, "Q8 prefill pipeline selection was not reported")
+    name = "mul_mm_q8_0_intel.spv" if packed else "mul_mm_q8_0.spv"
+    return {"selected_q8_gemm_shader": name,
+            "selected_q8_gemm_shader_sha256": sha256(directory / name)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("zinc-tree", "worker-config", "output"):
@@ -105,6 +121,11 @@ def main():
                 text = log.read_text(errors="replace")
                 require(any(re.search(r"\bKV cache:.*\bf32\b", line) for line in text.splitlines()),
                         "numerical Q8 validation did not confirm F32 KV storage")
+                selected = selected_q8_shader(text, tree)
+                if "selected_q8_gemm_shader" in report:
+                    require(all(report[key] == value for key, value in selected.items()),
+                            "Q8 prefill pipeline changed during numerical validation")
+                report.update(selected)
                 report["cases"].append(validated_logits(text, count))
                 idle()
                 write_json(output, report)
