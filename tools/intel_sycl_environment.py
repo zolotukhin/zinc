@@ -53,8 +53,11 @@ def environment(prefix, base, graphs=False, dnn=True, onednn_attention=True):
     prefix = Path(prefix).resolve()
     require((prefix / "bin/icpx").is_file() and (prefix / "lib").is_dir(), "native compiler/runtime prefix is incomplete")
     # Inherited tuning can silently disable graphs/XMX or choose another device.
+    # oneDNN's current and legacy prefixes also control implicit FP32 narrowing,
+    # primitive caching and tracing. Those are separate labelled treatments,
+    # never settings inherited by an otherwise default performance baseline.
     # Start from documented defaults; only this baseline gets the new libraries.
-    result = {key: value for key, value in base.items() if not key.startswith(("GGML_", "SYCL_", "ONEAPI_", "UR_", "ZE_", "ZES_", "OCL_", "OPENCL_"))}
+    result = {key: value for key, value in base.items() if not key.startswith(("GGML_", "SYCL_", "ONEAPI_", "UR_", "ZE_", "ZES_", "OCL_", "OPENCL_", "ONEDNN_", "DNNL_"))}
     result["PATH"] = str(prefix / "bin") + os.pathsep + result.get("PATH", os.defpath)
     result["LD_LIBRARY_PATH"] = str(prefix / "lib")
     result["ONEAPI_DEVICE_SELECTOR"] = "level_zero:gpu"

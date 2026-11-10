@@ -654,6 +654,16 @@ settings. It verifies the live server's SYCL and Level Zero libraries come from
 the selected environment. Those identities are checked again after cleanup.
 ZINC and the frozen Vulkan oracle keep their own loader environments.
 
+The native child environment also discards inherited `ONEDNN_*` and legacy
+`DNNL_*` controls. These can change math precision, primitive caching or tracing
+without changing the executable or installed library hashes. Default comparisons
+use the library defaults; an explicit diagnostic applies its settings after
+isolation and records them as a separate treatment. The parent, ZINC and oracle
+environments remain unchanged. See oneDNN's
+[floating-point math mode](https://uxlfoundation.github.io/oneDNN/v3.13/dev_guide_attributes_fpmath_mode.html)
+for the default precision contract. This closes an isolation gap; it does not
+establish the cause of earlier repeated-output drift or relabel those failures.
+
 Conda's OpenCL loader initially exposed only the bundled CPU ICD. Short SYCL
 continuations passed, but a 167-token prompt aborted when oneDNN needed its
 matching GPU OpenCL device. The reference environment now scopes
