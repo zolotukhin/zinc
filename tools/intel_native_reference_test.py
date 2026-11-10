@@ -142,7 +142,8 @@ class NativeReferenceTest(unittest.TestCase):
             ("aggregate", "exact-choice agreement is too low", 3, "aggregate_agreement"),
             ("bad-tail", "after the near tie", 3, "oracle_branches"),
         ):
-            record = {}
+            model = {"passed": False, "native_reference_validation": {}}
+            record = model["native_reference_validation"]
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, message):
                 self.execute(mode, record)
             self.assertIs(record["passed"], False)
@@ -152,6 +153,12 @@ class NativeReferenceTest(unittest.TestCase):
             self.assertIn("content", record["cases"][0])
             self.assertEqual(record["runtime"]["runtime"], "level_zero")
             self.assertEqual(record["gpu_offload"]["offloaded"], record["gpu_offload"]["total"])
+            # main's existing error handler/finally saves this same parent.
+            # Check the actual writer too: retained failures must survive JSON.
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "failed-model-report.json"
+                benchmark.write_json(path, model)
+                self.assertEqual(json.loads(path.read_text())["native_reference_validation"], record)
 
     def test_preflight_runtime_probe_failure_never_masks_the_rejected_continuation(self):
         for mode, message, count in (("short", "count differs", 1), ("near-tie", "runtime observation unavailable", 3)):
