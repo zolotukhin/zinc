@@ -7,6 +7,10 @@ It requires **Bun 1.4.4 or newer**. The client protocol is tested with
 **OpenCode 1.19.4, 2.0.21 and 2.2.6**. Model coding results retain their actual client
 version in the [RDNA4 validation report](OPENCODE_RELEASE_VALIDATION.md) and
 [Intel model matrix](INTEL_OPENCODE_VALIDATION.md).
+The [November 9 Intel replay](INTEL_OPENCODE_VALIDATION.md#november-9-full-catalog-opencode-replay)
+uses 2.2.6 on all seven models: all pass inference and recovery, while the six
+larger models pass three coding fixtures each. The 0.6B starter retains its
+three coding failures.
 The [AMD setup walkthrough](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/)
 connects OpenCode and OpenClaw, with R9700 evidence and RX 9070 XT memory guidance.
 
