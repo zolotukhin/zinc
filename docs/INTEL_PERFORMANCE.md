@@ -92,6 +92,22 @@ six server lifetimes. Complete outputs match throughout. Prefill improves
 tokens/s); decode stays within 0.1%. This independently confirms the production
 selection without relabelling the earlier shader-overlay prototype.
 
+### Q8 GEMM address bounds
+
+The F32-activation and DP4a Q8 GEMM recorders validate the complete weight
+buffer and matrix extent before pipeline lookup or GPU recording. Their
+existing 32-bit byte-address contract rejects oversized descriptors, short
+buffers and overflowing offsets/dimensions. Host arithmetic divides the
+remaining range rather than multiplying potentially overflowing dimensions.
+The shader binaries remain unchanged.
+
+The [pinned GGUF inventory](/zinc/validation/intel-q8-matrix-range-inventory-2026-11-10.json)
+checks all seven model files and 704 Q8 matrix tensors; the largest is 748 MiB,
+within this contract. This read-only metadata audit is separate from inference
+qualification and performance measurements. The GPU records above retain
+their exact archive/source identities; host range policy has independent CPU
+boundary tests, including 4,032 wide-integer comparisons.
+
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
 workloads: short chat, medium context, long context, and extended decode. It first

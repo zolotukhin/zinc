@@ -158,6 +158,7 @@ comptime {
     _ = @import("gpu/attention_window.zig");
     _ = @import("gpu/upload_plan.zig");
     _ = @import("gpu/prefill_policy.zig");
+    _ = @import("gpu/matrix_bounds.zig");
     _ = prefill_policy;
     _ = @import("compute/bounded_prefill.zig");
     _ = @import("server/http.zig");

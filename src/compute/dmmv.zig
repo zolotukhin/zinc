@@ -14,6 +14,7 @@ const Buffer = @import("../vulkan/buffer.zig").Buffer;
 const GpuConfig = @import("../vulkan/gpu_detect.zig").GpuConfig;
 const GpuVendor = @import("../vulkan/gpu_detect.zig").GpuVendor;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
+const matrix_bounds = @import("../gpu/matrix_bounds.zig");
 
 const log = std.log.scoped(.dmmv);
 const descriptor_pool_max_sets: u32 = 256;
@@ -81,7 +82,21 @@ test "packed Q8 prefill rejects odd weight offsets without GPU access" {
     const dispatch = std.mem.zeroes(DmmvDispatch);
     var command = std.mem.zeroes(CommandBuffer);
     try std.testing.expectError(error.InvalidArgument, dispatch.recordMulMmQ8_0(&command, null, null, 0, null, 0, null, 0, 1, 1, 32, 32, 1, 1, 0, 0));
-    try std.testing.expectError(error.PipelineNotLoaded, dispatch.recordMulMmQ8_0(&command, null, null, 0, null, 0, null, 0, 1, 1, 32, 32, 1, 2, 0, 0));
+    try std.testing.expectError(error.PipelineNotLoaded, dispatch.recordMulMmQ8_0(&command, null, null, 36, null, 0, null, 0, 1, 1, 32, 32, 1, 2, 0, 0));
+}
+
+test "Q8 prefill rejects an overflowing matrix before pipeline lookup" {
+    const dispatch = std.mem.zeroes(DmmvDispatch);
+    var command = std.mem.zeroes(CommandBuffer);
+    try std.testing.expectError(error.InvalidArgument, dispatch.recordMulMmQ8_0(&command, null, null, std.math.maxInt(u32), null, 0, null, 0, std.math.maxInt(u32), 1, 32, 32, 1, 0, 0, 0));
+}
+
+test "Q8 DP4a prefill enforces the same byte range before GPU access" {
+    const dispatch = std.mem.zeroes(DmmvDispatch);
+    var command = std.mem.zeroes(CommandBuffer);
+    try std.testing.expectError(error.InvalidArgument, dispatch.recordMulMmQ8_0FullDp4a(&command, null, null, @as(u64, 1) << 32, null, 0, null, 0, null, 0, 32, 32, 32, 0, 0));
+    try std.testing.expectError(error.InvalidArgument, dispatch.recordMulMmQ8_0FullDp4a(&command, null, null, 1087, null, 0, null, 0, null, 0, 32, 32, 32, 0, 0));
+    try std.testing.expectError(error.PipelineNotLoaded, dispatch.recordMulMmQ8_0FullDp4a(&command, null, null, 1088, null, 0, null, 0, null, 0, 32, 32, 32, 0, 0));
 }
 
 test "Intel Q8 row decode requires enforceable SIMD32 and honors the control" {
@@ -4687,7 +4702,8 @@ pub const DmmvDispatch = struct {
 
     /// Tiled Q8_0 dense GEMM for Qwen3.6 A3B layer-major prefill (SSM out projection).
     /// Uses the same `MulMmQ4KPush` layout as `recordMulMmQ4K`, but K must be a multiple of 32 (not 256).
-    /// @returns `error.PipelineNotLoaded` if the Q8_0 GEMM pipeline is absent, or `error.InvalidArgument` for K not a multiple of 32 or zero M/N.
+    /// Invalid weight alignment/ranges are rejected before checking pipeline availability.
+    /// @returns `error.PipelineNotLoaded` if the Q8_0 GEMM pipeline is absent, or `error.InvalidArgument` for invalid dimensions or weight byte ranges.
     pub fn recordMulMmQ8_0(
         self: *const DmmvDispatch,
         cmd: *CommandBuffer,
@@ -4708,6 +4724,7 @@ pub const DmmvDispatch = struct {
         d_offset: u32,
     ) !void {
         try validateQ8WeightOffset(.q8_0, a_offset);
+        if (!matrix_bounds.q8MatrixFits(M, K, a_offset, a_size)) return error.InvalidArgument;
         const pip = if (self.pipeline_mul_mm_q8_0) |*p| p else return error.PipelineNotLoaded;
         if (K == 0 or (K & 31) != 0) return error.InvalidArgument;
         if (M == 0 or N == 0) return error.InvalidArgument;
@@ -4740,6 +4757,7 @@ pub const DmmvDispatch = struct {
     /// Record an int8 DP4a full-tile Q8_0 GEMM. The activation must already
     /// be quantized with recordQuantizeActQ8. Ragged token tails stay on the
     /// f32 recordMulMmQ8_0 path at the call site.
+    /// Invalid weight ranges are rejected before checking pipeline availability.
     pub fn recordMulMmQ8_0FullDp4a(
         self: *const DmmvDispatch,
         cmd: *CommandBuffer,
@@ -4758,6 +4776,8 @@ pub const DmmvDispatch = struct {
         a_offset: u32,
         d_offset: u32,
     ) !void {
+        // Quantized activations do not widen the GGUF weight byte addressing.
+        if (!matrix_bounds.q8MatrixFits(M, K, a_offset, a_size)) return error.InvalidArgument;
         const pip = if (self.pipeline_mul_mm_q8_0_full_dp4a) |*p| p else return error.PipelineNotLoaded;
         if (K == 0 or (K & 31) != 0) return error.InvalidArgument;
         if (M == 0 or N == 0 or (M & 31) != 0 or (N & 31) != 0) return error.InvalidArgument;
