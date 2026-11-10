@@ -14,6 +14,8 @@ const medianOfThree = (values: number[]) => {
 };
 
 test('Intel prefill evidence binds the adopted kernel to its numerical and same-binary proof', () => {
+  // Exact provenance is intentional. A comment edit needs an updated source
+  // digest and a verified unchanged SPV; a kernel change needs a fresh proof.
   const source = readFileSync(new URL('../src/shaders/mul_mm_q8_0_intel.comp', import.meta.url));
   expect(createHash('sha256').update(source).digest('hex')).toBe(report.candidate_source_sha256);
   expect(report.source_report_sha256).toBe(

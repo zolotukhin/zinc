@@ -154,7 +154,11 @@ fn createQ8PrefillPipeline(
         }
     }
     const fallback = try std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q8_0.spv", .{shader_dir});
-    return pipeline_mod.createFromSpirvWithOptions(instance, fallback, 3, @sizeOf(MulMmQ4KPush), &.{}, options, allocator);
+    const pipeline = try pipeline_mod.createFromSpirvWithOptions(instance, fallback, 3, @sizeOf(MulMmQ4KPush), &.{}, options, allocator);
+    // Exactly one pipeline is stored for every subsequent Q8 GEMM dispatch.
+    // Report both selections so controls/qualification can detect fallback.
+    log.info("Q8_0 generic prefill shader loaded (WG64, 32x32, TM4/TN4)", .{});
+    return pipeline;
 }
 
 pub const ProjectionSpecializations = @import("projection_specializations.zig").ProjectionSpecializations;

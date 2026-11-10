@@ -32,7 +32,7 @@
   "numerical_source_report_sha256": "3cb0a1b0ec8a775ca816338f1696a9024c6b8c09d904044393966bdd061cd8de",
   "model": "qwen3-0.6b-q8-0",
   "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
-  "candidate_source_sha256": "269d8aafad32a9a0b2aed62e39ab4e47fdbca47d50d97c59a0d73c794103133a",
+  "candidate_source_sha256": "cc50ff8e9be46b449e26876401681aebd3cd1b9d9cb82faee4f78753cb012eea",
   "prototype_source_sha256": "f1fe6de4a1fcc1c4e2c2f9c6e3ece97995b432751121e8702bb6ddcdac45ff92",
   "candidate_shader_sha256": "bdc26e13bc8fd6c54e500b5aab9406064dd09c1b89074640335cdcd2563abe08",
   "baseline_shader_sha256": "8a2d61570c283ddc07bb890879dbd602131f9a06a7a030bb8f4f17a1d88f7987",

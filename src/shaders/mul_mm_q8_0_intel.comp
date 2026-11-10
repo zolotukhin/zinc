@@ -27,7 +27,8 @@ const uint TPR_N = BN / TN;
 const uint Q8_0_BLOCK_SIZE = 32u;
 const uint Q8_0_BYTES = 34u;
 
-// +1 stride in K dimension to avoid 32-bank LDS conflicts on RDNA.
+// Retain the generic kernel's +1 shared-memory stride. The Intel A/B changes
+// packed weight loads and the output strip; it does not isolate this padding.
 const uint STRIDE_A = BK + 1u;
 const uint STRIDE_B = BK + 1u;
 
