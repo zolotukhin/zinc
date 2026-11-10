@@ -4,6 +4,46 @@ The Intel Arc Pro B70 checks keep inference correctness, API behavior, client
 exit and independent acceptance tests separate. Earlier failures retain their
 source, binary and launch settings.
 
+## November 9 Gemma cache and client qualification
+
+The [two-Gemma exact-package replay](/zinc/validation/intel-gemma-chat-prefix-2026-11-09.json)
+checks CI source `2d0e1369`, binary `3bea62b8`, with actual **OpenCode 2.2.6**
+and **OpenClaw 2026.11.1**. Both models pass native continuations before and
+after the clients, eight cache/invalidation controls and independent coding
+acceptance:
+
+| Model           | Context | Cache controls | OpenCode fixtures | OpenClaw text / workspace / recovery |
+| --------------- | ------: | -------------: | ----------------: | ------------------------------------ |
+| Gemma 4 26B-A4B |  16,384 |            8/8 |               3/3 | Pass / pass / pass                   |
+| Gemma 4 31B     |  12,288 |            8/8 |               3/3 | Pass / pass / pass                   |
+
+Both use F16 KV, MTP/thinking off and one slot. OpenCode runs the same
+rate-limiter, multi-file cart and Python CLI fixtures with 16 steps, 2,048
+output tokens and 900 seconds per fixture. OpenClaw retains 300 seconds per
+task; its workspace checks the protected input/test hashes, exact random
+receipt and an independent test execution. All twelve real-client task checks
+pass. Thirty complete native HTTP continuations include the before/after
+replays and the separate Gemma MoE disable control. Package and hardware
+identities stay unchanged through cleanup.
+
+The development server enables canonical prefix rewind by default only for
+Intel Xe2 Gemma MoE. Gemma 31B keeps its previous default path. Edited system
+messages, early edits before the old sliding window, shortened prompts/history,
+identical retries, context growth, intervening requests and disconnects all
+match full-prefill output. The late-system-edit control takes 646.9 ms with
+reuse versus 27,276.0 ms with full prefill; an early edit replays almost the
+whole prompt. These are same-server cache controls. Uncached engine throughput
+uses its separate matched protocol.
+
+Earlier failures remain in the record: an OpenClaw preparation failure, a stop
+at the global client-version gate, and an interrupted nine-fixture attempt.
+That attempt's additional repository-maintenance task exits successfully but
+still fails four independent tests. Three passing fixtures establish bounded
+acceptance, with other coding tasks retaining their actual outcomes.
+The [seven-model inference replay](/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json)
+covers the catalog separately. These development-package checks do not
+recertify the published 0.1.0 archives.
+
 ## November 7 candidate: OpenCode and OpenClaw
 
 The [seven-model client follow-up](/zinc/validation/intel-client-acceptance-2026-11-07.json)
