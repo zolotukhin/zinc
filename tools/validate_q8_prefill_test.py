@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -9,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import validate_q8_prefill as validator
-from validate_q8_prefill import PREFILL_TOKEN_COUNTS, validated_logits
+from validate_q8_prefill import PREFILL_TOKEN_COUNTS, selected_q8_shader, validated_logits
 
 
 def record(status="ok", maximum="0.000100", nonfinite=0, tolerance="0.001000", count=33):
@@ -39,6 +40,37 @@ class LogitRegression(unittest.TestCase):
                     record(maximum="0.001001"), record(tolerance="nan"), record(tolerance="0.01")):
             with self.subTest(log=log), self.assertRaises(ValueError):
                 validated_logits(log, 33)
+
+
+class SelectedShader(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.tree = Path(self.temporary.name)
+        self.shaders = self.tree / "share/zinc/shaders"
+        self.shaders.mkdir(parents=True)
+        (self.shaders / "mul_mm_q8_0.spv").write_bytes(b"generic fixture")
+        (self.shaders / "mul_mm_q8_0_intel.spv").write_bytes(b"packed fixture")
+        self.packed = "Q8_0 Intel packed prefill shader loaded (WG64, 32x32, TM2/TN8)"
+        self.generic = "Q8_0 generic prefill shader loaded (WG64, 32x32, TM4/TN4)"
+
+    def test_packed_kernel_reports_its_own_asset_instead_of_the_generic_hash(self):
+        self.assertEqual(selected_q8_shader(self.packed, self.tree), {
+            "selected_q8_gemm_shader": "mul_mm_q8_0_intel.spv",
+            "selected_q8_gemm_shader_sha256": hashlib.sha256(b"packed fixture").hexdigest(),
+        })
+
+    def test_generic_control_and_legacy_archive_preserve_their_actual_identity(self):
+        expected = {"selected_q8_gemm_shader": "mul_mm_q8_0.spv",
+                    "selected_q8_gemm_shader_sha256": hashlib.sha256(b"generic fixture").hexdigest()}
+        self.assertEqual(selected_q8_shader(self.generic, self.tree), expected)
+        (self.shaders / "mul_mm_q8_0_intel.spv").unlink()
+        self.assertEqual(selected_q8_shader("legacy pipeline loaded", self.tree), expected)
+
+    def test_new_archive_cannot_pass_ambiguous_or_missing_selection_telemetry(self):
+        for log in (self.packed + "\n" + self.generic, "pipeline loaded"):
+            with self.subTest(log=log), self.assertRaises(validator.Q8RegressionError):
+                selected_q8_shader(log, self.tree)
 
 
 class FailureReport(unittest.TestCase):
