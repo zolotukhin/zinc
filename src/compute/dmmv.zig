@@ -4702,6 +4702,7 @@ pub const DmmvDispatch = struct {
 
     /// Tiled Q8_0 dense GEMM for Qwen3.6 A3B layer-major prefill (SSM out projection).
     /// Uses the same `MulMmQ4KPush` layout as `recordMulMmQ4K`, but K must be a multiple of 32 (not 256).
+    /// Invalid weight alignment/ranges are rejected before checking pipeline availability.
     /// @returns `error.PipelineNotLoaded` if the Q8_0 GEMM pipeline is absent, or `error.InvalidArgument` for invalid dimensions or weight byte ranges.
     pub fn recordMulMmQ8_0(
         self: *const DmmvDispatch,
@@ -4756,6 +4757,7 @@ pub const DmmvDispatch = struct {
     /// Record an int8 DP4a full-tile Q8_0 GEMM. The activation must already
     /// be quantized with recordQuantizeActQ8. Ragged token tails stay on the
     /// f32 recordMulMmQ8_0 path at the call site.
+    /// Invalid weight ranges are rejected before checking pipeline availability.
     pub fn recordMulMmQ8_0FullDp4a(
         self: *const DmmvDispatch,
         cmd: *CommandBuffer,

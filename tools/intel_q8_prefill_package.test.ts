@@ -33,7 +33,7 @@ function completeResponses(row) {
   }
 }
 
-test('production prefill proof binds the exact CI archive and immutable source/shader identities', () => {
+test('historical prefill qualification retains its original CI archive and source identities', () => {
   expect(report.passed).toBe(true);
   expect(report.archive).toEqual({
     version: '0.1.0-dev.42739579552',
@@ -53,8 +53,11 @@ test('production prefill proof binds the exact CI archive and immutable source/s
   expect(
     Object.keys(report.shader_sha256).filter((name) => !(name in previous.zinc.shader_sha256)),
   ).toEqual(['share/zinc/shaders/mul_mm_q8_0_intel.spv']);
-  // This inventory belongs to the recorded archive. Host policy edits have
-  // CPU regressions; the current kernel stays bound to its numerical proof.
+  // These hashes describe ac891db0, not the checkout running this test. The
+  // archive and its qualification stay immutable when later host code changes:
+  // hashing today's dmmv.zig here would either forbid every future host fix or
+  // encourage relabelling an old GPU run as a new one. Current host behavior has
+  // independent CPU tests; selected kernel identity is checked separately below.
   expect(report.production_source_sha256).toEqual({
     'build.zig': '1ad726527f93a0c8983923e4ed48d2abddf0c68817b10bfe1ef7afaa30b03a07',
     'src/compute/dmmv.zig': '5d273fe12a03e88110aa2269002e341f0f273a4852a7c82517c242c7e01418c6',
@@ -66,9 +69,6 @@ test('production prefill proof binds the exact CI archive and immutable source/s
     'tools/validate_q8_prefill.py':
       'aadbeed14a90882e2daf102259387b0a964465be0b58fb2f11b99f513c190449',
   });
-  expect(
-    hash(readFileSync(new URL('../src/shaders/mul_mm_q8_0_intel.comp', import.meta.url))),
-  ).toBe(report.production_source_sha256['src/shaders/mul_mm_q8_0_intel.comp']);
   expect(report.kernel_reference.cases).toBe(376);
   expect(report.kernel_reference.passed).toBe(true);
   expect(report.q8_decode_reference).toEqual(
@@ -87,6 +87,12 @@ test('production prefill proof binds the exact CI archive and immutable source/s
   ]);
   expect(report.numerical_default_pipeline_loads).toBe(14);
   expect(() => assertPublicArtifact(report)).not.toThrow();
+});
+
+test('the current packed Q8 kernel still matches the historical numerical qualification', () => {
+  expect(
+    hash(readFileSync(new URL('../src/shaders/mul_mm_q8_0_intel.comp', import.meta.url))),
+  ).toBe(report.production_source_sha256['src/shaders/mul_mm_q8_0_intel.comp']);
 });
 
 test('the entire catalog passes complete native/API/SSE checks and only the starter selects packed prefill', () => {

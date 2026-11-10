@@ -9,6 +9,9 @@ const std = @import("std");
 /// the complete weight buffer. Reject unsupported ranges before either an
 /// offset wraps in the shader or the descriptor exceeds the 32-bit range.
 /// Alignment is checked separately by the Q8 dispatch caller.
+/// Current forward call sites pass a tensor's gpu_buffer.size with zero weight
+/// offset; loader.zig allocates that buffer using tensor_info.sizeBytes(). The
+/// model file's total size is never used as this descriptor range.
 pub fn q8MatrixFits(rows: u32, columns: u32, offset: u32, buffer_bytes: u64) bool {
     if (rows == 0 or columns == 0 or (columns & 31) != 0) return false;
     if (buffer_bytes > std.math.maxInt(u32) or offset > buffer_bytes) return false;
