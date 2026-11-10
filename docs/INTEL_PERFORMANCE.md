@@ -180,7 +180,14 @@ default three rounds alternate engine order. Each workload gets one warmup and
 three measured requests per round. Natural early EOS remains in the report and
 excludes that workload from full-budget comparisons; finishing early is never
 counted as a speed win. Reduced prefill work, different prompt counts, invalid
-token accounting, and unstable repeated outputs fail the campaign.
+token accounting, and unstable repeated outputs fail the campaign. Repetitions
+include warmups and every server lifetime: full responses must retain their
+text hash, byte length, prompt/completion token counts and finish reason.
+The short SSE probes keep a separate text/byte/cap identity. A changed
+repetition remains in the report with the first and changed identities and
+the fields that differ. Summary eligibility recomputes these checks from the
+retained samples, rather than trusting a cached passing flag. These stricter
+checks apply to new campaigns; historical evidence retains its original protocol.
 Workload messages are rendered once by the frozen correctness oracle. Both
 servers receive identical raw prompt bytes through `/v1/completions`, including
 the separate streaming probes. Development ZINC builds with raw SSE support
