@@ -766,6 +766,37 @@ and disabled wide-Q8 kernel each pass this limited attempt: two server lifetimes
 native-reference continuations per treatment.
 
 The unchanged default passing here does not erase its earlier medium-context
-drift. These results show that the issue is intermittent; they do not identify
-a corrective setting or qualify the seven-model performance baseline. The
+drift. The failure did not reproduce in this limited setup; these results do not
+identify a corrective setting or qualify the seven-model performance baseline. The
 earlier failures and all later samples remain separate records.
+
+### Native request-cadence replay
+
+The [November 10 native replay](/zinc/validation/intel-native-exact-cadence-2026-11-10.json)
+uses upstream `3b4d6ab3`, selected before building a separate FP32 SYCL reference.
+The previous references remain intact. The official oneAPI packages and GPU
+stack match the earlier campaign; Intel's published compute-runtime and IGC
+releases also match the installed versions at this check.
+
+This diagnostic matches the native timed request order: four full generations
+per workload, followed directly by one short SSE probe, across two fresh server
+lifetimes. It uses the catalog contexts, including 2,048 tokens for the starter.
+Earlier passing starter controls used 4,096 tokens and an additional 16-token
+JSON generation before each SSE probe. Those differences are now explicit;
+the complete alternating ZINC/native performance campaign is not repeated here.
+
+| Model            | Changed full responses | Changed short streams |
+| ---------------- | ---------------------: | --------------------: |
+| Qwen 3 0.6B      |                   0/32 |                   0/8 |
+| Qwen 3.6 35B-A3B |                  14/32 |                   1/8 |
+
+Both models pass the initial frozen-oracle continuations and fully offload to
+SYCL. Every timed response reports zero cached prompt tokens and retains its
+complete output hash, token counts and server timings. Hardware, SDK and binary
+identities remain unchanged. No inherited oneDNN settings were present, so the
+environment-isolation fix does not explain the passing starter attempt.
+
+The 35B failures remain included. Zero prompt-cache hits do not identify the
+cause or exclude other internal caches. The passing starter does not establish
+a corrective setting or erase its earlier failure. This two-model diagnostic
+qualifies neither a competitor speed win nor a native ZINC backend.
