@@ -6,11 +6,15 @@ Both engines must offload the model to that GPU. There is no CPU-only inference
 baseline. CPU unit tests and numerical shader references remain correctness
 checks, separate from performance comparisons.
 
-The [packed-Q8 CI archive replay](/zinc/validation/intel-native-sycl-fp32-packed-q8-2026-11-10.json)
-passes all seven ZINC model support gates on the updated Intel worker. It also
-attempts a fresh native SYCL FP32 baseline at `cf6463ac`, selected before
-building. Repeated-output failures remain recorded; they do not establish an
-all-model competitor performance baseline. The
+The [prefill CI archive replay](/zinc/validation/intel-q8-prefill-package-support-2026-11-10.json)
+passes all seven ZINC model support gates, fourteen selected-kernel prefill
+boundary checks, an explicit opt-out and a missing-asset fallback. All 215
+packaged shader identities and the final hardware checks remain unchanged.
+
+The [preceding packed-Q8 campaign](/zinc/validation/intel-native-sycl-fp32-packed-q8-2026-11-10.json)
+also attempts a fresh native SYCL FP32 baseline at `cf6463ac`, selected before
+building. Its repeated-output failures remain recorded; they do not establish
+an all-model competitor performance baseline. The
 [preceding CI replay](/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json)
 retains its separate package, reference selection and actual outcomes.
 
@@ -27,7 +31,7 @@ full prefill on one ZINC server. The [client report](INTEL_OPENCODE_VALIDATION.m
 keeps those results separate from uncached competitor throughput and the
 published release archives.
 
-### Packed Q8 reads
+## Packed Q8 reads
 
 The [balanced Q8 experiment](/zinc/validation/intel-q8-packed-reads-2026-11-09.json)
 replaces four byte reads with two aligned 16-bit reads in the existing Intel
@@ -53,7 +57,7 @@ does not replace the three-round internal A/B or qualify the rejected native
 comparison. The new replay retains all failed samples and their final process
 memory/runtime observations.
 
-### Intel dense-Q8 prefill
+## Intel dense-Q8 prefill
 
 The [separate prefill A/B](/zinc/validation/intel-q8-prefill-packed-2026-11-10.json)
 uses the same packaged binary with only the Q8 GEMM shader changed. Two-byte
@@ -69,6 +73,24 @@ the generic shader, as does a missing or rejected Intel pipeline. Other GPUs
 and mixed-quantization/recurrent graphs retain their existing shader. These
 results establish an internal prefill gain, with natural EOS retained; they
 make no llama.cpp, all-model, memory, startup or streaming-latency claim.
+
+The [actual archive support replay](/zinc/validation/intel-q8-prefill-package-support-2026-11-10.json)
+binds source `ac891db0`, archive SHA-256 `3e16bc5a…`, all 215 SPVs and the
+production source files. Its packaged Intel kernel is bitwise identical to the
+numerical/A/B candidate. All seven models pass 27 complete native CLI
+continuations, 81 full HTTP continuations and 27 raw JSON/SSE controls, with
+604 numerical kernel cases and 14 full-vocabulary prefill boundaries. Separate
+opt-out and one-missing-asset controls pass six more CLI continuations, eighteen
+HTTP continuations and six JSON/SSE controls, including cancellation/context
+recovery. Actual pipeline selection is checked in every owned ZINC process.
+
+The [packaged default-versus-opt-out A/B](/zinc/validation/intel-q8-prefill-production-ab-2026-11-10.json)
+then reuses that exact archive, binary and all 215 shaders for both modes.
+Three balanced rounds retain 96 requests and full native checks before/after
+six server lifetimes. Complete outputs match throughout. Prefill improves
+10.9–18.2% across the workload/round pairs (core median about 1,896 → 2,139
+tokens/s); decode stays within 0.1%. This independently confirms the production
+selection without relabelling the earlier shader-overlay prototype.
 
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
