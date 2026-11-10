@@ -28,6 +28,7 @@ HARNESS = ("tools/benchmark_intel.py", "tools/benchmark_metrics.py", "tools/inte
            "tools/performance_suite.mjs", "tools/benchmark_speculation.mjs", "tools/benchmark_reference.mjs",
            "tools/release_gpu.py", "tools/release_lib.py", "config/benchmark-reference.json", "config/release/targets.json")
 HARNESS += ("tools/validate_dmmv_shared_cache.c", "tools/validate_q8_decode.c", "tools/validate_gemma_router.c", "tools/validate_attention_window.c")
+HARNESS += ("tools/validate_gemma_geglu.c",)
 HARNESS += ("tools/intel_sycl_environment.py", "tools/intel_native_probe.py", "tools/intel_sycl_probe.cpp", "tools/intel_probe_json.h")
 
 
@@ -564,6 +565,9 @@ def main():
             print("Correctness: 376 numerical shader cases", flush=True)
             report["kernel_reference"] = gpu.kernel_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
             report["q8_decode_reference"] = gpu.q8_decode_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
+            gemma_geglu = gpu.gemma_geglu_reference(args.zinc_tree, args.oracle, args.oracle_source, args.device, work, env)
+            if gemma_geglu is not None:
+                report["gemma_geglu_reference"] = gemma_geglu
             for identifier in args.models:
                 model_pin = next(m for m in policy()["models"] if m["id"] == identifier)
                 args.model, args.context = Path(worker["models"][identifier]), model_pin["context"]

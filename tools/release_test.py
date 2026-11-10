@@ -506,6 +506,59 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(compile_tool.call_count, 1)
             self.assertEqual(reaped, [True])
 
+    def test_gemma_geglu_gate_skips_older_archives_and_rejects_half_installed_pairs(self):
+        shaders = self.root / "share/zinc/shaders"
+        shaders.mkdir(parents=True)
+        with patch.object(release_gpu, "output") as compiler:
+            self.assertIsNone(release_gpu.gemma_geglu_reference(self.root, self.root, self.root, 3, self.root, {}))
+            for name in ("mul_mm_q4k_gate_up_geglu_intel", "mul_mm_q4k_gate_up_geglu_intel_full"):
+                path = shaders / (name + ".spv")
+                path.write_bytes(b"shader")
+                with self.assertRaisesRegex(ValueError, "pair is incomplete"):
+                    release_gpu.gemma_geglu_reference(self.root, self.root, self.root, 3, self.root, {})
+                path.unlink()
+        compiler.assert_not_called()
+
+    def test_gemma_geglu_gate_requires_complete_bitwise_and_native_reference_proofs(self):
+        shaders = self.root / "share/zinc/shaders"
+        shaders.mkdir(parents=True)
+        names = ("mul_mm_q4k_gate_up_geglu_intel", "mul_mm_q4k_gate_up_geglu_intel_full",
+                 "mul_mm_q4k_gate_up_geglu", "mul_mm_q4k_gate_up_geglu_full")
+        for name in names:
+            (shaders / (name + ".spv")).write_bytes(name.encode())
+        marker = "PASS: 204 GEGLU native-reference/offset/stride/guard cases\nPASS: 102 GEGLU identical-accumulation pairs\nmaximum_absolute_error=0.00002"
+        for status, text in ((1, marker), (0, ""), (0, marker.replace("204", "203")),
+                             (0, marker.replace("102", "101")), (0, marker + "\n" + marker),
+                             (0, marker.rsplit("\n", 1)[0]), (0, marker.replace("0.00002", "nan")),
+                             (0, marker.replace("0.00002", "inf")), (0, marker.replace("0.00002", "-1")), (0, marker)):
+            reaped = []
+            @contextlib.contextmanager
+            def child(command, log, cwd, env):
+                self.assertEqual(Path(command[0]).name, "validate-gemma-geglu")
+                self.assertEqual(env["ZINC_GPU"], "3")
+                self.assertEqual(env["ZINC_SHADER_DIR"], str(shaders))
+                Path(log).write_text(text + "\n")
+                try:
+                    yield SimpleNamespace(wait=lambda timeout: status)
+                finally:
+                    reaped.append(True)
+            with self.subTest(status=status, text=text), patch.object(release_gpu, "output", return_value="") as compiler, \
+                    patch.object(release_gpu, "process", side_effect=child):
+                if status or text != marker:
+                    with self.assertRaises(ValueError):
+                        release_gpu.gemma_geglu_reference(self.root, self.root, self.root, 3, self.root, {})
+                else:
+                    result = release_gpu.gemma_geglu_reference(self.root, self.root, self.root, 3, self.root, {})
+                    self.assertEqual(result["cases"], 204)
+                    self.assertEqual(result["bitwise_pairs"], 102)
+                    self.assertEqual(result["maximum_absolute_error"], 0.00002)
+                    self.assertTrue(result["passed"])
+                    self.assertEqual(result["shader_sha256"], {name: sha256(shaders / (name + ".spv")) for name in names})
+                    self.assertEqual(result["validator_source_sha256"], sha256(ROOT / "tools/validate_gemma_geglu.c"))
+                    self.assertEqual(result["shared_fixture_source_sha256"], sha256(ROOT / "tools/validate_dmmv_shared_cache.c"))
+            self.assertEqual(compiler.call_count, 1)
+            self.assertEqual(reaped, [True])
+
     def test_rocm_kernel_gate_rejects_wrong_embedded_source_failure_and_incomplete_success(self):
         (self.root / "bin").mkdir()
         binary = self.root / "bin/zinc"

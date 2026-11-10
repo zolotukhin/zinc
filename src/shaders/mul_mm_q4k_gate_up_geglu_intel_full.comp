@@ -1,0 +1,236 @@
+#version 460
+// Intel Xe2: 2 rows x 8 prompt tokens per thread, WG64 and a 32x32 tile.
+// Retain the generic kernel's F16 weight staging, F32 activations/accumulators
+// and each output's K/FMA order; this retile adds no activation quantization.
+// ZINC - branchless full-tile Q4_K gate+up+GEGLU GEMM for Gemma dense prefill.
+//
+// This is the checked mul_mm_q4k_gate_up_geglu.comp shape specialized for
+// complete BM=32 x BN=32 tiles. The host may only dispatch it when M and N are
+// both multiples of 32; ragged token tails must use the checked shader.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+
+const uint BM = 32u;
+const uint BN = 32u;
+const uint BK = 32u;
+const uint TM = 2u;
+const uint TN = 8u;
+const uint WG_SIZE = 64u;
+const uint TPR_M = BM / TM;
+const uint TPR_N = BN / TN;
+
+const uint Q4K_BLOCK_U32 = 36u;
+const uint STRIDE_A = BK + 1u;
+const uint STRIDE_B = BK + 1u;
+
+layout(local_size_x = WG_SIZE) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint stride_b;
+    uint stride_d;
+    uint a_offset;
+    uint b_offset;
+    uint d_offset;
+};
+
+layout(set = 0, binding = 0) readonly buffer GateA { uint gate_u32[]; };
+layout(set = 0, binding = 1) readonly buffer UpA   { uint up_u32[];   };
+layout(set = 0, binding = 2) readonly buffer MatB  { float b_data[];  };
+layout(set = 0, binding = 3) writeonly buffer MatD { float d_data[];  };
+
+shared float16_t buf_gate[BM * STRIDE_A];
+shared float16_t buf_up[BM * STRIDE_A];
+shared float buf_b[BN * STRIDE_B];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint ir = gl_WorkGroupID.x;
+    const uint ic = gl_WorkGroupID.y;
+
+    const uint tiwr = tid % TPR_M;
+    const uint tiwc = tid / TPR_M;
+
+    float sums_gate[TM][TN];
+    float sums_up[TM][TN];
+    [[unroll]] for (uint m = 0u; m < TM; m++) {
+        [[unroll]] for (uint n = 0u; n < TN; n++) {
+            sums_gate[m][n] = 0.0;
+            sums_up[m][n] = 0.0;
+        }
+    }
+
+    const uint a_base_u32 = a_offset / 4u;
+    const uint blocks_per_row = K / 256u;
+
+    for (uint k_outer = 0u; k_outer < K; k_outer += BK) {
+        const uint super_block = k_outer / 256u;
+        const uint sb_offset = k_outer & 0xFFu;
+        const uint sb = sb_offset >> 5;
+        const uint chunk = sb >> 1;
+        const uint nibble_choice = sb & 1u;
+
+        {
+            const uint row_local = tid / 2u;
+            const uint k_in_tile = (tid & 1u) * 16u;
+            const uint row_global = ir * BM + row_local;
+
+            const uint blk_gate_u32 = a_base_u32
+                + row_global * blocks_per_row * Q4K_BLOCK_U32
+                + super_block * Q4K_BLOCK_U32;
+            const uint blk_up_u32 = a_base_u32
+                + row_global * blocks_per_row * Q4K_BLOCK_U32
+                + super_block * Q4K_BLOCK_U32;
+
+            uint d_dmin = gate_u32[blk_gate_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+            uint sc0 = gate_u32[blk_gate_u32 + 1u];
+            uint sc1 = gate_u32[blk_gate_u32 + 2u];
+            uint sc2 = gate_u32[blk_gate_u32 + 3u];
+            uint bytes[12];
+            bytes[0] = sc0 & 0xFFu;
+            bytes[1] = (sc0 >> 8) & 0xFFu;
+            bytes[2] = (sc0 >> 16) & 0xFFu;
+            bytes[3] = (sc0 >> 24) & 0xFFu;
+            bytes[4] = sc1 & 0xFFu;
+            bytes[5] = (sc1 >> 8) & 0xFFu;
+            bytes[6] = (sc1 >> 16) & 0xFFu;
+            bytes[7] = (sc1 >> 24) & 0xFFu;
+            bytes[8] = sc2 & 0xFFu;
+            bytes[9] = (sc2 >> 8) & 0xFFu;
+            bytes[10] = (sc2 >> 16) & 0xFFu;
+            bytes[11] = (sc2 >> 24) & 0xFFu;
+            float sc_val;
+            float mn_val;
+            if (sb < 4u) {
+                sc_val = float(bytes[sb] & 63u);
+                mn_val = float(bytes[sb + 4u] & 63u);
+            } else {
+                sc_val = float((bytes[sb + 4u] & 0xFu) | ((bytes[sb - 4u] >> 6) << 4));
+                mn_val = float(((bytes[sb + 4u] >> 4) & 0xFu) | ((bytes[sb] >> 6) << 4));
+            }
+            float factor = d_val * sc_val;
+            float bias = dmin_val * mn_val;
+            uint qs_byte_base = chunk * 32u + k_in_tile;
+            uint qs_u32_idx = blk_gate_u32 + 4u + (qs_byte_base >> 2);
+            uint qs0 = gate_u32[qs_u32_idx];
+            uint qs1 = gate_u32[qs_u32_idx + 1u];
+            uint qs2 = gate_u32[qs_u32_idx + 2u];
+            uint qs3 = gate_u32[qs_u32_idx + 3u];
+            float vals_gate[16];
+            [[unroll]] for (uint w = 0u; w < 4u; w++) {
+                uint qs_word = (w == 0u) ? qs0 : (w == 1u) ? qs1 : (w == 2u) ? qs2 : qs3;
+                uint plane = (nibble_choice == 0u) ? (qs_word & 0x0F0F0F0Fu)
+                                                   : ((qs_word >> 4) & 0x0F0F0F0Fu);
+                [[unroll]] for (uint b = 0u; b < 4u; b++) {
+                    uint nibble = (plane >> (b * 8u)) & 0xFu;
+                    vals_gate[w * 4u + b] = factor * float(nibble) - bias;
+                }
+            }
+
+            d_dmin = up_u32[blk_up_u32];
+            d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+            sc0 = up_u32[blk_up_u32 + 1u];
+            sc1 = up_u32[blk_up_u32 + 2u];
+            sc2 = up_u32[blk_up_u32 + 3u];
+            bytes[0] = sc0 & 0xFFu;
+            bytes[1] = (sc0 >> 8) & 0xFFu;
+            bytes[2] = (sc0 >> 16) & 0xFFu;
+            bytes[3] = (sc0 >> 24) & 0xFFu;
+            bytes[4] = sc1 & 0xFFu;
+            bytes[5] = (sc1 >> 8) & 0xFFu;
+            bytes[6] = (sc1 >> 16) & 0xFFu;
+            bytes[7] = (sc1 >> 24) & 0xFFu;
+            bytes[8] = sc2 & 0xFFu;
+            bytes[9] = (sc2 >> 8) & 0xFFu;
+            bytes[10] = (sc2 >> 16) & 0xFFu;
+            bytes[11] = (sc2 >> 24) & 0xFFu;
+            if (sb < 4u) {
+                sc_val = float(bytes[sb] & 63u);
+                mn_val = float(bytes[sb + 4u] & 63u);
+            } else {
+                sc_val = float((bytes[sb + 4u] & 0xFu) | ((bytes[sb - 4u] >> 6) << 4));
+                mn_val = float(((bytes[sb + 4u] >> 4) & 0xFu) | ((bytes[sb] >> 6) << 4));
+            }
+            factor = d_val * sc_val;
+            bias = dmin_val * mn_val;
+            qs_u32_idx = blk_up_u32 + 4u + (qs_byte_base >> 2);
+            qs0 = up_u32[qs_u32_idx];
+            qs1 = up_u32[qs_u32_idx + 1u];
+            qs2 = up_u32[qs_u32_idx + 2u];
+            qs3 = up_u32[qs_u32_idx + 3u];
+            float vals_up[16];
+            [[unroll]] for (uint w = 0u; w < 4u; w++) {
+                uint qs_word = (w == 0u) ? qs0 : (w == 1u) ? qs1 : (w == 2u) ? qs2 : qs3;
+                uint plane = (nibble_choice == 0u) ? (qs_word & 0x0F0F0F0Fu)
+                                                   : ((qs_word >> 4) & 0x0F0F0F0Fu);
+                [[unroll]] for (uint b = 0u; b < 4u; b++) {
+                    uint nibble = (plane >> (b * 8u)) & 0xFu;
+                    vals_up[w * 4u + b] = factor * float(nibble) - bias;
+                }
+            }
+
+            const uint base_a = row_local * STRIDE_A + k_in_tile;
+            [[unroll]] for (uint i = 0u; i < 16u; i++) {
+                buf_gate[base_a + i] = float16_t(vals_gate[i]);
+                buf_up[base_a + i] = float16_t(vals_up[i]);
+            }
+        }
+
+        {
+            const uint col_local = tid / 2u;
+            const uint k_in_tile_b = (tid & 1u) * 16u;
+            const uint col_global = ic * BN + col_local;
+            const uint b_col_base = b_offset + col_global * stride_b;
+            const uint base_b = col_local * STRIDE_B + k_in_tile_b;
+
+            [[unroll]] for (uint i = 0u; i < 16u; i++) {
+                buf_b[base_b + i] = b_data[b_col_base + k_outer + k_in_tile_b + i];
+            }
+        }
+
+        barrier();
+
+        [[unroll]] for (uint k = 0u; k < BK; k++) {
+            float16_t gate_reg[TM];
+            float16_t up_reg[TM];
+            [[unroll]] for (uint m = 0u; m < TM; m++) {
+                const uint a_idx = (tiwr * TM + m) * STRIDE_A + k;
+                gate_reg[m] = buf_gate[a_idx];
+                up_reg[m] = buf_up[a_idx];
+            }
+            float b_reg[TN];
+            [[unroll]] for (uint n = 0u; n < TN; n++) {
+                b_reg[n] = buf_b[(tiwc * TN + n) * STRIDE_B + k];
+            }
+            [[unroll]] for (uint m = 0u; m < TM; m++) {
+                [[unroll]] for (uint n = 0u; n < TN; n++) {
+                    sums_gate[m][n] = fma(float(gate_reg[m]), b_reg[n], sums_gate[m][n]);
+                    sums_up[m][n] = fma(float(up_reg[m]), b_reg[n], sums_up[m][n]);
+                }
+            }
+        }
+
+        barrier();
+    }
+
+    [[unroll]] for (uint m = 0u; m < TM; m++) {
+        [[unroll]] for (uint n = 0u; n < TN; n++) {
+            const uint row_g = ir * BM + tiwr * TM + m;
+            const uint col_g = ic * BN + tiwc * TN + n;
+            float gate = sums_gate[m][n];
+            float up = sums_up[m][n];
+            float g3 = gate * gate * gate;
+            float inner = 0.7978845608 * (gate + 0.044715 * g3);
+            inner = clamp(inner, -15.0, 15.0);
+            float gelu_gate = 0.5 * gate * (1.0 + tanh(inner));
+            d_data[d_offset + col_g * stride_d + row_g] = gelu_gate * up;
+        }
+    }
+}

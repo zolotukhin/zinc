@@ -2053,7 +2053,8 @@ pub const InferenceEngine = struct {
         // MoE, SSM and sliding-window graphs are excluded. Packed prefill uses
         // that graph qualification independently of decode's SIMD32 gate.
         const q8_rows_default = q8_decode_demand.qualified(config.*);
-        var dmmv = try DmmvDispatch.initWithSpecializations(instance, &gpu_config, shader_dir, max_k, projection_demand, q8_rows_default, allocator);
+        const intel_gemma_geglu = prefill_policy.intelGemmaGegluPrefillEnabled(config.*, gpu_config.vendor == .intel_arc_xe2, instance.push_descriptor_fn != null, host_io.getenv("ZINC_INTEL_GEMMA_PREFILL"));
+        var dmmv = try DmmvDispatch.initWithSpecializations(instance, &gpu_config, shader_dir, max_k, projection_demand, q8_rows_default, intel_gemma_geglu, allocator);
         errdefer dmmv.deinit();
 
         var elementwise = try ElementwiseDispatch.init(instance, shader_dir, allocator);

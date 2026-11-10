@@ -92,6 +92,26 @@ six server lifetimes. Complete outputs match throughout. Prefill improves
 tokens/s); decode stays within 0.1%. This independently confirms the production
 selection without relabelling the earlier shader-overlay prototype.
 
+## Intel dense-Gemma prefill
+
+The dense Gemma 4 31B graph uses separate Intel Xe2 gate/up GEGLU shaders with
+two output rows and eight prompt tokens per thread. The dispatch remains a
+32×32 tile with WG64. Weight staging stays F16, activations and accumulators
+stay F32, and each output retains the existing FMA order and GELU calculation.
+
+Selection requires the qualified dense 5,376×21,504 graph and push descriptors.
+`ZINC_INTEL_GEMMA_PREFILL=0` selects the generic shaders. Missing or rejected
+Intel pipelines fall back independently to their generic counterparts, with
+explicit selected-pipeline logs. Other GPU families and model graphs retain
+the generic shaders.
+
+Intel package and benchmark validation checks both new assets against native
+Q4_K quantization, an independent F16-weight/F32-activation mathematical
+reference and the unchanged generic kernels: 204 numerical/offset/stride/guard
+cases and 102 bitwise-equal output pairs, including partial tiles. Older archives
+without either Intel asset retain their original validation; a partially
+installed pair fails package qualification.
+
 ### Q8 GEMM address bounds
 
 The F32-activation and DP4a Q8 GEMM recorders validate the complete weight

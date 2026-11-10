@@ -4,6 +4,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import platform
 import re
@@ -217,6 +218,36 @@ def q8_decode_reference(tree, reference, checkout, device, work, env):
             "shared_fixture_source_sha256": sha256(ROOT / "tools/validate_dmmv_shared_cache.c"),
             "shader_sha256": {name: sha256(tree / "share/zinc/shaders" / (name + ".spv"))
                               for name in ("dmmv_q8_0", "dmmv_q8_0_intel_rows")}}
+
+
+def gemma_geglu_reference(tree, reference, checkout, device, work, env):
+    """Qualify both Intel tile variants; retain compatibility with older archives."""
+    shaders = tree / "share/zinc/shaders"
+    names = ("mul_mm_q4k_gate_up_geglu_intel", "mul_mm_q4k_gate_up_geglu_intel_full")
+    present = [(shaders / (name + ".spv")).is_file() for name in names]
+    if not any(present):
+        return None
+    require(all(present), "packaged Intel Gemma prefill shader pair is incomplete")
+    executable = work / "validate-gemma-geglu"
+    output(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(ROOT / "tools/validate_gemma_geglu.c"),
+            "-I" + str(checkout / "ggml/include"), "-L" + str(reference), "-Wl,-rpath," + str(reference),
+            "-lggml-base", "-lvulkan", "-lm", "-o", str(executable)])
+    log = work / "gemma-geglu-reference.log"
+    with process([str(executable)], log, work, {**reference_environment(reference, env),
+                 "ZINC_SHADER_DIR": str(shaders), "ZINC_GPU": str(device)}) as child:
+        require(child.wait(timeout=300) == 0, "packaged Gemma GEGLU reference validation failed")
+    text = log.read_text()
+    cases = reference_case_count(text, "GEGLU native-reference/offset/stride/guard cases", 204)
+    pairs = reference_case_count(text, "GEGLU identical-accumulation pairs", 102)
+    errors = re.findall(r"^maximum_absolute_error=([^\n]+)$", text, re.M)
+    require(len(errors) == 1, "Gemma GEGLU reference error is missing or duplicated")
+    error = float(errors[0])
+    require(math.isfinite(error) and error >= 0, "Gemma GEGLU reference error is invalid")
+    return {"passed": True, "cases": cases, "bitwise_pairs": pairs, "maximum_absolute_error": error,
+            "validator_source_sha256": sha256(ROOT / "tools/validate_gemma_geglu.c"),
+            "shared_fixture_source_sha256": sha256(ROOT / "tools/validate_dmmv_shared_cache.c"),
+            "shader_sha256": {name: sha256(shaders / (name + ".spv")) for name in
+                              (*names, "mul_mm_q4k_gate_up_geglu", "mul_mm_q4k_gate_up_geglu_full")}}
 
 
 def rocm_kernel_reference(tree, reference, checkout, device, work, env):
@@ -686,12 +717,14 @@ def main():
                     output(["codesign", "--verify", "--strict", str(executable)])
                     output(["spctl", "--assess", "--type", "execute", str(executable)], timeout=120)
             q8_decode = None
+            gemma_geglu = None
             if profile["target"].endswith("vulkan"):
                 print("Running 376 packaged shader/reference cases", flush=True)
                 kernel_reference(tree, reference, checkout, device, work, env)
                 if profile["family"] == "intel-xe2":
                     print("Running 228 packaged Q8 decode/reference cases and 114 identical-reduction pairs", flush=True)
                     q8_decode = q8_decode_reference(tree, reference, checkout, device, work, env)
+                    gemma_geglu = gemma_geglu_reference(tree, reference, checkout, device, work, env)
             rocm_kernels = None
             if profile["target"].endswith("rocm"):
                 print("Running 305 packaged ROCm partial-tile/reference cases", flush=True)
@@ -748,6 +781,8 @@ def main():
                 report["rocm_kernel_reference"] = rocm_kernels
             if q8_decode is not None:
                 report["q8_decode_reference"] = q8_decode
+            if gemma_geglu is not None:
+                report["gemma_geglu_reference"] = gemma_geglu
     # Release the reservation before recording successful cleanup.
     # Reports contain no machine identifiers, private paths, ports or URLs.
     write_json(args.output, report)

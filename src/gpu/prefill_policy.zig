@@ -117,6 +117,55 @@ pub fn intelBatchedPrefillChunkDefault(gemma_moe: bool, dense_q8: bool, gemma_li
     return if (dense_q8) 384 else 96;
 }
 
+/// Retile only the measured dense Gemma graph on Intel Xe2. The new kernels
+/// retain the existing F16 weight staging and F32 accumulation; this gate does
+/// not enable activation quantization, MoE shortcuts or a different backend.
+pub fn intelGemmaGegluPrefillEnabled(config: ModelConfig, intel_xe2: bool, push_descriptors: bool, setting: ?[]const u8) bool {
+    if (!intel_xe2 or !push_descriptors or config.architecture != .gemma or
+        config.n_layers == 0 or config.n_experts != 0 or config.n_nextn_layers != 0 or
+        config.ssm_d_inner != 0 or config.hidden_dim != 5376 or config.intermediate_dim != 21504) return false;
+    // Unknown values never silently select a path outside its measured mode.
+    return if (setting) |value| std.mem.eql(u8, value, "1") else true;
+}
+
+test "Intel Gemma tiling requires the measured dense graph and honors its opt-out" {
+    var cfg = std.mem.zeroes(ModelConfig);
+    cfg.architecture = .gemma;
+    cfg.n_layers = 62;
+    cfg.hidden_dim = 5376;
+    cfg.intermediate_dim = 21504;
+    try std.testing.expect(intelGemmaGegluPrefillEnabled(cfg, true, true, null));
+    try std.testing.expect(intelGemmaGegluPrefillEnabled(cfg, true, true, "1"));
+    for ([_][]const u8{ "0", "", "false", "off", "true", "2", "01" }) |setting| {
+        try std.testing.expect(!intelGemmaGegluPrefillEnabled(cfg, true, true, setting));
+    }
+    for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false } }) |caps| {
+        try std.testing.expect(!intelGemmaGegluPrefillEnabled(cfg, caps[0], caps[1], null));
+        try std.testing.expect(!intelGemmaGegluPrefillEnabled(cfg, caps[0], caps[1], "1"));
+    }
+    const qualified = cfg;
+    for (std.enums.values(@TypeOf(cfg.architecture))) |arch| {
+        if (arch == .gemma) continue;
+        cfg = qualified;
+        cfg.architecture = arch;
+        try std.testing.expect(!intelGemmaGegluPrefillEnabled(cfg, true, true, "1"));
+    }
+    for (0..6) |case| {
+        cfg = qualified;
+        switch (case) {
+            0 => cfg.n_layers = 0,
+            1 => cfg.n_experts = 128,
+            2 => cfg.n_nextn_layers = 1,
+            3 => cfg.ssm_d_inner = 1024,
+            4 => cfg.hidden_dim = 4096,
+            5 => cfg.intermediate_dim = 16384,
+            else => unreachable,
+        }
+        try std.testing.expect(!intelGemmaGegluPrefillEnabled(cfg, true, true, null));
+        try std.testing.expect(!intelGemmaGegluPrefillEnabled(cfg, true, true, "1"));
+    }
+}
+
 test "Intel Q8 batching is bounded independently of Gemma precision tuning" {
     for ([_]u32{ 64, 384, 4096 }) |gemma_limit| {
         try std.testing.expectEqual(gemma_limit, intelBatchedPrefillChunkDefault(true, false, gemma_limit));
