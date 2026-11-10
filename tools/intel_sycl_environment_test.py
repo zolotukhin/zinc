@@ -49,6 +49,24 @@ class SyclEnvironmentTest(unittest.TestCase):
                 with self.subTest(options=options), self.assertRaisesRegex(ValueError, "explicit booleans"):
                     sycl.environment(prefix, base, **options)
 
+    def test_onednn_math_cache_and_tracing_cannot_leak_into_a_default_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory); (prefix / "bin").mkdir(); (prefix / "lib").mkdir()
+            (prefix / "bin/icpx").write_bytes(b"fixture")
+            tuning = {"ONEDNN_DEFAULT_FPMATH_MODE": "ANY", "ONEDNN_PRIMITIVE_CACHE_CAPACITY": "0",
+                      "ONEDNN_VERBOSE": "all", "DNNL_DEFAULT_FPMATH_MODE": "BF16",
+                      "DNNL_PRIMITIVE_CACHE_CAPACITY": "0", "DNNL_VERBOSE": "1"}
+            base = {"PATH": "/usr/bin", "ZINC_MTP": "0", "OMP_NUM_THREADS": "4", **tuning}
+            original = dict(base)
+            clean = sycl.environment(prefix, {key: value for key, value in base.items() if key not in tuning})
+            self.assertEqual(sycl.environment(prefix, base), clean)
+            self.assertEqual(base, original)
+            # A separately labelled diagnostic may opt in after isolation; it
+            # must not alter subsequent defaults or the caller's environment.
+            diagnostic = sycl.environment(prefix, base)
+            diagnostic["ONEDNN_VERBOSE"] = "1"
+            self.assertNotIn("ONEDNN_VERBOSE", sycl.environment(prefix, base))
+
     def probe(self, *, gpu_count=1, vendor=0x8086, platform_count=1):
         def platforms(count, data, actual):
             if actual is not None: actual._obj.value = platform_count
