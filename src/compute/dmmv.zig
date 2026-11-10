@@ -19,6 +19,32 @@ const log = std.log.scoped(.dmmv);
 const descriptor_pool_max_sets: u32 = 256;
 const descriptors_per_set: u32 = 3;
 
+/// Q8 tensor buffers start at byte zero; views advance by whole 34-byte
+/// blocks. Check the half-word alignment before either descriptor path can
+/// select the packed Intel shader, including ReleaseFast builds.
+pub fn validateQ8WeightOffset(quant_type: GGMLType, a_offset: u32) !void {
+    if (quant_type == .q8_0 and (a_offset & 1) != 0) return error.InvalidArgument;
+}
+
+test "Q8 weight views require half-word rather than four-byte alignment" {
+    for ([_]u32{ 0, 2, 34, 66, 102, std.math.maxInt(u32) - 1 }) |offset| {
+        try validateQ8WeightOffset(.q8_0, offset);
+    }
+    for ([_]u32{ 1, 3, 33, 35, std.math.maxInt(u32) }) |offset| {
+        try std.testing.expectError(error.InvalidArgument, validateQ8WeightOffset(.q8_0, offset));
+        try validateQ8WeightOffset(.q4_k, offset);
+    }
+}
+
+test "Q8 pool dispatch rejects odd offsets before accessing GPU resources" {
+    // An empty wrapper is safe to inspect if validation is accidentally moved
+    // after pipeline lookup: that regression returns UnsupportedQuantType.
+    const dispatch = std.mem.zeroes(DmmvDispatch);
+    var command = std.mem.zeroes(CommandBuffer);
+    try std.testing.expectError(error.InvalidArgument, dispatch.recordDispatch(&command, .q8_0, null, 1, 32, 1, 0, 0));
+    try std.testing.expectError(error.UnsupportedQuantType, dispatch.recordDispatch(&command, .q8_0, null, 1, 32, 2, 0, 0));
+}
+
 fn intelQ8RowDecodeEnabled(vendor: GpuVendor, legacy_subgroup_size: u32, can_require_simd32: bool, full_subgroups: bool, qualified_default: bool, setting: ?[]const u8) bool {
     // Enforce the reduction width rather than assuming the device's default
     // equals the pipeline's width. =0 retains the original shader for A/B runs.
@@ -3598,6 +3624,7 @@ pub const DmmvDispatch = struct {
         /// Output buffer byte offset.
         y_offset: u32,
     ) !void {
+        try validateQ8WeightOffset(quant_type, a_offset);
         const pip = self.pipelineForType(quant_type) orelse return error.UnsupportedQuantType;
 
         const push = DmmvPushConstants{
