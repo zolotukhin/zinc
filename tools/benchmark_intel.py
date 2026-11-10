@@ -282,13 +282,74 @@ def comparison_eligibility(samples, scenarios):
     return eligible
 
 
+def response_identity(collection, row):
+    """Text equality alone cannot prove stable token accounting or completion."""
+    require(collection in ("samples", "stream_samples") and isinstance(row, dict), "invalid repeatability sample")
+    digest, size = row.get("content_sha256"), row.get("content_bytes")
+    require(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest)
+            and type(size) is int and size > 0, "invalid repeatability content identity")
+    identity = {"content_sha256": digest, "content_bytes": size}
+    if collection == "samples":
+        for field in ("promptTokens", "generatedTokens"):
+            value = row.get(field)
+            require(type(value) is int and value > 0, "invalid repeatability token accounting")
+            identity[field] = value
+        require(row.get("finish_reason") in ("length", "stop"), "invalid repeatability finish reason")
+        identity["finish_reason"] = row["finish_reason"]
+    else:
+        cap = row.get("output_cap")
+        require(type(cap) is int and cap > 0, "invalid repeatability streaming cap")
+        identity["output_cap"] = cap
+    return identity
+
+
+def repeated_response(collection, row, identities, index):
+    identity = response_identity(collection, row)
+    require(row.get("engine") in ("zinc", "llama") and isinstance(row.get("scenario"), str)
+            and row["scenario"], "invalid repeatability engine or workload")
+    # Keep the warmup and all subsequent server lifetimes in this identity.
+    # Streams have a separate output budget. Different engines may produce
+    # different text, but each must repeat its own complete response.
+    key = (collection, row["engine"], row["scenario"])
+    expected, first_index = identities.setdefault(key, (identity, index))
+    if identity != expected:
+        return {"collection": collection, "engine": row["engine"], "scenario": row["scenario"],
+                "first_sample_index": first_index, "sample_index": index, "expected": expected, "actual": identity,
+                "changed_fields": [field for field in expected if identity[field] != expected[field]]}
+    return None
+
+
+def repeatability_verification(model):
+    """Rebuild stability from retained rows, never a cached passing summary."""
+    result = {"passed": False, "full_responses_checked": 0, "streams_checked": 0, "reason": None}
+    identities = {}
+    for collection, counter in (("samples", "full_responses_checked"), ("stream_samples", "streams_checked")):
+        rows = model.get(collection)
+        if not isinstance(rows, list) or not rows:
+            result["reason"] = "missing repeatability samples"
+            return result
+        for index, row in enumerate(rows):
+            result[counter] += 1
+            try:
+                mismatch = repeated_response(collection, row, identities, index)
+            except ValueError as error:
+                result.update(collection=collection, sample_index=index, reason=str(error))
+                return result
+            if mismatch is not None:
+                result.update(mismatch, reason="repeated complete outputs differ")
+                return result
+    result["passed"] = True
+    return result
+
+
 def retain_measurement(model, collection, row, identities, counts=None):
     # Retain the rejected request too. Otherwise the public report would stop
     # just before the divergent output and require private logs to explain it.
     model[collection].append(row)
-    key = (collection, row["engine"], row["scenario"])
-    require(identities.setdefault(key, row["content_sha256"]) == row["content_sha256"],
-            row["engine"] + " " + row["scenario"] + " repeated complete outputs differ")
+    mismatch = repeated_response(collection, row, identities, len(model[collection]) - 1)
+    if mismatch is not None:
+        model.setdefault("repeatability_failures", []).append(mismatch)
+        raise ValueError(row["engine"] + " " + row["scenario"] + " repeated complete outputs differ")
     if counts is not None:
         observed = counts.setdefault(row["scenario"], [])
         observed.append(row["promptTokens"])
@@ -428,7 +489,8 @@ def performance_comparison(model, settings):
     reference_correct = reference_backend != "sycl" or (isinstance(native_validation, dict) and native_validation.get("passed") is True)
     gpu_verification = gpu_process_verification(model, rounds, reference_backend)
     gpu_verified = gpu_verification["passed"]
-    headline = (model.get("passed") is True and correct and reference_correct and gpu_verified and matched_settings and startup_resolution is not None and complete_workloads
+    repeatability = repeatability_verification(model)
+    headline = (model.get("passed") is True and correct and reference_correct and gpu_verified and repeatability["passed"] and matched_settings and startup_resolution is not None and complete_workloads
                 and rounds >= 3 and runs >= 3 and settings["warmup"] >= 1 and all(eligible.values())
                 and bool(dimensions) and measured_dimensions == len(dimensions))
     return {"scope": "observed matched single-slot MTP-off rounds; not concurrency or statistical confidence",
@@ -436,6 +498,7 @@ def performance_comparison(model, settings):
             "inference_correctness_verified": correct, "gpu_offload_verified": gpu_verified,
             "native_reference_correctness_verified": reference_correct,
             "gpu_offload_verification": gpu_verification,
+            "response_repeatability_verified": repeatability["passed"], "repeatability_verification": repeatability,
             "matched_settings_verified": matched_settings,
             "startup_resolution_ms": startup_resolution,
             "headline_eligible": headline, "comparison_eligible": eligible, "dimensions": dimensions,
@@ -469,6 +532,7 @@ def campaign_outcome(report):
                        and bool(hardware) and hardware == report.get("hardware_after"))
     performance_complete = (complete and stable_hardware and all(
         comparison["gpu_offload_verified"] and comparison["matched_settings_verified"] and comparison["native_reference_correctness_verified"]
+        and comparison["response_repeatability_verified"]
         and set(comparison["comparison_eligible"]) == workloads
         and all(comparison["comparison_eligible"].values()) for comparison in comparisons))
     reference = report.get("reference") if isinstance(report.get("reference"), dict) else {}

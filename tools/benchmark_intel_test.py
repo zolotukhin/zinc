@@ -90,23 +90,125 @@ class IntelMetricsTest(unittest.TestCase):
 
     def test_rejected_repetitions_and_prompt_mismatches_remain_in_the_evidence(self):
         model, identities, counts = {"samples": [], "stream_samples": []}, {}, {}
-        first = {"engine": "zinc", "scenario": "core", "round": 1, "content_sha256": "a", "promptTokens": 42}
+        first = {"engine": "zinc", "scenario": "core", "round": 1, "warmup": True,
+                 "content_sha256": "a" * 64, "content_bytes": 10, "promptTokens": 42,
+                 "generatedTokens": 16, "finish_reason": "length"}
         benchmark_intel.retain_measurement(model, "samples", first, identities, counts)
         # Different engines need not generate identical text. A new server of
         # the same engine still has to reproduce the complete prior output.
-        benchmark_intel.retain_measurement(model, "samples", {**first, "engine": "llama", "content_sha256": "b"}, identities, counts)
-        rejected = {**first, "round": 2, "content_sha256": "changed"}
+        benchmark_intel.retain_measurement(model, "samples", {**first, "engine": "llama", "content_sha256": "b" * 64}, identities, counts)
+        rejected = {**first, "round": 2, "content_sha256": "c" * 64}
         with self.assertRaisesRegex(ValueError, "zinc core repeated"):
             benchmark_intel.retain_measurement(model, "samples", rejected, identities, counts)
         self.assertEqual(model["samples"][-1], rejected)
-        rejected = {**first, "promptTokens": 45}
+        rejected = {**first, "engine": "llama", "promptTokens": 45}
         with self.assertRaisesRegex(ValueError, "different prompt counts"):
-            benchmark_intel.retain_measurement(model, "samples", rejected, identities, counts)
+            benchmark_intel.retain_measurement(model, "samples", rejected, {}, {"core": [42]})
         self.assertEqual(model["samples"][-1], rejected)
         self.assertEqual(len(model["samples"]), 4)
         # The 16-token stream is a separate output budget and identity.
-        benchmark_intel.retain_measurement(model, "stream_samples", {**first, "content_sha256": "stream"}, identities)
+        benchmark_intel.retain_measurement(model, "stream_samples", {**first, "content_sha256": "d" * 64, "output_cap": 16}, identities)
         self.assertEqual(len(model["stream_samples"]), 1)
+
+    def test_same_text_with_changed_token_accounting_or_finish_is_not_repeatable(self):
+        first = {"engine": "llama", "scenario": "core", "round": 1, "warmup": True,
+                 "content_sha256": "a" * 64, "content_bytes": 10, "promptTokens": 42,
+                 "generatedTokens": 16, "finish_reason": "length"}
+        for field, value in (("promptTokens", 43), ("generatedTokens", 15),
+                             ("finish_reason", "stop"), ("content_bytes", 11)):
+            with self.subTest(field=field):
+                model, identities = {"samples": []}, {}
+                benchmark_intel.retain_measurement(model, "samples", dict(first), identities)
+                changed = {**first, "round": 2, "warmup": False, field: value}
+                with self.assertRaisesRegex(ValueError, "llama core repeated complete outputs differ"):
+                    benchmark_intel.retain_measurement(model, "samples", changed, identities)
+                self.assertEqual(model["samples"], [first, changed])
+                failure = model["repeatability_failures"][0]
+                self.assertEqual(failure["changed_fields"], [field])
+                self.assertEqual(failure["expected"][field], first[field])
+                self.assertEqual(failure["actual"][field], value)
+                self.assertEqual(failure["sample_index"], 1)
+                self.assertNotIn("temperature", failure)
+
+    def test_stream_caps_and_lengths_remain_separate_from_full_response_identities(self):
+        first = {"engine": "llama", "scenario": "core", "round": 1,
+                 "content_sha256": "a" * 64, "content_bytes": 10, "output_cap": 16}
+        for field, value in (("output_cap", 8), ("content_bytes", 11)):
+            model, identities = {"stream_samples": []}, {}
+            benchmark_intel.retain_measurement(model, "stream_samples", first, identities)
+            with self.assertRaisesRegex(ValueError, "repeated complete outputs differ"):
+                benchmark_intel.retain_measurement(model, "stream_samples", {**first, field: value}, identities)
+            self.assertEqual(model["repeatability_failures"][0]["changed_fields"], [field])
+
+    def test_missing_or_invalid_repeatability_metadata_cannot_supply_a_stable_response(self):
+        model, _ = self.campaign()
+        original = model["samples"][0]
+        mutations = {"content_sha256": (None, "bad"), "promptTokens": (None, True, 0),
+                     "generatedTokens": (None, True, 0), "finish_reason": (None, "error"),
+                     "content_bytes": (None, True, -1)}
+        for field, values in mutations.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    record = {"samples": []}
+                    row = {**original, field: value}
+                    with self.assertRaises(ValueError):
+                        benchmark_intel.retain_measurement(record, "samples", row, {})
+                    self.assertEqual(record["samples"], [row])
+
+    def test_report_recomputes_repeatability_from_warmups_and_every_server_lifetime(self):
+        model, settings = self.campaign()
+        self.assertTrue(benchmark_intel.performance_comparison(model, settings)["response_repeatability_verified"])
+        for collection, field, changed in (("samples", "content_sha256", "c" * 64),
+                                            ("samples", "generatedTokens", 15),
+                                            ("samples", "promptTokens", 43),
+                                            ("samples", "finish_reason", "stop"),
+                                            ("stream_samples", "output_cap", 8)):
+            with self.subTest(collection=collection, field=field):
+                record = copy.deepcopy(model)
+                record[collection][-1][field] = changed
+                result = benchmark_intel.performance_comparison(record, settings)
+                self.assertFalse(result["response_repeatability_verified"])
+                self.assertFalse(result["headline_eligible"])
+                self.assertFalse(result["all_dimensions_better"])
+                self.assertEqual(result["repeatability_verification"]["changed_fields"], [field])
+        # A convenient cached passing summary cannot erase the changed row.
+        report = self.complete_campaign()
+        report["models"][0]["samples"][0]["generatedTokens"] = 15
+        outcome = benchmark_intel.campaign_outcome(report)
+        self.assertFalse(outcome["complete_performance_matrix"])
+        self.assertFalse(outcome["all_models_all_dimensions_better"])
+
+    def test_reconstruction_rejects_missing_and_malformed_evidence_without_mutating_it(self):
+        model, _ = self.campaign()
+        self.assertEqual(benchmark_intel.repeatability_verification(model), {
+            "passed": True, "full_responses_checked": 96, "streams_checked": 24, "reason": None})
+        for mutation in ("missing-full", "empty-streams", "bad-count", "bad-stream-cap", "invalid-row", "bad-engine"):
+            with self.subTest(mutation=mutation):
+                record = copy.deepcopy(model)
+                if mutation == "missing-full": del record["samples"]
+                elif mutation == "empty-streams": record["stream_samples"] = []
+                elif mutation == "bad-count": record["samples"][0]["generatedTokens"] = True
+                elif mutation == "bad-stream-cap": record["stream_samples"][0]["output_cap"] = 0
+                elif mutation == "invalid-row": record["samples"][0] = None
+                elif mutation == "bad-engine": record["samples"][0]["engine"] = "cpu"
+                original = copy.deepcopy(record)
+                result = benchmark_intel.repeatability_verification(record)
+                self.assertFalse(result["passed"])
+                self.assertTrue(result["reason"])
+                self.assertEqual(record, original)
+
+    def test_saved_first_identity_is_independent_of_mutable_sample_rows(self):
+        model, _ = self.campaign()
+        first = dict(model["samples"][0])
+        record, identities = {"samples": []}, {}
+        benchmark_intel.retain_measurement(record, "samples", first, identities)
+        first["generatedTokens"] = 15
+        with self.assertRaisesRegex(ValueError, "repeated complete outputs differ"):
+            benchmark_intel.retain_measurement(record, "samples", first, identities)
+        failure = record["repeatability_failures"][0]
+        self.assertEqual(failure["expected"]["generatedTokens"], 16)
+        self.assertEqual(failure["actual"]["generatedTokens"], 15)
+        self.assertEqual(failure["first_sample_index"], 0)
 
     def test_raw_completions_use_text_and_full_prefill_accounting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -272,9 +374,13 @@ class IntelMetricsTest(unittest.TestCase):
                     for warmup in (True, False, False, False):
                         model["samples"].append({"engine": engine, "round": number, "scenario": scenario["id"],
                             "warmup": warmup, "output_budget_complete": True, "prefillTps": 200 if better else 100,
-                            "decodeTps": 20 if better else 10, "totalLatencyMs": 100 if better else 200})
+                            "decodeTps": 20 if better else 10, "totalLatencyMs": 100 if better else 200,
+                            "content_sha256": benchmark_intel.text_hash(engine + scenario["id"]), "content_bytes": 10,
+                            "promptTokens": 42, "generatedTokens": 16, "finish_reason": "length"})
                     model["stream_samples"].append({"engine": engine, "round": number, "scenario": scenario["id"],
-                        "first_usable_content_ms": 10 if better else 20})
+                        "first_usable_content_ms": 10 if better else 20,
+                        "content_sha256": benchmark_intel.text_hash(engine + "stream" + scenario["id"]),
+                        "content_bytes": 10, "output_cap": 16})
                 model["processes"].append({"engine": engine, "round": number, "startup_ms": 1000 if better else 2000,
                     **({"kv_cache": "f16"} if better else {"gpu_offload": {"backend": "vulkan", "offloaded": 40, "total": 40}}),
                     "memory": {"gpu_memory_available": True, "observed_peak": {
