@@ -1,0 +1,3015 @@
+{
+  "completed": true,
+  "reference_commit": "cf6463ace735a570d5734da4957d54b720cac6f8",
+  "harness_commit": "c73ed59457c1943f5cbbf148515968056a194104",
+  "reference_is_latest_claim": false,
+  "model": "qwen3-0.6b-q8-0",
+  "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "hardware": {
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.14-arch1-1",
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.6-arch1.1"
+  },
+  "hardware_after": {
+    "gpu": "Intel(R) Graphics (BMG G31)",
+    "os": "Linux 7.2.14-arch1-1",
+    "driver": "1.4.354 / Intel open-source Mesa driver / Mesa 26.2.6-arch1.1"
+  },
+  "hardware_unchanged": true,
+  "cleanup": "no GPU process remains",
+  "schema_version": "zinc-intel-native-feature-controls-v1",
+  "date": "2026-11-10",
+  "date_basis": "UTC",
+  "scope": "Starter-only runtime diagnostics after a failed seven-model campaign; this includes a later passing attempt with the unchanged default",
+  "source_report_sha256": "44e612afa6ec2157f8c7c42b570b5c40a942183ef9e805674450a197b570192e",
+  "native_stack_sha256": "54f47fc6c058918dbeeadf22534f932349372ecb6aead7f6575daa7129353de3",
+  "native_stack_after_sha256": "54f47fc6c058918dbeeadf22534f932349372ecb6aead7f6575daa7129353de3",
+  "native_package_count": 41,
+  "rows": [
+    {
+      "id": "fp32-default-reproduction",
+      "passed": true,
+      "build": {
+        "cache_sha256": "f229a0dacbf0d43518358a6e5f6b4ddd2fa1d12b5ad55cefdad0ba28cb19c814",
+        "settings": {
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_SYCL": "ON",
+          "GGML_VULKAN": "OFF",
+          "GGML_CUDA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+          "GGML_SYCL_SUPPORT_XMX": "ON",
+          "GGML_SYCL_GRAPH": "ON",
+          "GGML_SYCL_DNN": "ON",
+          "GGML_SYCL_F16": "OFF"
+        }
+      },
+      "server_sha256": "b8b497b379103d9e034abd578a225898401e877ca6b3a995fb4d6dfe357c34d7",
+      "settings": {
+        "GGML_SYCL_ENABLE_GRAPH": "0",
+        "GGML_SYCL_ENABLE_DNN": "1",
+        "GGML_SYCL_FA_ONEDNN": "1"
+      },
+      "processes": [
+        {
+          "lifetime": 0,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        },
+        {
+          "lifetime": 1,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        }
+      ],
+      "output_drift": [],
+      "native_reference_validation": {
+        "passed": true,
+        "backend": "sycl",
+        "oracle_backend": "vulkan",
+        "oracle_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "performance_configuration_checked": true,
+        "agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "cases": [
+          {
+            "reference_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "native_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "content": "**The Lighthouse Keeper\u2019s Tale**\n\nIn the heart of the coastal town of",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "native_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "content": "A refrigerator works by using **cold energy** to **cool and preserve food**",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "native_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "content": "Three uses of copper include:\n\n1. **Electrical wiring**: Copper is widely",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          }
+        ],
+        "gpu_offload": {
+          "offloaded": 29,
+          "total": 29,
+          "backend": "sycl"
+        },
+        "runtime": {
+          "runtime": "level_zero",
+          "library_sha256": {
+            "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+            "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+            "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+            "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+            "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+            "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+            "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+          }
+        }
+      },
+      "reference_samples_sha256": "17f1a31be54b865061ca7b44513dbbe86995361c71d32f635c3a822ed8711fc1",
+      "samples": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 903.145226999186
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 278.03671400033636
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 277.6301909980248
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 892.9857119983353
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 464.17369399932795
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 462.08334599941736
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 398.1156320005539
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 357.6953420015343
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 357.10429399841814
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 731.0348749997502
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 724.4966729995213
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 723.9048749979702
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 890.7167139986996
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 274.04199699958554
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 273.9556790002098
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 903.8909500013688
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 467.78567000001203
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 475.4955419994076
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 399.173443998734
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 364.3757940008072
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 360.4474549974839
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 731.8669260021125
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 727.3132930022257
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 728.0917489988497
+        }
+      ],
+      "streams": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.361005999380723,
+          "total_latency_ms": 52.62577000030433,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 16.026646000682376,
+          "total_latency_ms": 59.09498400069424,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.20106999934069,
+          "total_latency_ms": 72.61480799934361,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.169967001274927,
+          "total_latency_ms": 52.889946000505006,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.13797999965027,
+          "total_latency_ms": 51.403762998234015,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 15.814409001905005,
+          "total_latency_ms": 58.903705001284834,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.210450000187848,
+          "total_latency_ms": 72.73615700250957,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.31249199877493,
+          "total_latency_ms": 53.6054639997019,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        }
+      ]
+    },
+    {
+      "id": "fp32-async-copy-off",
+      "passed": true,
+      "build": {
+        "cache_sha256": "f229a0dacbf0d43518358a6e5f6b4ddd2fa1d12b5ad55cefdad0ba28cb19c814",
+        "settings": {
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_SYCL": "ON",
+          "GGML_VULKAN": "OFF",
+          "GGML_CUDA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+          "GGML_SYCL_SUPPORT_XMX": "ON",
+          "GGML_SYCL_GRAPH": "ON",
+          "GGML_SYCL_DNN": "ON",
+          "GGML_SYCL_F16": "OFF"
+        }
+      },
+      "server_sha256": "b8b497b379103d9e034abd578a225898401e877ca6b3a995fb4d6dfe357c34d7",
+      "settings": {
+        "GGML_SYCL_ENABLE_GRAPH": "0",
+        "GGML_SYCL_ENABLE_DNN": "1",
+        "GGML_SYCL_FA_ONEDNN": "1",
+        "GGML_SYCL_USE_ASYNC_MEM_OP": "0"
+      },
+      "processes": [
+        {
+          "lifetime": 0,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        },
+        {
+          "lifetime": 1,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        }
+      ],
+      "output_drift": [],
+      "native_reference_validation": {
+        "passed": true,
+        "backend": "sycl",
+        "oracle_backend": "vulkan",
+        "oracle_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "performance_configuration_checked": true,
+        "agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "cases": [
+          {
+            "reference_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "native_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "content": "**The Lighthouse Keeper\u2019s Tale**\n\nIn the heart of the coastal town of",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "native_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "content": "A refrigerator works by using **cold energy** to **cool and preserve food**",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "native_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "content": "Three uses of copper include:\n\n1. **Electrical wiring**: Copper is widely",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          }
+        ],
+        "gpu_offload": {
+          "offloaded": 29,
+          "total": 29,
+          "backend": "sycl"
+        },
+        "runtime": {
+          "runtime": "level_zero",
+          "library_sha256": {
+            "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+            "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+            "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+            "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+            "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+            "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+            "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+          }
+        }
+      },
+      "reference_samples_sha256": "17f1a31be54b865061ca7b44513dbbe86995361c71d32f635c3a822ed8711fc1",
+      "samples": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 885.5305840006622
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 281.2613739988592
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 282.4584469999536
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 903.2661800010828
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 472.47653199883644
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 482.47759899822995
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 399.17375299773994
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 356.62598199996864
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 358.65126000135206
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 737.8600079973694
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 727.6604190010403
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 726.8016850030108
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 890.8984970003075
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 283.2175539988384
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 283.70196799733094
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 901.6958089996479
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 475.8739520002564
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 476.3076950002869
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 405.8580589990015
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 357.4291020013334
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 354.6419269987382
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 733.8514759976533
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 723.933635999856
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 729.2005710005469
+        }
+      ],
+      "streams": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.193597001285525,
+          "total_latency_ms": 51.92810700100381,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 16.075079001893755,
+          "total_latency_ms": 58.62717300260556,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.17512799811084,
+          "total_latency_ms": 72.22203099809121,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.41015499868081,
+          "total_latency_ms": 54.22997899950133,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.273766998376232,
+          "total_latency_ms": 53.05201499868417,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 16.16275400010636,
+          "total_latency_ms": 59.80167600137065,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.08694600025774,
+          "total_latency_ms": 71.1585639983241,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.147197997866897,
+          "total_latency_ms": 52.42281399841886,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        }
+      ]
+    },
+    {
+      "id": "fp32-fusion-off",
+      "passed": true,
+      "build": {
+        "cache_sha256": "f229a0dacbf0d43518358a6e5f6b4ddd2fa1d12b5ad55cefdad0ba28cb19c814",
+        "settings": {
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_SYCL": "ON",
+          "GGML_VULKAN": "OFF",
+          "GGML_CUDA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+          "GGML_SYCL_SUPPORT_XMX": "ON",
+          "GGML_SYCL_GRAPH": "ON",
+          "GGML_SYCL_DNN": "ON",
+          "GGML_SYCL_F16": "OFF"
+        }
+      },
+      "server_sha256": "b8b497b379103d9e034abd578a225898401e877ca6b3a995fb4d6dfe357c34d7",
+      "settings": {
+        "GGML_SYCL_ENABLE_GRAPH": "0",
+        "GGML_SYCL_ENABLE_DNN": "1",
+        "GGML_SYCL_FA_ONEDNN": "1",
+        "GGML_SYCL_ENABLE_FUSION": "0"
+      },
+      "processes": [
+        {
+          "lifetime": 0,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        },
+        {
+          "lifetime": 1,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        }
+      ],
+      "output_drift": [],
+      "native_reference_validation": {
+        "passed": true,
+        "backend": "sycl",
+        "oracle_backend": "vulkan",
+        "oracle_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "performance_configuration_checked": true,
+        "agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "cases": [
+          {
+            "reference_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "native_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "content": "**The Lighthouse Keeper\u2019s Tale**\n\nIn the heart of the coastal town of",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "native_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "content": "A refrigerator works by using **cold energy** to **cool and preserve food**",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "native_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "content": "Three uses of copper include:\n\n1. **Electrical wiring**: Copper is widely",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          }
+        ],
+        "gpu_offload": {
+          "offloaded": 29,
+          "total": 29,
+          "backend": "sycl"
+        },
+        "runtime": {
+          "runtime": "level_zero",
+          "library_sha256": {
+            "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+            "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+            "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+            "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+            "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+            "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+            "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+          }
+        }
+      },
+      "reference_samples_sha256": "17f1a31be54b865061ca7b44513dbbe86995361c71d32f635c3a822ed8711fc1",
+      "samples": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 352.2161569999298
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 304.5046710030874
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 302.230100001907
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 930.715523998515
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 501.25065199972596
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 500.8266270015156
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 424.05658200004837
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 382.1733549993951
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 384.56535399745917
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 798.0512159992941
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 784.427554001013
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 789.1583810014708
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 346.5283549994638
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 296.4653279996128
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 296.2776300009864
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 922.1587100000761
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 498.8248879999446
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 497.8804839993245
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 426.3758619999862
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 385.6857829996443
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 384.5300060020236
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 795.4031859990209
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 790.187111000705
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 789.6999689983204
+        }
+      ],
+      "streams": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.464491002290742,
+          "total_latency_ms": 55.986994000704726,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 16.536223000002792,
+          "total_latency_ms": 62.49527800173382,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 29.10388500094996,
+          "total_latency_ms": 76.2149810034316,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.540161001699744,
+          "total_latency_ms": 56.323503002204234,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.215497000695905,
+          "total_latency_ms": 54.702069002814824,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 16.430477000540122,
+          "total_latency_ms": 62.053133002336835,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.544638997118454,
+          "total_latency_ms": 75.42351799929747,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.54969200049527,
+          "total_latency_ms": 55.893289998493856,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        }
+      ]
+    },
+    {
+      "id": "fp32-q8-wide-off",
+      "passed": true,
+      "build": {
+        "cache_sha256": "f229a0dacbf0d43518358a6e5f6b4ddd2fa1d12b5ad55cefdad0ba28cb19c814",
+        "settings": {
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_SYCL": "ON",
+          "GGML_VULKAN": "OFF",
+          "GGML_CUDA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_SYCL_HOST_MEM_FALLBACK": "OFF",
+          "GGML_SYCL_SUPPORT_XMX": "ON",
+          "GGML_SYCL_GRAPH": "ON",
+          "GGML_SYCL_DNN": "ON",
+          "GGML_SYCL_F16": "OFF"
+        }
+      },
+      "server_sha256": "b8b497b379103d9e034abd578a225898401e877ca6b3a995fb4d6dfe357c34d7",
+      "settings": {
+        "GGML_SYCL_ENABLE_GRAPH": "0",
+        "GGML_SYCL_ENABLE_DNN": "1",
+        "GGML_SYCL_FA_ONEDNN": "1",
+        "GGML_SYCL_MMVQ_WIDE": "0"
+      },
+      "processes": [
+        {
+          "lifetime": 0,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        },
+        {
+          "lifetime": 1,
+          "gpu_offload": {
+            "offloaded": 29,
+            "total": 29,
+            "backend": "sycl"
+          },
+          "native_runtime": {
+            "runtime": "level_zero",
+            "library_sha256": {
+              "libOpenCL.so.1.0.0": "d2bcc4f21a7bf2df1a54f318e372f9906e2c1c1a2783658fc0885b199ab075c3",
+              "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+              "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+              "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+              "libigdrcl.so": "d57f30819c580be1b07d87442bb49caab88f469c1705d7e5610080ed4911367d",
+              "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+              "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+              "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+              "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+            }
+          }
+        }
+      ],
+      "output_drift": [],
+      "native_reference_validation": {
+        "passed": true,
+        "backend": "sycl",
+        "oracle_backend": "vulkan",
+        "oracle_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+        "performance_configuration_checked": true,
+        "agreement": {
+          "cases": [
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            },
+            {
+              "tokens": 16,
+              "near_ties": []
+            }
+          ],
+          "total_tokens": 48,
+          "exact_tokens": 48,
+          "near_tie_tokens": 0
+        },
+        "cases": [
+          {
+            "reference_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "native_ids": [
+              334,
+              785,
+              444,
+              57909,
+              81627,
+              748,
+              54348,
+              56177,
+              641,
+              279,
+              4746,
+              315,
+              279,
+              34235,
+              6290,
+              315
+            ],
+            "content": "**The Lighthouse Keeper\u2019s Tale**\n\nIn the heart of the coastal town of",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "native_ids": [
+              32,
+              44944,
+              4278,
+              553,
+              1667,
+              3070,
+              87072,
+              4802,
+              334,
+              311,
+              3070,
+              42196,
+              323,
+              21129,
+              3607,
+              334
+            ],
+            "content": "A refrigerator works by using **cold energy** to **cool and preserve food**",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          },
+          {
+            "reference_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "native_ids": [
+              19641,
+              5711,
+              315,
+              23285,
+              2924,
+              1447,
+              16,
+              13,
+              3070,
+              29331,
+              12108,
+              18827,
+              95518,
+              42540,
+              374,
+              13570
+            ],
+            "content": "Three uses of copper include:\n\n1. **Electrical wiring**: Copper is widely",
+            "comparison": {
+              "tokens": 16,
+              "near_ties": []
+            }
+          }
+        ],
+        "gpu_offload": {
+          "offloaded": 29,
+          "total": 29,
+          "backend": "sycl"
+        },
+        "runtime": {
+          "runtime": "level_zero",
+          "library_sha256": {
+            "libdnnl.so.3.13": "a537b5c9b993e33968c7a6ffbd7a38e3fbebaaaf702956301b633454e11f8ca8",
+            "libigc.so.2.42.0+0": "26d4d0a3daf19bdd88c4085aa2713cc6d55d0972327e8cdef1d9b5802dfff178",
+            "libigdfcl.so.2.42.0+0": "6c11606ca0c7aaf2d641200767bae95b8b0ddc9f31432fb41a946290e7717312",
+            "libmkl_sycl_blas.so.6": "9c600366611ef61e1cb426f7dd68f1738291e26b11bd633ed6f26562c309d4c7",
+            "libsycl.so.9.0.0": "8cd211230e1aebc94060214e0015b6894513942653c2ff35920e0c3d25c7749d",
+            "libur_adapter_level_zero.so.0.12.0": "356e253ecb0848b8d2da18e79d35278f11778a843995c9b087257791049cb750",
+            "libur_adapter_level_zero_v2.so.0.12.0": "e5788b1f57407652d6468750a431b8c66d34f569bbffbd960411ba11ee60b44c"
+          }
+        }
+      },
+      "reference_samples_sha256": "17f1a31be54b865061ca7b44513dbbe86995361c71d32f635c3a822ed8711fc1",
+      "samples": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 894.23508499749
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 279.49266499854275
+        },
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 279.6541530005925
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 896.7264390012133
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 463.2531850002124
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 462.5683880003635
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 396.7282539997541
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 358.7845689980895
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 355.0100559987186
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 731.0925739984668
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 723.5507179975684
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 724.5821540018369
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 893.0589080009668
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 275.8227359990997
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "2a25297a8a81370dee3f843796035c9663d46a2c3ba08f4ab23bd93e48aec147",
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 57,
+            "total_tokens": 153,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 276.01681699889014
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 891.967505998764
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 463.6289489972114
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "f087ba1c927362d60c51d039c6f7d08136e483d99c2fc5dbe9b1c6f67b24ad5f",
+          "usage": {
+            "completion_tokens": 160,
+            "prompt_tokens": 167,
+            "total_tokens": 327,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 468.11042799890856
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 402.9118960024789
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 360.0449400000798
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "498034827ca51c8e4e92ddf7f740d5ebe4ae45d80aa3e7cbbe0bf18ff82e8f11",
+          "usage": {
+            "completion_tokens": 116,
+            "prompt_tokens": 335,
+            "total_tokens": 451,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "stop",
+          "latency_ms": 356.5511550004885
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 0,
+          "warmup": true,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 733.522364997043
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 1,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 726.8228079992696
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "repeat": 2,
+          "warmup": false,
+          "content_sha256": "db8dce00a8f40ed253c6d7f22d606e25f364c78c8895a7e3aa1bce504d7ea83d",
+          "usage": {
+            "completion_tokens": 256,
+            "prompt_tokens": 80,
+            "total_tokens": 336,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "latency_ms": 727.9372160010098
+        }
+      ],
+      "streams": [
+        {
+          "lifetime": 0,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.342494999145856,
+          "total_latency_ms": 52.7594710001722,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 16.077467997092754,
+          "total_latency_ms": 58.77244899966172,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 0,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.158665998489596,
+          "total_latency_ms": 71.46471399755683,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 0,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.256425000989111,
+          "total_latency_ms": 52.21802600135561,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        },
+        {
+          "lifetime": 1,
+          "scenario": "core",
+          "matches_json": true,
+          "first_usable_content_ms": 9.133052000834141,
+          "total_latency_ms": 51.581084000645205,
+          "output_cap": 16,
+          "content_sha256": "740e5c48e76de56fba6cea6e2f0b6ea781f6563dff7efcc97cc9d81d527dbd2a",
+          "content_bytes": 74
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-medium",
+          "matches_json": true,
+          "first_usable_content_ms": 15.884912998444634,
+          "total_latency_ms": 59.101073999045184,
+          "output_cap": 16,
+          "content_sha256": "650b48914a091cb21521867ae7c6d91d9e558f7e617310c1dd39e0cfa2214dff",
+          "content_bytes": 90
+        },
+        {
+          "lifetime": 1,
+          "scenario": "context-long",
+          "matches_json": true,
+          "first_usable_content_ms": 28.389308998157503,
+          "total_latency_ms": 71.9050369989418,
+          "output_cap": 16,
+          "content_sha256": "a75f4e149910366d3d777bf943d032b54ff3e0bcf6c9a9a87a9699b9854db019",
+          "content_bytes": 93
+        },
+        {
+          "lifetime": 1,
+          "scenario": "decode-extended",
+          "matches_json": true,
+          "first_usable_content_ms": 10.289683999872068,
+          "total_latency_ms": 52.524508002534276,
+          "output_cap": 16,
+          "content_sha256": "bc7994d1192f424354f1e41dee4eed0d8a0b92d16bb7bb1306d0a5c60647ca20",
+          "content_bytes": 86
+        }
+      ]
+    }
+  ],
+  "release_qualification": false,
+  "performance_qualified": false,
+  "complete_model_matrix": false,
+  "all_models_all_dimensions_better": false,
+  "prior_campaign_record": "/zinc/validation/intel-native-sycl-fp32-packed-q8-2026-11-10.json",
+  "settings": {
+    "kv_cache": "f16",
+    "mtp": "off",
+    "slots": 1,
+    "prompt_cache": false,
+    "ram_cache_bytes": 0,
+    "server_lifetimes_per_treatment": 2,
+    "workloads": 4,
+    "requests_per_workload_per_lifetime": 3,
+    "short_stream_output_cap": 16
+  },
+  "limitations": [
+    "All four later treatments pass this limited attempt, including the unchanged default. This does not reproduce or explain the earlier intermittent output drift.",
+    "These controls cover one model with two server lifetimes each; they do not replace the failed seven-model performance campaign or establish an all-dimension speed win.",
+    "Public samples retain complete-output hashes, counts, finish reasons and request latency; raw API responses remain in the private source report bound by SHA-256.",
+    "Changing async copies, fusion or the Q8 wide kernel alone did not distinguish a failing control from a passing treatment in this attempt."
+  ]
+}

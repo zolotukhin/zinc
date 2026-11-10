@@ -6,19 +6,23 @@ Both engines must offload the model to that GPU. There is no CPU-only inference
 baseline. CPU unit tests and numerical shader references remain correctness
 checks, separate from performance comparisons.
 
-The [November 9 final CI-package replay](/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json)
-passes all seven ZINC model support gates on the updated Intel worker. The
-competing native SYCL configuration still needs repeatability controls on six
-models before it can establish an all-model performance baseline.
+The [packed-Q8 CI archive replay](/zinc/validation/intel-native-sycl-fp32-packed-q8-2026-11-10.json)
+passes all seven ZINC model support gates on the updated Intel worker. It also
+attempts a fresh native SYCL FP32 baseline at `cf6463ac`, selected before
+building. Repeated-output failures remain recorded; they do not establish an
+all-model competitor performance baseline. The
+[preceding CI replay](/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json)
+retains its separate package, reference selection and actual outcomes.
 
 The [fresh all-model OpenCode replay](INTEL_OPENCODE_VALIDATION.md#november-9-full-catalog-opencode-replay)
-also passes native checks before and after client tasks on every catalog model.
+uses the earlier `2d0e1369` CI package and passes native checks before and after
+client tasks on every catalog model.
 All six larger models pass three independent coding fixtures each; the 0.6B
 starter retains its three coding failures with inference stability intact.
 
 The [separate Gemma cache/client replay](/zinc/validation/intel-gemma-chat-prefix-2026-11-09.json)
 passes all sixteen cache controls and twelve real OpenCode/OpenClaw task checks
-on that same CI package. Its request-latency controls compare prefix reuse with
+on that earlier CI package. Its request-latency controls compare prefix reuse with
 full prefill on one ZINC server. The [client report](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
 keeps those results separate from uncached competitor throughput and the
 published release archives.
@@ -39,6 +43,15 @@ changes. Native continuations pass before and after each of six server runs.
 Prefill changes are mixed, and the long-context request's natural EOS remains
 in the record. These are internal ZINC results; they do not establish a
 llama.cpp speed win or measurements of startup, memory or streaming latency.
+
+The follow-up CI archive at source `cc1a01dc` passes all 604 numerical GPU
+cases, 27 complete native CLI continuations, 81 full HTTP continuations and
+27 raw JSON/SSE controls across all seven models, including Gemma window
+boundaries and cancellation/context recovery. Its starter core decode is
+about 275 tokens/s in the attempted native comparison. That partial timing
+does not replace the three-round internal A/B or qualify the rejected native
+comparison. The new replay retains all failed samples and their final process
+memory/runtime observations.
 
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
@@ -649,6 +662,45 @@ ability for the starter.
 Some rejected timed processes lack final memory/runtime observations in the
 frozen harness. Those fields remain unknown. The later observation collector
 retains them on failures while preserving the original error; it does not
-backfill historical data. The next controls separate oneDNN attention from
-other oneDNN operations on the affected models, followed by matched timing only
-for configurations that pass the same correctness and repeatability gates.
+backfill historical data. The follow-up below separates oneDNN attention from
+other oneDNN operations while retaining the same correctness and repeatability
+gates.
+
+### Qwen 35B native repeatability controls
+
+The [Qwen 35B-A3B follow-up](/zinc/validation/intel-native-35b-controls-2026-11-09.json)
+reproduces the failing `0a94a3f2` reference with two treatments. Each passes
+three initial native continuations, fully offloads all 41 layers through
+SYCL/Level Zero, and retains two server lifetimes, 24 JSON requests and eight
+short streaming controls. F16 KV, MTP off, one slot, disabled prompt/RAM caches
+and the official package identities remain unchanged.
+
+| Treatment                              | Changed complete outputs | Matching JSON/SSE controls |
+| -------------------------------------- | -----------------------: | -------------------------: |
+| Native SYCL attention, oneDNN math     |                    10/24 |                        6/8 |
+| Native SYCL attention, oneDNN disabled |                     4/24 |                        8/8 |
+
+The oneDNN-disabled attempt changes outputs only on the core workload; the
+other treatment also changes medium and long-context outputs. Neither passes
+repeatability. Reduced observed drift does not establish a cause or qualify a
+performance baseline. Both records preserve every response hash, warmup and
+measured process's loaded runtime libraries, including rejected requests.
+
+The previous source and three binary trees are preserved separately. A fresh
+selection of upstream `cf6463ac` was recorded before rebuilding its FP32,
+FP16 and Vulkan references. That rebuild is a separate attempt; it does not
+relabel these frozen controls or their failures.
+
+### Starter native feature controls
+
+The [later starter controls](/zinc/validation/intel-native-starter-controls-2026-11-10.json)
+use the same `cf6463ac` build and official package identities as the packed-Q8
+campaign. The unchanged default, disabled asynchronous copies, disabled fusion
+and disabled wide-Q8 kernel each pass this limited attempt: two server lifetimes,
+24 repeated JSON requests, eight short JSON/SSE controls and three initial
+native-reference continuations per treatment.
+
+The unchanged default passing here does not erase its earlier medium-context
+drift. These results show that the issue is intermittent; they do not identify
+a corrective setting or qualify the seven-model performance baseline. The
+earlier failures and all later samples remain separate records.
