@@ -581,6 +581,14 @@ explicit event dependencies, tail elements, copies and output guards. Its
 78 cases are readiness evidence; they do not qualify a ZINC inference backend
 or establish model throughput.
 
+Use a fresh output path for each readiness attempt. A failed, timed-out or
+interrupted probe retains a failed JSON report with its validation stage,
+available result fields and process cleanup observation. Complete stdout and
+stderr stay in a private `intel-native-probe-*` directory beside that report;
+the JSON includes only their hashes and byte counts. Earlier reports are never
+overwritten. The probe holds the worker reservation until its owned process
+group has stopped, including on SSH disconnect.
+
 After the coverage and Vulkan performance work, add a separate native Intel
 backend using Intel's Level Zero runtime and compiler toolchain, with SYCL/XMX
 kernels where measurements justify them. Intel's

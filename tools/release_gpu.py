@@ -58,11 +58,12 @@ def free_port():
 
 
 @contextlib.contextmanager
-def process(command, log, cwd, env, grace_seconds=3):
-    """Own the entire subprocess group, including timeout/error/cancel paths."""
+def process(command, log, cwd, env, grace_seconds=3, stdout=None):
+    """Own the child group; optional stdout keeps machine JSON separate from logs."""
     with Path(log).open("wb") as stream:
         child = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                                 stdout=stream if stdout is None else stdout,
+                                 stderr=subprocess.STDOUT if stdout is None else stream, start_new_session=True)
         try:
             yield child
         finally:
