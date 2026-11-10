@@ -129,6 +129,12 @@ the separate streaming probes. Development ZINC builds with raw SSE support
 are required; the 0.1.0 Vulkan archives do not implement raw streaming.
 llama.cpp must report full GPU layer offload; ZINC must confirm F16 KV storage.
 
+A rejected native preflight keeps its obtained continuation IDs, complete text,
+validation stage and live runtime observations in the model report. The owned
+process is stopped before any oracle branch check. A runtime-probe failure is
+recorded without masking an earlier correctness error; `passed` becomes true
+only after every required agreement and oracle-tail check succeeds.
+
 Run the following **on the remote Intel worker**, with paths supplied by private
 operator configuration:
 
