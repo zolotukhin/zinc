@@ -194,6 +194,13 @@ class NativeReferenceTest(unittest.TestCase):
         self.assertEqual(record["validation_stage"], "complete")
         self.assertEqual(record["agreement"]["near_tie_tokens"], 1)
 
+    def test_retry_cannot_clear_or_mix_an_earlier_attempt_record(self):
+        record = {"passed": False, "cases": [{"native_ids": [1]}]}
+        previous = copy.deepcopy(record)
+        with self.assertRaisesRegex(ValueError, "must be fresh"):
+            self.execute(record=record)
+        self.assertEqual(record, previous)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -139,6 +139,7 @@ def native_reference_validation(args, work, env, reference_env, record=None):
     # Attach this object to the parent before calling. A rejected configuration
     # must retain its obtained continuations and live runtime, without becoming
     # an accepted baseline just because the process returned usable text.
+    # Each retry needs a fresh record; clearing a used one would erase evidence.
     record = {} if record is None else record
     require(isinstance(record, dict) and not record, "native preflight record must be fresh")
     record.update(passed=False, backend="sycl", oracle_backend="vulkan", oracle_commit=policy()["reference"]["commit"],
