@@ -61,7 +61,7 @@ class NativeReferenceTest(unittest.TestCase):
         return {"content": content, "completion_probabilities": [
             {"id": token, "top_logprobs": [{"id": 1, "logprob": -0.10}, {"id": 2, "logprob": -0.11}]} for token in ids]}
 
-    def execute(self, mode="near-tie"):
+    def execute(self, mode="near-tie", record=None, runtime_error=False):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             samples = [{"prompt": f"prompt {i}", "expected": self.expected()} for i in range(3)]
@@ -81,7 +81,8 @@ class NativeReferenceTest(unittest.TestCase):
                 requests.append((path, copy.deepcopy(body)))
                 if path == "/completion" and isinstance(body["prompt"], str):
                     index = generated["count"]; generated["count"] += 1
-                    if index == 0:
+                    if mode == "cancel": raise KeyboardInterrupt()
+                    if index == 0 or (mode == "aggregate" and index == 1):
                         if mode == "short": return self.expected([1], "primary")
                         if mode == "wrong-text": return self.expected(content="different text")
                         return self.expected([2] + [1] * 15, "branch")
@@ -94,18 +95,24 @@ class NativeReferenceTest(unittest.TestCase):
                 if path == "/detokenize": return {"content": "branch"}
                 raise AssertionError("unexpected protocol request")
             runtime = {"runtime": "level_zero", "library_sha256": {"libsycl.so.9": "a" * 64}}
-            with patch.object(benchmark.gpu, "process", side_effect=process), patch.object(benchmark.gpu, "ready"), \
+            with patch.object(benchmark.gpu, "process", side_effect=process), \
+                    patch.object(benchmark.gpu, "ready", side_effect=ValueError("server startup failed") if mode == "startup" else None), \
                     patch.object(benchmark.gpu, "free_port", return_value=1), patch.object(benchmark.gpu, "json_request", side_effect=request), \
-                    patch.object(benchmark.sycl, "runtime_evidence", return_value=runtime):
+                    patch.object(benchmark.sycl, "runtime_evidence", return_value=runtime,
+                                 side_effect=ValueError("runtime probe failed") if runtime_error else None):
                 try:
-                    result = benchmark.native_reference_validation(args, work, {}, {})
+                    if record is None:
+                        result = benchmark.native_reference_validation(args, work, {}, {})
+                    else:
+                        result = benchmark.native_reference_validation(args, work, {}, {}, record)
                 finally:
                     self.assertEqual(active, [])
                     # Even a count/text/suffix failure keeps the actual native
                     # response for diagnosis; it must not vanish on exception.
-                    saved = json.loads((work / "native-reference-case-0.json").read_text())
-                    self.assertIn("actual", saved)
-                    self.assertIn("expected", saved)
+                    saved = work / "native-reference-case-0.json"
+                    if saved.exists():
+                        self.assertIn("actual", json.loads(saved.read_text()))
+                        self.assertIn("expected", json.loads(saved.read_text()))
             return result, commands, requests
 
     def test_close_choice_requires_independent_oracle_suffix_and_complete_text(self):
@@ -127,6 +134,58 @@ class NativeReferenceTest(unittest.TestCase):
         for mode, message in (("short", "count differs"), ("wrong-text", "text differs")):
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, message):
                 self.execute(mode)
+
+    def test_rejected_preflight_retains_obtained_cases_and_runtime_in_the_parent_report(self):
+        for mode, message, count, stage in (
+            ("short", "count differs", 1, "native_continuations"),
+            ("wrong-text", "text differs", 1, "native_continuations"),
+            ("aggregate", "exact-choice agreement is too low", 3, "aggregate_agreement"),
+            ("bad-tail", "after the near tie", 3, "oracle_branches"),
+        ):
+            record = {}
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, message):
+                self.execute(mode, record)
+            self.assertIs(record["passed"], False)
+            self.assertEqual(record["validation_stage"], stage)
+            self.assertEqual(len(record["cases"]), count)
+            self.assertTrue(record["cases"][0]["native_ids"])
+            self.assertIn("content", record["cases"][0])
+            self.assertEqual(record["runtime"]["runtime"], "level_zero")
+            self.assertEqual(record["gpu_offload"]["offloaded"], record["gpu_offload"]["total"])
+
+    def test_preflight_runtime_probe_failure_never_masks_the_rejected_continuation(self):
+        for mode, message, count in (("short", "count differs", 1), ("near-tie", "runtime observation unavailable", 3)):
+            record = {}
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, message):
+                self.execute(mode, record, runtime_error=True)
+            self.assertIs(record["passed"], False)
+            self.assertEqual(record["runtime_error"], "ValueError")
+            self.assertEqual(len(record["cases"]), count)
+
+    def test_cancelled_preflight_keeps_its_failed_record_and_reaps_the_owned_process(self):
+        record = {}
+        with self.assertRaises(KeyboardInterrupt):
+            self.execute("cancel", record)
+        self.assertIs(record["passed"], False)
+        self.assertEqual(record["cases"], [])
+        self.assertEqual(record["runtime"]["runtime"], "level_zero")
+
+    def test_failed_startup_does_not_mark_the_timed_configuration_as_checked(self):
+        record = {}
+        with self.assertRaisesRegex(ValueError, "startup failed"):
+            self.execute("startup", record)
+        self.assertIs(record["passed"], False)
+        self.assertIs(record["performance_configuration_checked"], False)
+        self.assertEqual(record["validation_stage"], "startup")
+        self.assertEqual(record["cases"], [])
+
+    def test_success_only_marks_the_same_parent_record_after_oracle_branch_qualification(self):
+        record = {}
+        result, _, _ = self.execute(record=record)
+        self.assertIs(result, record)
+        self.assertIs(record["passed"], True)
+        self.assertEqual(record["validation_stage"], "complete")
+        self.assertEqual(record["agreement"]["near_tie_tokens"], 1)
 
 
 if __name__ == "__main__":
