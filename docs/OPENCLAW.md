@@ -102,6 +102,9 @@ config and model, direct tools, the lean local-model prompt, and thinking off.
 Each task gets temporary client state. Task failure, timeout, interruption,
 oversized diagnostics or an unsuccessful JSON task report makes the helper
 fail. It stops its process group and removes that state on completion.
+Cancellation remains active while allocating or removing client state and while
+checking the project before a retry. A signal during those steps returns
+`OPENCLAW_INTERRUPTED` and prevents another client from starting.
 An interrupted evaluation also writes a partial summary and stops before
 starting another task.
 
