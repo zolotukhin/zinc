@@ -117,7 +117,7 @@ pub fn intelBatchedPrefillChunkDefault(gemma_moe: bool, dense_q8: bool, gemma_li
     return if (dense_q8) 384 else 96;
 }
 
-/// Retile only the measured dense Gemma graph on Intel Xe2. The new kernels
+/// Retile only the measured dense Gemma 4 31B graph on Intel Xe2. The new kernels
 /// retain the existing F16 weight staging and F32 accumulation; this gate does
 /// not enable activation quantization, MoE shortcuts or a different backend.
 pub fn intelGemmaGegluPrefillEnabled(config: ModelConfig, intel_xe2: bool, push_descriptors: bool, setting: ?[]const u8) bool {
@@ -131,7 +131,7 @@ pub fn intelGemmaGegluPrefillEnabled(config: ModelConfig, intel_xe2: bool, push_
 test "Intel Gemma tiling requires the measured dense graph and honors its opt-out" {
     var cfg = std.mem.zeroes(ModelConfig);
     cfg.architecture = .gemma;
-    cfg.n_layers = 62;
+    cfg.n_layers = 60;
     cfg.hidden_dim = 5376;
     cfg.intermediate_dim = 21504;
     try std.testing.expect(intelGemmaGegluPrefillEnabled(cfg, true, true, null));
