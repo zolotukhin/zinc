@@ -37,7 +37,12 @@ test "Q8 weight views require half-word rather than four-byte alignment" {
 }
 
 test "Q8 pool dispatch rejects odd offsets before accessing GPU resources" {
-    try std.testing.expectError(error.InvalidArgument, DmmvDispatch.recordDispatch(undefined, undefined, .q8_0, undefined, 1, 32, 1, 0, 0));
+    // An empty wrapper is safe to inspect if validation is accidentally moved
+    // after pipeline lookup: that regression returns UnsupportedQuantType.
+    const dispatch = std.mem.zeroes(DmmvDispatch);
+    var command = std.mem.zeroes(CommandBuffer);
+    try std.testing.expectError(error.InvalidArgument, dispatch.recordDispatch(&command, .q8_0, null, 1, 32, 1, 0, 0));
+    try std.testing.expectError(error.UnsupportedQuantType, dispatch.recordDispatch(&command, .q8_0, null, 1, 32, 2, 0, 0));
 }
 
 fn intelQ8RowDecodeEnabled(vendor: GpuVendor, legacy_subgroup_size: u32, can_require_simd32: bool, full_subgroups: bool, qualified_default: bool, setting: ?[]const u8) bool {
