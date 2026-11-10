@@ -632,6 +632,31 @@ ability for the starter.
 Some rejected timed processes lack final memory/runtime observations in the
 frozen harness. Those fields remain unknown. The later observation collector
 retains them on failures while preserving the original error; it does not
-backfill historical data. The next controls separate oneDNN attention from
-other oneDNN operations on the affected models, followed by matched timing only
-for configurations that pass the same correctness and repeatability gates.
+backfill historical data. The follow-up below separates oneDNN attention from
+other oneDNN operations while retaining the same correctness and repeatability
+gates.
+
+### Qwen 35B native repeatability controls
+
+The [Qwen 35B-A3B follow-up](/zinc/validation/intel-native-35b-controls-2026-11-09.json)
+reproduces the failing `0a94a3f2` reference with two treatments. Each passes
+three initial native continuations, fully offloads all 41 layers through
+SYCL/Level Zero, and retains two server lifetimes, 24 JSON requests and eight
+short streaming controls. F16 KV, MTP off, one slot, disabled prompt/RAM caches
+and the official package identities remain unchanged.
+
+| Treatment                              | Changed complete outputs | Matching JSON/SSE controls |
+| -------------------------------------- | -----------------------: | -------------------------: |
+| Native SYCL attention, oneDNN math     |                    10/24 |                        6/8 |
+| Native SYCL attention, oneDNN disabled |                     4/24 |                        8/8 |
+
+The oneDNN-disabled attempt changes outputs only on the core workload; the
+other treatment also changes medium and long-context outputs. Neither passes
+repeatability. Reduced observed drift does not establish a cause or qualify a
+performance baseline. Both records preserve every response hash, warmup and
+measured process's loaded runtime libraries, including rejected requests.
+
+The previous source and three binary trees are preserved separately. A fresh
+selection of upstream `cf6463ac` was recorded before rebuilding its FP32,
+FP16 and Vulkan references. That rebuild is a separate attempt; it does not
+relabel these frozen controls or their failures.
