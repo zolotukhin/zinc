@@ -30,6 +30,14 @@ test('fresh Intel client evidence covers the full pinned catalog on one immutabl
     policy.models.map((model) => model.id).sort(),
   );
   expect(Object.keys(report.zinc.shader_sha256)).toHaveLength(214);
+  expect(report.zinc.shader_sha256).toEqual(
+    Object.fromEntries(
+      Object.entries(support.zinc.shader_sha256).map(([name, digest]) => [
+        name.replace(/^share\/zinc\/shaders\//, ''),
+        digest,
+      ]),
+    ),
+  );
   expect(report.hardware).toEqual(gemma.hardware_after);
   expect(report.hardware_unchanged).toBe(true);
   expect(report.cleanup).toBe('no GPU process remains');

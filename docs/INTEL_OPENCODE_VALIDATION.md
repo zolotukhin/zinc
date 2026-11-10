@@ -9,7 +9,7 @@ source, binary and launch settings.
 The [seven-model client record](/zinc/validation/intel-client-acceptance-2026-11-09.json)
 tests actual **OpenCode 2.2.6** on the Arc Pro B70 with the same CI package as
 the inference qualification: source `2d0e1369`, binary `3bea62b8`, and all 214
-shader hashes checked before and after. Every model passes complete native
+shader hashes verified against the pinned package. Every model passes complete native
 continuations before and after its client tasks, with a healthy server after
 the tasks finish.
 
