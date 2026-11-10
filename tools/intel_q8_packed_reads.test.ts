@@ -9,10 +9,17 @@ const support = read(
   '../site/public/zinc/validation/intel-native-sycl-fp32-baseline-2026-11-09.json',
 );
 const policy = read('../config/release/targets.json');
-const median = (values: number[]) =>
-  [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+const medianOfThree = (values: number[]) => {
+  expect(values).toHaveLength(3);
+  return [...values].sort((a, b) => a - b)[1];
+};
 
 test('packed Q8 evidence binds the shader source and bitwise proof to the qualified binary', () => {
+  // tools/validate_q8_decode.c runs the compiled shader directly against
+  // llama.cpp's native quantizer/dequantizer, offsets, tails and output guards.
+  // Its 228 cases and 114 bitwise legacy pairs need no whole-model inference.
+  // A CPU copy of bitfieldExtract would not test the compiled GPU transform;
+  // bind the shader source to that standalone proof instead.
   const source = readFileSync(new URL('../src/shaders/dmmv_q8_0_intel_rows.comp', import.meta.url));
   expect(createHash('sha256').update(source).digest('hex')).toBe(report.candidate_source_sha256);
   expect(report.numerical_proof.source_sha256['dmmv_q8_0_intel_rows.comp']).toBe(
@@ -103,7 +110,9 @@ test('every decode improvement comes from all three measured requests in each ba
         );
         expect(samples).toHaveLength(3);
         for (const metric of ['prefillTps', 'decodeTps', 'totalLatencyMs'])
-          expect(round[treatment][metric]).toBe(median(samples.map((sample) => sample[metric])));
+          expect(round[treatment][metric]).toBe(
+            medianOfThree(samples.map((sample) => sample[metric])),
+          );
       }
       expect(round.decode_ratio).toBe(round.candidate.decodeTps / round.baseline.decodeTps);
       expect(round.decode_ratio).toBeGreaterThan(1.15);

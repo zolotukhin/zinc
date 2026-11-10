@@ -17588,6 +17588,9 @@ pub const InferenceEngine = struct {
         acc_mode: u32,
     ) !void {
         const qt = tensor.info.type_;
+        // Cover generic and fixed-width push-descriptor Q8 paths before any
+        // pipeline records a packed half-word read. The pool path checks too.
+        try dmmv_mod.validateQ8WeightOffset(qt, a_offset);
         const pip = self.dmmv.pipelineForType(qt) orelse {
             log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @backingInt(qt), tensor.info.name });
             return error.UnsupportedQuantType;
