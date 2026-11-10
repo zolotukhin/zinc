@@ -35,7 +35,7 @@ test('35B controls preserve the exact failing reference and official GPU runtime
       expect(process.gpu_offload).toEqual({ backend: 'sycl', offloaded: 41, total: 41 });
       expect(process.native_runtime.runtime).toBe('level_zero');
       expect(Object.keys(process.native_runtime.library_sha256).length).toBeGreaterThan(0);
-      expect(process.observation_errors).toBeUndefined();
+      expect(process.native_runtime_error).toBeUndefined();
     }
   }
   expect(() => assertPublicArtifact(report)).not.toThrow();
