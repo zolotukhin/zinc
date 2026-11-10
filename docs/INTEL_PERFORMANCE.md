@@ -11,6 +11,11 @@ passes all seven ZINC model support gates on the updated Intel worker. The
 competing native SYCL configuration still needs repeatability controls on six
 models before it can establish an all-model performance baseline.
 
+The [fresh all-model OpenCode replay](INTEL_OPENCODE_VALIDATION.md#november-9-full-catalog-opencode-replay)
+also passes native checks before and after client tasks on every catalog model.
+All six larger models pass three independent coding fixtures each; the 0.6B
+starter retains its three coding failures with inference stability intact.
+
 The [separate Gemma cache/client replay](/zinc/validation/intel-gemma-chat-prefix-2026-11-09.json)
 passes all sixteen cache controls and twelve real OpenCode/OpenClaw task checks
 on that same CI package. Its request-latency controls compare prefix reuse with

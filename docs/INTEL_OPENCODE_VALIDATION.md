@@ -4,6 +4,44 @@ The Intel Arc Pro B70 checks keep inference correctness, API behavior, client
 exit and independent acceptance tests separate. Earlier failures retain their
 source, binary and launch settings.
 
+## November 9 full-catalog OpenCode replay
+
+The [seven-model client record](/zinc/validation/intel-client-acceptance-2026-11-09.json)
+tests actual **OpenCode 2.2.6** on the Arc Pro B70 with the same CI package as
+the inference qualification: source `2d0e1369`, binary `3bea62b8`, and all 214
+shader hashes verified against the pinned package. Every model passes complete native
+continuations before and after its client tasks, with a healthy server after
+the tasks finish.
+
+| Model                    | Context | Inference and recovery | OpenCode fixtures |
+| ------------------------ | ------: | ---------------------- | ----------------: |
+| Qwen 3 0.6B Q8_0         |  16,384 | Pass                   |           **0/3** |
+| Qwen 3.5 9B Q4_K_M       |  16,384 | Pass                   |               3/3 |
+| Qwen 3.6 27B Q4_K_M      |  16,384 | Pass                   |               3/3 |
+| Qwen 3.6 35B-A3B Q4_K_XL |  16,384 | Pass                   |               3/3 |
+| Qwen 3.8 27B Q4_K_M      |  16,384 | Pass                   |               3/3 |
+| Gemma 4 26B-A4B Q4_K_M   |  16,384 | Pass                   |               3/3 |
+| Gemma 4 31B Q4_K_M       |  12,288 | Pass                   |               3/3 |
+
+All seven run the same three explicitly selected fixtures: a rate limiter, a
+multi-file cart and a Python CLI. Each uses 16 steps, 2,048 output tokens and
+a 900-second deadline, F16 KV, one slot, and MTP/thinking off. Passing requires
+independent tests, unchanged protected files and no unexpected files or
+shortcut trace events. The six larger models pass all eighteen tasks. No
+response repair or suppressed-content trace is recorded in this campaign.
+
+The starter client exits normally on all three tasks but fails their independent
+tests. Its failed tool attempts and unchanged failing tests remain in the
+record. Use a larger qualified model for these coding tasks; the starter's
+inference support remains qualified independently.
+
+The before/after checks retain 54 complete native continuations, including the
+previously teacher-forced Qwen 35B near tie. The package, pinned client lock and
+hardware remain unchanged, and owned clients and GPU processes are stopped
+afterwards. The two Gemmas also have the fresh OpenClaw checks below. This
+campaign does not relabel older OpenClaw results for the other five models,
+establish uncached performance wins, or recertify the published release.
+
 ## November 9 Gemma cache and client qualification
 
 The [two-Gemma exact-package replay](/zinc/validation/intel-gemma-chat-prefix-2026-11-09.json)
