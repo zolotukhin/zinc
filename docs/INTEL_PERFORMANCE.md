@@ -23,6 +23,23 @@ full prefill on one ZINC server. The [client report](INTEL_OPENCODE_VALIDATION.m
 keeps those results separate from uncached competitor throughput and the
 published release archives.
 
+### Packed Q8 reads
+
+The [balanced Q8 experiment](/zinc/validation/intel-q8-packed-reads-2026-11-09.json)
+replaces four byte reads with two aligned 16-bit reads in the existing Intel
+row shader. It preserves signed Q8 values, the 34-byte GGUF block layout and
+the original dot/FMA/reduction order. The GPU proof passes 228 native-reference,
+offset, accumulation and guard cases, with 114 bitwise-equal reduction pairs.
+
+On the Qwen 3 0.6B starter, decode improves from about 236 to 274 tokens/s for
+the core workload. All four workloads improve decode by 15–16% in each of
+three balanced A/B rounds, with complete output hashes and token counts equal
+across all 96 requests. The same binary serves both arms; only that shader
+changes. Native continuations pass before and after each of six server runs.
+Prefill changes are mixed, and the long-context request's natural EOS remains
+in the record. These are internal ZINC results; they do not establish a
+llama.cpp speed win or measurements of startup, memory or streaming latency.
+
 [`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
 workloads: short chat, medium context, long context, and extended decode. It first
