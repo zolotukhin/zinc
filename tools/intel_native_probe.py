@@ -76,7 +76,14 @@ def record_probe_result(path, report):
 
 def run_probe(args):
     """Retain failed bring-up without publishing driver stderr or worker paths."""
-    os.umask(0o077)
+    previous_umask = os.umask(0o077)
+    try:
+        return _run_probe(args)
+    finally:
+        os.umask(previous_umask)
+
+
+def _run_probe(args):
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = {"schema_version": 1, "passed": False, "release_qualification": False,
               "native_zinc_backend": False, "kernel": platform.release(), "validation_stage": "reservation",
@@ -126,6 +133,8 @@ def run_probe(args):
                 # Retain that math evidence without accepting the timed-out run.
                 if (work / "stdout.log").is_file() and "probe" not in report and "result_decode_error" not in report:
                     record_probe_result(work / "stdout.log", report)
+                # Hash complete closed files, including bytes beyond the JSON
+                # parsing cap; each stream needs one full-file fingerprint.
                 report["diagnostics"] = {name: {"sha256": sha256(path), "bytes": path.stat().st_size}
                                          for name in ("stdout", "stderr") if (path := work / (name + ".log")).is_file()}
         except Exception as error:

@@ -113,7 +113,7 @@ class NativeProbeRunnerTest(unittest.TestCase):
                 finally:
                     active.pop(); child.poll.return_value = exit_code; events.append("reap")
                     if changed_binary: probe.write_bytes(b"different fixture")
-            previous_umask = os.umask(0o077)
+            previous_umask = os.umask(0o027)
             original_sha256 = native.sha256
             def observed_sha256(path):
                 if observation_error is not None and Path(path).name == "stdout.log": raise observation_error
@@ -127,6 +127,7 @@ class NativeProbeRunnerTest(unittest.TestCase):
                     caught = None
                     try: native.run_probe(args)
                     except BaseException as error: caught = error
+                    self.assertEqual(os.umask(0o027), 0o027)
                     saved = json.loads(output.read_text())
                     self.assertEqual(active, [])
                     self.assertEqual(events, ["lock", "unlock"] if busy or startup_error is not None else ["lock", "start", "reap", "unlock"])
@@ -241,7 +242,7 @@ class NativeProbeRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); output = root / "result.json"
             args = SimpleNamespace(output=output, probe=root / "fixture", reservation=root / "reservation")
-            previous_umask = os.umask(0o077)
+            previous_umask = os.umask(0o027)
             try:
                 for passed in (True, False):
                     old = json.dumps({"passed": passed, "retained": "earlier attempt"})
@@ -249,6 +250,7 @@ class NativeProbeRunnerTest(unittest.TestCase):
                     with patch.object(native, "worker_reservation") as reserve, \
                             patch.object(native.gpu, "process") as launch:
                         with self.assertRaises(FileExistsError): native.run_probe(args)
+                        self.assertEqual(os.umask(0o027), 0o027)
                         reserve.assert_not_called(); launch.assert_not_called()
                     self.assertEqual(output.read_text(), old)
             finally: os.umask(previous_umask)
