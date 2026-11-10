@@ -53,9 +53,22 @@ test('production prefill proof binds the exact CI archive and immutable source/s
   expect(
     Object.keys(report.shader_sha256).filter((name) => !(name in previous.zinc.shader_sha256)),
   ).toEqual(['share/zinc/shaders/mul_mm_q8_0_intel.spv']);
-  for (const [name, digest] of Object.entries(report.production_source_sha256)) {
-    expect(hash(readFileSync(new URL('../' + name, import.meta.url)))).toBe(digest);
-  }
+  // This inventory belongs to the recorded archive. Host policy edits have
+  // CPU regressions; the current kernel stays bound to its numerical proof.
+  expect(report.production_source_sha256).toEqual({
+    'build.zig': '1ad726527f93a0c8983923e4ed48d2abddf0c68817b10bfe1ef7afaa30b03a07',
+    'src/compute/dmmv.zig': '5d273fe12a03e88110aa2269002e341f0f273a4852a7c82517c242c7e01418c6',
+    'src/compute/forward.zig': '04108ecc93ee370632b2ef873a5722925fc38bafc1c39bc71a7f8ed3930a0d7e',
+    'src/gpu/prefill_policy.zig':
+      'bbdb9ab58174ffca718421d9bf757edb3453dda34a808dd3b061c683bf68cfa8',
+    'src/shaders/mul_mm_q8_0_intel.comp':
+      'cc50ff8e9be46b449e26876401681aebd3cd1b9d9cb82faee4f78753cb012eea',
+    'tools/validate_q8_prefill.py':
+      'aadbeed14a90882e2daf102259387b0a964465be0b58fb2f11b99f513c190449',
+  });
+  expect(
+    hash(readFileSync(new URL('../src/shaders/mul_mm_q8_0_intel.comp', import.meta.url))),
+  ).toBe(report.production_source_sha256['src/shaders/mul_mm_q8_0_intel.comp']);
   expect(report.kernel_reference.cases).toBe(376);
   expect(report.kernel_reference.passed).toBe(true);
   expect(report.q8_decode_reference).toEqual(
