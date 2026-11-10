@@ -169,14 +169,14 @@ function symbolSearchText(symbol: ZigApiSymbol): string {
               <a href={`#${symbol.anchor}`} class="anchor-link">#</a>
             </div>
 
-            <pre><code>{symbol.signature}</code></pre>
+            <pre tabindex="0" role="region" aria-label={`${symbol.qualifiedName} signature`}><code>{symbol.signature}</code></pre>
 
             {symbol.symbolKind === 'struct' && symbol.size !== undefined && (
               <div class="struct-layout meta-block">
                 <h3>Memory Layout</h3>
                 <p>Size: <strong>{symbol.size}</strong> bytes (alignment: {symbol.alignment})</p>
                 {symbol.fields && symbol.fields.length > 0 && (
-                  <div class="table-wrapper">
+                  <div class="table-wrapper" tabindex="0" role="region" aria-label={`${symbol.qualifiedName} memory layout`}>
                     <table>
                       <thead>
                         <tr>
@@ -274,7 +274,7 @@ function symbolSearchText(symbol: ZigApiSymbol): string {
                         <a href={`#${member.anchor}`} class="anchor-link">#</a>
                       </div>
 
-                      <pre><code>{member.signature}</code></pre>
+                      <pre tabindex="0" role="region" aria-label={`${member.qualifiedName} signature`}><code>{member.signature}</code></pre>
 
                       {hasDocContent(member) ? (
                         <div class="doc-copy">
@@ -741,6 +741,14 @@ function symbolSearchText(symbol: ZigApiSymbol): string {
   .symbol-card pre code,
   .member-card pre code {
     white-space: inherit;
+  }
+
+  /* Long signatures and layout tables need a visible keyboard scroll target. */
+  .symbol-card pre:focus-visible,
+  .member-card pre:focus-visible,
+  .table-wrapper:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
   }
 
   .doc-empty,

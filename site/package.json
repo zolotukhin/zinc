@@ -11,7 +11,8 @@
     "dev": "astro dev",
     "build": "astro build && bun tools/protect-code-html.mjs",
     "preview": "astro preview",
-    "check:benchmarks": "bun tools/check-benchmarks.ts",
+    "check:benchmarks": "bun tools/check-benchmarks.ts && bun run check:api-docs",
+    "check:api-docs": "bun tools/check-api-docs.ts",
     "check:posts": "bun tools/check-posts.ts",
     "check:harnesses": "bun tools/check-coding-harnesses.ts",
     "astro": "astro"
