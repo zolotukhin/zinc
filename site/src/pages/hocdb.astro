@@ -1,0 +1,137 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { Code } from 'astro:components';
+
+const repository = 'https://github.com/o1dstaRs/hocdb';
+const release = repository + '/releases/tag/v0.1.1';
+const quickstart = [
+  'hocdb init --db ./market --preset ticks',
+  'echo \'{"timestamp":1700000000,"price":100,"volume":2}\' \\',
+  '  | hocdb append --db ./market',
+  'hocdb query --db ./market',
+  'hocdb snapshot --db ./market',
+].join('\n');
+---
+
+<BaseLayout
+  title="HOCDB — time-series storage for apps and agents"
+  description="Store timestamped records and compute analytics locally with HOCDB, an embedded Zig database with a native JSON CLI. Download the first release for Linux or macOS."
+  keywords="HOCDB, time-series database, embedded database, Zig database, agent tools, JSON CLI, market indicators"
+  jsonLd={{
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: 'HOCDB',
+    applicationCategory: 'DeveloperApplication',
+    operatingSystem: 'Linux, macOS',
+    softwareVersion: '0.1.1',
+    license: 'https://opensource.org/license/mit',
+    codeRepository: repository,
+    url: 'https://zolotukhin.ai/hocdb/',
+    downloadUrl: release,
+    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  }}
+>
+  <article class="hocdb">
+    <header class="intro">
+      <p class="eyebrow">HOCDB · First release · 0.1.1</p>
+      <h1>Local time-series storage.<br />Ready for apps and agents.</h1>
+      <p class="lead">Store timestamped records, inspect a range, or compute market indicators in one call. HOCDB brings an embedded Zig database to your terminal with a small, predictable JSON interface.</p>
+      <nav class="actions" aria-label="HOCDB links">
+        <a class="primary" href={release}>Download 0.1.1 ↗</a>
+        <a href="#quickstart">Try it in your terminal ↓</a>
+        <a href={repository}>Source on GitHub ↗</a>
+      </nav>
+      <p class="detail">Linux x86_64 · macOS Apple Silicon · MIT license · No server to configure</p>
+    </header>
+
+    <section class="features" aria-label="What HOCDB does">
+      <div><h2>Keep the data local</h2><p>Fixed schemas, timestamp indexing and buffered writes. Each CLI database keeps its schema and data together in one directory.</p></div>
+      <div><h2>Ask for the useful part</h2><p>Read a bounded range, get summary statistics, or compute a snapshot of roughly 100 indicator values. Missing warm-up values are explicit.</p></div>
+      <div><h2>Give agents a clear contract</h2><p>Discover commands, parse JSON results and recover from structured errors. Read commands use read-only handles.</p></div>
+    </section>
+
+    <section id="quickstart" class="content-section">
+      <div>
+        <p class="eyebrow">Start with a few records</p>
+        <h2>Download. Extract. Run.</h2>
+        <p>Choose the <a href={release}>release archive</a> for your machine and verify its SHA256 against SHA256SUMS. Extract it and run <code>./bin/hocdb --help</code>.</p>
+        <p>Put the binary on your PATH to use the example here, or replace <code>hocdb</code> with <code>./bin/hocdb</code>. Choose a new directory whose parent already exists.</p>
+        <p><a href={repository + '/blob/v0.1.1/docs/QUICKSTART.md'}>Full installation and quickstart →</a></p>
+      </div>
+      <div class="example">
+        <Code code={quickstart} lang="bash" themes={{ light: 'github-light-high-contrast', dark: 'github-dark-high-contrast' }} />
+        <p>The ticks preset uses timestamp, price and volume. Use <code>--preset ohlcv</code> for candles or <code>--schema</code> for your own fields.</p>
+      </div>
+    </section>
+
+    <section class="content-section">
+      <div>
+        <p class="eyebrow">For agents</p>
+        <h2>Discover once.<br />Use ordinary tools.</h2>
+        <p><code>hocdb describe</code> returns commands, argument schemas, defaults and limits as JSON. Invoke the binary with an argument array and send records through stdin.</p>
+        <p>Success goes to stdout. Errors go to stderr with a nonzero exit status and recovery guidance. Large integers remain exact, and unavailable analytics become JSON <code>null</code>.</p>
+        <nav class="actions" aria-label="Agent documentation">
+          <a href="/hocdb/agent-guide.txt">Read the agent guide →</a>
+          <a href="/hocdb/commands.json">Command contract ↗</a>
+        </nav>
+      </div>
+      <div class="command-list">
+        <dl>
+          <div><dt><code>info</code></dt><dd>Schema, units and committed record count</dd></div>
+          <div><dt><code>query</code></dt><dd>Records in a time range, with an explicit row limit</dd></div>
+          <div><dt><code>stats</code></dt><dd>Min, max, sum, mean and count</dd></div>
+          <div><dt><code>snapshot</code></dt><dd>Latest price and market indicator values</dd></div>
+          <div><dt><code>health</code></dt><dd>Gaps, outliers and volume quality</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="content-section">
+      <div>
+        <p class="eyebrow">Inside your application</p>
+        <h2>The same storage engine,<br />with more control.</h2>
+        <p>Embed HOCDB through Zig or its C, C++, Python, Go, Node.js and Bun bindings. The library adds custom indicators, calendars, pair analytics, backtesting, universe scans, ring buffers and retention policies.</p>
+        <p><a href={repository + '/blob/v0.1.1/INDICATORS.md'}>Explore the analytics reference →</a></p>
+      </div>
+      <div>
+        <h3>Know the boundaries</h3>
+        <p>Schemas are fixed after creation. Each database has one writer and can have concurrent readers. CLI databases hold up to 2 GiB and never overwrite earlier records automatically.</p>
+        <p>The CLI opens the directories it creates. Existing embedded databases use their language binding and schema. Release downloads contain the CLI; bindings are built from source with Zig 0.17.1. macOS binaries are unsigned.</p>
+        <p><a href={repository + '/blob/v0.1.1/validation/zig17/README.md'}>Read the measured performance and validation report →</a></p>
+      </div>
+    </section>
+
+    <p class="release-note"><a href="/blog/2026-11-15-hocdb-first-release/">Read about the first release and the agent interface →</a></p>
+  </article>
+</BaseLayout>
+
+<style>
+  .hocdb { max-width: var(--max-width-wide); margin: 0 auto; }
+  .intro { padding: 3rem 0 4rem; max-width: 56rem; }
+  .eyebrow { color: var(--color-text-muted); font-family: var(--font-mono); font-size: 0.72rem; }
+  h1 { font-size: clamp(2.2rem, 5vw, 4rem); line-height: 1.08; letter-spacing: -0.045em; margin: 1rem 0 1.5rem; }
+  .lead { max-width: 45rem; font-size: 1.1rem; line-height: 1.7; color: var(--color-text-muted); }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; margin: 1.5rem 0; font-size: 0.85rem; }
+  .primary { display: inline-block; padding: 0.7rem 1rem; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-text); }
+  .primary:hover { border-color: var(--color-accent); }
+  .detail { font-size: 0.72rem; color: var(--color-text-muted); }
+  .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2.5rem; border-top: 1px solid var(--color-border); padding: 2.5rem 0; }
+  .features h2 { font-size: 1.05rem; }
+  .features p, .content-section p { color: var(--color-text-muted); line-height: 1.75; font-size: 0.9rem; }
+  .content-section { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4rem; padding: 3.5rem 0; border-top: 1px solid var(--color-border); scroll-margin-top: 2rem; }
+  .content-section h2 { font-size: 1.8rem; line-height: 1.25; letter-spacing: -0.025em; }
+  .content-section h3 { font-size: 1.05rem; }
+  .example { min-width: 0; }
+  .example :global(pre) { font-size: 0.78rem; overflow-x: auto; padding: 1.3rem; }
+  .example p { font-size: 0.78rem; }
+  .command-list dl { margin: 0; }
+  .command-list dl > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 1rem; padding: 1rem 0; border-bottom: 1px solid var(--color-border); }
+  .command-list dt { font-size: 0.85rem; }
+  .command-list dd { margin: 0; color: var(--color-text-muted); font-size: 0.82rem; }
+  .release-note { padding: 2rem 0; border-top: 1px solid var(--color-border); font-size: 0.9rem; }
+  @media (max-width: 820px) {
+    .intro { padding: 2rem 0 3rem; }
+    .features, .content-section { grid-template-columns: 1fr; gap: 1.5rem; }
+    .content-section { padding: 2.5rem 0; }
+  }
+</style>

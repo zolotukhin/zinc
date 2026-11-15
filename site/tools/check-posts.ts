@@ -74,6 +74,40 @@ try {
         }
         views++;
       }
+      // Product and launch pages must stay usable with and without scripts.
+      for (const path of ['/', '/hocdb/', '/blog/2026-11-15-hocdb-first-release/']) {
+        const response = await page.goto(base + path);
+        assert.equal(response?.status(), 200, path);
+        assert.equal(await page.locator('h1').count(), 1, path);
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1),
+          false,
+          path + ' must not overflow',
+        );
+        assert.ok((await page.locator('a[href="/hocdb/"]').count()) > 0, path);
+        if (process.env.POST_SCREENSHOTS) {
+          await page.screenshot({
+            path: resolve(
+              process.env.POST_SCREENSHOTS,
+              'hocdb-' +
+                (path === '/' ? 'home' : path.startsWith('/blog/') ? 'article' : 'project') +
+                '-' +
+                width +
+                '-' +
+                javaScriptEnabled +
+                '.png',
+            ),
+            fullPage: true,
+          });
+        }
+        views++;
+      }
+      const contract = await context.request.get(base + '/hocdb/commands.json');
+      assert.equal(contract.status(), 200);
+      assert.equal((await contract.json()).commands.query.mutates, false);
+      const guide = await context.request.get(base + '/hocdb/agent-guide.txt');
+      assert.equal(guide.status(), 200);
+      assert.match(await guide.text(), /hocdb describe/);
       await context.close();
     }
   }

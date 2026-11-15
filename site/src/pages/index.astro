@@ -54,28 +54,29 @@ const modelWork = [
 ---
 
 <BaseLayout
-  title="Stepan Zolotukhin — ZINC and GPU Inference"
-  description="I build ZINC, a local LLM inference engine for consumer GPUs, and publish reproducible benchmarks and engineering notes about the work."
-  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, Intel Arc, Vulkan, ROCm, Metal, Zig, Qwen 3.8, Muse Glimmer, Gemma 4, GPU programming"
+  title="Stepan Zolotukhin — ZINC, HOCDB and systems engineering"
+  description="I build ZINC for local AI inference and HOCDB for time-series storage, with benchmarks, documentation and engineering notes."
+  keywords="Stepan Zolotukhin, ZINC, HOCDB, time-series database, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, Intel Arc, Vulkan, ROCm, Metal, Zig, Qwen 3.8, Muse Glimmer, Gemma 4, GPU programming"
   jsonLd={{
     '@context': 'https://schema.org',
     '@type': 'WebSite',
     name: 'Stepan Zolotukhin',
     url: 'https://zolotukhin.ai',
-    description: 'ZINC, reproducible local LLM benchmarks, and notes from the GPU engineering work behind them.',
+    description: 'ZINC for local AI inference, HOCDB for time-series storage, and the engineering work behind them.',
   }}
 >
   <section class="hero">
     <div class="identity">
       <h1>Stepan<br />Zolotukhin</h1>
-      <p>Systems engineer working on GPU inference.</p>
+      <p>Systems engineer working on inference and storage.</p>
     </div>
     <div class="introduction">
-      <p class="statement">I build ZINC, an engine for local AI on your GPU.</p>
-      <p>Run GGUF models from the terminal, chat in your browser, or connect an app through the OpenAI-compatible API.</p>
+      <p class="statement">I build tools for local AI and the data behind it.</p>
+      <p><a href="/zinc/">ZINC</a> runs AI models on your GPU. <a href="/hocdb/">HOCDB</a> stores and analyzes time-series data, with a JSON command line for people and agents.</p>
       <p>I publish the benchmark data and write down the kernel work, including the experiments that do not improve performance.</p>
       <nav class="hero-links" aria-label="Start here">
-        <a href="/zinc/docs/getting-started/">Get started</a>
+        <a href="/zinc/docs/getting-started/">Start with ZINC</a>
+        <a href="/hocdb/">Explore HOCDB</a>
         <a href="/zinc/benchmarks/">Benchmarks</a>
         <a href="/blog/">Writing</a>
         <a href="https://github.com/zolotukhin/zinc">GitHub ↗</a>
@@ -113,6 +114,25 @@ const modelWork = [
       </dl>
 
       <p class="measurement-note">Same Radeon AI PRO R9700, model file, prompts, and reusable-server method. Speculative decoding is off for both engines. <a href="/zinc/benchmarks/#rdna-rocm">See the complete run and method →</a></p>
+    </div>
+  </section>
+
+  <section class="page-section" aria-labelledby="hocdb-heading">
+    <header class="section-intro">
+      <h2 id="hocdb-heading">HOCDB</h2>
+      <p>Time-series storage for applications and agents.</p>
+    </header>
+    <div class="section-body">
+      <div class="project-copy">
+        <p>Keep timestamped records on your machine, query a range, or ask for a snapshot of market indicators. HOCDB is an embedded Zig database with a native JSON command line and bindings for six languages.</p>
+        <p class="hardware-line">Linux &amp; macOS&nbsp;&nbsp;·&nbsp;&nbsp; JSON CLI&nbsp;&nbsp;·&nbsp;&nbsp; MIT license</p>
+      </div>
+      <p class="measurement-note">The first release adds schema presets, validated imports, read-only queries and a command contract agents can discover.</p>
+      <nav class="hero-links" aria-label="HOCDB resources">
+        <a href="/hocdb/">Get started →</a>
+        <a href="https://github.com/o1dstaRs/hocdb/releases/tag/v0.1.1">Download 0.1.1 ↗</a>
+        <a href="/hocdb/agent-guide.txt">Agent guide</a>
+      </nav>
     </div>
   </section>
 
