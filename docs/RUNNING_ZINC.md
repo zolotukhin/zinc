@@ -528,6 +528,8 @@ That usually points to environment issues before it points to the model:
 ```bash
 zinc --help
 zinc --check -m /path/to/model.gguf
+
+# Optional Vulkan-only diagnostic, if vulkan-tools is installed
 vulkaninfo --summary
 ```
 

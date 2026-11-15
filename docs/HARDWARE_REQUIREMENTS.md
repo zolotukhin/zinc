@@ -278,10 +278,10 @@ Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
 rocminfo
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-ROCR_VISIBLE_DEVICES=0 zinc --model-id qwen35-9b-q4k-m --chat --prompt "Hello"
+zinc --model-id qwen35-9b-q4k-m --chat --prompt "Hello"
 ```
 
-Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, troubleshooting, and performance switches.
+Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, GPU selection on multi-GPU hosts, troubleshooting, and performance switches.
 
 ### On Linux with an Intel Arc GPU
 
