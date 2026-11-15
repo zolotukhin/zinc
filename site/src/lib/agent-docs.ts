@@ -111,6 +111,13 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     '## Supplemental ZINC Documentation',
     ...supplemental.map((doc) => `- ${doc.title}: ${doc.url}`),
     '',
+    '## HOCDB',
+    '- Project and quickstart: https://zolotukhin.ai/hocdb/',
+    '- Agent guide: https://zolotukhin.ai/hocdb/agent-guide.txt',
+    '- CLI command contract: https://zolotukhin.ai/hocdb/commands.json',
+    '- Releases: https://github.com/o1dstaRs/hocdb/releases',
+    'HOCDB is a separate embedded time-series database. Use hocdb describe for its JSON CLI contract; its CLI is not an HTTP API.',
+    '',
     '## Other Surfaces',
     `- Blog: ${absoluteUrl(base, '/blog')}`,
     `- RSS: ${absoluteUrl(base, '/feed.xml')}`,
@@ -171,6 +178,14 @@ export function renderLlmsFullTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl:
     lines.push(`  Summary: ${doc.description}`);
   }
 
+  lines.push(
+    '',
+    '## HOCDB',
+    '- Project: https://zolotukhin.ai/hocdb/',
+    '- Agent guide: https://zolotukhin.ai/hocdb/agent-guide.txt',
+    '- CLI command contract: https://zolotukhin.ai/hocdb/commands.json',
+    '- Releases: https://github.com/o1dstaRs/hocdb/releases',
+  );
   lines.push('', '## Other Surfaces');
   lines.push(`- Blog: ${absoluteUrl(base, '/blog')}`);
   lines.push(`- RSS: ${absoluteUrl(base, '/feed.xml')}`);

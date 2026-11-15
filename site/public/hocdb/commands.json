@@ -1,0 +1,314 @@
+{
+  "name": "hocdb",
+  "contract_version": 1,
+  "transport": "CLI; parameter names become --kebab-case flags",
+  "commands": {
+    "init": {
+      "description": "Create a database in a new directory. Parent directory must exist. Schema and preset are mutually exclusive.",
+      "mutates": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "ticks",
+              "ohlcv"
+            ],
+            "default": "ticks"
+          },
+          "schema": {
+            "type": "string",
+            "description": "JSON file containing an array of {name,type}; first field timestamp:i64"
+          },
+          "timestamp_unit": {
+            "type": "string",
+            "enum": [
+              "s",
+              "ms",
+              "us",
+              "ns"
+            ],
+            "default": "s"
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "append": {
+      "description": "Append one JSON object or an array. Validate all records and ordering before writing, then flush and fsync.",
+      "mutates": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          },
+          "input": {
+            "type": "string",
+            "default": "-",
+            "description": "JSON file, or - for stdin. Maximum 16 MiB."
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "info": {
+      "description": "Read schema, timestamp unit, storage format and committed record count.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "query": {
+      "description": "Return all records in [start,end). Fail if more than limit match; never silently truncate.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          },
+          "start": {
+            "type": "integer",
+            "description": "Inclusive timestamp in stored units; defaults to i64 minimum"
+          },
+          "end": {
+            "type": "integer",
+            "description": "Exclusive timestamp in stored units; defaults to i64 maximum"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stats": {
+      "description": "Read min/max/sum/count/mean for a numeric field. Percentiles are not computed.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          },
+          "start": {
+            "type": "integer",
+            "description": "Inclusive timestamp in stored units; defaults to i64 minimum"
+          },
+          "end": {
+            "type": "integer",
+            "description": "Exclusive timestamp in stored units; defaults to i64 maximum"
+          },
+          "field": {
+            "type": "string",
+            "description": "Default close, falling back to price"
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "snapshot": {
+      "description": "Read latest indicator snapshot. Warm-up/unavailable values are null. Price role is close or price.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          },
+          "bars": {
+            "type": "integer",
+            "default": 2500,
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "bucket": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "description": "OHLCV bucket width in stored timestamp units; 0 uses raw records"
+          },
+          "periods_per_year": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0,
+            "description": "Annualization frequency; 0 uses engine inference. Set explicitly for comparable risk statistics."
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "health": {
+      "description": "Read gaps and price/volume quality; log returns above 0.1 count as outliers.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "db": {
+            "type": "string",
+            "description": "Explicit database directory containing hocdb.json and series.bin"
+          },
+          "start": {
+            "type": "integer",
+            "description": "Inclusive timestamp in stored units; defaults to i64 minimum"
+          },
+          "end": {
+            "type": "integer",
+            "description": "Exclusive timestamp in stored units; defaults to i64 maximum"
+          },
+          "gap_threshold": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "description": "Gap threshold in stored timestamp units"
+          }
+        },
+        "required": [
+          "db"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "describe": {
+      "description": "Return this command contract.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "--version": {
+      "description": "Return version and storage/CLI contract versions.",
+      "mutates": false,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  "io": {
+    "success": {
+      "stream": "stdout",
+      "exit_code": 0,
+      "shape": {
+        "ok": true,
+        "command": "command name",
+        "data": "command result"
+      }
+    },
+    "failure": {
+      "stream": "stderr",
+      "exit_code": 1,
+      "shape": {
+        "ok": false,
+        "error": {
+          "code": "machine-readable error name",
+          "message": "recovery guidance"
+        }
+      }
+    },
+    "help": "Plain text; no arguments, --help, help, or COMMAND --help"
+  },
+  "data_contract": {
+    "presets": {
+      "ticks": [
+        {
+          "name": "timestamp",
+          "type": "i64"
+        },
+        {
+          "name": "price",
+          "type": "f64"
+        },
+        {
+          "name": "volume",
+          "type": "f64"
+        }
+      ],
+      "ohlcv": [
+        {
+          "name": "timestamp",
+          "type": "i64"
+        },
+        {
+          "name": "open",
+          "type": "f64"
+        },
+        {
+          "name": "high",
+          "type": "f64"
+        },
+        {
+          "name": "low",
+          "type": "f64"
+        },
+        {
+          "name": "close",
+          "type": "f64"
+        },
+        {
+          "name": "volume",
+          "type": "f64"
+        }
+      ]
+    },
+    "field_types": [
+      "i64",
+      "f64",
+      "u64",
+      "u8",
+      "bool",
+      "string"
+    ],
+    "strings": "UTF-8, at most 128 bytes; no NUL bytes",
+    "integers": "i64/u64 accept JSON integers or decimal strings. Output outside -(2^53-1)..2^53-1 is a decimal string.",
+    "timestamps": "Strictly increasing Unix timestamps from 0; maximum accepted is 9223372036854775806. Unit stored in hocdb.json.",
+    "nulls": "Missing/undefined analytics values are null, never a trading signal.",
+    "capacity": "2 GiB per database, no automatic overwrite",
+    "concurrency": "One writer per database; read commands use lock-free readers",
+    "durability": "Append flushes and fsyncs before success. Validation errors write no input records; storage/I/O failures may partially append. Inspect info/query before retrying.",
+    "compatibility": "CLI opens directories it created. Existing library databases continue to use their language binding and explicit schema."
+  }
+}

@@ -2,7 +2,7 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
-<BaseLayout title="About" description="Stepan Zolotukhin — systems engineer working on ZINC, with a background in storage infrastructure, Linux systems, and AWS." keywords="Stepan Zolotukhin, systems engineer, ZINC, consumer GPU inference, AMD GPU, Apple Silicon, NVIDIA RTX, Intel Arc, Vulkan, ROCm, Metal, CUDA, Zig, AWS, Linux kernel, storage infrastructure, GPU computing">
+<BaseLayout title="About" description="Stepan Zolotukhin — systems engineer building ZINC and HOCDB, with a background in storage infrastructure, Linux systems, and AWS." keywords="Stepan Zolotukhin, systems engineer, ZINC, consumer GPU inference, AMD GPU, Apple Silicon, NVIDIA RTX, Intel Arc, Vulkan, ROCm, Metal, CUDA, Zig, AWS, Linux kernel, storage infrastructure, GPU computing">
   <article class="about">
     <h1>About</h1>
 
@@ -14,13 +14,15 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       height="320"
     />
 
-    <p>I&apos;m Stepan Zolotukhin. I&apos;m building a local LLM inference engine for consumer GPUs.</p>
+    <p>I&apos;m Stepan Zolotukhin. I&apos;m building tools for local AI inference and time-series storage.</p>
 
     <p>Right now I spend most of my time on GPU compute, Zig, Vulkan, ROCm, Metal, CUDA, and local AI inference.</p>
 
     <p>I spent seven years building infrastructure for storage systems. For the past six years, I&apos;ve worked at AWS on low-level systems problems across Linux kernels, userland, cross-compilation, glibc, and adjacent platform work.</p>
 
     <p>I&apos;m building <a href="/zinc/">ZINC</a>, an inference engine for consumer GPUs. It uses Zig with native backend code for each platform: Vulkan or ROCm on AMD, Vulkan on Intel, Metal on Apple Silicon, and an experimental CUDA path on NVIDIA RTX. The goal is to make the hardware people already own useful for local LLM inference.</p>
+
+    <p>I also build <a href="/hocdb/">HOCDB</a>, an embedded time-series database in Zig. It keeps timestamped records and their analytics close to the application, with a JSON command line that agents can use directly.</p>
 
     <p>I write about the work here: how the GPU kernels are tuned, what the quantization tradeoffs look like, and the systems engineering decisions behind ZINC.</p>
 
