@@ -5,6 +5,7 @@
 const std = @import("std");
 const host_io = @import("host_io");
 const http = @import("http.zig");
+const capabilities = @import("capabilities.zig");
 const runtime = @import("runtime.zig");
 const forward_mod = runtime.forward_mod;
 const catalog_mod = if (runtime.supports_model_management) @import("../model/catalog.zig") else struct {};
@@ -582,6 +583,12 @@ pub fn handleConnection(
     // Route dispatch
     if (request.method == .GET and std.mem.eql(u8, request.path, "/health")) {
         try handleHealth(conn, manager, server_state);
+    } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/capabilities")) {
+        var snapshot = try manager.discoverySnapshot(allocator);
+        defer snapshot.deinit(allocator);
+        const body = try std.json.Stringify.valueAlloc(allocator, snapshot.value, .{});
+        defer allocator.free(body);
+        try conn.sendJson(200, body);
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/models")) {
         try handleModels(conn, manager, server_state, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/activate")) {
@@ -626,38 +633,43 @@ fn buildHealthJson(
     server_state: *const ServerState,
     model_name: []const u8,
     memory_usage: model_manager_mod.ModelManager.MemoryUsage,
-    reuse_supported: bool,
+    discovery: capabilities.Info,
     buf: []u8,
 ) ![]const u8 {
     const now = host_io.timestamp();
     const snapshot = server_state.snapshot(now);
     const active_context_tokens = memory_usage.activeContextTokens(snapshot.active_context_tokens);
     const active_context_bytes = memory_usage.activeContextBytes(active_context_tokens);
-    return std.fmt.bufPrint(buf,
-        \\{{"status":"ok","model":"{s}","capabilities":{{"chat_session_reuse":{s}}},"active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
-    , .{
-        model_name,
-        if (reuse_supported) "true" else "false",
-        snapshot.active_requests,
-        snapshot.queued_requests,
-        snapshot.uptime_seconds,
-        memory_usage.device_local_bytes,
-        memory_usage.device_local_budget_bytes,
-        memory_usage.weights_bytes,
-        memory_usage.runtime_device_local_bytes,
-        memory_usage.context_reserved_bytes,
-        active_context_bytes,
-        active_context_tokens,
-        memory_usage.context_capacity_tokens,
-    });
+    var writer = std.Io.Writer.fixed(buf);
+    try std.json.Stringify.value(.{
+        .status = "ok",
+        .schema_version = discovery.schema_version,
+        .build = discovery.build,
+        .backend = discovery.backend,
+        .model = model_name,
+        .active_model = discovery.active_model,
+        .context_length = discovery.context_length,
+        .capabilities = discovery.capabilities,
+        .active_requests = snapshot.active_requests,
+        .queued_requests = snapshot.queued_requests,
+        .uptime_seconds = snapshot.uptime_seconds,
+        .gpu_memory_used_bytes = memory_usage.device_local_bytes,
+        .gpu_memory_budget_bytes = memory_usage.device_local_budget_bytes,
+        .gpu_memory_weights_bytes = memory_usage.weights_bytes,
+        .gpu_memory_runtime_bytes = memory_usage.runtime_device_local_bytes,
+        .gpu_context_reserved_bytes = memory_usage.context_reserved_bytes,
+        .gpu_context_active_bytes = active_context_bytes,
+        .gpu_context_tokens = active_context_tokens,
+        .gpu_context_capacity_tokens = memory_usage.context_capacity_tokens,
+    }, .{}, &writer);
+    return writer.buffered();
 }
 
 fn handleHealth(conn: *http.Connection, manager: *model_manager_mod.ModelManager, server_state: *const ServerState) !void {
-    var buf: [1024]u8 = undefined;
-    // Advertise the existing ChatRequestBody.session_id -> handleChatCompletions
-    // -> ChatReuseCache path only for the active model's qualified state type.
-    const reuse_supported = if (comptime runtime.is_vulkan) manager.supportsChatSessionReuse() else false;
-    const body = buildHealthJson(server_state, manager.activeDisplayName(), manager.currentMemoryUsage(), reuse_supported, &buf) catch return error.BufferTooSmall;
+    var buf: [4096]u8 = undefined;
+    var snapshot = try manager.discoverySnapshot(conn.allocator);
+    defer snapshot.deinit(conn.allocator);
+    const body = try buildHealthJson(server_state, snapshot.display_name, manager.currentMemoryUsage(), snapshot.value, &buf);
     try conn.sendJson(200, body);
 }
 
@@ -6324,7 +6336,7 @@ test "buildHealthJson includes request counts and uptime" {
     _ = state.queued_requests.fetchAdd(1, .monotonic);
     state.setActiveContextTokens(1024);
 
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const body = try buildHealthJson(&state, "qwen3.5-35b", .{
         .weights_bytes = 20 * 1024 * 1024 * 1024,
         .runtime_device_local_bytes = 1024 * 1024 * 1024,
@@ -6333,10 +6345,13 @@ test "buildHealthJson includes request counts and uptime" {
         .context_bytes_per_token = 192 * 1024,
         .device_local_bytes = 21 * 1024 * 1024 * 1024,
         .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
-    }, session_reuse_policy.canAdvertise(runtime.is_vulkan, 0), &buf);
+    }, capabilities.info(capabilities.currentBackend(), "qwen3.5-35b", 4096, session_reuse_policy.canAdvertise(runtime.is_vulkan, 0)), &buf);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"ok\"") != null);
     const health = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
     defer health.deinit();
+    try std.testing.expectEqualStrings("qwen3.5-35b", health.value.object.get("active_model").?.string);
+    try std.testing.expectEqualStrings(@tagName(capabilities.currentBackend()), health.value.object.get("backend").?.string);
+    try std.testing.expectEqual(@as(i64, 4096), health.value.object.get("context_length").?.integer);
     try std.testing.expectEqual(runtime.is_vulkan, health.value.object.get("capabilities").?.object.get("chat_session_reuse").?.bool);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"qwen3.5-35b\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"active_requests\":1") != null);

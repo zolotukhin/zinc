@@ -104,7 +104,10 @@ The managed catalog includes Qwen, Gemma, and other tested model families.
 See [model selection](https://zolotukhin.ai/zinc/docs/getting-started/#models-in-current-work)
 for checkpoints, memory needs, and the exact Muse Glimmer GGUF used in testing.
 
-## Coding harnesses
+## Connect harnesses
+
+The [agent and app workflow](https://zolotukhin.ai/zinc/docs/agent-setup/) covers
+server startup, model discovery, context sizing, and client checks.
 
 Connect **OpenClaw** with the [dedicated setup helper](tools/setup_openclaw.mjs):
 

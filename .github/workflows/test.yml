@@ -126,8 +126,11 @@ jobs:
       - name: Build
         run: ./scripts/zig.sh build -Doptimize=${{ matrix.optimize }} -Dinstall-hot-bench=true
 
-      - name: Check CUDA host code without a GPU
-        run: ./scripts/zig.sh build check-cuda -Doptimize=${{ matrix.optimize }}
+      - name: Check CUDA and ROCm host code without a GPU
+        run: ./scripts/zig.sh build check-cuda check-rocm -Doptimize=${{ matrix.optimize }}
+
+      - name: Exercise the installed CLI outside a checkout without a GPU
+        run: bun tools/smoke_installed_cli.mjs --prefix zig-out
 
       - name: Compile standalone tools without model or GPU execution
         run: ./scripts/zig.sh build check-tools -Doptimize=${{ matrix.optimize }}
@@ -157,6 +160,8 @@ jobs:
           done
       - name: Run CPU-only tests, including Metal benchmark CLI contracts
         run: ./scripts/zig.sh build test --summary all
+      - name: Exercise the installed CLI outside a checkout without a GPU
+        run: bun tools/smoke_installed_cli.mjs --prefix zig-out
 
   nix-build:
     runs-on: ubuntu-latest

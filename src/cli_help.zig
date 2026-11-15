@@ -42,6 +42,7 @@ pub fn render(comptime backend: Backend, full: bool) []const u8 {
         \\Usage:
         \\  zinc -m <model.gguf> --prompt "Hello"
         \\  zinc -m <model.gguf> [-p 8080]
+        \\  zinc serve [-m <model.gguf> | --model-id <id>] [-p 8080]
         \\  zinc chat [-m <model.gguf> | --model-id <id>] [-p 9090]
         \\  zinc --model-id <id> [--prompt "Hello"]
         \\  zinc -hf <owner/model[:quant]> [--prompt "Hello"]
@@ -61,6 +62,8 @@ pub fn render(comptime backend: Backend, full: bool) []const u8 {
         ++ device_options ++ context_option ++
         \\
         \\Server options:
+        \\  serve                    Start the HTTP API without opening a browser
+        \\  --no-browser             Keep browser chat headless (Vulkan/Metal)
         \\  -p, --port <port>        Server port (default: 8080)
         \\
         ++ serving_options ++
@@ -73,8 +76,8 @@ pub fn render(comptime backend: Backend, full: bool) []const u8 {
         \\  model rm [-f] <id>       Remove a cached model (catalog or hf-- id)
         \\
         \\Diagnostics:
-        \\  --check                  Run system diagnostics and verify dependencies
-        \\  --version                Show version and build metadata
+        \\  --check [--json]         Run system diagnostics and verify dependencies
+        \\  --version [--json]       Show version and build metadata
         \\  -h, --help               Show the short help
         \\  --help-all               Show the full help
         \\

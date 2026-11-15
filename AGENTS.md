@@ -2,6 +2,10 @@
 
 Instructions for AI coding agents working on this repository.
 
+To install ZINC or connect an external agent/application, start with
+[Agent and App Setup](docs/AGENT_SETUP.md). The instructions below are for
+contributing to ZINC itself; user-facing examples use the installed `zinc` command.
+
 ## Commands
 
 ```bash

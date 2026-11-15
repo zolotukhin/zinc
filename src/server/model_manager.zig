@@ -195,6 +195,19 @@ pub const ModelManager = struct {
         return @import("session_reuse_policy.zig").canAdvertise(true, current.model.config.ssm_d_inner);
     }
 
+    /// Snapshot the same active ID returned by /v1/models, without parent paths.
+    pub fn discoverySnapshot(self: *ModelManager, allocator: std.mem.Allocator) !@import("capabilities.zig").Snapshot {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        const discovery = @import("capabilities.zig");
+        if (self.current) |current| {
+            const entry = catalog_mod.findForLoadedModel(current.managed_id, current.model_path, current.display_name);
+            const id = if (entry) |e| e.id else current.display_name;
+            return discovery.Snapshot.init(allocator, .vulkan, id, current.display_name, current.context_capacity_tokens, @import("session_reuse_policy.zig").canAdvertise(true, current.model.config.ssm_d_inner));
+        }
+        return discovery.Snapshot.init(allocator, .vulkan, null, "none", null, false);
+    }
+
     /// Returns the human-readable name of the active model, or `"none"`.
     pub fn activeDisplayName(self: *ModelManager) []const u8 {
         self.state_mutex.lock();
@@ -850,4 +863,32 @@ test "removeManagedModel refuses loaded active model without force" {
 
     try std.testing.expectError(error.ModelLoadedInGpu, fake.removeManagedModel("qwen36-35b-a3b-q4k-xl", false));
     try std.testing.expect(fake.current == &current);
+}
+
+test "discovery snapshots preserve idle state and a raw model's public ID" {
+    var manager: ModelManager = undefined;
+    manager.current = null;
+    manager.state_mutex = .{};
+    var idle = try manager.discoverySnapshot(std.testing.allocator);
+    defer idle.deinit(std.testing.allocator);
+    try std.testing.expect(idle.value.active_model == null);
+    try std.testing.expect(idle.value.context_length == null);
+    try std.testing.expect(!idle.value.capabilities.chat_session_reuse);
+
+    var resources: LoadedResources = undefined;
+    resources.managed_id = null;
+    resources.model_path = try std.testing.allocator.dupe(u8, "/fixtures/private/local-model.gguf");
+    defer std.testing.allocator.free(resources.model_path);
+    resources.display_name = try std.testing.allocator.dupe(u8, "local-model.gguf");
+    defer std.testing.allocator.free(resources.display_name);
+    resources.context_capacity_tokens = 8192;
+    resources.model.config.ssm_d_inner = 0;
+    manager.current = &resources;
+    var loaded = try manager.discoverySnapshot(std.testing.allocator);
+    defer loaded.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("local-model.gguf", loaded.value.active_model.?);
+    try std.testing.expectEqual(@as(?u32, 8192), loaded.value.context_length);
+    // The snapshot remains valid if the loaded resource's name changes.
+    resources.display_name[0] = 'x';
+    try std.testing.expectEqualStrings("local-model.gguf", loaded.display_name);
 }

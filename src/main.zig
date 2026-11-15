@@ -6,6 +6,8 @@ const builtin = @import("builtin");
 const std = @import("std");
 const host_io = @import("host_io");
 const build_info = @import("build_info.zig");
+const diagnostic_report = @import("diagnostic_report.zig");
+const capabilities_mod = @import("server/capabilities.zig");
 const gpu = @import("gpu/interface.zig");
 const runtime_assets = @import("runtime_assets.zig");
 const catalog_mod = @import("model/catalog.zig");
@@ -157,6 +159,9 @@ comptime {
     _ = @import("regression_tests.zig");
     _ = @import("gpu/attention_window.zig");
     _ = @import("gpu/upload_plan.zig");
+    _ = @import("gpu/native_memory_estimate.zig");
+    _ = diagnostic_report;
+    _ = capabilities_mod;
     _ = @import("gpu/prefill_policy.zig");
     _ = @import("gpu/matrix_bounds.zig");
     _ = prefill_policy;
@@ -212,6 +217,8 @@ pub const Config = struct {
     profile: bool = false,
     /// Enable verbose debug logging.
     debug: bool = false,
+    /// Suppress automatic browser launch for chat on desktop backends.
+    no_browser: bool = false,
     /// Print usage and exit.
     show_help: bool = false,
     /// Show extended help including developer-only flags.
@@ -228,7 +235,7 @@ pub const Config = struct {
     command_force: bool = false,
     /// Show unsupported catalog entries in `zinc model list`.
     show_all_models: bool = false,
-    /// Output `model list` results as pretty-printed JSON.
+    /// Structured output for model list, --check or --version.
     json_output: bool = false,
 
     fn gpuDevicePreference(self: Config) u32 {
@@ -243,6 +250,7 @@ pub const Config = struct {
 pub const Command = enum {
     run,
     chat,
+    serve,
     model_list,
     model_pull,
     model_use,
@@ -269,20 +277,6 @@ const ConnectionWorker = struct {
         };
     }
 };
-
-fn openBrowser(port: u16) void {
-    var url_buf: [64]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buf, "http://localhost:{d}", .{port}) catch return;
-    const opener = if (comptime @import("builtin").os.tag == .macos) "open" else "xdg-open";
-    var child = std.process.spawn(host_io.io, .{
-        .argv = &.{ opener, url },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return;
-    defer child.kill(host_io.io);
-    _ = child.wait(host_io.io) catch {};
-}
 
 fn reportGpuProcessLockError(err: anyerror, backend: process_lock_mod.Backend, device_index: u32) noreturn {
     switch (err) {
@@ -323,14 +317,10 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
     };
     defer server.deinit();
     log.info("Server listening on 0.0.0.0:{d}", .{config.port});
-    if (config.command == .chat) {
-        launchChatUi(config.port);
-    }
+    log.info("API base URL: http://localhost:{d}/v1", .{config.port});
+    log.info("Health: http://localhost:{d}/health", .{config.port});
+    maybeLaunchChatUi(config, capabilities_mod.currentBackend(), launchChatUi);
     log.info("Press Ctrl+C to stop", .{});
-
-    if (config.command == .chat) {
-        openBrowser(config.port);
-    }
 
     const posix = std.posix;
     const Handler = struct {
@@ -394,6 +384,12 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
         host_io.sleep(50 * std.time.ns_per_ms);
     }
     log.info("Shutting down...", .{});
+}
+
+// One decision and one opener for browser chat. Explicit serving is headless;
+// ROCm/CUDA do not ship a browser UI even when invoked through `chat`.
+fn maybeLaunchChatUi(config: Config, backend: capabilities_mod.Backend, opener: anytype) void {
+    if (config.command == .chat and !config.no_browser and (backend == .vulkan or backend == .metal)) opener(config.port);
 }
 
 fn launchChatUi(port: u16) void {
@@ -490,7 +486,11 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             return config;
         } else if (std.mem.eql(u8, arg, "--version")) {
             config.show_version = true;
-            return config;
+        } else if (std.mem.eql(u8, arg, "--no-browser")) {
+            config.no_browser = true;
+        } else if (std.mem.eql(u8, arg, "serve")) {
+            if (config.command != .run) return error.UnknownArgument;
+            config.command = .serve;
         } else if (std.mem.eql(u8, arg, "chat")) {
             if (config.command != .run) return error.UnknownArgument;
             config.command = .chat;
@@ -608,9 +608,9 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
         }
     }
 
-    if (config.command == .chat and config.prompt != null) {
-        return error.ChatCommandDoesNotTakePrompt;
-    }
+    if (config.command == .chat and config.prompt != null) return error.ChatCommandDoesNotTakePrompt;
+    if (config.command == .serve and config.prompt != null) return error.ServeCommandDoesNotTakePrompt;
+    if (config.json_output and !config.show_version and !config.check and config.command != .model_list) return error.UnsupportedJsonOutput;
     if (config.hf_spec != null and (config.model_path != null or config.model_id != null)) {
         return error.ConflictingModelSources;
     }
@@ -1607,7 +1607,7 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
                 .removed_dir = removed.removed_dir,
             });
         },
-        .run, .chat => {},
+        .run, .chat, .serve => {},
     }
 }
 
@@ -2163,15 +2163,23 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
             conn.sendError(503, "server_error", "GPU execution failed; restart the server") catch {};
             return;
         }
-        var health_buf: [160]u8 = undefined;
-        const health = std.fmt.bufPrint(&health_buf, "{{\"status\":\"ok\",\"backend\":\"{s}\",\"context_length\":{d}}}", .{
-            if (gpu.is_rocm) @as([]const u8, "rocm") else "cuda", ctx.slot_ctx,
-        }) catch return;
+        var health_buf: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&health_buf);
+        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch return;
+        capabilities_mod.writeHealth(value, &writer) catch return;
+        const health = writer.buffered();
         conn.sendJson(200, health) catch {};
         return;
     }
     // 3c throughput gate: cumulative decode/prefill counters. Diff two snapshots
     // around a B-concurrent phase → aggregate decode tok/s + mean batch occupancy.
+    if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/capabilities")) {
+        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch return;
+        const body = std.json.Stringify.valueAlloc(ctx.allocator, value, .{}) catch return;
+        defer ctx.allocator.free(body);
+        conn.sendJson(200, body) catch {};
+        return;
+    }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/models")) {
         if (ctx.model_path) |mp| {
             const json = model_discovery_mod.serializeModels(ctx.allocator, mp, ctx.slot_ctx) catch |err| {
@@ -2710,71 +2718,133 @@ fn envIsOn(name: []const u8) bool {
 
 // CUDA/ROCm preflight. Device diagnostics use native backend terminology:
 // NVIDIA compute capability/SMs or AMD target/CUs. No Vulkan shader assets are needed.
-fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: std.mem.Allocator) !void {
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writerStreaming(host_io.io, &stdout_buffer);
-    const w = &stdout_writer.interface;
+fn printDiagnosticCheck(writer: *std.Io.Writer, report: *diagnostic_report.Report, status: diagnostic_report.Status, name: []const u8, comptime fmt: []const u8, args: anytype) !void {
+    try report.add(name, status, fmt, args);
+    try writer.print("  {s}: ", .{name});
+    try writer.print(fmt, args);
+    try writer.print(" [{s}]\n", .{status.label()});
+}
 
-    try w.print("\n=== ZINC System Diagnostics ===\n", .{});
-    try w.print("\n[1/2] Host Environment\n", .{});
-    try w.print("  OS: {s} [OK]\n", .{@tagName(builtin.os.tag)});
-    try w.print("  CPU arch: {s} [OK]\n", .{@tagName(builtin.cpu.arch)});
-    try w.print("  Backend: {s} [OK]\n", .{if (gpu.is_rocm) "rocm" else "cuda"});
-
-    try w.print("\n[2/2] {s} Device\n", .{accelerator_name});
+fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: std.mem.Allocator, writer: *std.Io.Writer, report: *diagnostic_report.Report) !void {
+    try writer.writeAll("\n=== ZINC System Diagnostics ===\n");
+    try printDiagnosticCheck(writer, report, .ok, "Backend", "{s} on {s}/{s}", .{ build_info.backend, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
     var device = cuda_device_mod.CudaDevice.initBest(allocator) catch |err| {
-        try w.print("  {s} init: FAILED ({s}) [FAIL]\n", .{ accelerator_name, @errorName(err) });
-        try w.print("\nVerdict: NOT READY [FAIL]\n", .{});
-        try w.flush();
+        try printDiagnosticCheck(writer, report, .fail, "Device", "Initialization failed: {s}", .{@errorName(err)});
         return error.DiagnosticsFailed;
     };
     defer device.deinit();
-
     var name_buf: [256]u8 = undefined;
-    const name = device.name(&name_buf);
-    const cc = device.computeCapability();
-    const total = device.totalMemory();
     const free = device.freeMemory();
-    try w.print("  {s} init: Initialized best device (index {d}) [OK]\n", .{ accelerator_name, device.device_index });
-    try w.print("  Device: {s} [OK]\n", .{name});
+    try report.setDevice(device.name(&name_buf), free);
+    try printDiagnosticCheck(writer, report, .ok, "Device", "{s} (index {d}); {d:.2} GiB free / {d:.2} GiB total", .{
+        report.device_name.?, device.device_index, bytesToGiBf(free), bytesToGiBf(device.totalMemory()),
+    });
     if (comptime gpu.is_rocm) {
         var arch_buf: [64]u8 = undefined;
-        try w.print("  Compute target: {s} [OK]\n", .{device.arch(&arch_buf)});
-        try w.print("  CU count: {d} [OK]\n", .{device.smCount()});
-        try w.print("  Wavefront size: {d}\n", .{device.warpSize()});
+        try printDiagnosticCheck(writer, report, .ok, "Compute target", "{s}; {d} CUs; wave{d}", .{ device.arch(&arch_buf), device.smCount(), device.warpSize() });
     } else {
-        try w.print("  Compute capability: sm_{d} [OK]\n", .{cc});
-        try w.print("  SM count: {d} [OK]\n", .{device.smCount()});
-        try w.print("  Warp size: {d}\n", .{device.warpSize()});
-    }
-    try w.print("  Total VRAM: {d:.2} GiB [OK]\n", .{bytesToGiBf(total)});
-    try w.print("  Free VRAM: {d:.2} GiB [OK]\n", .{bytesToGiBf(free)});
-
-    // Optional model-fit note (catalog size vs free VRAM); GGUF inspection of an
-    // installed model when a managed id / path was supplied.
-    if (check_target.managed_model) |managed| {
-        try w.print("  Managed model: {s} ({s})\n", .{ managed.id, managed.status_label });
-        const status = if (managed.size_bytes <= free) "[OK]" else "[WARN]";
-        try w.print("  Catalog size: {d:.2} GiB of weights vs {d:.2} GiB free VRAM {s}\n", .{
-            bytesToGiBf(managed.size_bytes), bytesToGiBf(free), status,
-        });
+        try printDiagnosticCheck(writer, report, .ok, "Compute target", "sm_{d}; {d} SMs", .{ device.computeCapability(), device.smCount() });
     }
     if (check_target.model_path) |path| {
-        const cfg = loader_cuda_mod.inspectConfig(path, allocator) catch |err| blk: {
-            try w.print("  GGUF: inspection failed for {s}: {s} [WARN]\n", .{ path, @errorName(err) });
-            break :blk null;
+        const inspection = loader_cuda_mod.inspectModel(path, allocator) catch |err| {
+            try printDiagnosticCheck(writer, report, .fail, "Model", "Inspection failed: {s}", .{@errorName(err)});
+            return error.DiagnosticsFailed;
         };
-        if (cfg) |c| {
-            try w.print("  GGUF: {s} [OK]\n", .{path});
-            try w.print("  architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}\n", .{
-                @tagName(c.architecture), c.n_layers, c.n_heads, c.n_kv_heads, c.hidden_dim, c.vocab_size,
-            });
+        const cfg = inspection.config;
+        if (cfg.architecture == .unknown) {
+            try printDiagnosticCheck(writer, report, .fail, "Model", "Unsupported architecture", .{});
+            return error.DiagnosticsFailed;
         }
+        try printDiagnosticCheck(writer, report, .ok, "Model", "{s}; {d} layers", .{ @tagName(cfg.architecture), cfg.n_layers });
+        const format = @import("compute/kv_storage.zig").Format.parse(host_io.getenv("ZINC_KV_CACHE")) catch |err| {
+            try printDiagnosticCheck(writer, report, .fail, "KV format", "{s}", .{@errorName(err)});
+            return error.DiagnosticsFailed;
+        };
+        const slots = if (config.prompt != null) 1 else cudaServeSlotCount(config.max_parallel, cfg.architecture == .gemma and cfg.n_experts > 0);
+        if (format == .q8 and (!gpu.is_rocm or (cfg.architecture != .qwen35 and cfg.architecture != .qwen2_moe) or slots != 1)) {
+            try printDiagnosticCheck(writer, report, .fail, "KV format", "Q8 requires a supported ROCm Qwen model and --parallel 1", .{});
+            return error.DiagnosticsFailed;
+        }
+        const estimate = @import("gpu/native_memory_estimate.zig").estimate(cfg, inspection.weights_bytes, config.context_length orelse 2048, slots, format) catch |err| {
+            try printDiagnosticCheck(writer, report, .fail, "Memory estimate", "{s}", .{@errorName(err)});
+            return error.DiagnosticsFailed;
+        };
+        report.memory = .{
+            .source = .estimate,
+            .weights_bytes = estimate.weights_bytes,
+            .runtime_bytes = estimate.recurrent_bytes + estimate.runtime_reserve_bytes,
+            .kv_bytes = estimate.kv_bytes,
+            .total_bytes = estimate.estimated_total_bytes,
+            .budget_bytes = free,
+            .context_length = estimate.context_length,
+            .slots = estimate.slots,
+            .recurrent_bytes = estimate.recurrent_bytes,
+            .runtime_reserve_bytes = estimate.runtime_reserve_bytes,
+        };
+        try printDiagnosticCheck(writer, report, if (estimate.weights_bytes > free) .fail else .warn, "Memory estimate", "{d:.2} GiB weights + {d:.2} GiB KV + {d:.2} GiB recurrent/runtime reserve = {d:.2} GiB vs {d:.2} GiB free; context {d}, slots {d}. Lazy scratch/JIT/cache costs vary; inference has not been tested", .{
+            bytesToGiBf(estimate.weights_bytes),         bytesToGiBf(estimate.kv_bytes), bytesToGiBf(estimate.recurrent_bytes + estimate.runtime_reserve_bytes),
+            bytesToGiBf(estimate.estimated_total_bytes), bytesToGiBf(free),              estimate.context_length,
+            estimate.slots,
+        });
+        if (estimate.estimated_total_bytes > free and estimate.weights_bytes <= free) {
+            try printDiagnosticCheck(writer, report, .warn, "Estimated budget exceeded", "Reduce --context or --parallel before inference; this is an estimate, not an allocation test", .{});
+        }
+    } else if (check_target.managed_model) |managed| {
+        try printDiagnosticCheck(writer, report, if (managed.required_vram_bytes > free) .fail else .warn, "Model fit (catalog)", "{s}: {d:.2} GiB catalog requirement vs {d:.2} GiB free; pull the model for a context/slot estimate", .{ managed.id, bytesToGiBf(managed.required_vram_bytes), bytesToGiBf(free) });
+    } else {
+        try printDiagnosticCheck(writer, report, .skip, "Model fit", "No model selected; only device readiness was checked", .{});
     }
+    try writer.print("\nVerdict: {s}\n", .{@tagName(report.result())});
+    if (report.fail != 0) return error.DiagnosticsFailed;
+}
 
-    _ = config;
-    try w.print("\nVerdict: READY [OK]\n", .{});
-    try w.flush();
+// JSON mode buffers the human rendering but records checks at their source.
+// It never parses terminal text and always emits one JSON document on stdout,
+// including fatal model-resolution and driver failures.
+fn runCheck(config: Config, allocator: std.mem.Allocator) !void {
+    var report = diagnostic_report.Report.init(allocator);
+    defer report.deinit();
+    var hidden = std.Io.Writer.Allocating.init(allocator);
+    defer hidden.deinit();
+    var stdout_buffer: [8192]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(host_io.io, &stdout_buffer);
+    const writer = if (config.json_output) &hidden.writer else &stdout.interface;
+    const failure: ?anyerror = check: {
+        var target = resolveCheckTarget(config, allocator) catch |err| {
+            try printDiagnosticCheck(writer, &report, .fail, "Model selection", "{s}", .{@errorName(err)});
+            break :check err;
+        };
+        defer target.deinit(allocator);
+        // Own the display id until serialization; target paths may be allocated.
+        const model = if (target.managed_model) |managed| managed.id else if (target.model_path) |path| std.fs.path.basename(path) else null;
+        if (model) |id| report.model = try allocator.dupe(u8, id);
+        if (comptime gpu.is_cuda) {
+            runCudaCheck(config, target, allocator, writer, &report) catch |err| break :check err;
+        } else {
+            const shader_dir = runtime_assets.resolveShaderDir(allocator, if (gpu.is_metal) .metal else .spirv) catch |err| {
+                try printDiagnosticCheck(writer, &report, .fail, "Runtime assets", "{s}", .{@errorName(err)});
+                break :check err;
+            };
+            defer allocator.free(shader_dir);
+            diagnostics_mod.run(.{
+                .device_index = config.gpuDevicePreference(),
+                .model_path = target.model_path,
+                .requested_context_length = config.context_length,
+                .managed_model = target.managed_model,
+                .shader_dir = shader_dir,
+                .report = &report,
+                .output_writer = writer,
+            }, allocator) catch |err| break :check err;
+        }
+        break :check null;
+    };
+    defer if (report.model) |id| allocator.free(id);
+    if (failure) |err| {
+        if (report.fail == 0) try printDiagnosticCheck(writer, &report, .fail, "Diagnostics", "{s}", .{@errorName(err)});
+    }
+    if (config.json_output) try report.writeJson(&stdout.interface);
+    try stdout.interface.flush();
+    if (failure) |err| return err;
 }
 
 /// Bytes → GiB as f64 for diagnostics formatting.
@@ -2807,52 +2877,24 @@ pub fn main(process_init: std.process.Init) !void {
     if (config.show_version) {
         var stdout_buffer: [512]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writerStreaming(host_io.io, &stdout_buffer);
-        try build_info.writeVersion(&stdout_writer.interface);
+        if (config.json_output) {
+            try build_info.writeVersionJson(&stdout_writer.interface);
+        } else {
+            try build_info.writeVersion(&stdout_writer.interface);
+        }
         try stdout_writer.interface.flush();
         return;
     }
 
     if (config.check) {
-        var check_target = resolveCheckTarget(config, allocator) catch |err| {
-            log.err("Failed to resolve model for diagnostics: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        defer check_target.deinit(allocator);
-
-        if (comptime gpu.is_cuda) {
-            // CUDA-family backends compile kernels at runtime and do not need a
-            // Vulkan/Metal shader directory for their preflight.
-            runCudaCheck(config, check_target, allocator) catch |err| {
-                log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
-                std.process.exit(1);
-            };
-            return;
-        }
-
-        const check_shader_dir_owned = runtime_assets.resolveShaderDir(allocator, if (gpu.is_metal) .metal else .spirv) catch |err| blk: {
-            log.warn("Could not resolve shader directory before diagnostics: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        defer if (check_shader_dir_owned) |shader_dir| allocator.free(shader_dir);
-        const check_shader_dir = check_shader_dir_owned orelse if (gpu.is_metal)
-            "src/shaders/metal"
-        else
-            "zig-out/share/zinc/shaders";
-
-        diagnostics_mod.run(.{
-            .device_index = config.gpuDevicePreference(),
-            .model_path = check_target.model_path,
-            .requested_context_length = config.context_length,
-            .managed_model = check_target.managed_model,
-            .shader_dir = check_shader_dir,
-        }, allocator) catch |err| {
-            log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
+        runCheck(config, allocator) catch |err| {
+            if (!config.json_output) log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
         return;
     }
 
-    if (config.command != .run and config.command != .chat) {
+    if (config.command != .run and config.command != .chat and config.command != .serve) {
         runModelCommand(config, allocator) catch |err| {
             if (err == error.CommandAlreadyReported) {
                 std.process.exit(1);
@@ -2871,8 +2913,8 @@ pub fn main(process_init: std.process.Init) !void {
     const resolved_model: ?ResolvedStartupModel = blk: {
         break :blk resolveStartupModel(config, allocator) catch |err| {
             if (err == error.NoModelSpecified) {
-                if (config.command == .chat) {
-                    log.info("No startup model specified; starting chat server with no model loaded.", .{});
+                if ((config.command == .chat or config.command == .serve) and !gpu.is_cuda) {
+                    log.info("No startup model specified; starting HTTP server with no model loaded.", .{});
                     break :blk null;
                 }
                 log.warn("No model specified (-m/--model or --model-id) and no active managed model is configured. Use --help for common usage or --help-all for developer flags.", .{});
@@ -3916,4 +3958,49 @@ test "accelerator SSE escaping retains a full token of control bytes" {
     defer parsed.deinit();
     const content = parsed.value.object.get("choices").?.array.items[0].object.get("delta").?.object.get("content").?.string;
     try std.testing.expectEqualStrings(&text, content);
+}
+
+test "explicit serving is headless and preserves existing port defaults" {
+    const serve = try parseArgs(&.{ "zinc", "serve", "--model-id", "qwen35-9b-q4k-m" });
+    try std.testing.expectEqual(Command.serve, serve.command);
+    try std.testing.expectEqual(@as(u16, 8080), serve.port);
+    const chat = try parseArgs(&.{ "zinc", "chat", "--no-browser", "-p", "9191" });
+    try std.testing.expect(chat.no_browser);
+    try std.testing.expectEqual(@as(u16, 9191), chat.port);
+    try std.testing.expectError(error.ServeCommandDoesNotTakePrompt, parseArgs(&.{ "zinc", "serve", "--prompt", "hi" }));
+    try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "zinc", "serve", "chat" }));
+}
+
+test "JSON diagnostics and version accept flags in either order" {
+    for ([_][]const [:0]const u8{
+        &.{ "zinc", "--version", "--json" }, &.{ "zinc", "--json", "--version" },
+        &.{ "zinc", "--check", "--json" },   &.{ "zinc", "--json", "--check" },
+    }) |args| {
+        const config = try parseArgs(args);
+        try std.testing.expect(config.json_output);
+        try std.testing.expect(config.show_version or config.check);
+    }
+    try std.testing.expectError(error.UnsupportedJsonOutput, parseArgs(&.{ "zinc", "serve", "--json" }));
+}
+
+test "chat opens one browser only on UI backends and respects no-browser" {
+    const Fake = struct {
+        var calls: usize = 0;
+        var port: u16 = 0;
+        fn open(value: u16) void {
+            calls += 1;
+            port = value;
+        }
+    };
+    inline for (.{ capabilities_mod.Backend.vulkan, capabilities_mod.Backend.metal, capabilities_mod.Backend.rocm, capabilities_mod.Backend.cuda }) |backend| {
+        Fake.calls = 0;
+        maybeLaunchChatUi(.{ .command = .chat, .port = 9191 }, backend, Fake.open);
+        try std.testing.expectEqual(@as(usize, if (backend == .vulkan or backend == .metal) 1 else 0), Fake.calls);
+        if (Fake.calls != 0) try std.testing.expectEqual(@as(u16, 9191), Fake.port);
+        Fake.calls = 0;
+        maybeLaunchChatUi(.{ .command = .chat, .no_browser = true }, backend, Fake.open);
+        maybeLaunchChatUi(.{ .command = .serve }, backend, Fake.open);
+        maybeLaunchChatUi(.{}, backend, Fake.open);
+        try std.testing.expectEqual(@as(usize, 0), Fake.calls);
+    }
 }

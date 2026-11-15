@@ -216,6 +216,13 @@ pub const Model = struct {
 /// @param allocator Owns the transient GGUF metadata (freed before returning).
 /// @returns The parsed `ModelConfig`.
 pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfig {
+    return (try inspectModel(path, allocator)).config;
+}
+
+pub const ModelInspection = struct { config: ModelConfig, weights_bytes: u64 };
+
+/// Inspect native tensor payload sizes without uploading any model data.
+pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspection {
     const file = try std.Io.Dir.cwd().openFile(host_io.io, path, .{});
     defer file.close(host_io.io);
 
@@ -233,7 +240,9 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     var gf = try gguf.parse(mmap_data, allocator);
     defer gf.deinit();
 
-    return extractConfigWithLogging(&gf, false);
+    var weights_bytes: u64 = 0;
+    for (gf.tensors.items) |tensor| weights_bytes = try std.math.add(u64, weights_bytes, tensor.sizeBytes());
+    return .{ .config = extractConfigWithLogging(&gf, false), .weights_bytes = weights_bytes };
 }
 
 // ===========================================================================

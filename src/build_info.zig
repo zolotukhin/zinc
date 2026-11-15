@@ -17,6 +17,20 @@ pub const optimize = build_options.optimize;
 /// Single GPU backend compiled into this binary, e.g. `vulkan`, `rocm`, or `metal`.
 pub const backend = build_options.backend;
 
+/// Shared identity for CLI JSON, diagnostics and HTTP discovery.
+pub const Metadata = struct {
+    version: []const u8 = version,
+    commit: []const u8 = commit,
+    target: []const u8 = target,
+    optimize: []const u8 = optimize,
+    backend: []const u8 = backend,
+};
+
+pub fn writeVersionJson(writer: *std.Io.Writer) !void {
+    try std.json.Stringify.value(.{ .schema_version = 1, .build = Metadata{} }, .{}, writer);
+    try writer.writeByte('\n');
+}
+
 /// Write the full `zinc --version` report to `writer`.
 ///
 /// Emits the version, commit, target, optimize mode, and compiled-in backend,
@@ -46,4 +60,17 @@ test "version metadata is present" {
     try std.testing.expect(target.len > 0);
     try std.testing.expect(optimize.len > 0);
     try std.testing.expect(backend.len > 0);
+}
+
+test "JSON version uses the same build identity as the human report" {
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeVersionJson(&writer);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("schema_version").?.integer);
+    const build = parsed.value.object.get("build").?.object;
+    inline for (.{ "version", "commit", "target", "optimize", "backend" }) |field| {
+        try std.testing.expectEqualStrings(@field(Metadata{}, field), build.get(field).?.string);
+    }
 }

@@ -84,7 +84,7 @@ export async function getStaticPaths() {
     },
     'getting-started': {
       title: 'Run Local LLMs with ZINC',
-      description: 'Build ZINC, select Vulkan, ROCm, Metal, or experimental CUDA, pull a managed GGUF model, and run local inference on AMD Radeon, Intel Arc, Apple Silicon, or NVIDIA RTX.',
+      description: 'Install ZINC, select Vulkan or ROCm, pull a managed GGUF model, and run local inference. Source builds cover Metal previews and experimental CUDA.',
       keywords: 'run local LLMs, run LLMs on AMD GPUs, ROCm LLM inference, run LLMs on Intel Arc, Apple Silicon local LLM, NVIDIA CUDA GGUF, ZINC getting started, Vulkan LLM inference, ZINC quick start',
     },
     'hardware-requirements': {
@@ -152,9 +152,14 @@ export async function getStaticPaths() {
       description: 'OpenAI-compatible chat and text completions, streaming, model listing, and health endpoints for local LLM inference, with backend-specific coverage.',
       keywords: 'ZINC API, OpenAI compatible, chat completions, SSE streaming, local LLM API, inference server, v1/chat/completions, health endpoint, self-hosted LLM, AMD GPU inference API',
     },
+    'agent-setup': {
+      title: 'Connect Agents and Apps to ZINC',
+      description: 'Install ZINC, choose a model, start a local API, discover its capabilities, and connect OpenClaw or OpenCode without a source checkout.',
+      keywords: 'ZINC agent setup, OpenClaw ZINC, OpenCode ZINC, local model API, headless inference, model discovery',
+    },
     'openclaw': {
       title: 'Configure OpenClaw with ZINC',
-      description: 'Connect OpenClaw coding tasks to a local ZINC server. Pinned client setup, context requirements, standalone helper, project verification and AMD model acceptance results.',
+      description: 'Connect OpenClaw to a local ZINC server. Pinned client setup, context requirements, standalone helper, project verification and AMD model acceptance results.',
       keywords: 'OpenClaw ZINC, OpenClaw local model, local coding agent, AMD Vulkan ROCm, OpenAI compatible, OpenClaw setup',
     },
     'openclaw-amd-validation': {

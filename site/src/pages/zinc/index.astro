@@ -124,9 +124,9 @@ zinc chat --model-id qwen35-9b-q4k-m`} />
 
   <section class="page-section coding-harnesses" aria-labelledby="harness-heading" data-coding-harnesses>
     <div class="section-copy">
-      <p class="eyebrow">Coding harnesses</p>
+      <p class="eyebrow">Connect harnesses</p>
       <h2 id="harness-heading">Use OpenClaw or OpenCode.</h2>
-      <p>Let a coding agent work in your project with a model served by ZINC. Start the server on your GPU machine, then run either client in a second terminal.</p>
+      <p>Connect OpenClaw or OpenCode to a model served by ZINC. Start the server on your GPU machine, then run the client in a second terminal.</p>
       <p>Stop the earlier chat server before starting this one. This installed Vulkan example gives Qwen 3.5 9B a 16K context; follow the <a href="/zinc/docs/rocm/">ROCm guide</a> for that backend's model paths and device selection.</p>
     </div>
     <div class="terminal-wrap" data-harness-server>
@@ -137,7 +137,7 @@ zinc chat --model-id qwen35-9b-q4k-m`} />
     <div class="harness-grid">
       <article class="harness-client terminal-wrap" aria-labelledby="openclaw-heading" data-coding-harness="openclaw">
         <h3 id="openclaw-heading">OpenClaw</h3>
-        <p class="harness-intro">One-shot coding tasks with a dedicated project config. Requires Node.js 24.16+ in the 24.x line, or 26.1+.</p>
+        <p class="harness-intro">Connect an agent with a dedicated project config. Requires Node.js 24.16+ in the 24.x line, or 26.1+.</p>
         <TerminalWindow title="2. Connect OpenClaw" density="compact" code={`npm install --global openclaw@2026.11.1
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs -o setup-openclaw.mjs
 node setup-openclaw.mjs setup --project ../my-project

@@ -105,6 +105,7 @@ describe('installed command documentation', () => {
       'docs/BINARY_RELEASES.md',
       'docs/RUNNING_ZINC.md',
       'docs/API.md',
+      'docs/AGENT_SETUP.md',
       'docs/HARDWARE_REQUIREMENTS.md',
       'docs/ROCM.md',
       'docs/OPENCLAW.md',
@@ -132,4 +133,28 @@ describe('installed command documentation', () => {
     expect(source).toContain('./scripts/zig.sh build -Doptimize=ReleaseFast');
     expect(source).toContain('./zig-out/bin/zinc');
   });
+});
+
+test('stable examples do not silently require development-only CLI and discovery features', async () => {
+  for (const file of ['README.md', 'docs/AGENT_SETUP.md', 'docs/RUNNING_ZINC.md', 'docs/API.md']) {
+    const markdown = await readFile(resolve(import.meta.dir, '../..', file), 'utf8');
+    for (const example of consumerShellExamples(markdown)) {
+      expect(example, file).not.toMatch(
+        /\bzinc serve\b|--no-browser|\bzinc (?:--version|--check) --json|\/v1\/capabilities/,
+      );
+    }
+  }
+});
+
+test('shared harness introductions do not classify OpenClaw as a coding-only client', async () => {
+  const root = resolve(import.meta.dir, '../..');
+  const readme = await readFile(resolve(root, 'README.md'), 'utf8');
+  const page = await readFile(resolve(root, 'site/src/pages/zinc/index.astro'), 'utf8');
+  expect(readme).toContain('## Connect harnesses');
+  expect(page).toContain('Connect harnesses');
+  expect(readme).not.toContain('## Coding harnesses');
+  expect(page).not.toContain('>Coding harnesses<');
+  expect(await readFile(resolve(root, 'docs/OPENCLAW.md'), 'utf8')).toStartWith(
+    '# OpenClaw with ZINC\n\nConnect OpenClaw to a model served by ZINC.',
+  );
 });
