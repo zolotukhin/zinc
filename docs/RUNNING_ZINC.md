@@ -528,16 +528,18 @@ That usually points to environment issues before it points to the model:
 ```bash
 zinc --help
 zinc --check -m /path/to/model.gguf
-zig build test --summary all
 vulkaninfo --summary
 ```
 
-Those four commands answer most “why is this not working?” questions:
+Those commands answer most “why is this not working?” questions:
 
 - is the CLI wired correctly?
 - does the machine/model preflight look sane?
-- does the codebase still pass its test suite?
 - does Vulkan actually see the GPU?
+
+For source-build regression diagnostics, run `./scripts/zig.sh build test --summary all`
+from the checkout. See [development tests](DEVELOPMENT.md#test) for the compiler
+and tooling requirements; installed binary users can skip that step.
 
 ## Related docs
 

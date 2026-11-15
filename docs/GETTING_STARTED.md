@@ -31,6 +31,11 @@ The chat UI steps below apply to Vulkan and Metal. For ROCm, use the
 
 ## Install ZINC
 
+**Apple Silicon:** choose an [unsigned Metal preview](BINARY_RELEASES.md) or
+follow the [macOS source-build steps](#macos-apple-silicon). Experimental CUDA
+and unreleased changes use the [source-build instructions](#build-from-source).
+The installer commands below are for Linux.
+
 For a supported Linux x86-64 machine, download the installer from the published
 release and inspect it before running it:
 
@@ -51,10 +56,6 @@ Check the [release requirements and qualified hardware](BINARY_RELEASES.md)
 for your selected archive. Install the GPU driver/runtime first; prebuilt Vulkan
 archives already contain their compiled shaders and need no shader compiler.
 The installer keeps the runtime assets with the executable.
-
-For Apple Silicon previews, experimental CUDA, or changes to ZINC itself,
-see [building from source](#build-from-source) below and the
-[binary release guide](BINARY_RELEASES.md) for platform availability.
 
 **AMD with Vulkan:** set `export RADV_PERFTEST=coop_matrix` in this terminal
 before checking the GPU or running a model. Skip this for ROCm, Intel Arc,

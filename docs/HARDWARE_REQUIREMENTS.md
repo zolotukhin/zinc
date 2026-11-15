@@ -154,7 +154,7 @@ its OpenAI-compatible endpoints and backend-specific limitations.
 ### Apple Silicon requirements
 
 - **OS**: macOS
-- **Tools**: Xcode Command Line Tools (`xcode-select --install`)
+- **Source-build tools**: Xcode Command Line Tools (`xcode-select --install`)
 - Native Metal runtime; no external GPU framework or Python environment required
 
 ### Apple Silicon memory guide
@@ -257,14 +257,17 @@ zinc --check
 
 ## Shortest path to success
 
+First [install the matching binary](BINARY_RELEASES.md), or [build from source](GETTING_STARTED.md#build-from-source)
+and put its `bin` directory on PATH. Linux release users need no compiler.
+Metal preview users can follow the [macOS setup](GETTING_STARTED.md#macos-apple-silicon).
+
 ### On Linux with an AMD GPU through Vulkan
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-zig build -Doptimize=ReleaseFast
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-zinc chat
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
@@ -272,11 +275,10 @@ Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
 ### On Linux with an AMD RDNA4 GPU through ROCm
 
 ```bash
-ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
 rocminfo
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-ROCR_VISIBLE_DEVICES=0 zinc chat
+ROCR_VISIBLE_DEVICES=0 zinc --model-id qwen35-9b-q4k-m --chat --prompt "Hello"
 ```
 
 Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, troubleshooting, and performance switches.
@@ -284,10 +286,9 @@ Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, tro
 ### On Linux with an Intel Arc GPU
 
 ```bash
-zig build -Doptimize=ReleaseFast
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-zinc chat
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 Then see [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for Arc B-series hardware details and current tuning notes.
@@ -295,10 +296,9 @@ Then see [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for Arc B-series
 ### On macOS with Apple Silicon
 
 ```bash
-zig build -Doptimize=ReleaseFast
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-zinc chat
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 Then see [Apple Silicon Reference](/zinc/docs/apple-silicon-reference/) and [Apple Metal Reference](/zinc/docs/apple-metal-reference/) for platform details.

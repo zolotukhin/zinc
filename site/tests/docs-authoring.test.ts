@@ -91,6 +91,13 @@ describe('installed command documentation', () => {
     expect(consumerShellExamples(markdown)).toEqual(['zinc model list', 'zinc --check']);
   });
 
+  test('legacy compiler commands stay visible to the installed-usage guard', () => {
+    const command = 'ROCM_PATH=/opt/rocm zig build -Dbackend=rocm';
+    expect(consumerShellExamples('## Run\n```bash\n' + command + '\nzinc --check\n```')).toEqual([
+      command + '\nzinc --check',
+    ]);
+  });
+
   test('consumer examples use zinc and downloaded helpers instead of a checkout', async () => {
     const files = [
       'README.md',
@@ -109,7 +116,9 @@ describe('installed command documentation', () => {
       );
       expect(examples.length, file).toBeGreaterThan(0);
       for (const example of examples) {
-        expect(example, file).not.toMatch(/zig-out\/bin\/zinc|(?:node|bun) (?:\.\/)?tools\/setup_/);
+        expect(example, file).not.toMatch(
+          /zig-out\/bin\/zinc|(?:node|bun) (?:\.\/)?tools\/setup_|(?:zig|scripts\/zig\.sh)\s+build/,
+        );
       }
     }
   });
