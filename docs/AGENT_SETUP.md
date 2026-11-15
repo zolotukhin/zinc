@@ -82,7 +82,7 @@ For older servers returning 404, use `/health` and `/v1/models` and the document
 backend matrix. Treat absent capabilities as unknown; never infer support from
 the backend's name alone. The helpers' live checks remain necessary.
 
-JSON diagnostics emit one document on stdout, with status messages on stderr.
+JSON diagnostics reserve stdout for one document; runtime logs use stderr.
 Exit code 0 means the preflight completed without failures; exit code 1 means a
 diagnostic failed. `result` distinguishes `ready`, `ready_with_warnings` and
 `not_ready`. Memory estimates include context and native serving slots but do

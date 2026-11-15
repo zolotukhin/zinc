@@ -584,9 +584,15 @@ pub fn handleConnection(
     if (request.method == .GET and std.mem.eql(u8, request.path, "/health")) {
         try handleHealth(conn, manager, server_state);
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/capabilities")) {
-        var snapshot = try manager.discoverySnapshot(allocator);
+        var snapshot = manager.discoverySnapshot(allocator) catch {
+            try conn.sendError(500, "internal_error", "Failed to describe the loaded model");
+            return;
+        };
         defer snapshot.deinit(allocator);
-        const body = try std.json.Stringify.valueAlloc(allocator, snapshot.value, .{});
+        const body = std.json.Stringify.valueAlloc(allocator, snapshot.value, .{}) catch {
+            try conn.sendError(500, "internal_error", "Failed to serialize capabilities");
+            return;
+        };
         defer allocator.free(body);
         try conn.sendJson(200, body);
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/models")) {
@@ -667,9 +673,15 @@ fn buildHealthJson(
 
 fn handleHealth(conn: *http.Connection, manager: *model_manager_mod.ModelManager, server_state: *const ServerState) !void {
     var buf: [4096]u8 = undefined;
-    var snapshot = try manager.discoverySnapshot(conn.allocator);
+    var snapshot = manager.discoverySnapshot(conn.allocator) catch {
+        try conn.sendError(500, "internal_error", "Failed to describe the loaded model");
+        return;
+    };
     defer snapshot.deinit(conn.allocator);
-    const body = try buildHealthJson(server_state, snapshot.display_name, manager.currentMemoryUsage(), snapshot.value, &buf);
+    const body = buildHealthJson(server_state, snapshot.display_name, manager.currentMemoryUsage(), snapshot.value, &buf) catch {
+        try conn.sendError(500, "internal_error", "Failed to serialize health");
+        return;
+    };
     try conn.sendJson(200, body);
 }
 

@@ -2165,8 +2165,14 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
         }
         var health_buf: [4096]u8 = undefined;
         var writer = std.Io.Writer.fixed(&health_buf);
-        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch return;
-        capabilities_mod.writeHealth(value, &writer) catch return;
+        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch {
+            conn.sendError(500, "internal_error", "Failed to describe the loaded model") catch {};
+            return;
+        };
+        capabilities_mod.writeHealth(value, &writer) catch {
+            conn.sendError(500, "internal_error", "Failed to serialize health") catch {};
+            return;
+        };
         const health = writer.buffered();
         conn.sendJson(200, health) catch {};
         return;
@@ -2174,8 +2180,14 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
     // 3c throughput gate: cumulative decode/prefill counters. Diff two snapshots
     // around a B-concurrent phase → aggregate decode tok/s + mean batch occupancy.
     if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/capabilities")) {
-        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch return;
-        const body = std.json.Stringify.valueAlloc(ctx.allocator, value, .{}) catch return;
+        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch {
+            conn.sendError(500, "internal_error", "Failed to describe the loaded model") catch {};
+            return;
+        };
+        const body = std.json.Stringify.valueAlloc(ctx.allocator, value, .{}) catch {
+            conn.sendError(500, "internal_error", "Failed to serialize capabilities") catch {};
+            return;
+        };
         defer ctx.allocator.free(body);
         conn.sendJson(200, body) catch {};
         return;
@@ -2746,6 +2758,9 @@ fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: st
         try printDiagnosticCheck(writer, report, .ok, "Compute target", "sm_{d}; {d} SMs", .{ device.computeCapability(), device.smCount() });
     }
     if (check_target.model_path) |path| {
+        // An explicit model selection is part of the requested preflight:
+        // unreadable/unsupported GGUFs must not produce a successful readiness
+        // check. This intentionally corrects the earlier unconditional READY.
         const inspection = loader_cuda_mod.inspectModel(path, allocator) catch |err| {
             try printDiagnosticCheck(writer, report, .fail, "Model", "Inspection failed: {s}", .{@errorName(err)});
             return error.DiagnosticsFailed;
@@ -2790,7 +2805,7 @@ fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: st
             try printDiagnosticCheck(writer, report, .warn, "Estimated budget exceeded", "Reduce --context or --parallel before inference; this is an estimate, not an allocation test", .{});
         }
     } else if (check_target.managed_model) |managed| {
-        try printDiagnosticCheck(writer, report, if (managed.required_vram_bytes > free) .fail else .warn, "Model fit (catalog)", "{s}: {d:.2} GiB catalog requirement vs {d:.2} GiB free; pull the model for a context/slot estimate", .{ managed.id, bytesToGiBf(managed.required_vram_bytes), bytesToGiBf(free) });
+        try printDiagnosticCheck(writer, report, .warn, "Model fit (catalog)", "{s}: {d:.2} GiB catalog requirement vs {d:.2} GiB free; pull the model for a context/slot estimate", .{ managed.id, bytesToGiBf(managed.required_vram_bytes), bytesToGiBf(free) });
     } else {
         try printDiagnosticCheck(writer, report, .skip, "Model fit", "No model selected; only device readiness was checked", .{});
     }
@@ -2809,42 +2824,45 @@ fn runCheck(config: Config, allocator: std.mem.Allocator) !void {
     var stdout_buffer: [8192]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(host_io.io, &stdout_buffer);
     const writer = if (config.json_output) &hidden.writer else &stdout.interface;
-    const failure: ?anyerror = check: {
-        var target = resolveCheckTarget(config, allocator) catch |err| {
-            try printDiagnosticCheck(writer, &report, .fail, "Model selection", "{s}", .{@errorName(err)});
-            break :check err;
-        };
-        defer target.deinit(allocator);
-        // Own the display id until serialization; target paths may be allocated.
-        const model = if (target.managed_model) |managed| managed.id else if (target.model_path) |path| std.fs.path.basename(path) else null;
-        if (model) |id| report.model = try allocator.dupe(u8, id);
-        if (comptime gpu.is_cuda) {
-            runCudaCheck(config, target, allocator, writer, &report) catch |err| break :check err;
-        } else {
-            const shader_dir = runtime_assets.resolveShaderDir(allocator, if (gpu.is_metal) .metal else .spirv) catch |err| {
-                try printDiagnosticCheck(writer, &report, .fail, "Runtime assets", "{s}", .{@errorName(err)});
-                break :check err;
-            };
-            defer allocator.free(shader_dir);
-            diagnostics_mod.run(.{
-                .device_index = config.gpuDevicePreference(),
-                .model_path = target.model_path,
-                .requested_context_length = config.context_length,
-                .managed_model = target.managed_model,
-                .shader_dir = shader_dir,
-                .report = &report,
-                .output_writer = writer,
-            }, allocator) catch |err| break :check err;
-        }
-        break :check null;
+    const failure: ?anyerror = blk: {
+        runCheckInto(config, allocator, writer, &report) catch |err| break :blk err;
+        break :blk null;
     };
-    defer if (report.model) |id| allocator.free(id);
     if (failure) |err| {
-        if (report.fail == 0) try printDiagnosticCheck(writer, &report, .fail, "Diagnostics", "{s}", .{@errorName(err)});
+        report.markFatal(err);
+        if (!config.json_output) try writer.print("\nDiagnostics failed: {s} [FAIL]\n", .{@errorName(err)});
     }
     if (config.json_output) try report.writeJson(&stdout.interface);
     try stdout.interface.flush();
     if (failure) |err| return err;
+}
+
+fn runCheckInto(config: Config, allocator: std.mem.Allocator, writer: *std.Io.Writer, report: *diagnostic_report.Report) !void {
+    var target = resolveCheckTarget(config, allocator) catch |err| {
+        try printDiagnosticCheck(writer, report, .fail, "Model selection", "{s}", .{@errorName(err)});
+        return err;
+    };
+    defer target.deinit(allocator);
+    const model = if (target.managed_model) |managed| managed.id else if (target.model_path) |path| std.fs.path.basename(path) else null;
+    if (model) |id| try report.setModel(id);
+    if (comptime gpu.is_cuda) {
+        try runCudaCheck(config, target, allocator, writer, report);
+    } else {
+        const shader_dir = runtime_assets.resolveShaderDir(allocator, if (gpu.is_metal) .metal else .spirv) catch |err| {
+            try printDiagnosticCheck(writer, report, .fail, "Runtime assets", "{s}", .{@errorName(err)});
+            return err;
+        };
+        defer allocator.free(shader_dir);
+        try diagnostics_mod.run(.{
+            .device_index = config.gpuDevicePreference(),
+            .model_path = target.model_path,
+            .requested_context_length = config.context_length,
+            .managed_model = target.managed_model,
+            .shader_dir = shader_dir,
+            .report = report,
+            .output_writer = writer,
+        }, allocator);
+    }
 }
 
 /// Bytes → GiB as f64 for diagnostics formatting.
