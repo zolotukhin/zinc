@@ -9,7 +9,7 @@ import sys
 
 from release_lib import require, sha256
 
-COMPONENTS = ("dpcpp_linux-64", "intel-sycl-rt", "mkl-devel-dpcpp", "onednn", "onedpl-devel")
+COMPONENTS = ("dpcpp_linux-64", "intel-sycl-rt", "mkl-devel-dpcpp", "onednn", "onednn-devel", "onedpl-devel")
 
 
 def stack_manifest(prefix):
@@ -23,14 +23,84 @@ def stack_manifest(prefix):
         require(isinstance(name, str) and name not in packages, "duplicate or invalid native package identity")
         packages[name] = {key: row.get(key) for key in ("name", "version", "build", "sha256", "channel")}
     for name in COMPONENTS:
-        require(name in packages and isinstance(packages[name]["version"], str)
+        require(name in packages and all(isinstance(packages[name][key], str) and packages[name][key]
+                                        for key in ("version", "build"))
                 and re.fullmatch(r"[a-f0-9]{64}", packages[name].get("sha256") or ""),
                 "native package identity is missing: " + name)
+    require(all(packages["onednn"][key] == packages["onednn-devel"][key] for key in ("version", "build")),
+            "oneDNN runtime and development packages must match")
     rows = [packages[name] for name in sorted(packages)]
     return {"packages": rows, "sha256": hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()}
 
 
-def build_manifest(directory, source):
+def onednn_development(prefix):
+    """Validate the selected GPU headers/library, without initializing a driver."""
+    prefix = Path(prefix).resolve()
+    packages = {row["name"]: row for row in stack_manifest(prefix)["packages"]}
+    header = (prefix / "include/oneapi/dnnl/dnnl_version.h").resolve()
+    config = (prefix / "include/oneapi/dnnl/dnnl_config.h").resolve()
+    library = (prefix / "lib/libdnnl.so").resolve()
+    require(all(path.is_file() and prefix in path.parents for path in (header, config, library)),
+            "selected oneDNN development files or library are missing")
+    version = []
+    text = header.read_text()
+    for part in ("MAJOR", "MINOR", "PATCH"):
+        matches = re.findall(r"^\s*#\s*define\s+DNNL_VERSION_" + part + r"\s+(\d+)\s*$", text, re.M)
+        require(len(matches) == 1, "oneDNN header version is missing or ambiguous")
+        version.append(int(matches[0]))
+    soname = re.fullmatch(r"libdnnl\.so\.(\d+)\.(\d+)(?:\.\d+)*", library.name)
+    require(soname and [int(soname[1]), int(soname[2])] == version[:2], "oneDNN header/library ABI versions differ")
+    settings = config.read_text()
+    for name, expected in (("DNNL_GPU_RUNTIME", "DNNL_RUNTIME_SYCL"), ("DNNL_GPU_VENDOR", "DNNL_VENDOR_INTEL")):
+        matches = re.findall(r"^\s*#\s*define\s+" + name + r"\s+(\w+)\s*$", settings, re.M)
+        require(matches == [expected], "oneDNN development package does not declare an Intel SYCL GPU runtime")
+    return {"version": ".".join(map(str, version)), "package_version": packages["onednn"]["version"],
+            "package_build": packages["onednn"]["build"], "gpu_runtime": "SYCL", "gpu_vendor": "INTEL",
+            "library_name": library.name, "library_sha256": sha256(library),
+            "header_sha256": {"dnnl_version.h": sha256(header), "dnnl_config.h": sha256(config)}}
+
+
+def onednn_cmake_content(version):
+    return '''# ZINC adapter for Intel's conda oneDNN package, which ships no CMake config.
+# Generated only after validating matching package identities and GPU headers.
+get_filename_component(_ZINC_DNNL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(DNNL_FOUND TRUE)
+set(DNNL_GPU_VENDOR "INTEL")
+set(DNNL_VERSION "@VERSION@")
+if(NOT TARGET DNNL::dnnl)
+  add_library(DNNL::dnnl SHARED IMPORTED)
+  set_target_properties(DNNL::dnnl PROPERTIES
+    IMPORTED_CONFIGURATIONS "RELEASE"
+    IMPORTED_LOCATION "${_ZINC_DNNL_PREFIX}/lib/libdnnl.so"
+    IMPORTED_LOCATION_RELEASE "${_ZINC_DNNL_PREFIX}/lib/libdnnl.so"
+    INTERFACE_INCLUDE_DIRECTORIES "${_ZINC_DNNL_PREFIX}/include")
+endif()
+unset(_ZINC_DNNL_PREFIX)
+'''.replace("@VERSION@", version)
+
+
+def prepare_onednn_cmake(prefix):
+    """Adapt Intel's header-only devel archive to llama.cpp's CMake discovery."""
+    prefix = Path(prefix).resolve()
+    development = onednn_development(prefix)
+    directory = prefix / "lib/cmake/dnnl"
+    require(prefix in directory.resolve().parents, "oneDNN CMake adapter escapes the selected prefix")
+    # Intel's conda devel package has headers, but no CMake package config.
+    # Derive the GPU label from those validated headers; never bypass the
+    # upstream CPU-only-package guard by unconditionally forcing that label.
+    content = onednn_cmake_content(development["version"])
+    path = directory / "dnnl-config.cmake"
+    require(prefix in path.resolve().parents, "oneDNN CMake adapter escapes the selected prefix")
+    if path.exists():
+        require(path.read_text() == content, "preserve the existing oneDNN CMake configuration")
+    else:
+        directory.mkdir(parents=True, exist_ok=True)
+        with path.open("x") as stream:
+            stream.write(content)
+    return {"origin": "ZINC conda compatibility adapter", "development": development, "config_sha256": sha256(path)}
+
+
+def build_manifest(directory, source, prefix=None):
     """Retain compile-time precision without publishing CMake's private paths."""
     cache = Path(directory).resolve().parent / "CMakeCache.txt"
     require(cache.is_file(), "SYCL reference needs its original CMake build cache")
@@ -46,7 +116,20 @@ def build_manifest(directory, source):
                 "GGML_SYCL_SUPPORT_XMX": "ON", "GGML_SYCL_GRAPH": "ON", "GGML_SYCL_DNN": "ON"}
     require(all(values.get(key) == value for key, value in expected.items()), "SYCL reference build settings differ")
     require(values.get("GGML_SYCL_F16") in ("ON", "OFF"), "SYCL reference precision is missing")
-    return {"cache_sha256": sha256(cache), "settings": {**expected, "GGML_SYCL_F16": values["GGML_SYCL_F16"]}}
+    result = {"cache_sha256": sha256(cache), "settings": {**expected, "GGML_SYCL_F16": values["GGML_SYCL_F16"]}}
+    if prefix is not None:
+        prefix = Path(prefix).resolve()
+        configured = values.get("DNNL_DIR")
+        require(configured and Path(configured).resolve() == (prefix / "lib/cmake/dnnl").resolve()
+                and prefix in Path(configured).resolve().parents,
+                "configure oneDNN explicitly inside the selected SDK prefix")
+        config = (prefix / "lib/cmake/dnnl/dnnl-config.cmake").resolve()
+        require(config.is_file() and prefix in config.parents, "selected oneDNN CMake configuration is missing or external")
+        development = onednn_development(prefix)
+        require(config.read_text() == onednn_cmake_content(development["version"]),
+                "selected oneDNN CMake adapter differs from the validated prefix-only configuration")
+        result["onednn_development"] = {**development, "cmake_config_sha256": sha256(config)}
+    return result
 
 
 def environment(prefix, base, graphs=False, dnn=True, onednn_attention=True):
@@ -141,12 +224,12 @@ def opencl_gpu_probe(library):
             "driver_library_sha256": opencl_driver_evidence()}
 
 
-def runtime_evidence(pid, prefix):
+def runtime_evidence(pid, prefix, development=None):
     """Prove which SYCL/UR libraries the live model server actually loaded."""
-    return runtime_evidence_from_maps(Path(f"/proc/{pid}/maps").read_text(), prefix)
+    return runtime_evidence_from_maps(Path(f"/proc/{pid}/maps").read_text(), prefix, development)
 
 
-def runtime_evidence_from_maps(text, prefix):
+def runtime_evidence_from_maps(text, prefix, development=None):
     prefix = Path(prefix).resolve()
     paths = {}
     for line in text.splitlines():
@@ -167,10 +250,18 @@ def runtime_evidence_from_maps(text, prefix):
     require(any(name.startswith("libsycl.so") for name in paths)
             and any(name.startswith("libur_adapter_level_zero") for name in paths),
             "baseline did not load the selected SYCL and Level Zero runtime")
-    return {"runtime": "level_zero", "library_sha256": {name: sha256(path) for name, path in sorted(paths.items())}}
+    result = {"runtime": "level_zero", "library_sha256": {name: sha256(path) for name, path in sorted(paths.items())}}
+    if development is not None:
+        require(result["library_sha256"].get(development.get("library_name")) == development.get("library_sha256")
+                and isinstance(development.get("library_sha256"), str),
+                "server oneDNN runtime differs from the selected development SDK")
+    return result
 
 
 if __name__ == "__main__":
-    require(sys.platform.startswith("linux") and len(sys.argv) == 3 and sys.argv[1] == "--probe-opencl",
-            "OpenCL discovery runs only as an owned remote benchmark child")
-    print(json.dumps(opencl_gpu_probe(sys.argv[2])))
+    if len(sys.argv) == 3 and sys.argv[1] == "--prepare-onednn-cmake":
+        print(json.dumps(prepare_onednn_cmake(sys.argv[2])))
+    else:
+        require(sys.platform.startswith("linux") and len(sys.argv) == 3 and sys.argv[1] == "--probe-opencl",
+                "OpenCL discovery runs only as an owned remote benchmark child")
+        print(json.dumps(opencl_gpu_probe(sys.argv[2])))

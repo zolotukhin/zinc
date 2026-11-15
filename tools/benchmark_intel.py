@@ -151,7 +151,8 @@ def native_reference_validation(args, work, env, reference_env, record=None):
     log = work / "native-reference-validation.log"
     with gpu.process(performance_reference_command(args, port), log, work,
                      gpu.reference_environment(args.llama_bin, reference_env)) as child:
-        with process_observations(record, [("runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix))]):
+        with process_observations(record, [("runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix,
+                                                                                 getattr(args, "onednn_development", None)))]):
             gpu.ready(child, port, require_ok=True)
             record["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"), "sycl")
             record["performance_configuration_checked"] = True
@@ -632,7 +633,8 @@ def main():
                 devices = [p for p in Path("/sys/class/drm").glob("renderD*/device/vendor") if p.read_text().strip() == "0x8086"]
                 require(len(devices) == 1, "cross-backend comparison requires exactly one physical Intel render device")
                 report["native_stack"] = sycl.stack_manifest(args.sycl_prefix)
-                report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source)
+                report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source, args.sycl_prefix)
+                args.onednn_development = report["native_build"]["onednn_development"]
                 report["settings"]["native_runtime"] = {key: reference_env[key] for key in (
                     "GGML_SYCL_ENABLE_GRAPH", "GGML_SYCL_ENABLE_DNN", "GGML_SYCL_FA_ONEDNN")}
                 report["native_probe"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
@@ -693,7 +695,7 @@ def main():
                                 current["processes"].append(process)
                                 collectors = [("memory", memory.snapshot)]
                                 if engine == "llama" and args.reference_backend == "sycl":
-                                    collectors.append(("native_runtime", lambda pid=child.pid, prefix=args.sycl_prefix: sycl.runtime_evidence(pid, prefix)))
+                                    collectors.append(("native_runtime", lambda pid=child.pid, prefix=args.sycl_prefix: sycl.runtime_evidence(pid, prefix, args.onednn_development)))
                                 with process_observations(process, collectors):
                                     for scenario in scenarios:
                                         for iteration in range(args.warmup + args.runs):
@@ -734,7 +736,7 @@ def main():
             report["hardware_unchanged"] = True
             if args.reference_backend == "sycl":
                 report["native_stack_after"] = sycl.stack_manifest(args.sycl_prefix)
-                report["native_build_after"] = sycl.build_manifest(args.llama_bin, args.llama_source)
+                report["native_build_after"] = sycl.build_manifest(args.llama_bin, args.llama_source, args.sycl_prefix)
                 report["native_probe_after"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
                 report["native_opencl_after"] = json.loads(gpu.output([sys.executable, str(ROOT / "tools/intel_sycl_environment.py"),
                                             "--probe-opencl", str(args.sycl_prefix / "lib/libOpenCL.so.1")], reference_env, timeout=60))
