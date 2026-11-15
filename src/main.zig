@@ -2089,6 +2089,8 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
     log.info("ZINC {s} server listening on :{d} (slots={d}, ctx={d}, eos={d}, debug_ids={})", .{
         accelerator_name, config.port, nslots, slot_ctx, eos, debug_ids,
     });
+    log.info("API base URL: http://localhost:{d}/v1", .{config.port});
+    log.info("Health: http://localhost:{d}/health", .{config.port});
 
     while (true) {
         const conn = server.accept() catch |err| {
@@ -2737,6 +2739,12 @@ fn printDiagnosticCheck(writer: *std.Io.Writer, report: *diagnostic_report.Repor
     try writer.print(" [{s}]\n", .{status.label()});
 }
 
+fn modelInspectionFailureStatus(config: Config) diagnostic_report.Status {
+    // -m/--model and --model-id explicitly request a model preflight, as on
+    // Vulkan/Metal. A system-only check must not fail on optional inspection.
+    return if (config.model_path != null or config.model_id != null) .fail else .warn;
+}
+
 fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: std.mem.Allocator, writer: *std.Io.Writer, report: *diagnostic_report.Report) !void {
     try writer.writeAll("\n=== ZINC System Diagnostics ===\n");
     try printDiagnosticCheck(writer, report, .ok, "Backend", "{s} on {s}/{s}", .{ build_info.backend, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
@@ -2762,13 +2770,17 @@ fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: st
         // unreadable/unsupported GGUFs must not produce a successful readiness
         // check. This intentionally corrects the earlier unconditional READY.
         const inspection = loader_cuda_mod.inspectModel(path, allocator) catch |err| {
-            try printDiagnosticCheck(writer, report, .fail, "Model", "Inspection failed: {s}", .{@errorName(err)});
-            return error.DiagnosticsFailed;
+            const status = modelInspectionFailureStatus(config);
+            try printDiagnosticCheck(writer, report, status, "Model", "Inspection failed: {s}", .{@errorName(err)});
+            if (status == .fail) return error.DiagnosticsFailed;
+            return;
         };
         const cfg = inspection.config;
         if (cfg.architecture == .unknown) {
-            try printDiagnosticCheck(writer, report, .fail, "Model", "Unsupported architecture", .{});
-            return error.DiagnosticsFailed;
+            const status = modelInspectionFailureStatus(config);
+            try printDiagnosticCheck(writer, report, status, "Model", "Unsupported architecture", .{});
+            if (status == .fail) return error.DiagnosticsFailed;
+            return;
         }
         try printDiagnosticCheck(writer, report, .ok, "Model", "{s}; {d} layers", .{ @tagName(cfg.architecture), cfg.n_layers });
         const format = @import("compute/kv_storage.zig").Format.parse(host_io.getenv("ZINC_KV_CACHE")) catch |err| {
@@ -2934,6 +2946,10 @@ pub fn main(process_init: std.process.Init) !void {
                 if ((config.command == .chat or config.command == .serve) and !gpu.is_cuda) {
                     log.info("No startup model specified; starting HTTP server with no model loaded.", .{});
                     break :blk null;
+                }
+                if (config.command == .serve or config.command == .chat) {
+                    log.err("{s} serving needs a startup model. Pass --model-id <id> or -m <model.gguf>; use `zinc model list` to choose one.", .{accelerator_name});
+                    std.process.exit(1);
                 }
                 log.warn("No model specified (-m/--model or --model-id) and no active managed model is configured. Use --help for common usage or --help-all for developer flags.", .{});
                 return;
@@ -3999,6 +4015,16 @@ test "JSON diagnostics and version accept flags in either order" {
         try std.testing.expect(config.show_version or config.check);
     }
     try std.testing.expectError(error.UnsupportedJsonOutput, parseArgs(&.{ "zinc", "serve", "--json" }));
+}
+
+test "model-check failures require an explicit model selector" {
+    try std.testing.expectEqual(diagnostic_report.Status.warn, modelInspectionFailureStatus(try parseArgs(&.{ "zinc", "--check" })));
+    for ([_][]const [:0]const u8{
+        &.{ "zinc", "--check", "-m", "/fixtures/unreadable.gguf" },
+        &.{ "zinc", "--check", "--model-id", "qwen35-9b-q4k-m" },
+    }) |args| {
+        try std.testing.expectEqual(diagnostic_report.Status.fail, modelInspectionFailureStatus(try parseArgs(args)));
+    }
 }
 
 test "chat opens one browser only on UI backends and respects no-browser" {

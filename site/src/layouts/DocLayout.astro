@@ -116,7 +116,7 @@ function isActive(slug: string): boolean {
       {lastmod && <p class="lastmod">Last updated: {lastmod}</p>}
       <aside class="doc-release-note" data-doc-channel={releaseStatus.channel} aria-label="Documentation version">
         <strong>{releaseStatus.label}</strong>
-        <p>Check <code>zinc --version</code> against your instructions. Features marked “Development” require newer source; installing <a href={STABLE_RELEASE_URL}>{STABLE_RELEASE}</a> keeps that release’s feature set. <a href="/zinc/docs/binary-releases/">Release installation and requirements →</a></p>
+        <p>“Development” sections need newer source. <a href={STABLE_RELEASE_URL}>Stable {STABLE_RELEASE}</a> · <a href="/zinc/docs/binary-releases/">Requirements</a></p>
       </aside>
       <slot />
     </article>

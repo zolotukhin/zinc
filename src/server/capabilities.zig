@@ -28,7 +28,9 @@ pub const Info = struct {
 };
 
 pub fn currentBackend() Backend {
-    return std.meta.stringToEnum(Backend, build_info.backend) orelse unreachable;
+    // Validate the compile-time build option before producing an executable.
+    // An invalid package identity must not become a runtime discovery panic.
+    return comptime (std.meta.stringToEnum(Backend, build_info.backend) orelse @compileError("Client discovery requires a Vulkan, Metal, ROCm or CUDA build"));
 }
 
 pub fn info(backend: Backend, model: ?[]const u8, context: ?u32, reuse: bool) Info {

@@ -20,7 +20,7 @@ export function docsReleaseStatus(slug: string) {
   ) {
     return {
       channel: 'mixed',
-      label: `Stable Linux ${STABLE_RELEASE} · marked development additions`,
+      label: `Stable ${STABLE_RELEASE} + development`,
     };
   }
   return { channel: 'development', label: 'Current source reference' };

@@ -46,8 +46,9 @@ stdout for the JSON document and stderr for runtime logs.
 
 A native ROCm/CUDA model estimate includes weights, context-sized KV, recurrent
 state and serving slots, plus a stated runtime reserve. Lazy prefill, compiler
-and optional cache allocations can exceed that reserve. A warning or a memory
-estimate is not a successful inference test. Without a selected model,
+and optional cache allocations can exceed that reserve. Only inspected weights exceeding free VRAM fail the native memory check;
+catalog requirements and estimated context/runtime overflow remain warnings.
+A warning or a memory estimate is not a successful inference test. Without a selected model,
 `--check` only checks system/device readiness.
 
 The [agent and app guide](AGENT_SETUP.md) covers discovery and older-server
