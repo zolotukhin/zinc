@@ -1,27 +1,24 @@
 # Running ZINC
 
-> **Current status**: ZINC is still experimental and under active development. The CLI path is the most dependable way to run it today. Server mode exists, but you should still treat it as evolving.
+Install the [binary release](BINARY_RELEASES.md) for your platform and backend,
+then run `zinc` from any working directory. Linux 0.1.0 provides Vulkan and ROCm
+archives; Metal remains a preview and CUDA is experimental.
 
-This page is the shortest path from “the project builds” to “I can actually use it.”
+## Install the command
 
-## Build the binary
-
-From the repo root:
-
-```bash
-./scripts/zig.sh build -Doptimize=ReleaseFast
-```
-
-Linux defaults to Vulkan; macOS defaults to Metal. Each binary contains one
-backend. For AMD ROCm, use the explicit [HIP build instructions](/zinc/docs/rocm/)
-instead. See [backend selection](/zinc/docs/getting-started/#choose-your-backend)
-and [API coverage](/zinc/docs/api/#backend-coverage) before copying settings.
-
-The executable will be here:
+The installer creates `~/.local/bin/zinc` and keeps the executable with its
+matching runtime assets. Add the command directory to your shell's PATH:
 
 ```bash
-./zig-out/bin/zinc
+export PATH="$HOME/.local/bin:$PATH"
+zinc --version
 ```
+
+Zig and a source checkout are needed only when [building from source](DEVELOPMENT.md#build).
+That build produces `./zig-out/bin/zinc`; use that path directly or add its
+`bin` directory to PATH to follow the installed-command examples below.
+Each binary contains one backend. See [backend selection](GETTING_STARTED.md#choose-your-backend)
+and [API coverage](API.md#backend-coverage) before copying settings.
 
 ## Run a preflight check first
 
@@ -32,29 +29,13 @@ This is the fastest way to answer "does this machine, selected GPU backend, and 
 export RADV_PERFTEST=coop_matrix
 
 # General preflight for the backend compiled into this binary
-./zig-out/bin/zinc --check
+zinc --check
 
 # Check one exact GGUF file
-./zig-out/bin/zinc --check -m /path/to/model.gguf
+zinc --check -m /path/to/model.gguf
 
 # Or check one managed model from the built-in catalog
-./zig-out/bin/zinc --check --model-id qwen36-35b-a3b-q4k-xl
-```
-
-On the shared RDNA4 test node, the equivalent command is:
-
-```bash
-# SSH to the shared RDNA4 node
-cd /root/zinc
-
-# General preflight
-./zig-out/bin/zinc --check
-
-# Managed model compatibility by catalog id
-./zig-out/bin/zinc --check --model-id qwen36-35b-a3b-q4k-xl
-
-# Exact GGUF file check
-./zig-out/bin/zinc --check -m /root/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+zinc --check --model-id qwen36-35b-a3b-q4k-xl
 ```
 
 `--check` prints its progress as numbered sections and ends with a summary and verdict. The five sections are:
@@ -86,7 +67,7 @@ Exit behavior:
 
 One common point of confusion on RDNA4: `RADV_PERFTEST` is checked in the shell where you run `--check`. A plain SSH shell can warn even if your long-running service sets `RADV_PERFTEST=coop_matrix` correctly. Intel Arc users do not set `RADV_PERFTEST`.
 
-### Sample outputs from the shared RDNA4 node
+### Historical development-node diagnostics
 
 These outputs were captured on **March 29, 2026** from `/root/zinc` on the shared RDNA4 host.
 
@@ -145,8 +126,8 @@ Most likely cause: the cooperative-matrix path is not enabled in this shell. Set
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc --check                               # should report READY [OK] or READY WITH WARNINGS
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "hi" --chat
+zinc --check                               # should report READY [OK] or READY WITH WARNINGS
+zinc --model-id qwen35-9b-q4k-m --prompt "hi" --chat
 ```
 
 Use `--system-prompt <text>` with `--chat` when CLI prompt construction must
@@ -154,7 +135,7 @@ match an API request that contains a system turn. Those tokens are included in
 prefill timing:
 
 ```bash
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m \
+zinc --model-id qwen38-27b-q4k-m \
   --chat \
   --system-prompt "You are a helpful assistant. Answer directly. Do not show analysis." \
   --prompt "Review this code."
@@ -169,7 +150,7 @@ The Vulkan driver is missing or the wrong one is installed.
 ```bash
 sudo apt install -y libvulkan-dev vulkan-tools mesa-vulkan-drivers   # AMD: Mesa/RADV
 vulkaninfo --summary | head -40                                       # confirm the GPU is listed
-./zig-out/bin/zinc --check                                            # rerun
+zinc --check                                            # rerun
 ```
 
 For Intel Arc, ensure a recent Mesa (25.x+) with ANV. For AMD, RADV is the recommended driver — AMDVLK works but is not the primary test target.
@@ -179,7 +160,7 @@ For Intel Arc, ensure a recent Mesa (25.x+) with ANV. For AMD, RADV is the recom
 The model is too large for current VRAM at the auto-allocated context length. Check the actual usage estimate:
 
 ```bash
-./zig-out/bin/zinc --check --model-id qwen35-9b-q4k-m
+zinc --check --model-id qwen35-9b-q4k-m
 # Look for: "VRAM fit (catalog): X.XX / Y.YY GiB device-local (headroom Z.ZZ GiB) [OK|WARN|FAIL]"
 ```
 
@@ -191,7 +172,7 @@ Make sure Xcode command-line tools are installed and you're on Apple Silicon (M1
 
 ```bash
 xcode-select --install
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 If you are on Intel Mac, ZINC's Metal path will not initialize — Apple Silicon only.
@@ -207,16 +188,16 @@ The built-in managed catalog only lists models ZINC has explicitly revalidated f
 ```bash
 # Show models that are tested for the detected GPU profile
 # and estimated to fit current VRAM
-./zig-out/bin/zinc model list
+zinc model list
 
 # Show the full built-in catalog even if local GPU probing is unavailable
-./zig-out/bin/zinc model list --all
+zinc model list --all
 
 # Show the current managed default, if one is configured
-./zig-out/bin/zinc model active
+zinc model active
 ```
 
-Example `./zig-out/bin/zinc model list` output on an AMD RDNA4 32 GB system:
+Example `zinc model list` output on an AMD RDNA4 32 GB system:
 
 ```bash
 Detected GPU profile: amd-rdna4-32gb
@@ -232,26 +213,26 @@ gemma4-26b-a4b-q4k-m           2026-04-02   supported     yes    no          no 
 For machine-readable output (useful for AI agents and scripts):
 
 ```bash
-./zig-out/bin/zinc model list --json
+zinc model list --json
 ```
 
 If you want ZINC to manage downloads and the default startup model for you:
 
 ```bash
 # Download one managed model into the local cache
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
+zinc model pull qwen35-9b-q4k-m
 
 # Mark it as the default managed model for future runs
-./zig-out/bin/zinc model use qwen35-9b-q4k-m
+zinc model use qwen35-9b-q4k-m
 
 # Inspect the current managed default
-./zig-out/bin/zinc model active
+zinc model active
 
 # Remove a cached managed model
-./zig-out/bin/zinc model rm qwen35-9b-q4k-m
+zinc model rm qwen35-9b-q4k-m
 
 # Force-unload it from the local server first if it is still active there
-./zig-out/bin/zinc model rm --force qwen35-9b-q4k-m
+zinc model rm --force qwen35-9b-q4k-m
 ```
 
 `model rm` is conservative by default: if the local ZINC server still has that model loaded in GPU memory, the command refuses and leaves the cache untouched. Use `--force` to have the local server unload it first. If your server uses a non-default port, add `--port <port>` before `model rm`.
@@ -262,7 +243,7 @@ This is the best first command to try on RDNA4:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/model.gguf \
   --prompt "The capital of France is"
 ```
@@ -270,7 +251,7 @@ export RADV_PERFTEST=coop_matrix
 On Intel Arc, use the same command without the RDNA-only environment variable:
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/model.gguf \
   --prompt "The capital of France is"
 ```
@@ -284,7 +265,7 @@ If your machine exposes multiple Vulkan devices and you need to override that
 choice, choose one explicitly:
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/model.gguf \
   -d 1 \
   --prompt "Hello"
@@ -299,7 +280,7 @@ These builds currently ignore `-d`; a Vulkan index is not a native HIP/CUDA inde
 ## Change context length
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/model.gguf \
   -c 8192 \
   --prompt "Summarize this document"
@@ -324,7 +305,7 @@ When you omit `--prompt`, ZINC starts an HTTP API server. Vulkan/Metal also
 include browser chat; ROCm/CUDA expose the API without that UI:
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/model.gguf \
   -p 8080
 ```
@@ -466,7 +447,7 @@ The full API contract is documented in [Serving HTTP API](/zinc/docs/api/).
 ZINC can emit decode-graph artifacts directly from GGUF metadata. The JSON report is model-aware: it includes estimated bytes moved, FLOPs, hotspot ranking, and bottleneck hints for each node.
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/model.gguf \
   --graph-report decode-graph.json \
   --graph-dot decode-graph.dot
@@ -545,8 +526,8 @@ That usually points to environment issues before it points to the model:
 ## Fast troubleshooting commands
 
 ```bash
-./zig-out/bin/zinc --help
-./zig-out/bin/zinc --check -m /path/to/model.gguf
+zinc --help
+zinc --check -m /path/to/model.gguf
 zig build test --summary all
 vulkaninfo --summary
 ```

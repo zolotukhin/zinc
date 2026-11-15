@@ -3,7 +3,8 @@
 ZINC has a supported Linux ROCm backend for AMD GPUs. It reuses the CUDA-side
 model loader and scheduler behind the same C ABI, implemented with HIP, hipRTC,
 and hipBLAS. Vulkan and ROCm are independently supported AMD paths; select ROCm
-explicitly at build time. Each executable contains one backend; a Vulkan
+by choosing its release archive or building with `-Dbackend=rocm`.
+Each executable contains one backend; a Vulkan
 binary does not use ROCm, and a ROCm binary does not require Vulkan, Mesa RADV,
 `glslc`, or `RADV_PERFTEST`. Use `zinc --version` to identify the build.
 
@@ -25,7 +26,7 @@ The current reference configuration is:
 - Linux kernel `7.2.2-070202-generic`
 - ROCm userspace `7.2.4`
 - Radeon AI PRO R9700 (`gfx1201`, wave32)
-- Zig `0.17.1`, pinned by `.zig-version` and selected by `scripts/zig.sh`
+- Source-build compiler: Zig `0.17.1`, pinned by `.zig-version` and selected by `scripts/zig.sh`
 - Qwen 3.5 9B, Qwen 3.6 35B-A3B, and Qwen 3.8 27B
 - Qwen 3.6 dense 27B at 4K in the [packaged prefill follow-up](ROCM_QWEN27_PREFILL.md)
 - Gemma 4 26B-A4B MoE and Gemma 4 31B
@@ -34,7 +35,22 @@ Kernel `7.2.2` is the validated reference, not a build-time requirement. The
 running `amdgpu` driver, ROCr runtime, and ROCm userspace must agree well enough
 for `rocminfo` and a HIP device query to expose the target GPU.
 
-## Build and verify
+## Install and run
+
+Install the ROCm archive with the [published installer](BINARY_RELEASES.md#install-a-published-version):
+
+```bash
+ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
+export PATH="$HOME/.local/bin:$PATH"
+zinc --version
+zinc --check
+```
+
+The `zinc` examples below use that installed command. A source build produces
+`./zig-out/bin/zinc`; use it directly or add its `bin` directory to PATH.
+The ROCm libraries and runtime compilation headers listed above remain required.
+
+## Build from source
 
 Install the ROCm HIP development files that provide `amdhip64`, `hiprtc`, and
 `hipblas`, then build with the toolkit root:
@@ -57,10 +73,12 @@ The standard `/opt/rocm` installation needs no `LD_LIBRARY_PATH` setup. If you
 move a custom toolkit after building, rebuild against its new location or add
 that toolkit's `lib` directory to `LD_LIBRARY_PATH`.
 
+## Run a model
+
 Run a GGUF directly:
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/Qwen3.8-27B-Q4_K_M.gguf \
   --chat --prompt "Explain why fair LLM benchmarks need a warmup." -n 96
 ```
@@ -111,7 +129,7 @@ See the [API matrix](API.md#backend-coverage) for endpoint and default differenc
 Start the server:
 
 ```bash
-./zig-out/bin/zinc \
+zinc \
   -m /path/to/Qwen3.8-27B-Q4_K_M.gguf \
   --parallel 1 --context 2048 --port 9090
 ```

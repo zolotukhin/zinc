@@ -44,7 +44,10 @@ cd zinc
 ./scripts/zig.sh build -Doptimize=ReleaseFast
 ```
 
-The binary lands at `./zig-out/bin/zinc`. The Linux default is Vulkan, which
+The binary lands at `./zig-out/bin/zinc`. That is the source-build output path;
+published installations expose the `zinc` command and need no compiler or checkout.
+Use `zinc` in user-facing examples, and reserve `./zig-out/bin/zinc` for explicit
+source-build, debugging and benchmark workflows. The Linux default is Vulkan, which
 compiles `src/shaders/*.comp` into SPIR-V during the build. macOS uses Metal.
 For AMD ROCm, install the [HIP prerequisites](/zinc/docs/rocm/) and build explicitly:
 

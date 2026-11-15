@@ -51,12 +51,14 @@ Install the pinned client with a compatible Node installation:
 
 ```bash
 npm install --global openclaw@2026.11.1
-node tools/setup_openclaw.mjs setup --project ../my-project
-node tools/setup_openclaw.mjs check --project ../my-project
+curl -fL https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs -o setup-openclaw.mjs
+node setup-openclaw.mjs setup --project ../my-project
+node setup-openclaw.mjs check --project ../my-project
 ```
 
-Or [download the standalone helper](https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs) and use
-`node setup-openclaw.mjs` with the same arguments. The project directory must
+The [standalone helper](https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs)
+needs no ZINC source checkout. In a source checkout, `node tools/setup_openclaw.mjs`
+accepts the same arguments. The project directory must
 already exist. `check` runs the real OpenClaw config validator and verifies ZINC
 health, model identity and available context; it does not generate tokens or
 prove coding ability.
@@ -80,7 +82,7 @@ isolated prefix. The ZINC runtime does not depend on these client packages.
 To connect to a different endpoint, supply its API base at setup time:
 
 ```bash
-node tools/setup_openclaw.mjs setup --project ../my-project \
+node setup-openclaw.mjs setup --project ../my-project \
   --base-url "$ZINC_API_BASE_URL" --api-key-env ZINC_API_KEY
 ```
 
@@ -94,7 +96,7 @@ ID. Rediscover after changing the server's model or context.
 ## Run and verify a task
 
 ```bash
-node tools/setup_openclaw.mjs run --project ../my-project --timeout 300 -- \
+node setup-openclaw.mjs run --project ../my-project --timeout 300 -- \
   "Fix the failing tests, run them, and explain the changes."
 ```
 

@@ -13,7 +13,7 @@ This first implementation supports a single request slot and head dimensions
 divisible by 32. CUDA hardware, other model families, and multi-slot Q8 serving
 are outside this validation.
 
-Build the [ROCm backend](ROCM.md#build-and-verify), then run on the GPU host:
+Build the [ROCm backend](ROCM.md#build-from-source), then run on the GPU host:
 
 ```bash
 ZINC_KV_CACHE=q8 ZINC_Q8_ATTN_F16=1 ZINC_MTP=1 ZINC_PROMPT_CACHE=0 \

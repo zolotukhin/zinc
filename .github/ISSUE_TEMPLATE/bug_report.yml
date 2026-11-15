@@ -24,8 +24,8 @@ body:
       label: Reproduction steps
       description: Include the exact command or sequence of steps.
       placeholder: |
-        1. Build with `./scripts/zig.sh build`
-        2. Run `./zig-out/bin/zinc ...`
+        1. Install a published release (or build from source)
+        2. Run `zinc ...`
         3. Observe failure
     validations:
       required: true
@@ -107,7 +107,7 @@ body:
     attributes:
       label: Exact command
       render: shell
-      placeholder: ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "Hello"
+      placeholder: zinc -m /path/to/model.gguf --prompt "Hello"
     validations:
       required: true
 

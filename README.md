@@ -26,33 +26,37 @@ see [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/) and
 is available for Vulkan and ROCm. The exact published binaries pass all three
 GPU profiles and public installation checks; see the
 [release record](docs/releases/0.1.0-plan.md).
-The commands below build from source.
-
-Install the [prerequisites for your GPU](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)
-first. The default build uses **Vulkan on Linux** and **Metal on macOS**.
-The build wrapper downloads and verifies **Zig 0.17.1** when needed; you do not
-need to replace your system compiler. Python 3 is needed for that initial
-compiler download.
+Install the published Linux Vulkan release without a source checkout:
 
 ```bash
-git clone https://github.com/zolotukhin/zinc.git
-cd zinc
-./scripts/zig.sh build -Doptimize=ReleaseFast
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
 ```
+
+Inspect the downloaded script, then install and add the command to PATH:
+
+```bash
+ZINC_VERSION=v0.1.0 bash install.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Install your GPU driver/runtime first. The installer keeps the executable and
+its matching runtime assets together; running the Vulkan release needs no Zig,
+Git, Python or `glslc`. For Apple Silicon previews, experimental CUDA, or
+unreleased changes, see [building from source](#build-and-contribute).
 
 On AMD with Vulkan, set `export RADV_PERFTEST=coop_matrix` in the same terminal
 before the GPU check or inference. Then check your GPU, download a model, and
 open the chat:
 
 ```bash
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc chat --model-id qwen35-9b-q4k-m
+zinc --check
+zinc model pull qwen35-9b-q4k-m
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 The example uses Qwen 3.5 9B. Check the
 [memory requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)
-before downloading, or run `./zig-out/bin/zinc model list` to browse the catalog.
+before downloading, or run `zinc model list` to browse the catalog.
 You can also load an existing file with `-m /path/to/model.gguf`.
 
 ## Choose your GPU path
@@ -66,12 +70,12 @@ You can also load an existing file with `-m /path/to/model.gguf`.
 | NVIDIA RTX                          | CUDA · experimental | [Requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)        |
 
 Each binary contains one backend; there is no runtime switch or automatic
-fallback between Vulkan and ROCm. For a validated AMD ROCm stack, choose HIP
-at build time:
+fallback between Vulkan and ROCm. For a validated AMD ROCm stack, choose its archive
+when installing:
 
 ```bash
-ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
-./zig-out/bin/zinc --check
+ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
+zinc --check
 ```
 
 Model coverage and performance vary by backend. The
@@ -83,13 +87,13 @@ validated cards, operating systems, drivers, and current limitations.
 **Browser chat** in the default Vulkan or Metal build starts the UI and local API together:
 
 ```bash
-./zig-out/bin/zinc chat --model-id qwen35-9b-q4k-m
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 **One prompt** from the terminal:
 
 ```bash
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --chat --prompt "Explain a ring buffer."
+zinc --model-id qwen35-9b-q4k-m --chat --prompt "Explain a ring buffer."
 ```
 
 **An existing app** can connect to `http://localhost:9090/v1` while the server
@@ -106,9 +110,10 @@ Connect **OpenClaw** with the [dedicated setup helper](tools/setup_openclaw.mjs)
 
 ```bash
 npm install --global openclaw@2026.11.1
-node tools/setup_openclaw.mjs setup --project ../my-project
-node tools/setup_openclaw.mjs check --project ../my-project
-node tools/setup_openclaw.mjs run --project ../my-project -- "Fix the failing tests and run them."
+curl -fL https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs -o setup-openclaw.mjs
+node setup-openclaw.mjs setup --project ../my-project
+node setup-openclaw.mjs check --project ../my-project
+node setup-openclaw.mjs run --project ../my-project -- "Fix the failing tests and run them."
 ```
 
 Use Node 24.16+ in the 24.x line, or Node 26.1+, and start ZINC first. The
@@ -121,10 +126,11 @@ chat and streaming tool calls, and runs headless tasks:
 
 ```bash
 bun add --global --trust @opencode/cli@2.0.21
-bun tools/setup_opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
+curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
+bun setup-opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
   --context auto --output 2048 --steps 16
-bun tools/setup_opencode.mjs check --project ../my-project
-bun tools/setup_opencode.mjs run --project ../my-project --auto \
+bun setup-opencode.mjs check --project ../my-project
+bun setup-opencode.mjs run --project ../my-project --auto \
   --verify 'bun test' -- "Fix the failing tests and run them."
 ```
 
@@ -192,6 +198,23 @@ The earlier [Zig 0.17 MTP optimization study](docs/ROCM_MTP_0_17.md) records a
 separate comparison between two ZINC builds.
 
 ## Build and contribute
+
+Source builds use the pinned **Zig 0.17.1** compiler, downloaded and verified by
+`scripts/zig.sh` when needed. Install the [build prerequisites](https://zolotukhin.ai/zinc/docs/getting-started/#install-dependencies)
+for your backend, plus Git and Python 3 for the initial compiler download:
+
+```bash
+git clone https://github.com/zolotukhin/zinc.git
+cd zinc
+./scripts/zig.sh build -Doptimize=ReleaseFast
+./zig-out/bin/zinc --check
+```
+
+The source build writes `zig-out/bin/zinc` and runtime assets under
+`zig-out/share/zinc/`. Run that output directly, or add `"$PWD/zig-out/bin"`
+to PATH to use the `zinc` commands above. Linux source builds default to Vulkan;
+macOS defaults to Metal. See the [ROCm guide](docs/ROCM.md#build-from-source)
+for an explicit HIP build.
 
 JavaScript tooling requires **Bun 1.4.4 or newer**, pinned in [`.bun-version`](.bun-version).
 Use `bun run format` to format changed files with `bun fmt`.

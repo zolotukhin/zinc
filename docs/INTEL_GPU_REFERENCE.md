@@ -156,7 +156,7 @@ For ZINC, the right sequence is:
 
 ### Model Fit Guide
 
-Use `./zig-out/bin/zinc --check --model-id <id>` for exact fit. The table below is a planning guide for Q4_K-ish GGUFs plus ZINC temporary buffers:
+Use `zinc --check --model-id <id>` for exact fit. The table below is a planning guide for Q4_K-ish GGUFs plus ZINC temporary buffers:
 
 | VRAM class | B-series cards | Practical target                                                         |
 | ---------- | -------------- | ------------------------------------------------------------------------ |

@@ -20,12 +20,12 @@ package dependencies and accepts the same arguments.
 
 ## Start the model server
 
-Build for [your GPU](GETTING_STARTED.md), then start a Qwen model with enough
+Install ZINC for [your GPU](BINARY_RELEASES.md), then start a Qwen model with enough
 context for source files, tool definitions, and tool results:
 
 ```bash
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m -c 16384 --port 9090 --parallel 1
+zinc model pull qwen35-9b-q4k-m
+zinc --model-id qwen35-9b-q4k-m -c 16384 --port 9090 --parallel 1
 ```
 
 The model must fit your GPU. Qwen 3.5 9B is a smaller starting point. The
@@ -62,17 +62,18 @@ and pass the server's actual capacity to setup. That 32K configuration is not a 
 
 ## Configure OpenCode
 
-From the ZINC checkout:
+Install the client and download the standalone helper:
 
 ```bash
 bun add --global --trust @opencode/cli@2.0.21
+curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 
-bun tools/setup_opencode.mjs \
+bun setup-opencode.mjs \
   --project ../my-project \
   --model qwen35-9b-q4k-m \
   --context auto --output 2048 --steps 16
 
-bun tools/setup_opencode.mjs check --project ../my-project
+bun setup-opencode.mjs check --project ../my-project
 ```
 
 For the legacy OpenCode 1 client, install
@@ -93,18 +94,10 @@ silently used a 256-token default and truncated tool calls. The
 [compatibility evidence](https://zolotukhin.ai/zinc/validation/opencode-client-compatibility-2026-11-01.json)
 records the reproduced failure and corrected one-token limits on Intel.
 
-To configure a project without cloning ZINC, download the same script and run it
-with Bun:
-
-```bash
-curl -fsS https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
-bun setup-opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
-  --context auto --output 2048 --steps 16
-bun setup-opencode.mjs check --project ../my-project
-```
-
-Use `bun setup-opencode.mjs run` for the headless commands below when using the
-downloaded file.
+The helper needs no ZINC source checkout. For a source checkout, use
+`bun tools/setup_opencode.mjs` with the same arguments instead of the downloaded
+`bun setup-opencode.mjs`. A source-built server can be started with
+`./zig-out/bin/zinc`; the published installation uses `zinc`.
 
 Setup creates **`opencode.zinc.json`** and a small, versioned context hook in
 **`.zinc/`** in the target project. Keep both when sharing the setup. It leaves
@@ -117,7 +110,7 @@ To preview the exact configuration without writing anything, use `--dry-run`
 creates no directories, hook, or config files:
 
 ```bash
-bun tools/setup_opencode.mjs --dry-run --context 32768
+bun setup-opencode.mjs --dry-run --context 32768
 ```
 
 The default limits are 16,384 context tokens, 4,096 output tokens per turn,
@@ -137,8 +130,8 @@ errors and a ten-second lookup deadline fail before project/config/hook writes.
 The deadline covers the response body as well as the connection.
 
 ```bash
-bun tools/setup_opencode.mjs --project ../my-project --context auto --dry-run
-bun tools/setup_opencode.mjs --project ../my-project --context auto
+bun setup-opencode.mjs --project ../my-project --context auto --dry-run
+bun setup-opencode.mjs --project ../my-project --context auto
 ```
 
 Discovery uses the validated runtime endpoint and `ZINC_API_KEY`; their values
@@ -168,7 +161,7 @@ coding-agent compatibility.
 ## Run a headless task
 
 ```bash
-bun tools/setup_opencode.mjs run \
+bun setup-opencode.mjs run \
   --project ../my-project \
   --auto -- "Fix the failing tests. Read the relevant files, edit the source, and run the tests."
 ```
@@ -190,7 +183,7 @@ deny rules still apply. Use a disposable checkout for evaluation tasks.
 To enforce a project check between editing rounds, pass `--verify`:
 
 ```bash
-bun tools/setup_opencode.mjs run --project ../my-project --auto \
+bun setup-opencode.mjs run --project ../my-project --auto \
   --verify 'bun test' --attempts 3 --timeout-ms 1200000 -- \
   "Implement the agreed feature and pass the project tests."
 ```
@@ -265,10 +258,10 @@ With a model server already running at the matching context limit:
 
 ```bash
 git worktree add -b experiment/opencode ../zinc-opencode HEAD
-bun tools/setup_opencode.mjs --project ../zinc-opencode \
+bun setup-opencode.mjs --project ../zinc-opencode \
   --context 32768 --output 3072 --steps 24
-bun tools/setup_opencode.mjs check --project ../zinc-opencode
-bun tools/setup_opencode.mjs run --project ../zinc-opencode \
+bun setup-opencode.mjs check --project ../zinc-opencode
+bun setup-opencode.mjs run --project ../zinc-opencode \
   --auto --timeout-ms 1200000 --verify './scripts/zig.sh build test' -- \
   "Implement the agreed feature. Read source in ranges of at most 80 lines, edit the code, and run the CPU unit tests. Follow AGENTS.md. Do not start model servers or commit changes. Report actual test results."
 git -C ../zinc-opencode diff --stat

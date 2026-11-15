@@ -67,6 +67,13 @@ try {
           `One native binary · Zig ${compilerVersion} · MIT licensed`,
           'The compiler badge must display the exact repository pin',
         );
+        const install = page.locator('[data-installed-quickstart]');
+        const installCode = await install.locator('pre code').innerText();
+        assert.match(installCode, /ZINC_VERSION=v0\.1\.0 bash install\.sh/);
+        assert.match(installCode, /export PATH="\$HOME\/\.local\/bin:\$PATH"/);
+        assert.match(installCode, /(?:^|\n)zinc --check/);
+        assert.doesNotMatch(installCode, /zig-out|git clone|scripts\/zig\.sh/);
+
         const section = page.locator('[data-coding-harnesses]');
         assert.match(await section.innerText(), /OpenClaw or OpenCode/);
         assert.match(await section.innerText(), /existing project/);
@@ -83,7 +90,7 @@ try {
         assert.match(await claw.locator('pre code').innerText(), /openclaw@2026\.11\.1/);
         assert.match(
           await claw.locator('pre code').innerText(),
-          /setup_openclaw\.mjs (setup|check|run)/,
+          /setup-openclaw\.mjs (setup|check|run)/,
         );
         const code = section.locator('[data-coding-harness="opencode"]');
         assert.match(await code.locator('pre code').innerText(), /--auto --verify 'bun test'/);
@@ -91,6 +98,12 @@ try {
         for (const client of ['openclaw', 'opencode']) {
           const card = section.locator(`[data-coding-harness="${client}"]`);
           assert.equal(await card.locator(`a[href="/zinc/docs/${client}/"]`).isVisible(), true);
+          const commands = await card.locator('pre code').innerText();
+          assert.ok(commands.includes(`https://zolotukhin.ai/zinc/harnesses/setup-${client}.mjs`));
+          assert.ok(
+            commands.includes(`${client === 'openclaw' ? 'node' : 'bun'} setup-${client}.mjs`),
+          );
+          assert.doesNotMatch(commands, /tools\/setup_|zig-out|git clone/);
           const download = card.locator('a[download]');
           assert.equal(await download.getAttribute('download'), `setup-${client}.mjs`);
           assert.equal(await download.getAttribute('href'), `/zinc/harnesses/setup-${client}.mjs`);
