@@ -97,7 +97,8 @@ def prepare_onednn_cmake(prefix):
         directory.mkdir(parents=True, exist_ok=True)
         with path.open("x") as stream:
             stream.write(content)
-    return {"origin": "ZINC conda compatibility adapter", "development": development, "config_sha256": sha256(path)}
+    return {"origin": "ZINC conda compatibility adapter; not an Intel-supplied CMake config",
+            "development": development, "config_sha256": sha256(path)}
 
 
 def build_manifest(directory, source, prefix=None):
@@ -229,6 +230,16 @@ def runtime_evidence(pid, prefix, development=None):
     return runtime_evidence_from_maps(Path(f"/proc/{pid}/maps").read_text(), prefix, development)
 
 
+def require_development_snapshot(development):
+    require(isinstance(development, dict)
+            and isinstance(development.get("library_name"), str)
+            and re.fullmatch(r"libdnnl\.so\.\d+(?:\.\d+)*", development["library_name"])
+            and isinstance(development.get("library_sha256"), str)
+            and re.fullmatch(r"[a-f0-9]{64}", development["library_sha256"]),
+            "native validation needs a recorded oneDNN development library")
+    return development
+
+
 def runtime_evidence_from_maps(text, prefix, development=None):
     prefix = Path(prefix).resolve()
     paths = {}
@@ -252,8 +263,8 @@ def runtime_evidence_from_maps(text, prefix, development=None):
             "baseline did not load the selected SYCL and Level Zero runtime")
     result = {"runtime": "level_zero", "library_sha256": {name: sha256(path) for name, path in sorted(paths.items())}}
     if development is not None:
-        require(result["library_sha256"].get(development.get("library_name")) == development.get("library_sha256")
-                and isinstance(development.get("library_sha256"), str),
+        require_development_snapshot(development)
+        require(result["library_sha256"].get(development["library_name"]) == development["library_sha256"],
                 "server oneDNN runtime differs from the selected development SDK")
     return result
 

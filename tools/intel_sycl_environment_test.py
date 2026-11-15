@@ -258,6 +258,7 @@ class OneDnnDevelopmentTest(unittest.TestCase):
             root = Path(directory); prefix = self.sdk(root)
             before = sycl.stack_manifest(prefix)
             first = sycl.prepare_onednn_cmake(prefix)
+            self.assertIn("not an Intel-supplied CMake config", first["origin"])
             self.assertEqual(first, sycl.prepare_onednn_cmake(prefix))
             self.assertEqual(first["development"]["version"], "3.13.2")
             self.assertEqual(first["development"]["library_name"], "libdnnl.so.3.13")
@@ -350,6 +351,16 @@ file(WRITE "${CMAKE_BINARY_DIR}/selected.txt" "${location}\\n${headers}\\n")
             library.write_bytes(b"same filename, changed runtime")
             with self.assertRaisesRegex(ValueError, "differs from the selected"):
                 sycl.runtime_evidence_from_maps(text, prefix, development)
+
+    def test_malformed_snapshot_cannot_skip_live_library_matching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.sdk(Path(directory)); text = SyclEnvironmentTest().fixture_maps(prefix)
+            for development in ({}, [], {"library_name": "libdnnl.so.3.13"},
+                                {"library_sha256": "a" * 64},
+                                {"library_name": "host-library", "library_sha256": "a" * 64},
+                                {"library_name": "libdnnl.so.3.13", "library_sha256": "invalid"}):
+                with self.subTest(development=development), self.assertRaisesRegex(ValueError, "recorded oneDNN"):
+                    sycl.runtime_evidence_from_maps(text, prefix, development)
 
 
 if __name__ == "__main__":

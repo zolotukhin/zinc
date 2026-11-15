@@ -276,3 +276,32 @@ test('the stable small control cannot bypass a failed correctness preflight', ()
   expect(check.cases.reduce((n, c) => n + c.comparison.tokens, 0)).toBe(48);
   expect(check.cases.reduce((n, c) => n + c.comparison.near_ties.length, 0)).toBe(2);
 });
+
+test('the standalone oneDNN probe retains small numeric variation and explicit determinism separately', () => {
+  const p = report.standalone_onednn_router_probe;
+  expect(p.completed).toBe(true);
+  expect(p.diagnostic_only).toBe(true);
+  expect(p.performance_qualified).toBe(false);
+  expect(p.native_zinc_backend).toBe(false);
+  expect(p.release_qualification).toBe(false);
+  expect(p.shape).toEqual({ m: 256, n: 58, k: 2048 });
+  expect(p.samples).toHaveLength(64);
+  expect(p.source_path).toBe('tools/intel_onednn_matmul_probe.cpp');
+  for (const deterministic of [false, true]) {
+    const rows = p.samples.filter((r) => r.deterministic === deterministic);
+    expect(rows.map((r) => r.run)).toEqual(Array.from({ length: 32 }, (_, i) => i));
+    expect(new Set(rows.map((r) => r.fnv1a64)).size).toBe(deterministic ? 1 : 32);
+    for (const row of rows) {
+      expect(row.guards_intact).toBe(true);
+      expect(row.nonfinite).toBe(0);
+      expect(row.max_absolute_error).toBeGreaterThanOrEqual(0);
+      expect(row.max_absolute_error).toBeLessThan(0.00003);
+      expect(row.max_change_from_first).toBeGreaterThanOrEqual(0);
+      if (deterministic) {
+        expect(row.changed_elements).toBe(0);
+        expect(row.max_change_from_first).toBe(0);
+      } else if (row.run > 0) expect(row.changed_elements).toBeGreaterThan(0);
+    }
+  }
+  expect(() => assertPublicArtifact(p)).not.toThrow();
+});

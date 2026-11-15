@@ -721,10 +721,19 @@ in the small replay, but the attempted four-workload replay stops at the
 correctness gate with two near ties in 48 checked tokens. That exceeds the
 existing agreement policy; no performance measurements are accepted. These
 controls narrow the investigation without identifying a complete upstream
-repair or qualifying native ZINC inference. oneDNN documents a separate
+repair or qualifying native ZINC inference.
+
+The standalone `tools/intel_onednn_matmul_probe.cpp` reproduces the same F32
+router shape with fixed, seeded inputs and checks its results against a host
+double-precision dot product. The default primitive produces 32 distinct
+results across 32 executions; oneDNN's explicit
 [deterministic primitive attribute](https://uxlfoundation.github.io/oneDNN/dev_guide_attributes_deterministic.html)
-that may change implementation selection; it is a candidate for further
-isolation, separate from the unmodified reference above.
+produces one bitwise-identical result across all 32 executions. Both modes
+preserve the output guards and stay within `0.00003` absolute error in this
+case. This establishes small floating-point variation in the isolated
+operation, without establishing corruption or a complete model repair. The
+next experiment must apply deterministic execution to a separately labelled
+model build and repeat the original correctness and server gates.
 
 Intel documents its official package channel in the
 [compiler installation instructions](https://www.intel.com/content/www/us/en/developer/tools/oneapi/dpc-compiler-download.html).
