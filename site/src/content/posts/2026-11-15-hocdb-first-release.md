@@ -24,7 +24,7 @@ interface to the machine it runs on.
 
 ## From a record to a result
 
-Download the archive for Linux x86_64 or macOS Apple Silicon from the release
+Download the archive for Linux x86_64 or macOS 13+ on Apple Silicon from the release
 page, verify the checksum and extract it. The binary lives at bin/hocdb. After
 putting it on your PATH, this is a complete first session:
 
