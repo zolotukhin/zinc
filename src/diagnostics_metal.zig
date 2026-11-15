@@ -5,6 +5,7 @@
 //! managed model fits once runtime allocations and KV reservation are included.
 //! @section Hardware Detection
 const std = @import("std");
+const diagnostic_report = @import("diagnostic_report.zig");
 const host_io = @import("host_io");
 const builtin = @import("builtin");
 const metal_c = @import("metal/c.zig").shim;
@@ -21,6 +22,9 @@ const ModelInspection = loader_metal.ModelInspection;
 
 /// Configuration for a Metal diagnostics run.
 pub const Options = struct {
+    /// Optional structured sink; the same checks feed human and JSON reports.
+    report: ?*diagnostic_report.Report = null,
+    output_writer: ?*std.Io.Writer = null,
     /// GPU device index (ignored on Metal; always uses the system default).
     device_index: u32 = 0,
     /// Path to a GGUF model file for inspection, or null to skip.
@@ -73,23 +77,10 @@ const Styles = struct {
     }
 };
 
-const CheckStatus = enum {
-    ok,
-    warn,
-    fail,
-    skip,
-
-    fn label(self: CheckStatus) []const u8 {
-        return switch (self) {
-            .ok => "OK",
-            .warn => "WARN",
-            .fail => "FAIL",
-            .skip => "SKIP",
-        };
-    }
-};
+const CheckStatus = diagnostic_report.Status;
 
 const Summary = struct {
+    report: ?*diagnostic_report.Report = null,
     ok: u32 = 0,
     warn: u32 = 0,
     fail: u32 = 0,
@@ -201,9 +192,9 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     const stdout_file = std.Io.File.stdout();
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = stdout_file.writerStreaming(host_io.io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
+    const stdout = opts.output_writer orelse &stdout_writer.interface;
     const styles = Styles.detect(stdout_file);
-    var summary = Summary{};
+    var summary = Summary{ .report = opts.report };
 
     try stdout.print("\n=== ZINC System Diagnostics ===\n", .{});
     try stdout.flush();
@@ -223,6 +214,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     try printCheckingLine(stdout, styles, "Metal device init and capability query");
     if (MetalDevice.init(allocator, opts.device_index)) |device| {
         maybe_device = device;
+        if (opts.report) |report| try report.setDevice(@tagName(device.chip), device.recommendedMaxWorkingSetSize());
         if (opts.device_index == 0) {
             try printStatusLine(stdout, styles, &summary, .ok, "Metal init", "Initialized default system device", .{});
         } else {
@@ -395,6 +387,15 @@ fn printModelCheck(
 
         if (maybe_device) |device| {
             const fit = estimateUnifiedFit(inspection, device.recommendedMaxWorkingSetSize(), device.totalMemory(), requested_context_length);
+            if (summary.report) |report| report.memory = .{
+                .source = .estimate,
+                .weights_bytes = fit.weights_bytes,
+                .runtime_bytes = fit.total_unified_bytes - fit.weights_bytes - fit.kv_cache_bytes,
+                .kv_bytes = fit.kv_cache_bytes,
+                .total_bytes = fit.total_unified_bytes,
+                .budget_bytes = device.recommendedMaxWorkingSetSize(),
+                .context_length = fit.max_ctx,
+            };
             const status = fit.fitStatus();
             const total_memory_status = fitStatusForUnifiedBytes(fit.total_unified_bytes, fit.total_memory_bytes, fit.total_memory_bytes);
             const headroom = fit.headroomBytes();
@@ -591,6 +592,7 @@ fn printStatusLine(
     value_args: anytype,
 ) !void {
     summary.record(status);
+    if (summary.report) |report| try report.add(label, status, value_fmt, value_args);
     try writer.print("  {s}: ", .{label});
     try writer.print(value_fmt, value_args);
     try writer.print(" ", .{});

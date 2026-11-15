@@ -6,6 +6,7 @@
 src/
 ├── main.zig                     # CLI entry, arg parsing, server startup, chat subcommand
 ├── cli_help.zig                 # CPU-only backend-specific help and capability/default tests
+├── diagnostic_report.zig        # Shared structured preflight results and JSON schema
 ├── bench_hot_decode.zig         # Hot decode microbenchmark binary
 ├── bench_support.zig            # Shared helpers for Metal benchmarks
 ├── regression_tests.zig         # Source-level regression guards
@@ -37,6 +38,7 @@ src/
 │   ├── http.zig                 # HTTP server and connection handling
 │   ├── model_manager.zig        # Hot model switching and catalog view
 │   ├── model_discovery.zig      # Minimal CUDA/ROCm loaded-model list serializer
+│   ├── capabilities.zig         # Shared build, backend and client-capability discovery
 │   ├── runtime.zig              # Backend runtime dispatch
 │   └── session.zig              # Chat session state
 ├── vulkan/
@@ -60,6 +62,7 @@ src/
 ├── gpu/
 │   ├── interface.zig            # Compile-time Vulkan / Metal / ROCm / CUDA selection
 │   ├── memory_plan.zig          # Cross-backend memory planning
+│   ├── native_memory_estimate.zig # Metadata-only native context/slot preflight
 │   ├── upload_plan.zig          # Bounded Vulkan staging windows and shared host tests
 │   ├── process_lock.zig         # Cross-process GPU reservation lock
 │   └── test_policy.zig          # Explicit opt-in for hardware unit tests

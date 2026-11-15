@@ -20,6 +20,40 @@ That build produces `./zig-out/bin/zinc`; use that path directly or add its
 Each binary contains one backend. See [backend selection](GETTING_STARTED.md#choose-your-backend)
 and [API coverage](API.md#backend-coverage) before copying settings.
 
+## Development: headless serving and JSON diagnostics
+
+These additions require current source newer than stable 0.1.0; check
+`zinc --help` before using them with an installed release. The legacy server
+commands elsewhere in this guide remain supported.
+
+```bash
+zinc --version --json
+zinc --check --json --model-id qwen35-9b-q4k-m -c 16384 --parallel 1
+zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
+```
+
+`serve` starts the API without opening a browser. `zinc chat --no-browser`
+starts browser chat without launching the browser automatically on Vulkan/Metal.
+The existing port defaults stay unchanged: 8080 for legacy server mode or
+`serve`, 9090 for `chat`. Use an explicit port in client configurations.
+
+JSON version reports contain `schema_version: 1` and a `build` object with
+version, commit, target, optimization mode, and backend. JSON diagnostics use
+that same identity and add `result`, check counts, per-check status/messages,
+device information and optional model-memory estimates. Exit code 0 means no
+failed preflight checks, including runs with warnings; 1 means failure. Keep
+stdout for the JSON document and stderr for runtime logs.
+
+A native ROCm/CUDA model estimate includes weights, context-sized KV, recurrent
+state and serving slots, plus a stated runtime reserve. Lazy prefill, compiler
+and optional cache allocations can exceed that reserve. Only inspected weights exceeding free VRAM fail the native memory check;
+catalog requirements and estimated context/runtime overflow remain warnings.
+A warning or a memory estimate is not a successful inference test. Without a selected model,
+`--check` only checks system/device readiness.
+
+The [agent and app guide](AGENT_SETUP.md) covers discovery and older-server
+fallbacks.
+
 ## Run a preflight check first
 
 This is the fastest way to answer "does this machine, selected GPU backend, and model look runnable at all?"

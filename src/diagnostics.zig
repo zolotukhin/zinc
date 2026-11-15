@@ -4,6 +4,7 @@
 //! preflight report on stdout.
 //! @section Hardware Detection
 const std = @import("std");
+const diagnostic_report = @import("diagnostic_report.zig");
 const host_io = @import("host_io");
 const builtin = @import("builtin");
 const gguf = @import("model/gguf.zig");
@@ -19,6 +20,9 @@ const ModelInspection = loader_mod.ModelInspection;
 
 /// Configuration for a Vulkan diagnostics run.
 pub const Options = struct {
+    /// Optional structured sink; the same checks feed human and JSON reports.
+    report: ?*diagnostic_report.Report = null,
+    output_writer: ?*std.Io.Writer = null,
     /// GPU device index to probe, or auto-select when unset by CLI.
     device_index: u32 = instance_mod.auto_select_device_index,
     /// Path to a GGUF model file for inspection, or null to skip.
@@ -71,23 +75,10 @@ const Styles = struct {
     }
 };
 
-const CheckStatus = enum {
-    ok,
-    warn,
-    fail,
-    skip,
-
-    fn label(self: CheckStatus) []const u8 {
-        return switch (self) {
-            .ok => "OK",
-            .warn => "WARN",
-            .fail => "FAIL",
-            .skip => "SKIP",
-        };
-    }
-};
+const CheckStatus = diagnostic_report.Status;
 
 const Summary = struct {
+    report: ?*diagnostic_report.Report = null,
     ok: u32 = 0,
     warn: u32 = 0,
     fail: u32 = 0,
@@ -197,9 +188,9 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     const stdout_file = std.Io.File.stdout();
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = stdout_file.writerStreaming(host_io.io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
+    const stdout = opts.output_writer orelse &stdout_writer.interface;
     const styles = Styles.detect(stdout_file);
-    var summary = Summary{};
+    var summary = Summary{ .report = opts.report };
 
     try stdout.print("\n=== ZINC System Diagnostics ===\n", .{});
     try stdout.flush();
@@ -239,6 +230,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     var vram_budget_bytes: ?u64 = null;
     if (vulkan_probe) |*probe| {
         vram_budget_bytes = probe.instance.vramBytes();
+        if (opts.report) |report| try report.setDevice(probe.gpu_config.nameSlice(), vram_budget_bytes.?);
         try printVulkanProbe(stdout, styles, &summary, probe);
     } else if (vulkan_probe_err) |err| {
         const status: CheckStatus = if (builtin.os.tag == .linux) .fail else .warn;
@@ -286,6 +278,7 @@ fn printStatusLine(
     value_args: anytype,
 ) !void {
     summary.record(status);
+    if (summary.report) |report| try report.add(label, status, value_fmt, value_args);
     try writer.print("  {s}: ", .{label});
     try writer.print(value_fmt, value_args);
     try writer.print(" ", .{});
@@ -624,6 +617,15 @@ fn printInspectedModelDetails(
 
     if (vram_budget_bytes) |budget| {
         const fit = estimateFit(inspection, budget, requested_context_length);
+        if (summary.report) |report| report.memory = .{
+            .source = .estimate,
+            .weights_bytes = fit.weights_bytes,
+            .runtime_bytes = fit.runtime_device_local_bytes - fit.kv_cache_bytes,
+            .kv_bytes = fit.kv_cache_bytes,
+            .total_bytes = fit.total_device_local_bytes,
+            .budget_bytes = budget,
+            .context_length = fit.max_ctx,
+        };
         const fit_status = fit.fitStatus();
         const headroom = fit.headroomBytes();
         if (headroom >= 0) {

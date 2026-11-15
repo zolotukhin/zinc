@@ -628,31 +628,30 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     if (is_linux) {
-        // The C ABI header is portable. A check-only artifact lets Linux CI
-        // analyze CUDA orchestration without a CUDA SDK or a GPU context.
-        const cuda_check_options = b.addOptions();
-        cuda_check_options.addOption([]const u8, "version", build_version);
-        cuda_check_options.addOption([]const u8, "commit", build_commit);
-        cuda_check_options.addOption([]const u8, "target", target.result.zigTriple(b.allocator) catch @panic("out of memory"));
-        cuda_check_options.addOption([]const u8, "optimize", @tagName(optimize));
-        cuda_check_options.addOption([]const u8, "backend", "cuda");
-        const cuda_check_step = b.step("check-cuda", "Type-check CUDA host code without linking or running a GPU");
-        for ([_][]const u8{
-            "src/main.zig", "src/cuda/smoke.zig", "src/loadtest_cuda.zig", "src/run_cuda.zig", "src/dbg_cuda.zig",
-        }, 0..) |root, i| {
-            const cuda_check_mod = createModule(b, .{
-                .root_source_file = b.path(root),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            });
-            cuda_check_mod.addOptions("build_options", cuda_check_options);
-            addCudaBindings(b, target, cuda_check_mod);
-            const cuda_check = addExecutable(b, .{
-                .name = b.fmt("zinc-cuda-check-{d}", .{i}),
-                .root_module = cuda_check_mod,
-            });
-            cuda_check_step.dependOn(&cuda_check.step);
+        // Both native backends share a portable C ABI. Analyze their distinct
+        // compile-time branches without an SDK, a driver or any GPU execution.
+        for ([_][]const u8{ "cuda", "rocm" }) |native_backend| {
+            const check_options = b.addOptions();
+            check_options.addOption([]const u8, "version", build_version);
+            check_options.addOption([]const u8, "commit", build_commit);
+            check_options.addOption([]const u8, "target", target.result.zigTriple(b.allocator) catch @panic("out of memory"));
+            check_options.addOption([]const u8, "optimize", @tagName(optimize));
+            check_options.addOption([]const u8, "backend", native_backend);
+            const check_step = b.step(b.fmt("check-{s}", .{native_backend}), b.fmt("Type-check {s} host code without linking or running a GPU", .{native_backend}));
+            for ([_][]const u8{
+                "src/main.zig", "src/cuda/smoke.zig", "src/loadtest_cuda.zig", "src/run_cuda.zig", "src/dbg_cuda.zig",
+            }, 0..) |root, i| {
+                const check_mod = createModule(b, .{
+                    .root_source_file = b.path(root),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                });
+                check_mod.addOptions("build_options", check_options);
+                addCudaBindings(b, target, check_mod);
+                const check = addExecutable(b, .{ .name = b.fmt("zinc-{s}-check-{d}", .{ native_backend, i }), .root_module = check_mod });
+                check_step.dependOn(&check.step);
+            }
         }
     }
 

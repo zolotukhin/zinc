@@ -59,6 +59,39 @@ The detailed catalog, health and browser sections below describe **Vulkan/Metal*
 For portable clients, set `stream` explicitly, get the loaded model from
 `/v1/models`, and do not assume model switching, sampling or prefix caching.
 
+## Development: capability discovery
+
+Newer source builds add `GET /v1/capabilities`. This endpoint and the additional
+health fields below are not in stable 0.1.0. Check `zinc --version` and use the
+release's documented API when it returns 404.
+
+```bash
+curl --fail http://localhost:9090/v1/capabilities
+```
+
+All four backends return the same schema:
+
+| Field            | Meaning                                                                                                                                                                                                           |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema_version` | `1`; clients must tolerate additive fields.                                                                                                                                                                       |
+| `build`          | `version`, `commit`, `target`, `optimize`, and compiled `backend`.                                                                                                                                                |
+| `backend`        | `vulkan`, `metal`, `rocm`, or `cuda`.                                                                                                                                                                             |
+| `active_model`   | Loaded ID matching `/v1/models`, or null when idle. Native backends use the GGUF basename.                                                                                                                        |
+| `context_length` | Live capacity per request/slot, or null when idle.                                                                                                                                                                |
+| `capabilities`   | Boolean `chat_completions`, `text_completions`, `chat_streaming`, `text_streaming`, `model_management`, `model_switching`, `browser_ui`, `sampling`, and `chat_session_reuse`; `tool_calls` is `model_dependent`. |
+
+Healthy `/health` responses include these fields and preserve their existing
+backend-specific fields. Vulkan/Metal's legacy `model` remains a display name;
+use `active_model` as the request ID. An unloaded Vulkan/Metal server can be
+healthy while `active_model` and `context_length` are null. Native execution
+failure still returns HTTP 503. Discovery describes features; it does not
+execute a request or qualify a model's output quality.
+
+`chat_session_reuse` reflects the currently loaded eligible model and is false
+when absent or unqualified. On older servers, use the existing `/health` and
+`/v1/models` fields, set `stream` explicitly, and treat missing capability flags
+as unknown. See [Agent and App Setup](AGENT_SETUP.md) for a complete workflow.
+
 ## Status and compatibility limits
 
 - Vulkan/Metal serialize generation behind one engine lock. `--parallel` bounds
@@ -86,18 +119,19 @@ For portable clients, set `stream` explicitly, get the loaded model from
 
 ## Endpoints
 
-| Method | Path                   | Available on                        |
-| ------ | ---------------------- | ----------------------------------- |
-| POST   | `/v1/chat/completions` | All four backends                   |
-| POST   | `/v1/completions`      | All four backends                   |
-| GET    | `/v1/models`           | All four backends; different detail |
-| GET    | `/health`              | All four backends; different detail |
-| POST   | `/v1/models/pull`      | Vulkan / Metal                      |
-| POST   | `/v1/models/activate`  | Vulkan / Metal                      |
-| POST   | `/v1/models/remove`    | Vulkan / Metal                      |
-| GET    | `/` or `/chat`         | Vulkan / Metal                      |
-| GET    | `/stats`               | ROCm / CUDA                         |
-| POST   | `/generate`            | ROCm / CUDA; raw completion alias   |
+| Method | Path                   | Available on                                  |
+| ------ | ---------------------- | --------------------------------------------- |
+| POST   | `/v1/chat/completions` | All four backends                             |
+| POST   | `/v1/completions`      | All four backends                             |
+| GET    | `/v1/capabilities`     | All four; development builds newer than 0.1.0 |
+| GET    | `/v1/models`           | All four backends; different detail           |
+| GET    | `/health`              | All four backends; different detail           |
+| POST   | `/v1/models/pull`      | Vulkan / Metal                                |
+| POST   | `/v1/models/activate`  | Vulkan / Metal                                |
+| POST   | `/v1/models/remove`    | Vulkan / Metal                                |
+| GET    | `/` or `/chat`         | Vulkan / Metal                                |
+| GET    | `/stats`               | ROCm / CUDA                                   |
+| POST   | `/generate`            | ROCm / CUDA; raw completion alias             |
 
 Unavailable endpoints return 404 on ROCm/CUDA. Set `stream` explicitly for both
 completion routes. The coverage matrix above describes their response defaults.

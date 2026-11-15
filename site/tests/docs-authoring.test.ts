@@ -60,11 +60,13 @@ function consumerShellExamples(markdown: string): string[] {
       if (node.type === 'code' && /^(bash|sh|shell|zsh)$/.test(node.lang ?? '')) {
         // Build outputs remain correct in contributor workflows and dated
         // captures. Installed usage must also work outside a ZINC checkout.
-        const source =
+        // Development headings are deliberately excluded from stable examples.
+        // Keep the classification here so nested headings inherit that scope.
+        const sourceOnly =
           /\b(build|source|development|historical|checkout|benchmark)\b/i.test(
             headings.join(' '),
           ) || /scripts\/zig\.sh build/.test(node.value);
-        if (!source) examples.push(node.value);
+        if (!sourceOnly) examples.push(node.value);
       }
       if (node.type !== 'heading') visit(node, headings);
     }
@@ -105,6 +107,7 @@ describe('installed command documentation', () => {
       'docs/BINARY_RELEASES.md',
       'docs/RUNNING_ZINC.md',
       'docs/API.md',
+      'docs/AGENT_SETUP.md',
       'docs/HARDWARE_REQUIREMENTS.md',
       'docs/ROCM.md',
       'docs/OPENCLAW.md',
@@ -132,4 +135,37 @@ describe('installed command documentation', () => {
     expect(source).toContain('./scripts/zig.sh build -Doptimize=ReleaseFast');
     expect(source).toContain('./zig-out/bin/zinc');
   });
+});
+
+test('stable examples do not silently require development-only CLI and discovery features', async () => {
+  for (const file of ['README.md', 'docs/AGENT_SETUP.md', 'docs/RUNNING_ZINC.md', 'docs/API.md']) {
+    const markdown = await readFile(resolve(import.meta.dir, '../..', file), 'utf8');
+    for (const example of consumerShellExamples(markdown)) {
+      expect(example, file).not.toMatch(
+        /\bzinc serve\b|--no-browser|\bzinc (?:--version|--check) --json|\/v1\/capabilities/,
+      );
+    }
+  }
+});
+
+test('shared harness introductions do not classify OpenClaw as a coding-only client', async () => {
+  const root = resolve(import.meta.dir, '../..');
+  const readme = await readFile(resolve(root, 'README.md'), 'utf8');
+  const page = await readFile(resolve(root, 'site/src/pages/zinc/index.astro'), 'utf8');
+  expect(readme).toContain('## Connect harnesses');
+  expect(page).toContain('Connect harnesses');
+  expect(readme).not.toContain('## Coding harnesses');
+  expect(page).not.toContain('>Coding harnesses<');
+  expect(await readFile(resolve(root, 'docs/OPENCLAW.md'), 'utf8')).toStartWith(
+    '# OpenClaw with ZINC\n\nConnect OpenClaw to a model served by ZINC.',
+  );
+});
+
+test('explicit Development headings exclude new commands while later stable sections remain checked', () => {
+  const markdown =
+    '## Stable\n```bash\nzinc --version\n```\n' +
+    '## Development: discovery\n```bash\nzinc serve --no-browser\n```\n' +
+    '### JSON\n```bash\nzinc --check --json\ncurl http://localhost:9090/v1/capabilities\n```\n' +
+    '## Stable clients\n```bash\nzinc model list --json\n```\n';
+  expect(consumerShellExamples(markdown)).toEqual(['zinc --version', 'zinc model list --json']);
 });

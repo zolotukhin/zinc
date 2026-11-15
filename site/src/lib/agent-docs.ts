@@ -1,5 +1,6 @@
 import type { DocPage } from './docs-loader';
 import type { ZigApiIndex } from './zig-api-loader';
+import { STABLE_RELEASE } from './docs-release-status';
 
 interface SupplementalDocMeta {
   slug: string;
@@ -65,6 +66,28 @@ function supplementalDocs(docs: DocPage[], siteUrl: string) {
     });
 }
 
+function clientGuidance(base: string): string[] {
+  return [
+    '## Run ZINC or connect a client',
+    `- Agent and app workflow: ${absoluteUrl(base, '/zinc/docs/agent-setup/')}`,
+    `- Install a published binary: ${absoluteUrl(base, '/zinc/docs/binary-releases/')}`,
+    `- First model and GPU requirements: ${absoluteUrl(base, '/zinc/docs/getting-started/')}`,
+    `- HTTP API and backend coverage: ${absoluteUrl(base, '/zinc/docs/api/')}`,
+    `- OpenClaw setup: ${absoluteUrl(base, '/zinc/docs/openclaw/')}`,
+    `- OpenCode setup: ${absoluteUrl(base, '/zinc/docs/opencode/')}`,
+    '',
+    `Stable Linux release: ${STABLE_RELEASE}. Use the installed zinc command; no Zig compiler or source checkout is needed. Each executable contains one backend. Metal is a preview; CUDA is experimental.`,
+    '1. Inspect zinc --version, run zinc --check, and use zinc model list --json to choose a model that fits and has the required validation.',
+    '2. Pull qwen35-9b-q4k-m, then start zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090. Keep the server running while the client uses it.',
+    '3. Check http://localhost:9090/health and discover the loaded ID and context at http://localhost:9090/v1/models. API base: http://localhost:9090/v1. Set stream explicitly.',
+    '4. Use the standalone helper linked from the client guide. Run its setup and check commands before a task; verify the outcome independently.',
+    '',
+    'Development additions (newer than stable 0.1.0): zinc serve, --no-browser, --version --json, --check --json and GET /v1/capabilities. Check zinc --help before using them. Discovery includes build identity, backend, active_model, context_length and capabilities. On older servers, use /health and /v1/models; absent capabilities are unknown.',
+    'Memory fit and protocol capabilities do not prove task quality. Never assume context size, model switching, tools or sampling support from a backend name alone.',
+    '',
+  ];
+}
+
 export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: string): string {
   const base = siteBaseUrl(siteUrl);
   const supplemental = supplementalDocs(docs, base);
@@ -74,9 +97,10 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     '',
     '> Technical writing and documentation for ZINC, local LLM inference on AMD (Vulkan or ROCm/HIP), Intel Arc (Vulkan), Apple Silicon (Metal preview), experimental NVIDIA CUDA, Zig, and systems engineering.',
     '',
-    'For ZINC, prefer the generated Zig API reference first. It is the canonical internal runtime reference.',
+    ...clientGuidance(base),
+    'For changes to ZINC itself, use the development guide, repository AGENTS.md and generated Zig API.',
     '',
-    '## Primary ZINC Documentation',
+    '## ZINC Implementation Reference',
     `- ZINC Zig API: ${absoluteUrl(base, '/zinc/docs/zig-api')}`,
     `- ZINC Zig API JSON: ${absoluteUrl(base, '/zinc/docs/zig-api.json')}`,
     `- ZINC Zig API Text: ${absoluteUrl(base, '/zinc/docs/zig-api.txt')}`,
@@ -101,7 +125,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     '## Guidance',
     '- Use the Zig API for internal implementation details, symbols, signatures, and module relationships.',
     '- Use the Serving HTTP API page and its backend coverage matrix for client-facing contracts; ROCm/CUDA do not expose the Vulkan/Metal browser UI or hot model management.',
-    '- Prefer the JSON export when building tools or agents that need structured access.',
+    '- For code analysis, use the Zig API JSON export. For a running server, use health, models and capability discovery.',
     '',
   ].join('\n');
 }
@@ -116,16 +140,18 @@ export function renderLlmsFullTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl:
     '',
     `Site: ${base}`,
     `LLMs index: ${absoluteUrl(base, '/llms.txt')}`,
+    '',
+    ...clientGuidance(base),
     `Zig API root: ${absoluteUrl(base, '/zinc/docs/zig-api')}`,
     `Zig API JSON: ${absoluteUrl(base, '/zinc/docs/zig-api.json')}`,
     `Zig API Text: ${absoluteUrl(base, '/zinc/docs/zig-api.txt')}`,
     '',
     `Last updated: ${zigApi.lastmod}`,
     '',
-    '## Guidance',
-    '- Treat the generated Zig API as the primary and canonical reference for ZINC internals.',
+    '## Implementation guidance',
+    '- For source changes, read the repository AGENTS.md and Development guide first. Use the generated Zig API as the canonical reference for ZINC internals.',
     '- Treat the Serving HTTP API as the external network surface only.',
-    '- Prefer the JSON export for structured ingestion and the text export for lightweight retrieval.',
+    '- For code analysis, prefer the Zig API JSON or text exports. For a running server, use health, models and capability discovery.',
     '',
     '## Zig API Sections',
   ];

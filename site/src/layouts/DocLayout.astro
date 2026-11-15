@@ -3,6 +3,7 @@ import BaseLayout from './BaseLayout.astro';
 import Breadcrumbs from '../components/Breadcrumbs.astro';
 import DocsSearch from '../components/DocsSearch.astro';
 import { buildBreadcrumbList } from '../lib/structured-data';
+import { docsReleaseStatus, STABLE_RELEASE, STABLE_RELEASE_URL } from '../lib/docs-release-status';
 
 interface Props {
   title: string;
@@ -51,6 +52,7 @@ const docNavSections = [
       { slug: 'rocm', label: 'AMD ROCm Setup' },
       { slug: 'running-zinc', label: 'Running ZINC' },
       { slug: 'api', label: 'Serving HTTP API' },
+      { slug: 'agent-setup', label: 'Agent and App Setup' },
       { slug: 'openclaw', label: 'OpenClaw Setup' },
       { slug: 'opencode', label: 'OpenCode Setup' },
       { slug: 'development', label: 'Development' },
@@ -74,6 +76,7 @@ const docNavSections = [
 ];
 
 const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/, '');
+const releaseStatus = docsReleaseStatus(currentSlug);
 
 function isActive(slug: string): boolean {
   return currentSlug === slug || currentSlug.startsWith(`${slug}/`);
@@ -111,12 +114,25 @@ function isActive(slug: string): boolean {
     </aside>
     <article class="doc-content">
       {lastmod && <p class="lastmod">Last updated: {lastmod}</p>}
+      <aside class="doc-release-note" data-doc-channel={releaseStatus.channel} aria-label="Documentation version">
+        <strong>{releaseStatus.label}</strong>
+        <p>“Development” sections need newer source. <a href={STABLE_RELEASE_URL}>Stable {STABLE_RELEASE}</a> · <a href="/zinc/docs/binary-releases/">Requirements</a></p>
+      </aside>
       <slot />
     </article>
   </div>
 </BaseLayout>
 
 <style>
+  .doc-release-note {
+    border-inline-start: 3px solid var(--color-accent);
+    padding: var(--space-sm) var(--space-md);
+    margin-bottom: var(--space-lg);
+    background: var(--color-bg-secondary, transparent);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+  }
+  .doc-release-note p { margin: var(--space-xs) 0 0; }
   .doc-layout {
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr);

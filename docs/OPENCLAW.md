@@ -1,6 +1,8 @@
 # OpenClaw with ZINC
 
-Use OpenClaw's one-shot coding agent with a model served by ZINC. The
+Connect OpenClaw to a model served by ZINC. This guide uses its direct agent
+command and a dedicated project configuration; the file-edit tasks below are
+examples of that integration. The
 [setup helper](https://github.com/zolotukhin/zinc/blob/main/tools/setup_openclaw.mjs)
 discovers the loaded model and its actual context capacity, creates a dedicated
 project config, validates it with the client, and runs a task.
