@@ -11,7 +11,12 @@ const aliases: HeadingAliases = {
     ],
   },
   'running-zinc': {
+    'install-the-command': ['build-the-binary'],
+    'historical-development-node-diagnostics': ['sample-outputs-from-the-shared-rdna4-node'],
     'kv-cache-configuration': ['enable-turboquant-kv-compression'],
+  },
+  rocm: {
+    'build-from-source': ['build-and-verify'],
   },
   spec: {
     '4-4-shared-runtime-behavior': ['4-3-shared-runtime-behavior', '43-shared-runtime-behavior'],

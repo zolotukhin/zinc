@@ -2,6 +2,10 @@
 
 ZINC runs on consumer GPUs through Vulkan, ROCm/HIP, Metal, and an experimental CUDA backend. This page covers the hardware, operating system, and driver stack needed for each path.
 
+Usage examples assume the installed `zinc` command is on PATH. Explicit source-build
+examples use `./zig-out/bin/zinc`, the build output; see [installation](BINARY_RELEASES.md)
+or [building from source](GETTING_STARTED.md#build-from-source) for your platform.
+
 ## Supported platforms
 
 | Platform         | GPU                                     | Backend     | Status                                       |
@@ -150,7 +154,7 @@ its OpenAI-compatible endpoints and backend-specific limitations.
 ### Apple Silicon requirements
 
 - **OS**: macOS
-- **Tools**: Xcode Command Line Tools (`xcode-select --install`)
+- **Source-build tools**: Xcode Command Line Tools (`xcode-select --install`)
 - Native Metal runtime; no external GPU framework or Python environment required
 
 ### Apple Silicon memory guide
@@ -172,14 +176,14 @@ ZINC uses zero-copy model loading on Metal, so a 1.2 GB model file does not requ
 Once the binary is built, verify everything works:
 
 ```bash
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 On AMD RDNA4 with the Vulkan build, add the cooperative matrix flag. Do not set it for ROCm:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 The check command verifies:
@@ -195,10 +199,10 @@ See which models ZINC supports on your machine:
 
 ```bash
 # Models that fit this machine
-./zig-out/bin/zinc model list
+zinc model list
 
 # Full catalog including models that do not fit
-./zig-out/bin/zinc model list --all
+zinc model list --all
 ```
 
 The catalog automatically selects the right GPU profile (`amd-rdna4-32gb`, `intel-arc`, `apple-silicon`, etc.) and shows which models are installed, active, and fit the available memory.
@@ -218,7 +222,7 @@ The catalog automatically selects the right GPU profile (`amd-rdna4-32gb`, `inte
 ```bash
 lspci | grep -i "vga\|display\|amd\|radeon"
 vulkaninfo --summary
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 ### Linux (AMD ROCm)
@@ -226,7 +230,7 @@ vulkaninfo --summary
 ```bash
 lspci | grep -i "vga\|display\|amd\|radeon"
 rocminfo
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 ### Linux (Intel Arc)
@@ -234,33 +238,36 @@ rocminfo
 ```bash
 lspci | grep -i "vga\|display\|intel\|arc"
 vulkaninfo --summary
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 ### macOS (Apple Silicon)
 
 ```bash
 system_profiler SPDisplaysDataType | head -20
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 ### Linux or WSL2 (NVIDIA CUDA, experimental)
 
 ```bash
 nvidia-smi
-./zig-out/bin/zinc --check
+zinc --check
 ```
 
 ## Shortest path to success
+
+First [install the matching binary](BINARY_RELEASES.md), or [build from source](GETTING_STARTED.md#build-from-source)
+and put its `bin` directory on PATH. Linux release users need no compiler.
+Metal preview users can follow the [macOS setup](GETTING_STARTED.md#macos-apple-silicon).
 
 ### On Linux with an AMD GPU through Vulkan
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc chat
+zinc --check
+zinc model pull qwen35-9b-q4k-m
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
@@ -268,22 +275,20 @@ Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
 ### On Linux with an AMD RDNA4 GPU through ROCm
 
 ```bash
-ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
 rocminfo
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc chat
+zinc --check
+zinc model pull qwen35-9b-q4k-m
+zinc --model-id qwen35-9b-q4k-m --chat --prompt "Hello"
 ```
 
-Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, troubleshooting, and performance switches.
+Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, GPU selection on multi-GPU hosts, troubleshooting, and performance switches.
 
 ### On Linux with an Intel Arc GPU
 
 ```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc chat
+zinc --check
+zinc model pull qwen35-9b-q4k-m
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 Then see [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for Arc B-series hardware details and current tuning notes.
@@ -291,10 +296,9 @@ Then see [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for Arc B-series
 ### On macOS with Apple Silicon
 
 ```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc chat
+zinc --check
+zinc model pull qwen35-9b-q4k-m
+zinc chat --model-id qwen35-9b-q4k-m
 ```
 
 Then see [Apple Silicon Reference](/zinc/docs/apple-silicon-reference/) and [Apple Metal Reference](/zinc/docs/apple-metal-reference/) for platform details.

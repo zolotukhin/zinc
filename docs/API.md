@@ -3,9 +3,12 @@
 ZINC exposes a local OpenAI-compatible HTTP API. Point OpenAI-style clients at
 the server by changing the base URL.
 
+The examples use the installed `zinc` command from the [binary release](BINARY_RELEASES.md).
+For a source build, use `./zig-out/bin/zinc` or add its `bin` directory to PATH.
+
 ```bash
 # Start the server. Plain server mode defaults to port 8080.
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m -p 8080
+zinc --model-id qwen35-9b-q4k-m -p 8080
 
 export OPENAI_BASE_URL=http://localhost:8080/v1
 ```
@@ -161,7 +164,7 @@ Supported message roles:
 Tool calling is enabled by default and can be disabled with:
 
 ```bash
-ZINC_TOOL_CALLING=0 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m
+ZINC_TOOL_CALLING=0 zinc --model-id qwen35-9b-q4k-m
 ```
 
 ZINC never executes tools. It only renders tool definitions into the prompt,
@@ -618,7 +621,7 @@ Errors use an OpenAI-style envelope:
 ## Server Configuration
 
 ```text
-./zig-out/bin/zinc [options]
+zinc [options]
   -m, --model <path>       Path to GGUF model file
   --model-id <id>          Managed model id from the built-in catalog/cache
   -p, --port <port>        Server port (default: 8080; `zinc chat` defaults to 9090)
@@ -646,6 +649,6 @@ managed catalog:
 | F16    | Yes       | Small tensors and some model data    |
 | F32    | Yes       | Baseline/scalar tensor path          |
 
-Run `./zig-out/bin/zinc model list` for catalog entries and fit checks. Vulkan/Metal
+Run `zinc model list` for catalog entries and fit checks. Vulkan/Metal
 also expose them through `GET /v1/models`; ROCm/CUDA return only the loaded model.
 Use the backend's qualification report for the exact model, context and cache settings tested.

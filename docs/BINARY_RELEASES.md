@@ -50,6 +50,11 @@ The installer checks the available archive list and every file, verifies archite
 
 The default command is `~/.local/bin/zinc`, pointing to the active version under `~/.local/share/zinc`. Add `~/.local/bin` to PATH if needed. `ZINC_INSTALL_DIR` and `ZINC_BIN_DIR` override those locations. Reinstalling identical bytes is safe; different bytes cannot replace an existing version directory.
 
+`zinc` is the installed command; `zig-out/bin/zinc` is a source-build output
+path. The Vulkan archive also contains compiled shader assets under
+`share/zinc/shaders/`. Keep the extracted `bin/` and `share/` directories together
+when moving a manual installation; the installer manages this layout for you.
+
 Omit `ZINC_VERSION` to select the latest published stable release, currently
 `v0.1.0`. Published RCs remain available through an explicit version, for example
 `ZINC_VERSION=v0.1.0-rc.1`. RC and final binaries have their own embedded
