@@ -25,6 +25,7 @@ https://software.repos.intel.com/python/conda/linux-64/mkl-dpcpp-2026.2.0-intel_
 https://software.repos.intel.com/python/conda/linux-64/mkl-include-2026.2.0-intel_881.conda#7684785ef069d1660bd4cf0724b6058c61bc0b266c582dbf8f5d967f5894f522
 https://conda.anaconda.org/conda-forge/linux-64/ocl-icd-2.3.4-hb03c661_1.conda#75f3bf733523a338f73d6c276c4a26634877cd970edb558f2769d9fa52b100a9
 https://software.repos.intel.com/python/conda/linux-64/onednn-2026.1.0-intel_617.conda#7304c7ea0a50e7957b04fe1a5b84c033c1564be53500a530e3fe4a673e732034
+https://software.repos.intel.com/python/conda/linux-64/onednn-devel-2026.1.0-intel_617.conda#8970090b393e8c0dc1a14cb4dd47c15d76aba72af28cfd319f43502d5dc8413c
 https://software.repos.intel.com/python/conda/linux-64/onedpl-devel-2022.14.0-intel_154.conda#8ca225ba232bf642c7622d8b3291f8694beab978ed01de4fe5725a8ea86aca2c
 https://software.repos.intel.com/python/conda/linux-64/onemkl-sycl-blas-2026.2.0-intel_881.conda#fab2909a21351f5b35c56871d13f9d873afacbc621824afc69b67c79caac9650
 https://software.repos.intel.com/python/conda/linux-64/onemkl-sycl-datafitting-2026.2.0-intel_881.conda#c4ff4fdda123a869accba80ebefd30032c548bf82bfc22766f9a00c5d9942524

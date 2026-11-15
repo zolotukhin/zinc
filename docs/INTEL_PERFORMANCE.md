@@ -13,6 +13,13 @@ packaged shader identities and the final hardware checks remain verified.
 The [preceding Q8 replay](/zinc/validation/intel-q8-prefill-package-support-2026-11-10.json)
 retains its fourteen full-vocabulary prefill boundary checks and separate archive.
 
+The [November 15 matched-SDK replay](/zinc/validation/intel-native-matched-development-2026-11-15.json)
+builds upstream `e574a17b` with matching oneDNN 3.13.2 development files and
+runtime. Its 78-case Level Zero probe and GPU OpenCL discovery pass. The 35B
+model passes its short native correctness preflight, but the default native
+server still drifts in 19 of 32 full responses and one of eight streams across
+two server lifetimes. It remains an unqualified performance reference.
+
 The [preceding packed-Q8 campaign](/zinc/validation/intel-native-sycl-fp32-packed-q8-2026-11-10.json)
 also attempts a fresh native SYCL FP32 baseline at `cf6463ac`, selected before
 building. Its repeated-output failures remain recorded; they do not establish
@@ -673,14 +680,60 @@ complete output across four repetitions. That establishes bring-up, not a
 seven-model performance or coding qualification.
 
 The [explicit Linux x86-64 package lock](https://github.com/zolotukhin/zinc/blob/main/config/intel/oneapi-2026.2-linux-64.explicit.txt)
-retains all 41 archive URLs and SHA256 checksums, without installation paths.
+retains 42 archive URLs and SHA256 checksums, including matching oneDNN runtime
+and development packages, without installation paths.
 After verifying and installing micromamba, create the isolated environment on
 the remote worker:
 
 ```bash
 micromamba create -y --prefix "$ZINC_INTEL_PREFIX" \
   --file config/intel/oneapi-2026.2-linux-64.explicit.txt
+python3 tools/intel_sycl_environment.py --prepare-onednn-cmake "$ZINC_INTEL_PREFIX"
 ```
+
+Intel's conda `onednn` package supplies the runtime; `onednn-devel` supplies
+headers. These archives do not include a CMake package configuration. The
+preparation command validates matching package versions/builds, the header and
+library ABI, and the Intel SYCL GPU configuration before writing a relocatable
+ZINC CMake adapter. It preserves existing configurations. The adapter is project
+build glue, separate from Intel's package contents.
+
+The November 15 UTC audit found that the earlier 41-package environment lacked
+oneDNN development files. CMake had found the host's 3.11 development package,
+while the server loaded the isolated 3.13 runtime. Those historical records
+retain their original configuration. New native campaigns require development
+files inside the selected prefix and verify that each server loads the recorded
+oneDNN library. This dependency correction has its own model validation; it
+does not establish a cause or repair for the previous repeatability failures.
+
+The separate instrumented 35B probe first observes varying output at the first
+layer's F32 MoE router multiplication (`256 × 58`, reduction width `2048`).
+Fingerprints of both its weights and activations match across eight repeated
+prefills. Disabling oneDNN matrix multiplication makes every observed tensor
+and the final logits match in that instrumented probe. Synchronizing and
+reading each tensor changes execution, so this is diagnostic evidence rather
+than a model or performance qualification.
+
+Normal server controls retain the distinction: disabling oneDNN multiplication
+alone leaves two distinct full generations among eight requests; disabling
+weight reordering alone leaves six. Disabling both produces identical outputs
+in the small replay, but the attempted four-workload replay stops at the
+correctness gate with two near ties in 48 checked tokens. That exceeds the
+existing agreement policy; no performance measurements are accepted. These
+controls narrow the investigation without identifying a complete upstream
+repair or qualifying native ZINC inference.
+
+The standalone `tools/intel_onednn_matmul_probe.cpp` reproduces the same F32
+router shape with fixed, seeded inputs and checks its results against a host
+double-precision dot product. The default primitive produces 32 distinct
+results across 32 executions; oneDNN's explicit
+[deterministic primitive attribute](https://uxlfoundation.github.io/oneDNN/dev_guide_attributes_deterministic.html)
+produces one bitwise-identical result across all 32 executions. Both modes
+preserve the output guards and stay within `0.00003` absolute error in this
+case. This establishes small floating-point variation in the isolated
+operation, without establishing corruption or a complete model repair. The
+next experiment must apply deterministic execution to a separately labelled
+model build and repeat the original correctness and server gates.
 
 Intel documents its official package channel in the
 [compiler installation instructions](https://www.intel.com/content/www/us/en/developer/tools/oneapi/dpc-compiler-download.html).
@@ -692,7 +745,9 @@ micromamba run --prefix "$ZINC_INTEL_PREFIX" cmake \
   -S "$LLAMA_SOURCE" -B "$LLAMA_SYCL_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
   -DCMAKE_PREFIX_PATH="$ZINC_INTEL_PREFIX" \
-  -DGGML_SYCL=ON -DGGML_SYCL_F16=ON -DGGML_SYCL_HOST_MEM_FALLBACK=OFF \
+  -DDNNL_DIR="$ZINC_INTEL_PREFIX/lib/cmake/dnnl" \
+  -DGGML_SYCL=ON -DGGML_SYCL_F16=OFF -DGGML_SYCL_HOST_MEM_FALLBACK=OFF \
+  -DGGML_SYCL_DNN=ON -DGGML_SYCL_GRAPH=ON -DGGML_SYCL_SUPPORT_XMX=ON \
   -DGGML_VULKAN=OFF -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF \
   -DLLAMA_BUILD_TESTS=ON
 micromamba run --prefix "$ZINC_INTEL_PREFIX" cmake \
@@ -700,7 +755,7 @@ micromamba run --prefix "$ZINC_INTEL_PREFIX" cmake \
   --target llama-server llama-cli llama-tokenize llama-eval-callback test-backend-ops
 ```
 
-Also build `GGML_SYCL_F16=OFF` in a different build directory. Upstream recommends
+Also build `GGML_SYCL_F16=ON` in a different build directory. Upstream recommends
 testing both precisions because their speed and accuracy differ. Graph execution
 is separately opt-in at runtime; compiled graph support does not mean it is
 active. Keep the default and `--sycl-graphs` treatments separate. Do not enable

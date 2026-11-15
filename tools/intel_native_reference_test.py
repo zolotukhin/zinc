@@ -95,18 +95,21 @@ class NativeReferenceTest(unittest.TestCase):
                 if path == "/detokenize": return {"content": "branch"}
                 raise AssertionError("unexpected protocol request")
             runtime = {"runtime": "level_zero", "library_sha256": {"libsycl.so.9": "a" * 64}}
+            development = {"library_name": "libdnnl.so.3.13", "library_sha256": "b" * 64}
             with patch.object(benchmark.gpu, "process", side_effect=process), \
                     patch.object(benchmark.gpu, "ready", side_effect=ValueError("server startup failed") if mode == "startup" else None), \
                     patch.object(benchmark.gpu, "free_port", return_value=1), patch.object(benchmark.gpu, "json_request", side_effect=request), \
                     patch.object(benchmark.sycl, "runtime_evidence", return_value=runtime,
-                                 side_effect=ValueError("runtime probe failed") if runtime_error else None):
+                                 side_effect=ValueError("runtime probe failed") if runtime_error else None) as observe:
                 try:
                     if record is None:
-                        result = benchmark.native_reference_validation(args, work, {}, {})
+                        result = benchmark.native_reference_validation(args, work, {}, {}, development=development)
                     else:
-                        result = benchmark.native_reference_validation(args, work, {}, {}, record)
+                        result = benchmark.native_reference_validation(args, work, {}, {}, record, development=development)
                 finally:
                     self.assertEqual(active, [])
+                    if observe.called:
+                        observe.assert_called_once_with(123, args.sycl_prefix, development)
                     # Even a count/text/suffix failure keeps the actual native
                     # response for diagnosis; it must not vanish on exception.
                     saved = work / "native-reference-case-0.json"
@@ -125,6 +128,20 @@ class NativeReferenceTest(unittest.TestCase):
         self.assertEqual(commands[1][commands[1].index("-ctk") + 1], "f32")
         self.assertEqual(commands[1][commands[1].index("-ub") + 1], "1")
         self.assertTrue(any(path == "/detokenize" for path, _ in requests))
+
+    def test_missing_or_malformed_sdk_snapshot_fails_before_starting_a_server(self):
+        for development in (None, {}, {"library_name": "libdnnl.so.3.13"},
+                            {"library_name": "libdnnl.so.3.13", "library_sha256": "invalid"}):
+            with self.subTest(development=development), tempfile.TemporaryDirectory() as directory:
+                record = {}
+                with patch.object(benchmark.gpu, "process") as start:
+                    with self.assertRaisesRegex(ValueError, "recorded oneDNN"):
+                        benchmark.native_reference_validation(SimpleNamespace(), Path(directory), {}, {}, record,
+                                                            development=development)
+                    start.assert_not_called()
+                self.assertIs(record["passed"], False)
+                self.assertEqual(record["validation_stage"], "development")
+                self.assertEqual(record["cases"], [])
 
     def test_close_first_choice_cannot_excuse_a_later_wrong_token(self):
         with self.assertRaisesRegex(ValueError, "after the near tie"):

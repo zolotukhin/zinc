@@ -1,6 +1,8 @@
 """CPU fixtures for native-baseline isolation; no Intel SDK or GPU is used."""
 import json
 import ctypes
+import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -147,7 +149,7 @@ class SyclEnvironmentTest(unittest.TestCase):
         lock = Path(__file__).resolve().parent.parent / "config/intel/oneapi-2026.2-linux-64.explicit.txt"
         lines = [line for line in lock.read_text().splitlines() if line and not line.startswith("#")]
         self.assertEqual(lines.pop(0), "@EXPLICIT")
-        self.assertEqual(len(lines), 41)
+        self.assertEqual(len(lines), 42)
         self.assertEqual(len(lines), len(set(lines)))
         for line in lines:
             url = urlsplit(line)
@@ -198,6 +200,167 @@ class SyclEnvironmentTest(unittest.TestCase):
             text = self.fixture_maps(prefix)
             with self.assertRaisesRegex(ValueError, "changed while"):
                 sycl.runtime_evidence_from_maps(text + " (deleted)", prefix)
+
+
+class OneDnnDevelopmentTest(unittest.TestCase):
+    """These file/CMake fixtures never load a library or initialize a GPU."""
+
+    def sdk(self, root):
+        prefix = root / "SDK with spaces"; metadata = prefix / "conda-meta"; metadata.mkdir(parents=True)
+        for name in sycl.COMPONENTS:
+            row = {"name": name, "version": "2026.1.0" if name.startswith("onednn") else "2026.2.0",
+                   "build": "intel_617" if name.startswith("onednn") else "fixture", "sha256": "a" * 64}
+            (metadata / (name + ".json")).write_text(json.dumps(row))
+        headers = prefix / "include/oneapi/dnnl"; headers.mkdir(parents=True)
+        (headers / "dnnl_version.h").write_text("#define DNNL_VERSION_MAJOR 3\n#define DNNL_VERSION_MINOR 13\n#define DNNL_VERSION_PATCH 2\n")
+        (headers / "dnnl_config.h").write_text("#define DNNL_GPU_RUNTIME DNNL_RUNTIME_SYCL\n#define DNNL_GPU_VENDOR DNNL_VENDOR_INTEL\n")
+        (prefix / "lib").mkdir(); (prefix / "lib/libdnnl.so.3.13").write_bytes(b"CPU fixture, never load this file")
+        (prefix / "lib/libdnnl.so").symlink_to("libdnnl.so.3.13")
+        return prefix
+
+    def test_runtime_only_or_mismatched_development_packages_fail_before_generation(self):
+        for mutation in ("missing", "version", "build", "checksum", "both-builds-missing"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                prefix = self.sdk(Path(directory)); path = prefix / "conda-meta/onednn-devel.json"
+                row = json.loads(path.read_text())
+                if mutation == "both-builds-missing":
+                    for name in ("onednn", "onednn-devel"):
+                        item = prefix / ("conda-meta/" + name + ".json")
+                        data = json.loads(item.read_text()); data.pop("build"); item.write_text(json.dumps(data))
+                elif mutation == "missing": path.unlink()
+                else:
+                    row[mutation if mutation != "checksum" else "sha256"] = "different"
+                    path.write_text(json.dumps(row))
+                with self.assertRaises(ValueError): sycl.prepare_onednn_cmake(prefix)
+                self.assertFalse((prefix / "lib/cmake/dnnl").exists())
+
+    def test_cpu_only_wrong_abi_missing_and_external_files_cannot_be_advertised_as_a_gpu_sdk(self):
+        for mutation in ("cpu", "other-vendor", "wrong-abi", "missing-header", "duplicate-version", "external-library", "external-header"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); prefix = self.sdk(root)
+                header = prefix / "include/oneapi/dnnl/dnnl_version.h"
+                config = prefix / "include/oneapi/dnnl/dnnl_config.h"
+                if mutation == "cpu": config.write_text(config.read_text().replace("DNNL_RUNTIME_SYCL", "DNNL_RUNTIME_NONE"))
+                elif mutation == "other-vendor": config.write_text(config.read_text().replace("DNNL_VENDOR_INTEL", "DNNL_VENDOR_ANY"))
+                elif mutation == "wrong-abi": header.write_text(header.read_text().replace("MINOR 13", "MINOR 11"))
+                elif mutation == "missing-header": header.unlink()
+                elif mutation == "duplicate-version": header.write_text(header.read_text() + "#define DNNL_VERSION_MINOR 11\n")
+                elif mutation == "external-library":
+                    outside = root / "libdnnl.so.3.13"; outside.write_bytes(b"host fixture")
+                    library = prefix / "lib/libdnnl.so"; library.unlink(); library.symlink_to(outside)
+                elif mutation == "external-header":
+                    outside = root / "host-header"; outside.write_text(header.read_text()); header.unlink(); header.symlink_to(outside)
+                with self.assertRaises(ValueError): sycl.prepare_onednn_cmake(prefix)
+                self.assertFalse((prefix / "lib/cmake/dnnl").exists())
+
+    def test_adapter_is_relocatable_idempotent_and_keeps_hashes_without_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); prefix = self.sdk(root)
+            before = sycl.stack_manifest(prefix)
+            first = sycl.prepare_onednn_cmake(prefix)
+            self.assertIn("not an Intel-supplied CMake config", first["origin"])
+            self.assertEqual(first, sycl.prepare_onednn_cmake(prefix))
+            self.assertEqual(first["development"]["version"], "3.13.2")
+            self.assertEqual(first["development"]["library_name"], "libdnnl.so.3.13")
+            self.assertEqual(before, sycl.stack_manifest(prefix))
+            config = prefix / "lib/cmake/dnnl/dnnl-config.cmake"
+            self.assertNotIn(str(root), config.read_text())
+            self.assertNotIn(str(root), json.dumps(first))
+            header = prefix / "include/oneapi/dnnl/dnnl_version.h"
+            header.write_text(header.read_text().replace("PATCH 2", "PATCH 3"))
+            old = config.read_bytes()
+            with self.assertRaisesRegex(ValueError, "preserve the existing"):
+                sycl.prepare_onednn_cmake(prefix)
+            self.assertEqual(config.read_bytes(), old)
+
+    def test_existing_and_external_cmake_configs_are_preserved(self):
+        for mutation in ("existing", "external-directory", "external-file"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); prefix = self.sdk(root); location = prefix / "lib/cmake/dnnl"
+                outside = root / "outside"; outside.mkdir()
+                (prefix / "lib/cmake").mkdir()
+                if mutation == "external-directory": location.symlink_to(outside)
+                else:
+                    location.mkdir()
+                    path = location / "dnnl-config.cmake"
+                    if mutation == "existing": path.write_text("# existing package configuration\n")
+                    else:
+                        target = outside / "dnnl-config.cmake"; target.write_text("# preserve me\n"); path.symlink_to(target)
+                with self.assertRaises(ValueError): sycl.prepare_onednn_cmake(prefix)
+                self.assertEqual(list(outside.iterdir()), [] if mutation != "external-file" else [outside / "dnnl-config.cmake"])
+
+    def test_cmake_resolves_the_selected_gpu_headers_and_library_without_host_fallback(self):
+        cmake = shutil.which("cmake")
+        self.assertIsNotNone(cmake, "CMake is required for native SDK compatibility fixtures")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); prefix = self.sdk(root); sycl.prepare_onednn_cmake(prefix)
+            source = root / "consumer"; source.mkdir(); build = root / "build"
+            (source / "CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.20)
+project(OneDnnAdapterFixture NONE)
+find_package(DNNL CONFIG REQUIRED NO_DEFAULT_PATH PATHS "''' + (prefix / "lib/cmake/dnnl").as_posix() + '''")
+if(NOT DNNL_GPU_VENDOR STREQUAL "INTEL" OR NOT DNNL_VERSION STREQUAL "3.13.2")
+  message(FATAL_ERROR "Incorrect package identity")
+endif()
+get_target_property(location DNNL::dnnl IMPORTED_LOCATION_RELEASE)
+get_target_property(headers DNNL::dnnl INTERFACE_INCLUDE_DIRECTORIES)
+file(WRITE "${CMAKE_BINARY_DIR}/selected.txt" "${location}\\n${headers}\\n")
+''')
+            result = subprocess.run([cmake, "-S", str(source), "-B", str(build)], capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "selected.txt").read_text().splitlines(), [str(prefix / "lib/libdnnl.so"), str(prefix / "include")])
+
+    def test_qualified_build_rejects_implicit_or_host_oneDNN_development_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); prefix = self.sdk(root); sycl.prepare_onednn_cmake(prefix)
+            source = root / "source"; source.mkdir(); build = root / "build"; binary = build / "bin"; binary.mkdir(parents=True)
+            values = {"CMAKE_HOME_DIRECTORY": str(source), "CMAKE_BUILD_TYPE": "Release", "GGML_SYCL": "ON",
+                      "GGML_VULKAN": "OFF", "GGML_CUDA": "OFF", "GGML_METAL": "OFF", "GGML_NATIVE": "OFF",
+                      "GGML_SYCL_HOST_MEM_FALLBACK": "OFF", "GGML_SYCL_SUPPORT_XMX": "ON",
+                      "GGML_SYCL_GRAPH": "ON", "GGML_SYCL_DNN": "ON", "GGML_SYCL_F16": "OFF"}
+            for config in (None, str(root / "host-dnnl"), str(prefix / "lib/cmake/dnnl")):
+                data = dict(values)
+                if config is not None: data["DNNL_DIR"] = config
+                (build / "CMakeCache.txt").write_text("\n".join(k + ":STRING=" + v for k, v in data.items()))
+                if config != str(prefix / "lib/cmake/dnnl"):
+                    with self.assertRaisesRegex(ValueError, "inside the selected SDK"):
+                        sycl.build_manifest(binary, source, prefix)
+                else:
+                    report = sycl.build_manifest(binary, source, prefix)
+                    self.assertEqual(report["onednn_development"]["version"], "3.13.2")
+                    self.assertNotIn(str(root), json.dumps(report))
+            config = prefix / "lib/cmake/dnnl/dnnl-config.cmake"
+            original = config.read_text()
+            config.write_text(original.replace('${_ZINC_DNNL_PREFIX}/include', '/host-sdk/include'))
+            with self.assertRaisesRegex(ValueError, "prefix-only configuration"):
+                sycl.build_manifest(binary, source, prefix)
+            config.write_text(original)
+            outside = root / "host-config.cmake"; outside.write_text(config.read_text())
+            config.unlink(); config.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "missing or external"):
+                sycl.build_manifest(binary, source, prefix)
+
+    def test_live_runtime_must_match_the_recorded_development_library_even_within_the_same_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.sdk(Path(directory)); development = sycl.onednn_development(prefix)
+            text = SyclEnvironmentTest().fixture_maps(prefix)
+            library = (prefix / "lib/libdnnl.so").resolve()
+            text += "\n00002000-00003000 r-xp 00000000 00:00 0 " + str(library)
+            self.assertEqual(sycl.runtime_evidence_from_maps(text, prefix, development)["library_sha256"][library.name], development["library_sha256"])
+            with self.assertRaisesRegex(ValueError, "differs from the selected"):
+                sycl.runtime_evidence_from_maps(text.rsplit("\n", 1)[0], prefix, development)
+            library.write_bytes(b"same filename, changed runtime")
+            with self.assertRaisesRegex(ValueError, "differs from the selected"):
+                sycl.runtime_evidence_from_maps(text, prefix, development)
+
+    def test_malformed_snapshot_cannot_skip_live_library_matching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.sdk(Path(directory)); text = SyclEnvironmentTest().fixture_maps(prefix)
+            for development in ({}, [], {"library_name": "libdnnl.so.3.13"},
+                                {"library_sha256": "a" * 64},
+                                {"library_name": "host-library", "library_sha256": "a" * 64},
+                                {"library_name": "libdnnl.so.3.13", "library_sha256": "invalid"}):
+                with self.subTest(development=development), self.assertRaisesRegex(ValueError, "recorded oneDNN"):
+                    sycl.runtime_evidence_from_maps(text, prefix, development)
 
 
 if __name__ == "__main__":

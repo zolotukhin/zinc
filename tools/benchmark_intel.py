@@ -135,7 +135,7 @@ def raw_scenarios(args, scenarios, work, env):
     return result
 
 
-def native_reference_validation(args, work, env, reference_env, record=None):
+def native_reference_validation(args, work, env, reference_env, record=None, *, development=None):
     """Check the timed SYCL configuration against the frozen Vulkan oracle."""
     # Attach this object to the parent before calling. A rejected configuration
     # must retain its obtained continuations and live runtime, without becoming
@@ -144,14 +144,19 @@ def native_reference_validation(args, work, env, reference_env, record=None):
     record = {} if record is None else record
     require(isinstance(record, dict) and not record, "native preflight record must be fresh")
     record.update(passed=False, backend="sycl", oracle_backend="vulkan", oracle_commit=policy()["reference"]["commit"],
-                  performance_configuration_checked=False, validation_stage="startup", cases=[])
+                  performance_configuration_checked=False, validation_stage="development", cases=[])
+    # Qualification must fail before starting a server if the caller omitted
+    # the build-time snapshot. Optional historical runtime inspection is a
+    # separate helper and cannot supply a new passing native preflight.
+    sycl.require_development_snapshot(development)
+    record["validation_stage"] = "startup"
     samples = json.loads((work / "reference-samples.json").read_text())
     require(samples, "native reference validation needs frozen oracle samples")
     port, cases, pending = gpu.free_port(), record["cases"], []
     log = work / "native-reference-validation.log"
     with gpu.process(performance_reference_command(args, port), log, work,
                      gpu.reference_environment(args.llama_bin, reference_env)) as child:
-        with process_observations(record, [("runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix))]):
+        with process_observations(record, [("runtime", lambda: sycl.runtime_evidence(child.pid, args.sycl_prefix, development))]):
             gpu.ready(child, port, require_ok=True)
             record["gpu_offload"] = native_gpu_layers(log.read_text(errors="replace"), "sycl")
             record["performance_configuration_checked"] = True
@@ -632,7 +637,7 @@ def main():
                 devices = [p for p in Path("/sys/class/drm").glob("renderD*/device/vendor") if p.read_text().strip() == "0x8086"]
                 require(len(devices) == 1, "cross-backend comparison requires exactly one physical Intel render device")
                 report["native_stack"] = sycl.stack_manifest(args.sycl_prefix)
-                report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source)
+                report["native_build"] = sycl.build_manifest(args.llama_bin, args.llama_source, args.sycl_prefix)
                 report["settings"]["native_runtime"] = {key: reference_env[key] for key in (
                     "GGML_SYCL_ENABLE_GRAPH", "GGML_SYCL_ENABLE_DNN", "GGML_SYCL_FA_ONEDNN")}
                 report["native_probe"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
@@ -664,7 +669,8 @@ def main():
                     if args.reference_backend == "sycl":
                         print("Correctness: timed SYCL configuration versus frozen Vulkan oracle", flush=True)
                         current["native_reference_validation"] = {}
-                        native_reference_validation(args, model_work, env, reference_env, current["native_reference_validation"])
+                        native_reference_validation(args, model_work, env, reference_env, current["native_reference_validation"],
+                                                    development=report["native_build"]["onednn_development"])
                     scenarios = run_json(["bun", str(ROOT / "tools/intel_workloads.mjs"), identifier])
                     scenarios = raw_scenarios(args, scenarios, model_work, env)
                     current["scenarios"] = [{k: v for k, v in row.items() if k != "body"} | {"request_sha256": text_hash(json.dumps(row["body"], sort_keys=True))} for row in scenarios]
@@ -693,7 +699,8 @@ def main():
                                 current["processes"].append(process)
                                 collectors = [("memory", memory.snapshot)]
                                 if engine == "llama" and args.reference_backend == "sycl":
-                                    collectors.append(("native_runtime", lambda pid=child.pid, prefix=args.sycl_prefix: sycl.runtime_evidence(pid, prefix)))
+                                    collectors.append(("native_runtime", lambda pid=child.pid, prefix=args.sycl_prefix,
+                                                       development=report["native_build"]["onednn_development"]: sycl.runtime_evidence(pid, prefix, development)))
                                 with process_observations(process, collectors):
                                     for scenario in scenarios:
                                         for iteration in range(args.warmup + args.runs):
@@ -734,7 +741,7 @@ def main():
             report["hardware_unchanged"] = True
             if args.reference_backend == "sycl":
                 report["native_stack_after"] = sycl.stack_manifest(args.sycl_prefix)
-                report["native_build_after"] = sycl.build_manifest(args.llama_bin, args.llama_source)
+                report["native_build_after"] = sycl.build_manifest(args.llama_bin, args.llama_source, args.sycl_prefix)
                 report["native_probe_after"] = validate_probe(json.loads(gpu.output([str(args.sycl_probe)], reference_env, timeout=180)))
                 report["native_opencl_after"] = json.loads(gpu.output([sys.executable, str(ROOT / "tools/intel_sycl_environment.py"),
                                             "--probe-opencl", str(args.sycl_prefix / "lib/libOpenCL.so.1")], reference_env, timeout=60))
