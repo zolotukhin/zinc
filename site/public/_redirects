@@ -1,6 +1,5 @@
-http://zolotukhin.ai/*       https://zolotukhin.ai/:splat             301
-http://www.zolotukhin.ai/*   https://zolotukhin.ai/:splat             301
-https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
+# Pages handles HTTPS; the canonical-host Worker handles www (see ../README.md).
+# Hostname rules are not supported in this file.
 
 /about                       /about/                                  301
 /blog                        /blog/                                   301
@@ -25,6 +24,8 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/spec              /zinc/docs/spec/                         301
 /zinc/docs/amd-gpu-reference /zinc/docs/amd-gpu-reference/            301
 /zinc/docs/turboquant-spec   /zinc/docs/turboquant-spec/              301
+/zinc/docs/zig-api/session   /zinc/docs/zig-api/                      301
+/zinc/docs/zig-api/session/  /zinc/docs/zig-api/                      301
 /zinc/docs/zig-api/:module   /zinc/docs/zig-api/:module/              301
 
 /zinc/docs/gpu-reference     /zinc/docs/amd-gpu-reference/            301
@@ -43,8 +44,6 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/rdna4-batched-prefill-2x/ /blog/2026-06-05-how-zinc-rdna4-batched-prefill-went-from-42-to-208-tok-s/ 301
 /zinc/docs/rdna4-performance-journey  /blog/2026-05-09-how-we-made-amd-qwen-inference-faster-than-llama-cpp-in-six-weeks-on-the-radeon-ai-pro-r9700/ 301
 /zinc/docs/rdna4-performance-journey/ /blog/2026-05-09-how-we-made-amd-qwen-inference-faster-than-llama-cpp-in-six-weeks-on-the-radeon-ai-pro-r9700/ 301
-/zinc/docs/zig-api/session          /zinc/docs/zig-api/        301
-/zinc/docs/zig-api/session/         /zinc/docs/zig-api/        301
 /zinc/docs/rdna4-performance-plan   /zinc/docs/rdna4-tuning/   301
 /zinc/docs/rdna4-performance-plan/  /zinc/docs/rdna4-tuning/   301
 /zinc/docs/performance-gap-analysis  /zinc/benchmarks/         301

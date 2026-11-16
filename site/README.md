@@ -78,3 +78,21 @@ Verify `/`, `/zinc/`, `/zinc/docs/`, `/zinc/benchmarks/`, `/blog/`, `/feed.xml`,
 and `/sitemap-index.xml` on `https://zolotukhin.ai` after deployment. For a
 Cloudflare-hosted build, use `site` as the root, `bun run build` as the build
 command, `dist` as the output directory, and the Node version in `.node-version`.
+
+### Canonical hostname
+
+Keep both `zolotukhin.ai` and `www.zolotukhin.ai` attached to the Pages project.
+A DNS record alone does not attach a Pages hostname and can return HTTP 522.
+The `canonical-host` Worker permanently redirects `www` to the HTTPS apex,
+preserving paths and query strings. Its route matches only `www.zolotukhin.ai/*`;
+Pages continues to serve the apex site. Deploy it when its source or route changes:
+
+```bash
+bunx wrangler deploy --config wrangler.canonical-host.json
+```
+
+Verify that `https://www.zolotukhin.ai/zinc/docs/` returns a 301 to
+`https://zolotukhin.ai/zinc/docs/`. Hostname redirects are not supported in
+Pages `_redirects`; that file handles path changes. Cloudflare's retired
+`/cdn-cgi/l/email-protection` utility is handled before Pages and returns 404;
+current content must not link to it.

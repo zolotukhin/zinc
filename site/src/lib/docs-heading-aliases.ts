@@ -10,6 +10,9 @@ const aliases: HeadingAliases = {
       'status--known-gaps-read-first',
     ],
   },
+  benchmarking: {
+    'latest-llama-cpp-and-matched-mtp-pairs': ['latest-llamacpp-and-matched-mtp-pairs'],
+  },
   'running-zinc': {
     'install-the-command': ['build-the-binary'],
     'historical-development-node-diagnostics': ['sample-outputs-from-the-shared-rdna4-node'],

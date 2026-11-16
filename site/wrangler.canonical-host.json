@@ -1,0 +1,10 @@
+{
+  "name": "zolotukhin-canonical-host",
+  "main": "workers/canonical-host.mjs",
+  "compatibility_date": "2026-11-15",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "www.zolotukhin.ai/*", "zone_name": "zolotukhin.ai" }
+  ]
+}
