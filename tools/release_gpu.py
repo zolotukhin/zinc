@@ -42,6 +42,35 @@ def output(command, env=None, timeout=180):
     return result.stdout + result.stderr
 
 
+def validate_model_diagnostics(report, model, context, backend):
+    require(isinstance(report, dict) and report.get("schema_version") == 1 and
+            report.get("backend") == backend and report.get("model") == Path(model).name and
+            report.get("result") in ("ready", "ready_with_warnings") and report.get("error") is None,
+            "packaged model diagnostics failed or selected different inputs")
+    summary, memory, checks = report.get("summary"), report.get("memory"), report.get("checks")
+    require(isinstance(summary, dict) and summary.get("fail") == 0 and
+            isinstance(checks, list) and checks and all(isinstance(c, dict) and c.get("status") in ("ok", "warn", "skip") for c in checks) and
+            sum(c.get("name") == "Model" and c.get("status") == "ok" for c in checks) == 1,
+            "packaged model diagnostics skipped or failed model inspection")
+    require(isinstance(memory, dict) and memory.get("source") == "estimate" and
+            memory.get("context_length") == context and type(memory.get("slots")) is int and memory["slots"] == 1,
+            "packaged model diagnostics omitted or changed context/slot accounting")
+
+
+def model_diagnostics(tree, model, context, device, backend, work, env):
+    # Inspect metadata, not tensor payloads: the full weight hash is checked
+    # separately above. Keep a fixed deadline for a stuck GPU/metadata probe.
+    # Machine output has a dedicated stream: GPU-driver logging belongs in
+    # the private log, never mixed into JSON or copied into public evidence.
+    document = work / "model-diagnostics.json"
+    with document.open("wb") as stream:
+        with process([str(tree / "bin/zinc"), "--check", "--json", "-m", str(model),
+                      "-d", str(device), "-c", str(context), "--parallel", "1"],
+                     work / "model-diagnostics-private.log", work, env, stdout=stream) as child:
+            require(child.wait(timeout=360) == 0, "packaged model diagnostics command failed")
+    validate_model_diagnostics(read_json(document), model, context, backend)
+
+
 def packaged_environment():
     """Probe installed bytes without interactive model/library overrides."""
     return {key: value for key, value in os.environ.items() if not key.startswith(("ZINC_", "GH_", "ACTIONS_")) and
@@ -758,6 +787,8 @@ def main():
                 expected = next(m for m in policy()["models"] if m["id"] == identifier)
                 model = Path(config["models"][identifier]).expanduser().resolve()
                 require(model.is_file() and model.stat().st_size == expected["size_bytes"] and sha256(model) == expected["sha256"], "model bytes differ from pinned policy: " + identifier)
+                model_diagnostics(tree, model, expected["context"], device,
+                                  profile["target"].rsplit("-", 1)[1], work, env)
                 if profile["family"].startswith("apple"):
                     require(model == Path.home() / "Library/Caches/zinc/models/models" / identifier / "model.gguf", "Metal workers must use the managed model cache")
                 tokenizer_parity(tree, reference, model, work, env)
@@ -779,6 +810,7 @@ def main():
                 check_prefill = profile["target"].endswith("vulkan") and identifier == "qwen36-35b-a3b-q4k-xl"
                 prefill = api_checks(tree, model, expected["context"], device, work, env, browser_chat, samples, check_prefill)
                 models.append({"id": identifier, "sha256": expected["sha256"], "context": expected["context"], "passed": True,
+                               "diagnostics_passed": True,
                                "reference_agreement": agreement})
                 if bounded is not None:
                     models[-1]["bounded_prefill"] = bounded

@@ -1219,7 +1219,7 @@ class ReleaseTest(unittest.TestCase):
         (directory / "SHA256SUMS.txt").write_text("".join(a["sha256"] + "  " + a["filename"] + "\n" for a in artifacts))
         for profile in scoped["gpu_profiles"]:
             artifact = next(a for a in artifacts if a["target"] == profile["target"])
-            models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True,
+            models = [dict(id=m["id"], sha256=m["sha256"], context=m["context"], passed=True, diagnostics_passed=True,
                            reference_agreement=release_lib.reference_agreement([{"tokens": 16, "near_ties": []} for _ in range(3)]))
                       for m in policy()["models"] if m["id"] in profile["models"]]
             for model in models:
@@ -1379,6 +1379,8 @@ class ReleaseTest(unittest.TestCase):
                    lambda d: d["models"][0].update(sha256="0" * 64), lambda d: d["models"][0].update(context=1),
                    lambda d: d["models"].pop(), lambda d: d["reference"].update(commit="2" * 40),
                    lambda d: d["models"][0].pop("reference_agreement"),
+                   lambda d: d["models"][0].pop("diagnostics_passed"),
+                   lambda d: d["models"][0].update(diagnostics_passed=False),
                    lambda d: d["models"][0]["reference_agreement"].update(exact_tokens=1),
                    lambda d: d["reference"].pop("generation"), lambda d: d["reference"]["generation"].update(micro_batch=2),
                    lambda d: d["checks"].pop("kernel_reference"), lambda d: d["hardware"].pop("driver"),
@@ -1918,7 +1920,7 @@ class ReleaseTest(unittest.TestCase):
         for entrypoint in ("candidate", "readiness"):
             failures = [None, "library", "during_version_probe", "stale_server", "wrong_backend", "late_cleanup", "sliding_window"]
             if entrypoint == "readiness": failures += ["wrong_validation", "dirty_validation"]
-            else: failures.append("busy_bench")
+            else: failures += ["busy_bench", "model_diagnostics"]
             for failure in failures:
                 folder = self.root / (entrypoint + "-" + str(failure))
                 reference, tree = folder / "reference", folder / "package"
@@ -1973,6 +1975,8 @@ class ReleaseTest(unittest.TestCase):
                     for name, value in (("policy", data), ("extract_archive", tree), ("probe_binary", None), ("idle", None)):
                         stack.enter_context(patch.object(release_worker, name, return_value=value))
                     stack.enter_context(patch.object(release_gpu, "output", side_effect=output))
+                    diagnostic_check = stack.enter_context(patch.object(release_gpu, "model_diagnostics",
+                        side_effect=ValueError("fixture model diagnostics failed") if failure == "model_diagnostics" else None))
                     stack.enter_context(patch.object(release_gpu, "api_checks", side_effect=requests))
                     kernel_check = stack.enter_context(patch.object(release_gpu, "rocm_kernel_reference", return_value={"passed": True, "cases": 305}))
                     window_check = stack.enter_context(patch.object(release_gpu, "sliding_window_reference", return_value=sliding,
@@ -1996,7 +2000,7 @@ class ReleaseTest(unittest.TestCase):
                                   "stale_server": "reference executable", "wrong_backend": "native GPU backend",
                                   "wrong_validation": "validation checkout differs", "dirty_validation": "validation checkout is dirty",
                                   "late_cleanup": "fixture cleanup failed", "busy_bench": "GPU worker is busy",
-                                  "sliding_window": "fixture long-window continuation differed"}[failure]
+                                  "sliding_window": "fixture long-window continuation differed", "model_diagnostics": "fixture model diagnostics failed"}[failure]
                         with self.assertRaisesRegex(ValueError, reason): run()
                         if entrypoint == "candidate": report.assert_not_called()
                         else: self.assertFalse(report.call_args.args[1]["passed"])
@@ -2011,6 +2015,10 @@ class ReleaseTest(unittest.TestCase):
                         self.assertEqual(report.call_args.args[1]["models"][0]["sliding_window_reference"], sliding)
                         self.assertEqual(report.call_args.args[1]["reference"]["library_sha256"], before["library_sha256"])
                         self.assertEqual(set(before["library_sha256"]), {"libggml-hip.so"})
+                        if entrypoint == "candidate":
+                            diagnostic_check.assert_called_once()
+                            self.assertEqual(diagnostic_check.call_args.args[:5], (tree, model.resolve(), 2048, 7, "rocm"))
+                            self.assertTrue(report.call_args.args[1]["models"][0]["diagnostics_passed"])
                         if entrypoint == "readiness":
                             evidence = report.call_args.args[1]
                             self.assertTrue(evidence["passed"])
@@ -2828,6 +2836,57 @@ class ReleaseSSHTest(unittest.TestCase):
         for changed in ({"host": "-oProxyCommand=echo"}, {"user": "bad;echo"}, {"port": True}, {"profiles": ["rocm-rdna4"]}):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 release_ssh.ssh_command({**config, **changed})
+
+
+class PackagedModelDiagnosticsTests(unittest.TestCase):
+    def report(self, backend="vulkan"):
+        return {"schema_version": 1, "backend": backend, "model": "tiny.gguf", "result": "ready", "error": None,
+                "summary": {"fail": 0}, "checks": [{"name": "Model", "status": "ok"}],
+                "memory": {"source": "estimate", "context_length": 4096, "slots": 1}}
+
+    def test_model_diagnostics_accept_actual_estimates_and_native_warnings(self):
+        for backend in ("vulkan", "rocm", "metal"):
+            for warnings in (False, True):
+                report = self.report(backend)
+                if warnings:
+                    report["result"] = "ready_with_warnings"
+                    report["checks"].append({"name": "Memory estimate", "status": "warn"})
+                release_gpu.validate_model_diagnostics(report, Path("models/tiny.gguf"), 4096, backend)
+
+    def test_model_diagnostics_cannot_certify_failed_skipped_or_different_inputs(self):
+        changes = [lambda d: d.update(schema_version=2), lambda d: d.update(backend="rocm"),
+                   lambda d: d.update(model="other.gguf"), lambda d: d.update(result="not_ready"),
+                   lambda d: d.update(error="InspectionFailed"), lambda d: d["summary"].update(fail=1),
+                   lambda d: d.update(checks=[]), lambda d: d["checks"][0].update(status="skip"),
+                   lambda d: d["checks"][0].update(status="fail"), lambda d: d["checks"].append(dict(d["checks"][0])),
+                   lambda d: d.update(memory=None), lambda d: d["memory"].update(source="catalog"),
+                   lambda d: d["memory"].update(context_length=2048), lambda d: d["memory"].update(slots=2),
+                   lambda d: d["memory"].update(slots=True)]
+        for index, change in enumerate(changes):
+            report = self.report()
+            change(report)
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                release_gpu.validate_model_diagnostics(report, "tiny.gguf", 4096, "vulkan")
+
+    def test_model_diagnostics_separate_driver_logs_and_reject_nonzero_exit(self):
+        with tempfile.TemporaryDirectory(prefix="zinc model check ") as temporary:
+            work = Path(temporary)
+            (work / "bin").mkdir()
+            binary = work / "bin/zinc"
+            for exit_status in (0, 1):
+                binary.write_text("#!" + sys.executable + "\nimport json,sys\n"
+                                  "assert sys.argv[1:] == ['--check', '--json', '-m', 'models/tiny.gguf', '-d', '3', '-c', '4096', '--parallel', '1']\n"
+                                  "print('driver log stays private', file=sys.stderr)\n"
+                                  "print(" + repr(json.dumps(self.report())) + ")\n"
+                                  "sys.exit(" + str(exit_status) + ")\n")
+                binary.chmod(0o700)
+                if exit_status:
+                    with self.assertRaisesRegex(ValueError, "diagnostics command failed"):
+                        release_gpu.model_diagnostics(work, Path("models/tiny.gguf"), 4096, 3, "vulkan", work, dict(os.environ))
+                else:
+                    release_gpu.model_diagnostics(work, Path("models/tiny.gguf"), 4096, 3, "vulkan", work, dict(os.environ))
+                    self.assertNotIn("driver log", (work / "model-diagnostics.json").read_text())
+                    self.assertIn("driver log stays private", (work / "model-diagnostics-private.log").read_text())
 
 
 if __name__ == "__main__":
