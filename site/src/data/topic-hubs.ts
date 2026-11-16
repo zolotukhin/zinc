@@ -43,6 +43,80 @@ export type TopicHub = TopicHubBase & ({ guide: 'qwen38' } | {
 
 export const topicHubs: TopicHub[] = [
   {
+    slug: 'openclaw-local-models',
+    title: 'OpenClaw with Local Models and ZINC',
+    shortTitle: 'OpenClaw',
+    description: 'Connect OpenClaw to local models with ZINC: AMD GPU setup, model selection, live context discovery, tool calls, and tested R9700 workflows.',
+    keywords: 'OpenClaw local models, OpenClaw ZINC, OpenClaw AMD GPU, OpenClaw R9700, OpenClaw RX 9070 XT, OpenClaw local inference, OpenAI compatible API',
+    summary: 'Connect OpenClaw to a model running on your GPU. ZINC provides the local inference API; OpenClaw manages the agent workflow and executes tools. Start with the setup guide, then follow the hardware guidance and recorded model tests.',
+    practicalAnswer: 'Install ZINC for your GPU, pull a suitable model, and start its HTTP API with enough context for the agent. Download the standalone OpenClaw helper, run setup for an existing project, and run its connection check before a task. The helper discovers the loaded model and actual context capacity; it needs no ZINC source checkout.',
+    bestUse: 'Use this page to connect OpenClaw to a local model, choose a context budget, or diagnose a failed tool round trip. File-edit tasks are examples of the integration; OpenClaw is an agent platform with broader uses.',
+    status: [
+      {
+        label: 'Connection path',
+        detail: 'OpenClaw connects to the ZINC chat-completions API. The setup guide records the tested client version and Node.js requirements.',
+      },
+      {
+        label: 'Hardware evidence',
+        detail: 'The AMD acceptance report records R9700 tests for Vulkan and ROCm. The RX 9070 XT walkthrough provides memory guidance, not a separate qualification of that card.',
+      },
+    ],
+    actionPlan: [
+      { label: 'Start the model server', detail: 'Follow the binary installation and OpenClaw setup guides. Qwen 3.5 9B is a starting point when it fits your GPU; the guide uses 16K context and one request slot.' },
+      { label: 'Configure OpenClaw', detail: 'Download the standalone helper and run setup for your project. It creates a dedicated configuration without replacing your global OpenClaw settings.' },
+      { label: 'Check before a task', detail: 'Run the helper check to verify the client configuration, ZINC health, model identity and available context. Check task outcomes independently afterward.' },
+    ],
+    checklist: [
+      { label: 'Use the loaded model ID', detail: 'Discover the server model instead of guessing its name. Native ROCm discovery can use a GGUF filename as the ID.' },
+      { label: 'Match the live context', detail: 'Configure server memory first. A model’s advertised context window does not allocate that capacity on your GPU.' },
+      { label: 'Keep configuration portable', detail: 'Use the documented environment variables for custom endpoints and API keys. Rediscover model and context after changing the server.' },
+    ],
+    measurements: [
+      { label: 'Tool round trips', detail: 'Check that the model produces complete tool calls and can use the returned results in the next turn.' },
+      { label: 'Task outcome', detail: 'Verify the requested result separately from the agent’s final message. The published file-edit trials include independent tests and server recovery checks.' },
+      { label: 'Latency and memory', detail: 'Record time to first useful action, total task time, context and GPU memory. Token throughput alone does not establish agent reliability.' },
+    ],
+    articleIdeas: [
+      { label: 'Choose a model and context', detail: 'Use the acceptance matrix and memory guidance to select a starting configuration for your own workflow.' },
+      { label: 'Connect a remote GPU', detail: 'Follow the setup guide’s custom-endpoint instructions when OpenClaw and ZINC run on different machines.' },
+    ],
+    pitfalls: [
+      { label: 'Assuming every model is suitable', detail: 'Passing an inference test does not establish agent task quality. The small installation-test model is not recommended for agent tasks.' },
+      { label: 'Copying a larger card’s settings', detail: 'The R9700 has a different memory budget from a 16 GB RX 9070 XT. Check model weights, context and runtime memory before copying a configuration.' },
+      { label: 'Confusing inference and tool execution', detail: 'ZINC returns model responses and proposed tool calls. OpenClaw executes tools on the machine where the client runs.' },
+    ],
+    whatMatters: [
+      'Use chat completions and set streaming explicitly when configuring a client directly.',
+      'The standalone helper checks configuration and discovery before running an agent task.',
+      'The recorded AMD results belong to their exact model, backend, context and client settings.',
+    ],
+    readNext: [
+      {
+        title: 'OpenCode and OpenClaw on AMD: R9700 and RX 9070 XT',
+        href: '/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/',
+        description: 'A Linux walkthrough covering local models, GPU memory and the tests behind the setup.',
+      },
+      {
+        title: 'OpenClaw AMD model acceptance',
+        href: '/zinc/docs/openclaw-amd-validation/',
+        description: 'Recorded model outcomes, context settings, failures and qualification limits.',
+      },
+    ],
+    docs: [
+      { title: 'Configure OpenClaw with ZINC', href: '/zinc/docs/openclaw/', description: 'Client requirements, server startup, setup, connection checks and task execution.' },
+      { title: 'Download the OpenClaw helper', href: '/zinc/harnesses/setup-openclaw.mjs', description: 'Standalone setup, checks and task execution using Node’s standard library.' },
+      { title: 'Agent and app setup', href: '/zinc/docs/agent-setup/', description: 'An installed-first workflow with model discovery and release compatibility guidance.' },
+      { title: 'Hardware and memory requirements', href: '/zinc/docs/hardware-requirements/', description: 'Choose a backend and size the model and context for your GPU.' },
+    ],
+    related: ['opencode-local-coding', 'amd-rdna4-llm-inference', 'qwen3-8-local-inference'],
+    faqs: [
+      { question: 'Can OpenClaw use a local model served by ZINC?', answer: 'Yes. The OpenClaw setup guide connects a dedicated client configuration to ZINC’s OpenAI-compatible chat API. Run the helper check with your loaded model before submitting a task.' },
+      { question: 'Do I need a ZINC source checkout?', answer: 'No. Install the published Linux binary for your backend and download the standalone OpenClaw helper. Features marked Development in the guides require a newer source build.' },
+      { question: 'Can I use an AMD GPU without CUDA?', answer: 'Yes. ZINC provides Vulkan and ROCm backends for AMD. OpenClaw talks to the API; choose the GPU runtime and driver requirements documented for your backend.' },
+      { question: 'Does a successful connection prove the model can finish a task?', answer: 'No. Configuration, health and model discovery checks establish a working connection. Use the recorded acceptance results as a starting point and verify your own task outcomes independently.' },
+    ],
+  },
+  {
     slug: 'opencode-local-coding',
     title: 'OpenCode Local Coding with Qwen and ZINC',
     shortTitle: 'OpenCode',
@@ -196,7 +270,7 @@ export const topicHubs: TopicHub[] = [
         description: 'Start the local server, choose managed models, set context, and verify the runtime path.',
       },
     ],
-    related: ['qwen3-8-local-inference', 'amd-rdna4-llm-inference', 'gemma-local-inference'],
+    related: ['openclaw-local-models', 'qwen3-8-local-inference', 'amd-rdna4-llm-inference', 'gemma-local-inference'],
     faqs: [
       {
         question: 'Can OpenCode use ZINC as a local model backend?',

@@ -2,6 +2,7 @@ const topicTagRules: Record<string, string[]> = {
   'amd-rdna4-llm-inference': ['rdna4', 'r9700', 'rx-9070-xt'],
   'gemma-local-inference': ['gemma', 'gemma4'],
   'kv-cache-quantization': ['kv-cache', 'turboquant'],
+  'openclaw-local-models': ['openclaw'],
   'opencode-local-coding': ['opencode'],
   'qwen3-8-local-inference': ['qwen3-8', 'qwen3.8'],
 };
