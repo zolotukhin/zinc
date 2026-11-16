@@ -1821,6 +1821,26 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(family=family), self.assertRaises(ValueError):
                 release_gpu.gpu_evidence(text, family)
 
+    def test_ready_verdicts_accept_aligned_vulkan_and_metal_labels(self):
+        # Vulkan/Metal printVerdict pads the label before the colon, while
+        # runCudaCheck uses an unpadded label. Use the actual human layouts.
+        vulkan = ("  Selected GPU: #0 AMD Radeon AI PRO R9700 (RADV GFX1201)\n"
+                  "  GPU tuning: amd_rdna4 | 32768 MB VRAM\n"
+                  "Verdict       : READY [OK]\n")
+        metal = "  GPU family    : apple7 [OK]\nVerdict       : READY [OK]\n"
+        intel = vulkan.replace("AMD Radeon AI PRO R9700 (RADV GFX1201)", "Intel Arc Pro B70 Graphics").replace("amd_rdna4", "intel_arc_xe2")
+        for text, family in ((vulkan, "rdna4"), (intel, "intel-xe2"), (metal, "apple7")):
+            for verdict in ("READY [OK]", "READY WITH WARNINGS [WARN]"):
+                with self.subTest(family=family, verdict=verdict):
+                    ready = text.replace("READY [OK]", verdict)
+                    self.assertTrue(release_gpu.gpu_evidence(ready, family))
+                    self.assertTrue(release_gpu.gpu_evidence(ready.replace(verdict, "\x1b[1;32m" + verdict + "\x1b[0m"), family))
+            for failed in (text.replace("READY [OK]", "NOT READY [FAIL]"),
+                           text.replace("READY [OK]", "NOT READY [OK]"),
+                           text + "Verdict: not_ready\n", text.replace("Verdict       :", "log mentions")):
+                with self.subTest(family=family, failed=failed), self.assertRaises(ValueError):
+                    release_gpu.gpu_evidence(failed, family)
+
     def test_rocm_readiness_accepts_current_diagnostics_and_keeps_device_selection_strict(self):
         # runCudaCheck now shares the structured report's lower-case verdict
         # and includes the selected index/memory on the device line. Preserve
