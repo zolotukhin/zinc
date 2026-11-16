@@ -6,7 +6,7 @@ This is a lightweight public roadmap for contributors. It is not a guarantee of 
 
 Current priorities:
 
-- qualify and publish Linux Vulkan/ROCm 0.1.0 archives with real hardware evidence and verified installation; keep Metal as an unsigned preview
+- prepare and qualify the [Linux 0.1.1 candidate](releases/0.1.1-plan.md), including exact-archive model/client checks and upgrade/rollback coverage; [0.1.0 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0), and Metal remains an unsigned preview
 - make the core Linux AMD path more stable on real hardware
 - keep source builds and packages reliable across the documented Linux and macOS targets
 - harden the OpenAI-compatible server path

@@ -1675,6 +1675,30 @@ class ReleaseTest(unittest.TestCase):
         # keep its known limitation and source-frozen evidence visible there.
         self.assertIn("slower decode than llama.cpp on all seven models", notes)
         self.assertIn("https://github.com/zolotukhin/zinc/blob/" + COMMIT + "/docs/INTEL_PERFORMANCE.md", notes)
+        self.assertNotIn("0.1.0", notes)
+
+    def test_release_changes_use_the_same_reviewed_scope_for_rc_and_final(self):
+        directory = self.root / "reviewed-changes"
+        directory.mkdir()
+        (directory / "0.1.1-changes.md").write_text("Reviewed 0.1.1 corrections.\n")
+        for value in ("0.1.1", "0.1.1-rc.1", "0.1.1+build.7"):
+            self.assertEqual(release.release_changes(value, directory), "Reviewed 0.1.1 corrections.")
+        self.assertEqual(release.release_changes("0.1.0", directory), "")
+        with self.assertRaises(ValueError):
+            release.release_changes("../0.1.1", directory)
+
+    def test_generated_notes_freeze_changes_alongside_exact_hardware_evidence(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        with patch.object(release, "release_changes", return_value="Reviewed changes for the candidate.") as changes, \
+                contextlib.redirect_stdout(io.StringIO()):
+            release.finalize(SimpleNamespace(directory=directory))
+        changes.assert_called_once_with("9.8.7")
+        notes = (directory / "release-notes.md").read_text()
+        self.assertEqual(notes.count("Reviewed changes for the candidate."), 1)
+        self.assertIn("## Validated hardware and models", notes)
+        self.assertIn("Only the combinations in `validation.json` are certified", notes)
+        self.assertIn(COMMIT, notes)
 
     def test_stable_starter_coverage_must_match_the_selected_linux_profiles(self):
         for profiles in ('', '"apple-silicon"', '"amd-rdna4-32gb"', '"intel-arc"', '"unknown-profile"',

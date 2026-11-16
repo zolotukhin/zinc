@@ -389,6 +389,13 @@ def install_smoke(args):
     print("Actual archive: clean install, idempotent install and link repair passed (CPU only)")
 
 
+def release_changes(release_version, directory=None):
+    """Freeze reviewed version notes; RCs and final builds share the same scope."""
+    base_version = version(release_version).split("-", 1)[0].split("+", 1)[0]
+    path = Path(directory or ROOT / "docs/releases") / (base_version + "-changes.md")
+    return path.read_text().strip() if path.is_file() else ""
+
+
 def finalize(args):
     directory = Path(args.directory)
     data = verify_candidate(directory)
@@ -400,8 +407,11 @@ def finalize(args):
     label = " and ".join(backends)
     metal = any(a["target"] == "macos-aarch64-metal" for a in data["artifacts"])
     notes = [f"# ZINC v{data['version']}", "", label + " binaries built from [" + data["commit"] + "](https://github.com/zolotukhin/zinc/commit/" + data["commit"] + ").", "",
-             "Download the backend for your hardware. Models and GPU drivers are installed separately. CUDA remains experimental and source-only.", "",
-             "| Archive | Runtime |", "| --- | --- |"]
+             "Download the backend for your hardware. Models and GPU drivers are installed separately. CUDA remains experimental and source-only.", ""]
+    changes = release_changes(data["version"])
+    if changes:
+        notes.extend(["## Changes in this version", "", changes, ""])
+    notes.extend(["## Downloads", "", "| Archive | Runtime |", "| --- | --- |"])
     for artifact in data["artifacts"]:
         url = "https://github.com/zolotukhin/zinc/releases/download/v" + data["version"] + "/" + artifact["filename"]
         notes.append(f"| [{artifact['filename']}]({url}) | {target(artifact['target'])['runtime']} |")
@@ -419,7 +429,7 @@ def finalize(args):
     for report in validation["profiles"]:
         models = ", ".join("`" + m["id"] + "` (" + str(m["context"]) + ")" for m in report["models"])
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
-    notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU memory. Intel Macs, musl, Linux ARM64 and native Windows have no 0.1.0 archive.", "",
+    notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU memory. Intel Macs, musl, Linux ARM64 and native Windows have no archive in this release.", "",
                   "Vulkan includes the browser chat UI. ROCm exposes CLI/HTTP chat and completion routes; its standalone server has no built-in browser UI or hot model switching.", "",
                   "Release checks use greedy decoding, one slot and each backend's default KV/MTP settings. The pinned native reference uses F32 K/V. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
                   "## Known performance limits", "",
