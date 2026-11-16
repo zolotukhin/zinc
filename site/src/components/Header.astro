@@ -1,16 +1,38 @@
 ---
 const pathname = Astro.url.pathname;
+const projects = [
+  {
+    label: 'ZINC',
+    href: '/zinc/',
+    description: 'Local model inference',
+    links: [
+      { href: '/zinc/', label: 'Overview' },
+      { href: '/zinc/docs/', label: 'Documentation' },
+      { href: '/zinc/benchmarks/', label: 'Benchmarks' },
+    ],
+  },
+  {
+    label: 'HOCDB',
+    href: '/hocdb/',
+    description: 'Embedded time-series database',
+    links: [
+      { href: '/hocdb/', label: 'Overview' },
+      { href: '/hocdb/#quickstart', label: 'Quickstart' },
+      { href: '/hocdb/agent-guide.txt', label: 'Agent guide' },
+    ],
+  },
+];
 const navItems = [
-  { href: '/zinc/', label: 'ZINC' },
-  { href: '/hocdb/', label: 'HOCDB' },
-  { href: '/zinc/docs/', label: 'Docs' },
-  { href: '/zinc/benchmarks/', label: 'Benchmarks' },
   { href: '/blog/', label: 'Writing' },
   { href: '/about/', label: 'About' },
 ];
-const isActive = (href: string) => href === '/zinc/'
-  ? pathname === href
-  : pathname === href || pathname.startsWith(href);
+const currentLocation = (href: string) => {
+  if (pathname === href) return 'page';
+  if (!projects.some(project => project.href === href) && pathname.startsWith(href)) {
+    return 'location';
+  }
+  return undefined;
+};
 ---
 
 <header class="site-header">
@@ -18,8 +40,28 @@ const isActive = (href: string) => href === '/zinc/'
     <a href="/" class="site-name">zolotukhin.ai</a>
     <button class="nav-toggle" type="button" aria-controls="site-nav-links" aria-expanded="false">Menu</button>
     <ul id="site-nav-links" class="nav-links">
+      {projects.map(project => (
+        <li>
+          <details class="project-nav" name="site-projects" data-current={pathname.startsWith(project.href) || undefined}>
+            <summary class="project-label">
+              <span>{project.label}</span>
+              <svg class="chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m4 6 4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </summary>
+            <div class="project-panel">
+              <p class="project-description">{project.description}</p>
+              <ul aria-label={`${project.label} navigation`}>
+                {project.links.map(item => (
+                  <li><a href={item.href} aria-current={currentLocation(item.href)}>{item.label}</a></li>
+                ))}
+              </ul>
+            </div>
+          </details>
+        </li>
+      ))}
       {navItems.map(item => (
-        <li><a href={item.href} aria-current={isActive(item.href) ? 'page' : undefined}>{item.label}</a></li>
+        <li><a href={item.href} aria-current={currentLocation(item.href)}>{item.label}</a></li>
       ))}
     </ul>
   </nav>
@@ -30,18 +72,31 @@ const isActive = (href: string) => href === '/zinc/'
   const toggle = header?.querySelector<HTMLButtonElement>('.nav-toggle');
   const links = header?.querySelector<HTMLUListElement>('.nav-links');
   if (header && toggle && links) {
+    const projects = [...header.querySelectorAll<HTMLDetailsElement>('.project-nav')];
     header.dataset.enhanced = 'true';
+    const closeProjects = () => {
+      for (const project of projects) project.open = false;
+    };
     const close = () => {
+      closeProjects();
       toggle.setAttribute('aria-expanded', 'false');
       links.classList.remove('is-open');
     };
     toggle.addEventListener('click', () => {
       const open = toggle.getAttribute('aria-expanded') !== 'true';
+      if (!open) closeProjects();
       toggle.setAttribute('aria-expanded', String(open));
       links.classList.toggle('is-open', open);
     });
     header.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && toggle.getAttribute('aria-expanded') === 'true') {
+      if (event.key !== 'Escape') return;
+      const project = projects.find(project => project.open);
+      if (project) {
+        event.preventDefault();
+        project.open = false;
+        project.querySelector('summary')?.focus();
+      } else if (toggle.getAttribute('aria-expanded') === 'true') {
+        event.preventDefault();
         close();
         toggle.focus();
       }
@@ -49,25 +104,41 @@ const isActive = (href: string) => href === '/zinc/'
     links.addEventListener('click', event => {
       if ((event.target as Element).closest('a')) close();
     });
+    document.addEventListener('click', event => {
+      if (!header.contains(event.target as Node)) close();
+    });
     window.matchMedia('(min-width: 821px)').addEventListener('change', close);
   }
 </script>
 
 <style>
-  .site-header { border-bottom: 1px solid var(--color-border); padding: 1rem 0; }
+  .site-header { position: relative; z-index: 30; border-bottom: 1px solid var(--color-border); padding: 0.75rem 0; }
   .nav { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; flex-wrap: wrap; max-width: var(--max-width-wide); }
   .site-name { color: var(--color-text); font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; text-decoration: none; }
   .nav-links { display: flex; align-items: center; gap: 1.5rem; list-style: none; padding: 0; margin: 0; }
   .nav-links li { margin: 0; }
-  .nav-links a { display: block; padding: 0.25rem 0; color: var(--color-text-muted); font-size: 0.8rem; }
-  .nav-links a:hover, .nav-links a[aria-current] { color: var(--color-text); text-decoration: none; }
-  .nav-links a[aria-current] { text-decoration: underline; text-underline-offset: 0.35em; text-decoration-color: var(--color-accent); }
+  .nav-links a, .project-label { display: flex; align-items: center; min-height: 44px; padding: 0.4rem 0; color: var(--color-text-muted); font-size: 0.8rem; }
+  .nav-links a:hover, .nav-links a[aria-current], .project-label:hover, .project-nav[open] > .project-label, .project-nav[data-current] > .project-label { color: var(--color-text); text-decoration: none; }
+  .nav-links > li > a[aria-current], .project-nav[data-current] > .project-label > span { text-decoration: underline; text-underline-offset: 0.35em; text-decoration-color: var(--color-accent); }
+  .project-nav { position: relative; }
+  .project-label { gap: 0.4rem; cursor: pointer; list-style: none; }
+  .project-label::-webkit-details-marker { display: none; }
+  .chevron { flex-shrink: 0; }
+  .project-nav[open] .chevron { transform: rotate(180deg); }
+  .project-panel { position: absolute; top: calc(100% + 0.35rem); right: 0; width: 15rem; max-width: calc(100vw - 2rem); padding: 0.65rem; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg); box-shadow: 0 8px 24px rgb(0 0 0 / 0.1); }
+  .project-description { margin: 0; padding: 0.35rem 0.65rem 0.6rem; color: var(--color-text-muted); font-size: 0.7rem; }
+  .project-panel ul { list-style: none; padding: 0; margin: 0; }
+  .project-panel a { padding: 0.5rem 0.65rem; border-radius: 4px; }
+  .project-panel a:hover, .project-panel a:focus-visible { background: var(--color-bg-alt); }
+  .project-panel a[aria-current] { color: var(--color-accent); background: var(--color-tag-bg); }
   .nav-toggle { display: none; padding: 0.5rem 0.75rem; min-height: 44px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-text); background: var(--color-bg); font: inherit; font-size: 0.8rem; cursor: pointer; }
   @media (max-width: 820px) {
     .site-header { padding: 0.6rem 0; }
     .nav { gap: 0; }
     .nav-links { flex-direction: column; align-items: stretch; gap: 0; width: 100%; padding-top: 0.6rem; }
-    .nav-links a { padding: 0.65rem 0; }
+    .nav-links > li > a, .project-label { padding: 0.65rem 0; }
+    .project-label { justify-content: space-between; }
+    .project-panel { position: static; width: auto; max-width: none; margin: 0 0 0.65rem 0.35rem; padding: 0 0 0.1rem 0.65rem; border: 0; border-left: 2px solid var(--color-border); border-radius: 0; box-shadow: none; }
     .site-header[data-enhanced] .nav-toggle { display: block; }
     .site-header[data-enhanced] .nav-links:not(.is-open) { display: none; }
   }
