@@ -128,7 +128,8 @@ def gpu_evidence(text, family):
     # Native backends now render Report.result() rather than the legacy
     # upper-case label. Require one complete successful verdict, never a
     # READY substring in a failed verdict or unrelated log message.
-    verdicts = re.findall(r"^[ \t]*Verdict:[ \t]*([^\r\n]*)", clean, re.M)
+    # Vulkan and Metal align labels with padding before the colon.
+    verdicts = re.findall(r"^[ \t]*Verdict[ \t]*:[ \t]*([^\r\n]*)", clean, re.M)
     require("[FAIL]" not in clean and len(verdicts) == 1 and verdicts[0].strip() in
             ("READY [OK]", "READY WITH WARNINGS [WARN]", "ready", "ready_with_warnings"), "packaged diagnostics failed")
     require(not re.search(r"llvmpipe|lavapipe|software rasterizer|out of range", clean, re.I), "software/wrong GPU selected")
