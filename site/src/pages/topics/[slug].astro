@@ -5,6 +5,7 @@ import { buildBreadcrumbList } from '../../lib/structured-data';
 import { getTopicHub, topicHubs, type TopicHub } from '../../data/topic-hubs';
 import { getCollection } from 'astro:content';
 import { postMatchesTopic } from '../../lib/topic-posts';
+import Qwen38Guide from '../../components/topics/Qwen38Guide.astro';
 
 export function getStaticPaths() {
   return topicHubs.map((hub) => ({
@@ -34,6 +35,7 @@ const jsonLd = {
       '@type': 'TechArticle',
       headline: hub.title,
       description: hub.description,
+      dateModified: hub.updated,
       url: `${siteUrl}/topics/${hub.slug}/`,
       author: {
         '@type': 'Person',
@@ -77,8 +79,10 @@ const jsonLd = {
       <p class="eyebrow">Topic Guide</p>
       <h1>{hub.title}</h1>
       <p class="lede">{hub.summary}</p>
+      {hub.updated && <p class="section-note">Updated <time datetime={hub.updated}>{new Date(`${hub.updated}T00:00:00Z`).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</time></p>}
     </header>
 
+    {hub.guide === 'qwen38' ? <Qwen38Guide /> : <>
     <section class="answer-band" aria-labelledby="practical-answer">
       <h2 id="practical-answer">Practical Answer</h2>
       <p>{hub.practicalAnswer}</p>
@@ -167,9 +171,10 @@ const jsonLd = {
         ))}
       </ul>
     </section>
+    </>}
 
     <section aria-labelledby="read-next">
-      <h2 id="read-next">Deep Reads</h2>
+      <h2 id="read-next">{hub.guide ? 'Continue reading' : 'Deep Reads'}</h2>
       <div class="link-grid">
         {hub.readNext.map((link) => (
           <a href={link.href} class="link-card">
@@ -182,7 +187,7 @@ const jsonLd = {
 
     {latestPosts.length > 0 && (
       <section aria-labelledby="latest-posts">
-        <h2 id="latest-posts">Latest Research Notes</h2>
+        <h2 id="latest-posts">{hub.guide ? 'Qwen 3.8 field notes' : 'Latest Research Notes'}</h2>
         <ol class="latest-posts">
           {latestPosts.map((post) => (
             <li>
@@ -202,7 +207,7 @@ const jsonLd = {
     )}
 
     <section aria-labelledby="docs">
-      <h2 id="docs">Run It</h2>
+      <h2 id="docs">{hub.guide ? 'Setup and reference' : 'Run It'}</h2>
       <div class="link-grid compact">
         {hub.docs.map((link) => (
           <a href={link.href} class="link-card">

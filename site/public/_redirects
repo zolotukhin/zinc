@@ -12,6 +12,8 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /blog/*.webp                 /blog/:splat.webp                        200
 /blog/:slug                  /blog/:slug/                             301
 /topics                      /topics/                                 301
+/topics/qwen3-6-local-inference  /topics/qwen3-8-local-inference/        301
+/topics/qwen3-6-local-inference/ /topics/qwen3-8-local-inference/        301
 /topics/:slug                /topics/:slug/                           301
 /zinc                        /zinc/                                   301
 /zinc/benchmarks             /zinc/benchmarks/                        301

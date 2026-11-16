@@ -2,13 +2,13 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { getCollection } from 'astro:content';
 import benchmarkData from '../data/zinc-performance.json';
+import { rowsFor, scenarioOrder, overallRatio } from '../lib/benchmark-view';
 
 const allPosts = (await getCollection('posts', ({ data }) => !data.draft))
   .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
 const posts = allPosts.slice(0, 5);
 
 const rocmTarget = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
-const qwen38 = rocmTarget?.models?.find((model: any) => model.id === 'qwen38-27b-q4k-m');
 const museGlimmer = rocmTarget?.models?.find((model: any) => model.id === 'muse-glimmer-30b-q4k-m');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
 const formatRate = (value: number | null, digits = 1) => value == null ? 'n/a' : value.toFixed(digits);
@@ -19,23 +19,24 @@ const formatDate = (date: Date) => new Intl.DateTimeFormat('en-US', {
   timeZone: 'UTC',
 }).format(date);
 
-const qwenCore = qwen38?.scenarios?.find((scenario: any) => scenario.id === 'core');
-const qwenComparable = qwenCore?.variants?.mtp_off?.zinc ?? qwenCore?.zinc;
+const qwenRows = rocmTarget ? scenarioOrder.flatMap((scenario) =>
+  rowsFor(rocmTarget, scenario, 'off').filter((row) => row.model.id === 'qwen38-27b-q4k-m')
+) : [];
+const qwenCore = qwenRows.find((row) => row.id === 'core');
+const qwenComparable = qwenCore?.zinc;
 const qwenDecode = median(qwenComparable?.decode_tps);
 const qwenLlamaDecode = median(qwenCore?.baseline?.decode_tps);
 const qwenPrefill = median(qwenComparable?.prefill_tps);
 const qwenLlamaPrefill = median(qwenCore?.baseline?.prefill_tps);
-const qwenWorkloads = qwen38?.scenarios?.length ?? 0;
-const qwenWins = (qwen38?.scenarios ?? []).filter((scenario: any) =>
-  ((scenario.variants?.mtp_off?.comparison ?? scenario.comparison)?.overall_pct_of_baseline ?? 0) >= 100
-).length;
+const qwenWorkloads = qwenRows.length;
+const qwenWins = qwenRows.filter((row) => (overallRatio(row) ?? 0) >= 1).length;
 
 const modelWork = [
   {
     name: 'Qwen 3.8 27B',
     kind: 'Local / dense',
     note: 'Current ROCm decode and speculative-decoding target.',
-    href: '/zinc/benchmarks/#rdna-rocm',
+    href: '/topics/qwen3-8-local-inference/',
   },
   {
     name: 'Muse Glimmer 30B',

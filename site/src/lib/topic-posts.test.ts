@@ -14,6 +14,11 @@ describe('topic post matching', () => {
   });
 
   it('matches topic slugs case-insensitively', () => {
-    expect(postMatchesTopic('qwen3-6-local-inference', ['QWEN3-6'])).toBe(true);
+    expect(postMatchesTopic('qwen3-8-local-inference', ['QWEN3-8'])).toBe(true);
+  });
+
+  it('includes both published Qwen 3.8 tag spellings and excludes older model notes', () => {
+    expect(postMatchesTopic('qwen3-8-local-inference', ['qwen3.8'])).toBe(true);
+    expect(postMatchesTopic('qwen3-8-local-inference', ['qwen3-6'])).toBe(false);
   });
 });

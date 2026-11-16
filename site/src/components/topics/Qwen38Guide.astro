@@ -1,0 +1,201 @@
+---
+import { Code } from 'astro:components';
+import benchmarkData from '../../data/zinc-performance.json';
+import { formatDate, formatNumber, metric, rowsFor, scenarioNames, scenarioOrder } from '../../lib/benchmark-view';
+
+const modelId = 'qwen38-27b-q4k-m';
+const measurements = ['rdna', 'rdna-rocm'].flatMap((id) => {
+  const target = benchmarkData.targets.find((target) => target.id === id);
+  if (!target) throw new Error(`Missing Qwen benchmark target: ${id}`);
+  return scenarioOrder.map((scenario) => {
+    const row = rowsFor(target, scenario, 'off').find((row) => row.model.id === modelId);
+    if (!row || row.zinc?.speculative_decoding?.enabled !== false || row.baseline?.speculative_decoding?.enabled !== false) {
+      throw new Error(`Qwen guide requires a matched MTP-off measurement: ${id}/${scenario}`);
+    }
+    return { backend: id === 'rdna' ? 'Vulkan' : 'ROCm', row };
+  });
+});
+const quickstart = [
+  'zinc --version',
+  'zinc --check',
+  'zinc model list --json',
+  'zinc model pull qwen38-27b-q4k-m',
+  '',
+  'ZINC_MTP=0 zinc --model-id qwen38-27b-q4k-m \\',
+  '  --context 4096 --chat --max-tokens 256 \\',
+  '  --prompt "Explain how a hash table handles collisions."',
+].join('\n');
+const serve = [
+  'ZINC_MTP=0 zinc --model-id qwen38-27b-q4k-m \\',
+  '  --context 4096 --parallel 1 --port 9090',
+].join('\n');
+const discover = [
+  'curl --fail http://localhost:9090/health',
+  'curl --fail http://localhost:9090/v1/models',
+].join('\n');
+const themes = { light: 'github-light-high-contrast', dark: 'github-dark-high-contrast' };
+---
+
+<nav class="guide-jumps" aria-label="Qwen guide sections">
+  <a href="#quickstart">Run it</a>
+  <a href="#hardware">Hardware</a>
+  <a href="#benchmarks">Benchmarks</a>
+  <a href="#mtp">MTP</a>
+  <a href="#context">Context</a>
+  <a href="#agents">Coding agents</a>
+</nav>
+
+<section class="guide-section" aria-labelledby="model">
+  <h2 id="model">The model this guide covers</h2>
+  <p>Use <code>qwen38-27b-q4k-m</code> in ZINC’s managed catalog. It downloads a pinned
+    <code>Qwen3.8-27B-Q4_K_M.gguf</code> from Unsloth, verifies its SHA256, and keeps it in the model cache.
+    The file is <strong>17.1 GB / 15.9 GiB</strong>; weights are only part of the memory budget.
+    The <a href="https://github.com/zolotukhin/zinc/blob/main/src/model/catalog.zig">catalog entry</a>
+    records the exact revision, checksum, tested profiles and default context.</p>
+  <p>Qwen’s <a href="https://huggingface.co/Qwen/Qwen3.8-27B#model-overview">model description</a>
+    specifies 64 layers: 48 Gated DeltaNet layers and 16 full-attention layers, with dense feed-forward
+    blocks. It also has a multi-token prediction head. This combination gives the runtime both
+    recurrent state to maintain and an attention cache that grows with context.</p>
+  <p>The upstream checkpoint is a vision-language model. This page covers local text inference
+    through GGUF; <a href="/zinc/docs/api/">ZINC’s API</a> does not currently accept image input.</p>
+</section>
+
+<section class="guide-section" aria-labelledby="quickstart">
+  <h2 id="quickstart">Start with a short local run</h2>
+  <p>On a supported AMD GPU host, install the <a href="/zinc/docs/binary-releases/">Linux Vulkan or ROCm
+    release</a> for your driver stack. These commands use the installed <code>zinc</code> executable.
+    Check the hardware notes below for Intel and the Apple Silicon preview.</p>
+  <Code code={quickstart} lang="bash" themes={themes} />
+  <p>This explicitly selects a 4,096-token context and ordinary decoding. <code>--chat</code> applies
+    the model’s chat template to the prompt. Check the reported memory fit before downloading;
+    a machine with 16 GB of GPU memory cannot hold this pinned file plus the runtime fully on the GPU.</p>
+  <p>The catalog records a 20 GiB requirement at its default context. A 24 GB-class discrete GPU
+    or 32 GB-class Apple Silicon machine is a planning starting point, with room still needed for
+    the operating system and other applications. The published AMD measurements below use a 32 GB card.</p>
+</section>
+
+<section class="guide-section" aria-labelledby="hardware">
+  <h2 id="hardware">Choose the backend and release together</h2>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen 3.8 hardware support">
+    <table>
+      <caption>Support and qualification as of November 15, 2026</caption>
+      <thead><tr><th scope="col">Hardware</th><th scope="col">Path</th><th scope="col">What to expect</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Radeon AI PRO R9700, 32 GB</th><td>Linux Vulkan or ROCm</td><td>Published Qwen 3.8 measurements and release validation. Pick the package for the backend you intend to use.</td></tr>
+        <tr><th scope="row">Intel Arc Pro B70</th><td>Linux Vulkan</td><td>The model passed GPU qualification, but the shipped 0.1.0 catalog omitted its Intel profile. Current source fixes managed selection; keep MTP off.</td></tr>
+        <tr><th scope="row">Apple Silicon</th><td>Metal preview</td><td>Listed in the managed catalog, with earlier benchmark data. macOS remains an unsigned preview rather than a stable 0.1.0 binary release.</td></tr>
+        <tr><th scope="row">NVIDIA</th><td>Experimental CUDA</td><td>Source-only backend. There is no qualified Qwen 3.8 NVIDIA release path in this guide.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A backend existing is not evidence that every GPU or model is qualified. See the
+    <a href="/zinc/docs/binary-releases/">release scope</a>,
+    <a href="/zinc/docs/intel-performance/#work-order-after-0-1-0">Intel catalog follow-up</a>
+    and <a href="/zinc/docs/opencode-release-validation/">recorded client validation</a>
+    for the exact coverage. The Intel managed-model correction requires a
+    <a href="/zinc/docs/development/">development build</a> newer than 0.1.0.</p>
+</section>
+
+<section class="guide-section" aria-labelledby="benchmarks">
+  <h2 id="benchmarks">Measured performance with MTP off</h2>
+  <p>These are the published <strong>{formatDate(measurements[0].row.measured_at)}</strong>
+    measurements on a Radeon AI PRO R9700. Both engines load the same Q4_K_M file, use F32 K/V,
+    one request slot and a 4,096-token context. Each cell is the median of nine measured requests
+    across three rounds, with warmups excluded. Speculative decoding is disabled in both engines.</p>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Matched Qwen 3.8 benchmark results">
+    <table class="benchmark-table">
+      <caption>Tokens per second. Prefill processes the prompt; decode generates the answer.</caption>
+      <thead>
+        <tr><th scope="col">Backend</th><th scope="col">Workload</th><th scope="col">ZINC prefill</th><th scope="col">llama.cpp prefill</th><th scope="col">ZINC decode</th><th scope="col">llama.cpp decode</th></tr>
+      </thead>
+      <tbody>
+        {measurements.map(({ backend, row }) => (
+          <tr>
+            <td>{backend}</td><th scope="row">{scenarioNames[row.id]}</th>
+            <td>{formatNumber(metric(row.zinc.prefill_tps), 2)}</td>
+            <td>{formatNumber(metric(row.baseline.prefill_tps), 2)}</td>
+            <td>{formatNumber(metric(row.zinc.decode_tps), 2)}</td>
+            <td>{formatNumber(metric(row.baseline.decode_tps), 2)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+  <p>The prompts contain 58–349 tokens. They exercise four specific workloads, not a full 4K
+    prompt or the model’s native window. The table reads the same recorded variants as the
+    <a href="/zinc/benchmarks/">benchmark dashboard</a>; it does not mix an MTP-off run with an MTP-on baseline.</p>
+  <p>These timings do not establish equal answers or general coding quality. The
+    <a href="/zinc/docs/matched-mtp-llama-cpp/">matched campaign report</a> separates deterministic
+    repeats, within-engine output controls and cross-engine agreement, and records the source
+    revisions and raw samples.</p>
+</section>
+
+<section class="guide-section" aria-labelledby="mtp">
+  <h2 id="mtp">MTP needs an output check as well as a timer</h2>
+  <p>Multi-token prediction uses the model’s attached NextN block to draft tokens, then verifies
+    them with the target model. It can increase generation throughput, but a useful comparison
+    enables or disables speculation on both engines and checks what they generated.</p>
+  <p>In the matched November campaign, three Vulkan workloads retained each engine’s greedy
+    output across MTP modes and favored ZINC’s MTP decode throughput. The remaining Vulkan
+    workload and every ROCm MTP-on workload failed that exact-output control. Those observations
+    remain diagnostic; they do not establish an accuracy-equivalent speedup.</p>
+  <p>Start with <code>ZINC_MTP=0</code>, as in the quickstart. If you evaluate MTP, keep the model,
+    prompts, output budget, cache precision and backend fixed. Use full HTTP latency for the
+    on-mode comparison: ZINC and llama.cpp include draft priming in different phase timers.
+    The <a href="/zinc/docs/matched-mtp-llama-cpp/">campaign report</a> explains the controls and failures.</p>
+</section>
+
+<section class="guide-section" aria-labelledby="context">
+  <h2 id="context">Budget the context separately from the weights</h2>
+  <p>The <a href="https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json">official configuration</a>
+    declares a native window of <strong>262,144 tokens</strong>. ZINC’s managed default is
+    <strong>4,096</strong>. The supported model window, the server’s allocated capacity and the
+    number of tokens in a request are three different quantities.</p>
+  <p>On the documented ROCm path, the base attention cache at 32,768 tokens occupies 4 GiB in F32
+    or 1.125 GiB in Q8. At native capacity, including the NextN block, that becomes
+    <strong>34 GiB of F32 KV</strong> or <strong>9.5625 GiB of Q8 KV</strong>.
+    Weights, recurrent state, checkpoints and prefill scratch come on top.</p>
+  <p>The opt-in Q8 cache and a separate FP16-input attention mode completed a 260,048-token
+    synthetic retrieval on the 32 GB R9700 in about 17 minutes. That establishes one measured
+    retrieval result, not reliable coding across a full native window. Read the
+    <a href="/zinc/docs/rocm-native-context/">memory, precision and retrieval report</a>
+    before using those settings. Leave room in the configured window for the generated answer
+    and tool results.</p>
+</section>
+
+<section class="guide-section" aria-labelledby="agents">
+  <h2 id="agents">Connect a coding agent after the first run works</h2>
+  <p>Start one server on the GPU machine and keep it running while the client is connected:</p>
+  <Code code={serve} lang="bash" themes={themes} />
+  <p>From another terminal, check readiness and discover the model ID exposed by that backend:</p>
+  <Code code={discover} lang="bash" themes={themes} />
+  <p>The API base URL is <code>http://localhost:9090/v1</code>. Use the discovered model ID;
+    ROCm may expose the GGUF filename. The 4K configuration is a connection check. For repository
+    work, increase the server context only after checking memory, and match the client’s budget
+    to the capacity actually allocated.</p>
+  <p>The <a href="/zinc/docs/agent-setup/">agent setup guide</a> links the standalone OpenCode and
+    OpenClaw helpers and distinguishes stable commands from development features. ZINC returns
+    model responses; the client executes tools. Verify the resulting patch and tests independently.
+    Our <a href="/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/">recorded Qwen 3.8 task</a>
+    needed context fixes and review feedback before it passed.</p>
+</section>
+
+<style>
+  .guide-jumps { display: flex; flex-wrap: wrap; gap: 0.6rem 1.25rem; padding: 1rem 0; border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); font-size: 0.85rem; }
+  .guide-section { min-width: 0; }
+  .guide-section h2 { margin-top: 0; scroll-margin-top: 1rem; }
+  .guide-section p { max-width: 52rem; }
+  .guide-section p:last-child { margin-bottom: 0; }
+  .guide-section :global(pre) { font-size: 0.78rem; }
+  .table-scroll { overflow-x: auto; margin-bottom: 1rem; }
+  table { margin-bottom: 0; font-size: 0.82rem; }
+  caption { text-align: left; color: var(--color-text-muted); font-size: 0.78rem; padding-bottom: 0.75rem; }
+  th, td { padding: 0.65rem 0.8rem; vertical-align: top; }
+  tbody th { background: transparent; }
+  .benchmark-table { min-width: 46rem; font-variant-numeric: tabular-nums; }
+  .benchmark-table td:nth-child(n+3), .benchmark-table th:nth-child(n+3) { text-align: right; }
+  @media (max-width: 640px) {
+    .guide-section { font-size: 0.94rem; }
+    table { min-width: 38rem; }
+  }
+</style>

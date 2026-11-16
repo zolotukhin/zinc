@@ -3,7 +3,7 @@ const topicTagRules: Record<string, string[]> = {
   'gemma-local-inference': ['gemma', 'gemma4'],
   'kv-cache-quantization': ['kv-cache', 'turboquant'],
   'opencode-local-coding': ['opencode'],
-  'qwen3-6-local-inference': ['qwen3-6'],
+  'qwen3-8-local-inference': ['qwen3-8', 'qwen3.8'],
 };
 
 export function getTopicSlugsForTags(tags: string[] = []): string[] {

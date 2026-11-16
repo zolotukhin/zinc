@@ -14,13 +14,22 @@ export type TopicHubBriefItem = {
   detail: string;
 };
 
-export type TopicHub = {
+type TopicHubBase = {
   slug: string;
   title: string;
   shortTitle: string;
   description: string;
   keywords: string;
   summary: string;
+  updated?: string;
+  readNext: TopicHubLink[];
+  docs: TopicHubLink[];
+  related: string[];
+  faqs: TopicHubFaq[];
+};
+
+export type TopicHub = TopicHubBase & ({ guide: 'qwen38' } | {
+  guide?: undefined;
   practicalAnswer: string;
   bestUse: string;
   status: TopicHubBriefItem[];
@@ -30,11 +39,7 @@ export type TopicHub = {
   articleIdeas: TopicHubBriefItem[];
   pitfalls: TopicHubBriefItem[];
   whatMatters: string[];
-  readNext: TopicHubLink[];
-  docs: TopicHubLink[];
-  related: string[];
-  faqs: TopicHubFaq[];
-};
+});
 
 export const topicHubs: TopicHub[] = [
   {
@@ -159,8 +164,8 @@ export const topicHubs: TopicHub[] = [
         description: 'The ZINC API behavior that OpenCode relies on for tool definitions, tool calls, and tool results.',
       },
       {
-        title: 'Qwen3.6 local inference',
-        href: '/topics/qwen3-6-local-inference/',
+        title: 'Qwen 3.8 local inference',
+        href: '/topics/qwen3-8-local-inference/',
         description: 'Why Qwen-family models are the main target for thinking and tool-capable local coding sessions.',
       },
       {
@@ -191,7 +196,7 @@ export const topicHubs: TopicHub[] = [
         description: 'Start the local server, choose managed models, set context, and verify the runtime path.',
       },
     ],
-    related: ['qwen3-6-local-inference', 'amd-rdna4-llm-inference', 'gemma-local-inference'],
+    related: ['qwen3-8-local-inference', 'amd-rdna4-llm-inference', 'gemma-local-inference'],
     faqs: [
       {
         question: 'Can OpenCode use ZINC as a local model backend?',
@@ -361,7 +366,7 @@ export const topicHubs: TopicHub[] = [
         description: 'CLI and server usage, managed model ids, backend selection, and runtime flags.',
       },
     ],
-    related: ['qwen3-6-local-inference', 'amd-rdna4-llm-inference', 'kv-cache-quantization'],
+    related: ['qwen3-8-local-inference', 'amd-rdna4-llm-inference', 'kv-cache-quantization'],
     faqs: [
       {
         question: 'Can Gemma 4 run locally in ZINC?',
@@ -378,178 +383,74 @@ export const topicHubs: TopicHub[] = [
     ],
   },
   {
-    slug: 'qwen3-6-local-inference',
-    title: 'Qwen3.6 Local Inference',
-    shortTitle: 'Qwen3.6',
-    description: 'A practical guide to Qwen3.6 local inference: architecture details, GGUF status, sparse MoE, SSM, MTP, speculative decoding, RDNA4, and Metal.',
-    keywords: 'Qwen3.6 local inference, Qwen3.6 architecture, Qwen3.6 GGUF, Qwen 3.6 AMD GPU, Qwen3.6 RDNA4, Qwen3.6 speculative decoding, Qwen3.6 MTP',
-    summary: 'Qwen3.6 is the core search cluster for ZINC because it combines model-architecture curiosity with practical local inference intent. Readers want to know what the model is, whether it exists as GGUF, and what an engine has to do to run it well.',
-    practicalAnswer: 'For local Qwen3.6 inference, the important distinction is between model availability and engine readiness. ZINC already supports managed Qwen3.6 GGUF targets, but the fastest path depends on the variant. Dense Qwen3.6 is a batched-prefill and attention problem. A3B-style Qwen3.6 is a hybrid MoE plus SSM problem, where router scheduling, recurrent state, MTP, and KV memory all matter.',
-    bestUse: 'Use this page as the entry point for people searching "can I run Qwen3.6 locally" or "what does Qwen3.6 require from an inference engine." It should turn model-name curiosity into exact local-running guidance.',
-    status: [
-      {
-        label: 'Best current answer',
-        detail: 'Qwen3.6 is a fit-and-engine-readiness question, not only a download question. The right answer depends on dense versus A3B-style sparse variants.',
-      },
-      {
-        label: 'Reader problem',
-        detail: 'Searchers need a practical path from model name to local run: GGUF availability, managed model id, hardware class, and which backend path is mature.',
-      },
-      {
-        label: 'Main bottleneck',
-        detail: 'For sparse Qwen, the hard surface is MoE routing plus recurrent or SSM state in prefill; for dense Qwen, batched attention and LM head cost dominate.',
-      },
-    ],
-    actionPlan: [
-      {
-        label: 'Identify the variant',
-        detail: 'Dense, A3B MoE, and Next-style hybrid models do not have the same bottlenecks. Name the exact GGUF or managed model id before discussing performance.',
-      },
-      {
-        label: 'Split readiness from availability',
-        detail: 'A model file can exist before the fast path is ready. State what runs today, then call out which kernels still decide production quality.',
-      },
-      {
-        label: 'Track prefill, decode, and context',
-        detail: 'Qwen can win in one phase and lose in another. The useful comparison shows prompt throughput, decode throughput, latency, and context length together.',
-      },
-      {
-        label: 'Treat MTP as the speculation path',
-        detail: 'Generic draft-model speculation is fragile on sparse MoE. Target-attached MTP is the more credible story for Qwen A3B models.',
-      },
-    ],
-    checklist: [
-      {
-        label: 'Verify metadata',
-        detail: 'Confirm architecture string, layer count, attention layout, expert count, active expert count, vocab size, and context target.',
-      },
-      {
-        label: 'Pick the right hardware bucket',
-        detail: 'Separate 16 GB, 32 GB, Intel Arc, and Apple Silicon runs. A model that technically loads may still reserve too little context to be useful.',
-      },
-      {
-        label: 'Run the baseline',
-        detail: 'Use llama.cpp on the same machine when possible, with the same quantization and prompt policy.',
-      },
-      {
-        label: 'State the readiness gap',
-        detail: 'Call out whether the limiting work is model loading, prefill batching, SSM state, MoE routing, sampling, or KV memory.',
-      },
-    ],
-    measurements: [
-      {
-        label: 'Prompt tok/s and TTFT',
-        detail: 'Qwen posts should show whether the engine can turn long prompts into the first token quickly.',
-      },
-      {
-        label: 'Decode tok/s',
-        detail: 'Report steady-state generation separately from chat endpoint latency and early-stop behavior.',
-      },
-      {
-        label: 'VRAM residency',
-        detail: 'Show weight bytes, runtime bytes, reserved KV cache, offload status, and context capacity.',
-      },
-      {
-        label: 'Speculation cost',
-        detail: 'For MTP or draft-model posts, include acceptance rate, verifier cost, and state rewind cost.',
-      },
-    ],
-    articleIdeas: [
-      {
-        label: 'Which Qwen3.6 variant should local users run?',
-        detail: 'A practical dense versus A3B fit guide by GPU memory class.',
-      },
-      {
-        label: 'Why MTP is the Qwen speculation path',
-        detail: 'Turn the prior speculative-decoding analysis into a concise implementation guide.',
-      },
-      {
-        label: 'Qwen long-context budget on 16 GB and 32 GB',
-        detail: 'Tie model fit, KV memory, sampling overhead, and useful context into one decision page.',
-      },
-    ],
-    pitfalls: [
-      {
-        label: 'Mixing Qwen names',
-        detail: 'Qwen3, Qwen3.5, Qwen3.6, and Qwen3-Next attract overlapping searches. The page should keep model family, checkpoint, and architecture separate.',
-      },
-      {
-        label: 'Overpromising long context',
-        detail: 'A model-card context length is not the same as useful local context. KV memory, recurrent state, and prefill time still decide the run.',
-      },
-      {
-        label: 'Assuming speculation is free',
-        detail: 'Sparse expert verification can wake more experts than the draft saved. Any speedup claim needs acceptance rate and verifier cost.',
-      },
-    ],
-    whatMatters: [
-      'Qwen3.6 interest is split between architecture details, GGUF availability, local runtime support, and performance.',
-      'Sparse A3B variants decode like small active models but fill memory like large total-parameter models.',
-      'Speculative decoding is not automatically useful on sparse MoE models because verification can wake many experts.',
-      'MTP-style drafts are more promising than generic draft models when hidden-state alignment is available.',
-    ],
+    guide: 'qwen38',
+    slug: 'qwen3-8-local-inference',
+    title: 'Qwen 3.8 27B local inference',
+    shortTitle: 'Qwen 3.8',
+    updated: '2026-11-15',
+    description: 'Run Qwen 3.8 27B locally with ZINC: GGUF setup, AMD and Intel support, Apple Silicon preview, matched benchmarks, MTP and context memory.',
+    keywords: 'Qwen 3.8, Qwen3.8 27B, Qwen 3.8 local inference, Qwen3.8 GGUF, Qwen 3.8 AMD, Qwen 3.8 Intel Arc, Qwen 3.8 Apple Silicon, Qwen MTP, ZINC',
+    summary: 'Qwen 3.8 27B is a dense hybrid model for local chat and coding. Start with the pinned Q4_K_M download, choose a backend for your GPU, and size the context for the memory you actually have.',
     readNext: [
       {
-        title: 'Qwen 3.6 architecture and local inference in ZINC',
-        href: '/blog/2026-04-05-qwen-3-6-architecture-and-what-it-would-take-to-bring-it-into-zinc/',
-        description: 'The main architecture explainer for Qwen3.6, MoE, SSM, context, and local engine implications.',
+        title: 'Matched MTP against llama.cpp',
+        href: '/zinc/docs/matched-mtp-llama-cpp/',
+        description: 'The November 2 campaign: equal speculation settings, nine samples per cell, exact-output controls and retained failures.',
       },
       {
-        title: 'Qwen3.6-35B-A3B GGUF on AMD, Intel Arc, and Metal',
-        href: '/blog/2026-04-17-qwen-3-6-is-now-generally-available-in-zinc/',
-        description: 'Managed model support, AMD RDNA4, Intel Arc, Apple Silicon notes, and practical run guidance.',
+        title: 'Client validation and task outcomes',
+        href: '/zinc/docs/opencode-release-validation/',
+        description: 'Model-by-model protocol checks and coding fixtures, with failed tasks and narrower retries kept visible.',
       },
       {
-        title: 'Why speculative decoding does not net out on Qwen 35B-A3B',
-        href: '/blog/2026-04-28-why-speculative-decoding-does-not-net-out-on-qwen-35b-a3b/',
-        description: 'Why generic draft-model speculation can lose on sparse Qwen verification.',
-      },
-      {
-        title: 'Why MTP heads are the speculative decode draft Qwen3 A3B deserves',
-        href: '/blog/2026-05-08-why-mtp-heads-are-the-speculative-decode-draft-qwen3-a3b-deserves/',
-        description: 'Why target-attached multi-token prediction is a better fit than separate draft models.',
-      },
-      {
-        title: 'The gate that keeps Qwen 35B prefill at half of llama.cpp on RDNA4',
-        href: '/blog/2026-04-26-the-gate-that-keeps-qwen-35b-prefill-at-half-of-llama-cpp-on-rdna4/',
-        description: 'The structural MoE plus SSM prefill work needed for flagship Qwen performance.',
+        title: 'Intel qualification and follow-up work',
+        href: '/zinc/docs/intel-performance/',
+        description: 'Native-reference checks, seven-model coverage and the managed-catalog correction after the stable release.',
       },
     ],
     docs: [
       {
-        title: 'Getting Started with ZINC',
-        href: '/zinc/docs/getting-started/',
-        description: 'Pull a managed Qwen model and run local inference through the CLI or chat path.',
+        title: 'Install ZINC',
+        href: '/zinc/docs/binary-releases/',
+        description: 'Choose the Linux Vulkan or ROCm package; check driver requirements and the separate Metal preview status.',
       },
       {
-        title: 'ZINC Benchmarks',
+        title: 'Connect a coding agent',
+        href: '/zinc/docs/agent-setup/',
+        description: 'Stable server commands, model discovery, OpenCode and OpenClaw setup, and development-only capabilities.',
+      },
+      {
+        title: 'ROCm context and Q8 KV',
+        href: '/zinc/docs/rocm-native-context/',
+        description: 'Memory accounting, cache precision and the measured limits of near-native-context retrieval.',
+      },
+      {
+        title: 'All measured workloads',
         href: '/zinc/benchmarks/',
-        description: 'Current Qwen3.6 results against same-machine llama.cpp baselines.',
-      },
-      {
-        title: 'Running ZINC',
-        href: '/zinc/docs/running-zinc/',
-        description: 'Model ids, CLI flags, chat mode, server mode, and KV quantization options.',
-      },
-      {
-        title: 'Configure OpenCode with ZINC',
-        href: '/zinc/docs/opencode/',
-        description: 'Use Qwen through ZINC as a local OpenCode coding backend with tools, thinking, and context limits.',
+        description: 'Compare backends and MTP modes with the source revisions, correctness findings and original samples visible.',
       },
     ],
-    related: ['amd-rdna4-llm-inference', 'kv-cache-quantization', 'gemma-local-inference'],
+    related: ['opencode-local-coding', 'amd-rdna4-llm-inference', 'kv-cache-quantization'],
     faqs: [
       {
-        question: 'Can Qwen3.6 run locally?',
-        answer: 'Yes, when a supported GGUF target exists and the machine has enough memory. In ZINC, the managed model catalog is the preferred path because it keeps local files, defaults, and backend support aligned.',
+        question: 'How much memory does Qwen 3.8 27B need?',
+        answer: 'The pinned Q4_K_M file is 17.1 GB, about 15.9 GiB. Runtime state and context need additional memory. ZINC records a 20 GiB requirement at the managed 4,096-token default; plan for a 24 GB-class discrete GPU or a 32 GB-class Apple Silicon machine, and check the actual backend and available memory before increasing context.',
       },
       {
-        question: 'Why is Qwen3.6 hard for local inference engines?',
-        answer: 'The hard cases combine sparse experts, recurrent or state-space blocks, large context, and a large vocabulary. That pushes work into routing, recurrent state updates, KV memory, sampling, and prefill scheduling.',
+        question: 'Can I run the managed model on Intel Arc?',
+        answer: 'The Arc Pro B70 Vulkan qualification includes Qwen 3.8. The published 0.1.0 catalog omitted its Intel profile; current source fixes that selection problem. Use the development build for the managed model ID on Intel and keep MTP disabled.',
       },
       {
-        question: 'Is speculative decoding a clear win on Qwen3.6?',
-        answer: 'Not with a generic draft model. Sparse expert verification can erase the win. MTP-style target-attached drafts are the more credible direction for Qwen A3B models.',
+        question: 'Does a 262,144-token model window mean I can use it immediately?',
+        answer: 'No. The managed default is 4,096 tokens. Native capacity with NextN needs 34 GiB of F32 KV alone, or 9.5625 GiB with the opt-in ROCm Q8 cache, before weights and scratch. The long-context report documents a separate precision mode and retrieval test; it does not establish full-window coding quality.',
+      },
+      {
+        question: 'Should I enable MTP for the first run?',
+        answer: 'Start with ZINC_MTP=0. The matched campaign found exact-output differences in one Vulkan MTP workload and every ROCm MTP-on workload. Evaluate the current implementation and your own task before treating speculative throughput as a benefit.',
+      },
+      {
+        question: 'Does this setup accept images and video?',
+        answer: 'This guide covers the text GGUF path. The upstream model has vision-language capabilities, but ZINC does not currently expose image input through its OpenAI-compatible API.',
       },
     ],
   },
@@ -713,7 +614,7 @@ export const topicHubs: TopicHub[] = [
         description: 'Current public measurements across AMD, Metal, and baseline engines.',
       },
     ],
-    related: ['qwen3-6-local-inference', 'gemma-local-inference', 'kv-cache-quantization'],
+    related: ['qwen3-8-local-inference', 'gemma-local-inference', 'kv-cache-quantization'],
     faqs: [
       {
         question: 'Should I use ROCm or Vulkan on AMD RDNA4?',
@@ -884,7 +785,7 @@ export const topicHubs: TopicHub[] = [
         description: 'Runtime flags and model-running details, including KV-related options.',
       },
     ],
-    related: ['amd-rdna4-llm-inference', 'qwen3-6-local-inference', 'gemma-local-inference'],
+    related: ['amd-rdna4-llm-inference', 'qwen3-8-local-inference', 'gemma-local-inference'],
     faqs: [
       {
         question: 'Why does KV cache matter for local LLMs?',
