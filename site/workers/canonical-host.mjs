@@ -1,4 +1,4 @@
-// This Worker is routed only to www.zolotukhin.ai. Pages serves the apex site.
+// This Worker owns the www.zolotukhin.ai custom domain. Pages serves the apex.
 export default {
   fetch(request) {
     const url = new URL(request.url);

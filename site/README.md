@@ -81,11 +81,12 @@ command, `dist` as the output directory, and the Node version in `.node-version`
 
 ### Canonical hostname
 
-Keep both `zolotukhin.ai` and `www.zolotukhin.ai` attached to the Pages project.
-A DNS record alone does not attach a Pages hostname and can return HTTP 522.
-The `canonical-host` Worker permanently redirects `www` to the HTTPS apex,
-preserving paths and query strings. Its route matches only `www.zolotukhin.ai/*`;
-Pages continues to serve the apex site. Deploy it when its source or route changes:
+Keep `zolotukhin.ai` attached to the Pages project and `www.zolotukhin.ai`
+attached as a custom domain to the `canonical-host` Worker. The Worker permanently
+redirects `www` to the HTTPS apex, preserving paths and query strings. Cloudflare
+manages its DNS record and certificate through the custom-domain binding; a DNS
+record alone does not attach a hostname and can return HTTP 522. Pages continues
+to serve the apex site. Deploy the Worker when its source or binding changes:
 
 ```bash
 bunx wrangler deploy --config wrangler.canonical-host.json

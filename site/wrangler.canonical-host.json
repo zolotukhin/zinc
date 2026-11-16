@@ -5,6 +5,6 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [
-    { "pattern": "www.zolotukhin.ai/*", "zone_name": "zolotukhin.ai" }
+    { "pattern": "www.zolotukhin.ai", "custom_domain": true }
   ]
 }
