@@ -116,6 +116,12 @@ def ready(child, port, poll_interval=0.5, require_ok=False):
     raise ValueError("server health timeout")
 
 
+def rocm_device_evidence(diagnostics):
+    matches = list(ROCM_DEVICE.finditer(diagnostics))
+    require(len(matches) == 1, "missing or ambiguous selected GPU identity")
+    return matches[0]
+
+
 def gpu_evidence(text, family):
     """Check the selected device, never accept an arbitrary runner label."""
     clean = re.sub(r"\x1b\[[0-9;]*m", "", text)
@@ -131,9 +137,7 @@ def gpu_evidence(text, family):
         return family
     if family == "gfx1201":
         require(re.search(r"^[ \t]*Compute target:[ \t]*gfx1201(?:; \d+ CUs; wave(?:32|64))?[ \t]+\[OK\][ \t]*$", clean, re.M), "ROCm compute target mismatch")
-        matches = list(ROCM_DEVICE.finditer(clean))
-        require(len(matches) == 1, "missing or ambiguous selected GPU identity")
-        match = matches[0]
+        match = rocm_device_evidence(clean)
     else:
         tuning = {"rdna3": "amd_rdna3", "rdna4": "amd_rdna4", "strix-halo": "amd_rdna4_apu", "intel-xe2": "intel_arc_xe2"}[family]
         require(re.search(r"GPU tuning\s*:\s*" + tuning + r"\s*\|", clean), "Vulkan GPU family mismatch")
@@ -166,7 +170,7 @@ def hardware_evidence(diagnostics, family, device):
         return {"gpu": gpu, "os": "macOS " + os_version, "driver": "system Metal / macOS " + os_version}
     if family == "gfx1201":
         clean = re.sub(r"\x1b\[[0-9;]*m", "", diagnostics)
-        selected = ROCM_DEVICE.search(clean).group("index")
+        selected = rocm_device_evidence(clean).group("index")
         indices = [selected] if selected is not None else re.findall(
             r"^[ \t]*ROCm init: Initialized best device \(index (\d+)\) \[OK\][ \t]*$", clean, re.M)
         require(indices == [str(device)], "ROCm selected a different device")

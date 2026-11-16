@@ -1838,7 +1838,8 @@ class ReleaseTest(unittest.TestCase):
                                       (current.replace("Verdict: ready", "Verdict: ready_with_warnings"), "AMD Radeon Graphics")):
                 with self.subTest(name=name, diagnostics=diagnostics):
                     self.assertEqual(release_gpu.hardware_evidence(diagnostics, "gfx1201", 7)["gpu"], name)
-            for diagnostics in (current.replace("Verdict: ready", "Verdict: not_ready"),
+            for diagnostics in ("", "Verdict: ready\n", current + current.splitlines()[1] + "\n",
+                                current.replace("Verdict: ready", "Verdict: not_ready"),
                                 current.replace("Verdict: ready", "log mentions READY"),
                                 current + "Verdict: not_ready\n", current + "  Model: failed [FAIL]\n",
                                 current.replace("[gfx1201]", "[gfx1100]"),

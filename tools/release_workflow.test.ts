@@ -58,7 +58,11 @@ test('failed hardware keeps completed profile evidence and cannot certify a cand
   );
   expect(upload.if).toBe('always()');
   expect(upload.with.path).toBe('reports/*.json');
-  expect(upload.with['if-no-files-found']).toBe('warn');
+  const missingFiles = upload.with['if-no-files-found'].replace(/^\s*\$\{\{|\}\}\s*$/g, '');
+  for (const status of ['success', 'failure', 'cancelled']) {
+    const resolved = missingFiles.replaceAll('job.status', JSON.stringify(status));
+    expect(new Function(`return (${resolved});`)()).toBe(status === 'success' ? 'error' : 'warn');
+  }
   const expression = candidate.jobs.certify.if.replace(/^\s*\$\{\{|\}\}\s*$/g, '');
   for (const hardware of ['success', 'failure', 'cancelled', 'skipped']) {
     const resolved = expression
