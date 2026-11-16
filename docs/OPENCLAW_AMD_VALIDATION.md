@@ -1,5 +1,10 @@
 # OpenClaw on AMD: model acceptance
 
+The separate [0.1.1 candidate checks](releases/0.1.1-plan.md#final-archive-client-checks)
+record the newer archive identities and retained task failures. That candidate
+is certified and unpublished. The results below retain their original 0.1.0
+scope and outcomes.
+
 The first OpenClaw validation uses the **published ZINC 0.1.0 Linux archives**
 on a **Radeon AI PRO R9700 32 GB**. It tests the actual **OpenClaw 2026.11.1**
 client with Node **24.22.2**, rather than substituting a synthetic agent for the

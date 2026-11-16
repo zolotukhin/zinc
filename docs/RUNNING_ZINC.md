@@ -206,6 +206,9 @@ JSON diagnostics write one document to stdout and runtime logs to stderr.
 `result` is `ready`, `ready_with_warnings` or `not_ready`; exit codes are 0
 without failures and 1 on failure. Native memory estimates include context and
 serving slots, but lazy runtime allocations can exceed the stated reserve.
+Use the same `-c` value you intend to serve. For an installed model, Vulkan
+estimates its declared window when `-c` is omitted. Follow the metadata/GPU
+preflight with a real request to validate allocation and inference.
 
 ```bash
 curl --fail http://localhost:9090/v1/capabilities
