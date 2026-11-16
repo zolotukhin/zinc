@@ -11,6 +11,9 @@ release. Version-specific `docs/releases/<version>-changes.md` files supply
 reviewed change notes; the finalizer freezes them beside the generated hardware
 table. RCs share their base version's change notes and keep their own archive
 version and qualification.
+Change files contain Markdown body fragments (bullets, paragraphs, or headings
+at level three and deeper). The finalizer owns the release title, section
+headings, downloads, and certified hardware table.
 
 ## Version policy
 

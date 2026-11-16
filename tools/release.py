@@ -391,6 +391,8 @@ def install_smoke(args):
 
 def release_changes(release_version, directory=None):
     """Freeze reviewed version notes; RCs and final builds share the same scope."""
+    # Strict SemVer validation leaves only a numeric MAJOR.MINOR.PATCH basename.
+    # Files are reviewed Markdown body fragments, preserved for release rendering.
     base_version = version(release_version).split("-", 1)[0].split("+", 1)[0]
     path = Path(directory or ROOT / "docs/releases") / (base_version + "-changes.md")
     return path.read_text().strip() if path.is_file() else ""
