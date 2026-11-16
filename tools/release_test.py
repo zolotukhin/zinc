@@ -1821,6 +1821,38 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(family=family), self.assertRaises(ValueError):
                 release_gpu.gpu_evidence(text, family)
 
+    def test_rocm_readiness_accepts_current_diagnostics_and_keeps_device_selection_strict(self):
+        # runCudaCheck now shares the structured report's lower-case verdict
+        # and includes the selected index/memory on the device line. Preserve
+        # the 0.1.0 format as well: readiness also inspects older previews.
+        legacy = ("  ROCm init: Initialized best device (index 7) [OK]\n"
+                  "  Device: AMD Radeon AI PRO R9700 [gfx1201] [OK]\n"
+                  "  Compute target: gfx1201 [OK]\nVerdict: READY [OK]\n")
+        current = ("  Backend: rocm on linux/x86_64 [OK]\n"
+                   "  Device: AMD Radeon Graphics [gfx1201] (index 7); 31.59 GiB free / 31.86 GiB total [OK]\n"
+                   "  Compute target: gfx1201; 32 CUs; wave32 [OK]\n"
+                   "  Model fit: No model selected; only device readiness was checked [SKIP]\n"
+                   "\nVerdict: ready\n")
+        with patch.object(Path, "read_text", return_value="7.2.4"):
+            for diagnostics, name in ((legacy, "AMD Radeon AI PRO R9700"), (current, "AMD Radeon Graphics"),
+                                      (current.replace("Verdict: ready", "Verdict: ready_with_warnings"), "AMD Radeon Graphics")):
+                with self.subTest(name=name, diagnostics=diagnostics):
+                    self.assertEqual(release_gpu.hardware_evidence(diagnostics, "gfx1201", 7)["gpu"], name)
+            for diagnostics in (current.replace("Verdict: ready", "Verdict: not_ready"),
+                                current.replace("Verdict: ready", "log mentions READY"),
+                                current + "Verdict: not_ready\n", current + "  Model: failed [FAIL]\n",
+                                current.replace("[gfx1201]", "[gfx1100]"),
+                                current.replace("Compute target: gfx1201", "Compute target: gfx1100"),
+                                current.replace("Compute target: gfx1201; 32 CUs; wave32 [OK]", "Compute target: gfx1201; 32 CUs; wave32 [WARN]"),
+                                current.replace("AMD Radeon Graphics", "llvmpipe"),
+                                current.replace("AMD Radeon Graphics", "<private-host>"),
+                                current.replace("(index 7)", "(index 8)") + "log mentions (index 7)\n",
+                                legacy.replace("(index 7)", "(index 8)") + "log mentions (index 7)\n"):
+                with self.subTest(diagnostics=diagnostics), self.assertRaises(ValueError):
+                    release_gpu.hardware_evidence(diagnostics, "gfx1201", 7)
+            with patch.object(Path, "read_text", return_value="7.1.0"), self.assertRaisesRegex(ValueError, "pinned 7.2.4"):
+                release_gpu.hardware_evidence(current, "gfx1201", 7)
+
     def test_api_uses_the_loaded_model_instead_of_switching_to_an_unloaded_catalog_entry(self):
         self.assertEqual(release_gpu.active_model_id([{"id": "unloaded", "active": False}, {"id": "loaded", "active": True}]), "loaded")
         self.assertEqual(release_gpu.active_model_id([{"id": "rocm-loaded.gguf"}]), "rocm-loaded.gguf")

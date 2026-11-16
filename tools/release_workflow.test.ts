@@ -51,6 +51,24 @@ test('candidate hardware consumes frozen archives after signing and cannot run f
   expect(candidate.jobs.certify.permissions['attestations']).toBe('write');
 });
 
+test('failed hardware keeps completed profile evidence and cannot certify a candidate', () => {
+  const candidate = workflow('release-candidate.yml');
+  const upload = candidate.jobs.hardware.steps.find(
+    (step: any) => step.with?.name === 'report-${{ matrix.id }}',
+  );
+  expect(upload.if).toBe('always()');
+  expect(upload.with.path).toBe('reports/*.json');
+  expect(upload.with['if-no-files-found']).toBe('warn');
+  const expression = candidate.jobs.certify.if.replace(/^\s*\$\{\{|\}\}\s*$/g, '');
+  for (const hardware of ['success', 'failure', 'cancelled', 'skipped']) {
+    const resolved = expression
+      .replaceAll('cancelled()', 'false')
+      .replaceAll('needs.prepare.result', '"success"')
+      .replaceAll('needs.hardware.result', JSON.stringify(hardware));
+    expect(new Function(`return (${resolved});`)()).toBe(hardware === 'success');
+  }
+});
+
 test('candidate preparation and all publisher checkouts use the dispatched SHA', () => {
   const prepare = workflow('release-candidate.yml').jobs.prepare;
   const checkout = prepare.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));

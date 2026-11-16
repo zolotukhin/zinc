@@ -29,6 +29,12 @@ CORPUS = [
 ]
 PROMPTS = ["Write a long story about a lighthouse keeper.", "Explain how a refrigerator works.", "List three uses of copper."]
 
+# Current native diagnostics include the selected index and memory on this
+# line; 0.1.0 prints the index separately. Readiness can inspect either archive.
+ROCM_DEVICE = re.compile(r"^[ \t]*Device:[ \t]*(.+?)[ \t]+\[gfx1201\]"
+                         r"(?: \(index (?P<index>\d+)\); \d+(?:\.\d+)? GiB free / \d+(?:\.\d+)? GiB total)?"
+                         r"[ \t]+\[OK\][ \t]*$", re.M)
+
 
 def output(command, env=None, timeout=180):
     result = subprocess.run(command, cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=timeout, env=env)
@@ -113,14 +119,21 @@ def ready(child, port, poll_interval=0.5, require_ok=False):
 def gpu_evidence(text, family):
     """Check the selected device, never accept an arbitrary runner label."""
     clean = re.sub(r"\x1b\[[0-9;]*m", "", text)
-    require("[FAIL]" not in clean and "READY" in clean, "packaged diagnostics failed")
+    # Native backends now render Report.result() rather than the legacy
+    # upper-case label. Require one complete successful verdict, never a
+    # READY substring in a failed verdict or unrelated log message.
+    verdicts = re.findall(r"^[ \t]*Verdict:[ \t]*([^\r\n]*)", clean, re.M)
+    require("[FAIL]" not in clean and len(verdicts) == 1 and verdicts[0].strip() in
+            ("READY [OK]", "READY WITH WARNINGS [WARN]", "ready", "ready_with_warnings"), "packaged diagnostics failed")
     require(not re.search(r"llvmpipe|lavapipe|software rasterizer|out of range", clean, re.I), "software/wrong GPU selected")
     if family.startswith("apple"):
         require(re.search(r"GPU family\s*:\s*" + re.escape(family) + r"\b", clean), "Metal GPU family mismatch")
         return family
     if family == "gfx1201":
-        require(re.search(r"Compute target\s*:\s*gfx1201\b", clean), "ROCm compute target mismatch")
-        match = re.search(r"^[ \t]*Device:[ \t]*(.+?)[ \t]+\[gfx1201\][ \t]+\[OK\][ \t]*$", clean, re.M)
+        require(re.search(r"^[ \t]*Compute target:[ \t]*gfx1201(?:; \d+ CUs; wave(?:32|64))?[ \t]+\[OK\][ \t]*$", clean, re.M), "ROCm compute target mismatch")
+        matches = list(ROCM_DEVICE.finditer(clean))
+        require(len(matches) == 1, "missing or ambiguous selected GPU identity")
+        match = matches[0]
     else:
         tuning = {"rdna3": "amd_rdna3", "rdna4": "amd_rdna4", "strix-halo": "amd_rdna4_apu", "intel-xe2": "intel_arc_xe2"}[family]
         require(re.search(r"GPU tuning\s*:\s*" + tuning + r"\s*\|", clean), "Vulkan GPU family mismatch")
@@ -152,7 +165,11 @@ def hardware_evidence(diagnostics, family, device):
             require(os_version.split(".")[0] == "15", "Apple7 worker must exercise the macOS 15 minimum")
         return {"gpu": gpu, "os": "macOS " + os_version, "driver": "system Metal / macOS " + os_version}
     if family == "gfx1201":
-        require(f"(index {device})" in diagnostics, "ROCm selected a different device")
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", diagnostics)
+        selected = ROCM_DEVICE.search(clean).group("index")
+        indices = [selected] if selected is not None else re.findall(
+            r"^[ \t]*ROCm init: Initialized best device \(index (\d+)\) \[OK\][ \t]*$", clean, re.M)
+        require(indices == [str(device)], "ROCm selected a different device")
         runtime = Path("/opt/rocm/.info/version").read_text().strip()
         require(runtime.startswith("7.2.4"), "ROCm worker must use the pinned 7.2.4 runtime")
         return {"gpu": gpu, "os": platform.system() + " " + platform.release(), "driver": "ROCm " + runtime}

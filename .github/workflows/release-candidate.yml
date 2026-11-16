@@ -204,10 +204,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 tools/release_gpu_group.py --directory candidate --role "$RELEASE_RUNNER_ROLE" --output reports
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        # Preserve completed, sanitized profiles when a later profile fails.
+        # The failed hardware job still prevents candidate certification.
+        if: always()
         with:
           name: report-${{ matrix.id }}
           path: reports/*.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   certify:
