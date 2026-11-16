@@ -173,7 +173,7 @@ installed pair fails package qualification.
 
 ## Matched GPU benchmarks
 
-[`tools/benchmark_intel.py`](../tools/benchmark_intel.py) runs on the remote Linux
+[`tools/benchmark_intel.py`](https://github.com/zolotukhin/zinc/blob/main/tools/benchmark_intel.py) runs on the remote Linux
 worker. It covers all seven pinned Intel release models with the existing four
 workloads: short chat, medium context, long context, and extended decode. It first
 runs 376 numerical cases, tokenizer parity, complete native-reference

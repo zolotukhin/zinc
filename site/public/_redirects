@@ -57,6 +57,7 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/src/*                     https://github.com/zolotukhin/zinc/blob/main/src/:splat 301
 /zinc/docs/benchmarks/*              https://github.com/zolotukhin/zinc/blob/main/benchmarks/:splat 301
 /zinc/docs/tools/*                   https://github.com/zolotukhin/zinc/blob/main/tools/:splat 301
+/zinc/docs/config/benchmark-reference.json https://github.com/zolotukhin/zinc/blob/main/config/benchmark-reference.json 301
 
 # Cloudflare email-address obfuscation used to expose this crawlable URL.
 /cdn-cgi/l/email-protection          /about/                    301
