@@ -81,7 +81,7 @@ For OpenCode or OpenClaw on an RX 9070 XT, start with the smaller Qwen model rat
 
 These instructions target **Linux x86_64**. ZINC 0.1.0 ships separate Vulkan and ROCm executables; each binary contains one backend. The published AMD qualification covers the R9700. There is no native Windows ZINC 0.1.0 binary.
 
-The prebuilt Vulkan archive requires **glibc 2.35 or newer**; the ROCm archive requires **glibc 2.39 or newer**, in addition to its ROCm packages. Check the [binary runtime requirements](/zinc/docs/binary-releases/) before choosing an archive. AMD driver support for a distribution does not by itself establish compatibility with a particular ZINC binary.
+The prebuilt Vulkan archive requires **glibc 2.35 or newer**; the ROCm archive requires **glibc 2.39 or newer**, in addition to its ROCm packages. Check the [binary runtime requirements](/zinc/docs/getting-started/) before choosing an archive. AMD driver support for a distribution does not by itself establish compatibility with a particular ZINC binary.
 
 Download the versioned installer, inspect it, then install the Vulkan archive:
 

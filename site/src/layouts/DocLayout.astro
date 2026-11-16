@@ -1,5 +1,6 @@
 ---
 import BaseLayout from './BaseLayout.astro';
+import { docNavSections } from '../lib/docs-navigation';
 import Breadcrumbs from '../components/Breadcrumbs.astro';
 import DocsSearch from '../components/DocsSearch.astro';
 import { buildBreadcrumbList } from '../lib/structured-data';
@@ -42,39 +43,6 @@ const jsonLd = {
   ],
 };
 
-const docNavSections = [
-  {
-    label: 'Start Here',
-    items: [
-      { slug: 'getting-started', label: 'Getting Started' },
-      { slug: 'binary-releases', label: 'Binary Installation' },
-      { slug: 'hardware-requirements', label: 'Hardware Requirements' },
-      { slug: 'rocm', label: 'AMD ROCm Setup' },
-      { slug: 'running-zinc', label: 'Running ZINC' },
-      { slug: 'api', label: 'Serving HTTP API' },
-      { slug: 'agent-setup', label: 'Agent and App Setup' },
-      { slug: 'openclaw', label: 'OpenClaw Setup' },
-      { slug: 'opencode', label: 'OpenCode Setup' },
-      { slug: 'development', label: 'Development' },
-    ],
-  },
-  {
-    label: 'Engineering',
-    items: [
-      { slug: 'openclaw-amd-validation', label: 'OpenClaw AMD Validation' },
-      { slug: 'spec', label: 'Technical Spec' },
-      { slug: 'rdna4-tuning', label: 'RDNA4 Tuning' },
-      { slug: 'amd-gpu-reference', label: 'AMD GPU' },
-      { slug: 'nvidia-gpu-reference', label: 'NVIDIA GPU' },
-      { slug: 'intel-gpu-reference', label: 'Intel GPU' },
-      { slug: 'turboquant-spec', label: 'TurboQuant' },
-      { slug: 'apple-silicon-reference', label: 'Apple Silicon' },
-      { slug: 'apple-metal-reference', label: 'Apple Metal' },
-      { slug: 'zig-api', label: 'Zig API' },
-    ],
-  },
-];
-
 const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/, '');
 const releaseStatus = docsReleaseStatus(currentSlug);
 
@@ -97,8 +65,8 @@ function isActive(slug: string): boolean {
       <div class="doc-nav-panel">
         <DocsSearch compact={true} heading="Search" intro="Search guides and the Zig API." placeholder="Search docs and API" />
         {docNavSections.map(section => (
-          <div class="doc-nav-section">
-            <p class="doc-nav-label">{section.label}</p>
+          <details class="doc-nav-section" open={section.id !== 'engineering' || section.items.some(item => isActive(item.slug))}>
+            <summary class="doc-nav-label">{section.label}</summary>
             <ul>
               {section.items.map(item => (
                 <li>
@@ -108,7 +76,7 @@ function isActive(slug: string): boolean {
                 </li>
               ))}
             </ul>
-          </div>
+          </details>
         ))}
       </div>
     </aside>
@@ -116,7 +84,7 @@ function isActive(slug: string): boolean {
       {lastmod && <p class="lastmod">Last updated: {lastmod}</p>}
       <aside class="doc-release-note" data-doc-channel={releaseStatus.channel} aria-label="Documentation version">
         <strong>{releaseStatus.label}</strong>
-        <p>“Development” sections need newer source. <a href={STABLE_RELEASE_URL}>Stable {STABLE_RELEASE}</a> · <a href="/zinc/docs/binary-releases/">Requirements</a></p>
+        <p>{releaseStatus.description} <a href={STABLE_RELEASE_URL}>Stable {STABLE_RELEASE}</a> · <a href="/zinc/docs/getting-started/">Requirements</a></p>
       </aside>
       <slot />
     </article>
@@ -201,6 +169,7 @@ function isActive(slug: string): boolean {
   }
 
   .doc-nav-label {
+    cursor: pointer;
     margin: 0 0 var(--space-xs);
     font-size: 0.72rem;
     font-weight: 700;

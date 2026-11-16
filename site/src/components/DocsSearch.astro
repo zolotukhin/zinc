@@ -54,11 +54,13 @@ const endpoint = '/zinc/docs/search';
 
   <ul class="docs-search-results" data-docs-search-results hidden></ul>
 </section>
+<noscript><p class="docs-search-fallback">Browse the guides below, or use your browser’s Find command within a page.</p></noscript>
 
 <script define:vars={{ componentId, endpoint, scope, maxResults }}>
   const root = document.getElementById(componentId);
 
   if (root) {
+    root.setAttribute('data-ready', 'true');
     const input = root.querySelector('[data-docs-search-input]');
     const clearButton = root.querySelector('[data-docs-search-clear]');
     const chips = root.querySelectorAll('[data-docs-search-chip]');
@@ -288,6 +290,8 @@ const endpoint = '/zinc/docs/search';
 </script>
 
 <style>
+  .docs-search:not([data-ready]), .docs-search [hidden] { display: none; }
+  .docs-search-fallback { font-size: 0.8rem; color: var(--color-text-muted); }
   .docs-search {
     position: relative;
   }

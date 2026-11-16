@@ -72,7 +72,7 @@ jobs:
       # Markdown renderer dependencies belong to the site, not core CPU tests.
       - name: Check benchmark, guide, and indexing regressions
         working-directory: site
-        run: bun test src/lib/benchmark-view.test.ts tests/docs-authoring.test.ts src/lib/search-indexability.test.ts
+        run: bun test src/lib/benchmark-view.test.ts tests/docs-authoring.test.ts tests/agent-docs.test.ts src/lib/search-indexability.test.ts
 
       # Reuse the existing Playwright and axe-core dependencies in site/package.json.
       - name: Install browser for rendered page checks
@@ -90,6 +90,10 @@ jobs:
       - name: Check coding client onboarding and downloads
         working-directory: site
         run: bun run check:harnesses
+
+      - name: Check consolidated docs and retained links
+        working-directory: site
+        run: bun run check:docs
 
       - name: Check output
         working-directory: site

@@ -98,8 +98,8 @@ export async function getStaticPaths() {
       keywords: 'ZINC ROCm, ROCm HIP GGUF inference, AMD RDNA4 ROCm, Radeon AI PRO R9700, gfx1201, ROCm 7.2, ZINC backend rocm, local LLM AMD GPU',
     },
     'running-zinc': {
-      title: 'Running ZINC',
-      description: 'CLI usage, native and Vulkan device selection, backend-specific KV settings, graph export and HTTP serving for ZINC.',
+      title: 'Run ZINC Models and Connect Apps',
+      description: 'Run prompts and browser chat, manage models, start the API, discover model context, and connect apps or agents with ZINC.',
       keywords: 'running ZINC, ZINC CLI, ZINC server, ZINC --prompt, ZINC kv quant, ZINC graph export, ZINC OpenAI API, Vulkan inference CLI',
     },
     'spec': {
@@ -152,11 +152,6 @@ export async function getStaticPaths() {
       description: 'OpenAI-compatible chat and text completions, streaming, model listing, and health endpoints for local LLM inference, with backend-specific coverage.',
       keywords: 'ZINC API, OpenAI compatible, chat completions, SSE streaming, local LLM API, inference server, v1/chat/completions, health endpoint, self-hosted LLM, AMD GPU inference API',
     },
-    'agent-setup': {
-      title: 'Connect Agents and Apps to ZINC',
-      description: 'Install ZINC, choose a model, start a local API, discover its capabilities, and connect OpenClaw or OpenCode without a source checkout.',
-      keywords: 'ZINC agent setup, OpenClaw ZINC, OpenCode ZINC, local model API, headless inference, model discovery',
-    },
     'openclaw': {
       title: 'Configure OpenClaw with ZINC',
       description: 'Connect OpenClaw to a local ZINC server. Pinned client setup, context requirements, standalone helper, project verification and AMD model acceptance results.',
@@ -169,7 +164,7 @@ export async function getStaticPaths() {
     },
     'opencode': {
       title: 'Configure OpenCode with ZINC and Qwen',
-      description: 'Set up OpenCode local coding with ZINC and Qwen through an OpenAI-compatible local LLM provider, with thinking, tool calling, context limits, SSH tunnels, and trace proxy guidance.',
+      description: 'Configure OpenCode 2.2.6 with ZINC, check live tools and streaming, and run bounded coding tasks with independent project tests.',
       keywords: 'OpenCode local coding, OpenCode local LLM, OpenCode Qwen, configure OpenCode with Qwen, OpenCode ZINC, OpenCode OpenAI compatible provider, local coding agent, ZINC tool calling, Qwen coding model, self-hosted coding assistant',
     },
   };

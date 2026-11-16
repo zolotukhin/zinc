@@ -39,6 +39,15 @@ test('external, absolute, section and non-repository asset links stay unchanged'
   expect(resolve('invalid%zz.md')).toBe('invalid%zz.md');
 });
 
+test('merged Markdown sources link directly to the canonical guide with their fragment', () => {
+  expect(resolve('BINARY_RELEASES.md#verify-a-manual-download')).toBe(
+    '/zinc/docs/getting-started/#verify-a-manual-download',
+  );
+  expect(resolve('docs/AGENT_SETUP.md#stable-linux-0-1-0-workflow')).toBe(
+    '/zinc/docs/running-zinc/#stable-linux-0-1-0-workflow',
+  );
+});
+
 test('relative and bare repository sources never become fake documentation URLs', () => {
   for (const [href, destination] of [
     ['../src/server/model_manager_metal.zig', 'src/server/model_manager_metal.zig'],

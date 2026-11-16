@@ -50,7 +50,7 @@ use its native visibility setting if you need to restrict the GPU.
 
 ## Install, upgrade, or get help
 
-- [Binary installation and rollback](https://zolotukhin.ai/zinc/docs/binary-releases/)
+- [Binary installation and rollback](https://zolotukhin.ai/zinc/docs/getting-started/)
 - [Hardware and runtime requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)
 - [CLI and server usage](https://zolotukhin.ai/zinc/docs/running-zinc/)
 - [OpenAI-compatible API](https://zolotukhin.ai/zinc/docs/api/)

@@ -104,10 +104,8 @@ describe('installed command documentation', () => {
     const files = [
       'README.md',
       'docs/GETTING_STARTED.md',
-      'docs/BINARY_RELEASES.md',
       'docs/RUNNING_ZINC.md',
       'docs/API.md',
-      'docs/AGENT_SETUP.md',
       'docs/HARDWARE_REQUIREMENTS.md',
       'docs/ROCM.md',
       'docs/OPENCLAW.md',
@@ -126,19 +124,24 @@ describe('installed command documentation', () => {
     }
   });
 
-  test('the first-model flow installs a release before the optional source instructions', async () => {
+  test('the first-model flow installs a release and delegates builds to the contributor guide', async () => {
     const guide = await readFile(resolve(import.meta.dir, '../../docs/GETTING_STARTED.md'), 'utf8');
     const [usage, source] = guide.split('## Build from source');
     expect(usage).toContain('ZINC_VERSION=v0.1.0 bash install.sh');
     expect(usage).toContain('zinc --check');
     expect(usage).not.toMatch(/git clone|scripts\/zig\.sh build|zig-out\/bin\/zinc/);
-    expect(source).toContain('./scripts/zig.sh build -Doptimize=ReleaseFast');
+    expect(source).toContain('DEVELOPMENT.md#prerequisites');
     expect(source).toContain('./zig-out/bin/zinc');
   });
 });
 
 test('stable examples do not silently require development-only CLI and discovery features', async () => {
-  for (const file of ['README.md', 'docs/AGENT_SETUP.md', 'docs/RUNNING_ZINC.md', 'docs/API.md']) {
+  for (const file of [
+    'README.md',
+    'docs/GETTING_STARTED.md',
+    'docs/RUNNING_ZINC.md',
+    'docs/API.md',
+  ]) {
     const markdown = await readFile(resolve(import.meta.dir, '../..', file), 'utf8');
     for (const example of consumerShellExamples(markdown)) {
       expect(example, file).not.toMatch(

@@ -88,7 +88,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="section-copy">
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
-      <p><a href="/zinc/docs/binary-releases/">Install Linux 0.1.0</a>, then download a model and open a chat. Published Vulkan and ROCm archives include the executable and its runtime assets.</p>
+      <p><a href="/zinc/docs/getting-started/">Install Linux 0.1.0</a>, then download a model and open a chat. Published Vulkan and ROCm archives include the executable and its runtime assets.</p>
       <p>Install your GPU driver/runtime first. You can run the release without Zig or a source checkout. Apple Silicon is an unsigned preview; see the <a href="/zinc/docs/getting-started/#build-from-source">source-build instructions</a> for development and experimental backends.</p>
       <p class="setup-note">AMD with Vulkan: set <code>RADV_PERFTEST=coop_matrix</code> before the GPU check or chat. Choose the separate <a href="/zinc/docs/rocm/">ROCm archive</a> when using that runtime.</p>
     </div>
@@ -151,7 +151,7 @@ node setup-openclaw.mjs run --project ../my-project -- \\
       <article class="harness-client terminal-wrap" aria-labelledby="opencode-heading" data-coding-harness="opencode">
         <h3 id="opencode-heading">OpenCode</h3>
         <p class="harness-intro">Coding rounds with streaming tool calls and an independent project verification command. Requires Bun 1.4.4 or newer.</p>
-        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.0.21
+        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.2.6
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 bun setup-opencode.mjs --project ../my-project \\
   --model qwen35-9b-q4k-m --context auto --output 2048 --steps 16

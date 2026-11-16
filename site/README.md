@@ -15,13 +15,14 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-| Command                    | Purpose                                                                               |
-| -------------------------- | ------------------------------------------------------------------------------------- |
-| `bun run dev`              | Start the development server                                                          |
-| `bun run build`            | Build all pages into `dist/`                                                          |
-| `bun run preview`          | Preview the production build locally                                                  |
-| `bun run check:posts`      | Verify article images and wide tables on phones/desktops, with and without JavaScript |
-| `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts         |
+| Command                    | Purpose                                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------------------- |
+| `bun run dev`              | Start the development server                                                                    |
+| `bun run build`            | Build all pages into `dist/`                                                                    |
+| `bun run preview`          | Preview the production build locally                                                            |
+| `bun run check:posts`      | Verify article images and wide tables on phones/desktops, with and without JavaScript           |
+| `bun run check:benchmarks` | Verify the built dashboard, numeric data, links, controls, and mobile layouts                   |
+| `bun run check:docs`       | Verify the onboarding path, search, mobile navigation, merged routes and retained section links |
 
 `bun run build` adds Cloudflare's exclusion markers around literal code after
 Astro compresses the HTML. This final pass uses Bun's HTML parser and verifies
@@ -60,6 +61,15 @@ Use the [blog guide](../writing/ZOLOTUKHIN_AI_BLOG_GUIDE.md) and
 [post template](../writing/ZOLOTUKHIN_AI_POST_TEMPLATE.md) for new posts. Published
 content lives in `src/content/posts/`; old implementation plans and duplicate
 drafts are available in Git history.
+
+The docs hub and sidebar share `src/lib/docs-navigation.ts`. Keep installation
+and first-run steps in `GETTING_STARTED.md`, everyday CLI/API connection in
+`RUNNING_ZINC.md`, and detailed request fields in `API.md`. Client guides own
+their setup recipes; dated qualification belongs in the linked reports.
+Mark commands newer than the stable release under explicit Development headings.
+When merging a guide, add both old URL variants to `public/_redirects`, preserve
+its section links in `docs-heading-aliases.ts`, and update the agent indexes.
+Run `check:docs` after building; do not leave duplicate documents in the sitemap.
 
 The build needs the full repository, the pinned Zig toolchain, and the headers
 used by the native API layout probe. CI installs `libvulkan-dev` on Linux.

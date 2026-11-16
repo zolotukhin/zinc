@@ -105,7 +105,7 @@ export const topicHubs: TopicHub[] = [
     docs: [
       { title: 'Configure OpenClaw with ZINC', href: '/zinc/docs/openclaw/', description: 'Client requirements, server startup, setup, connection checks and task execution.' },
       { title: 'Download the OpenClaw helper', href: '/zinc/harnesses/setup-openclaw.mjs', description: 'Standalone setup, checks and task execution using Node’s standard library.' },
-      { title: 'Agent and app setup', href: '/zinc/docs/agent-setup/', description: 'An installed-first workflow with model discovery and release compatibility guidance.' },
+      { title: 'Agent and app setup', href: '/zinc/docs/running-zinc/', description: 'An installed-first workflow with model discovery and release compatibility guidance.' },
       { title: 'Hardware and memory requirements', href: '/zinc/docs/hardware-requirements/', description: 'Choose a backend and size the model and context for your GPU.' },
     ],
     related: ['opencode-local-coding', 'amd-rdna4-llm-inference', 'qwen3-8-local-inference'],
@@ -485,12 +485,12 @@ export const topicHubs: TopicHub[] = [
     docs: [
       {
         title: 'Install ZINC',
-        href: '/zinc/docs/binary-releases/',
+        href: '/zinc/docs/getting-started/',
         description: 'Choose the Linux Vulkan or ROCm package; check driver requirements and the separate Metal preview status.',
       },
       {
         title: 'Connect a coding agent',
-        href: '/zinc/docs/agent-setup/',
+        href: '/zinc/docs/running-zinc/',
         description: 'Stable server commands, model discovery, OpenCode and OpenClaw setup, and development-only capabilities.',
       },
       {

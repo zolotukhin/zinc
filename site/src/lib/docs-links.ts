@@ -1,3 +1,5 @@
+import { mergedDocs } from './docs-navigation';
+
 type DocLinkTarget = { slug: string; sourcePath: string };
 type DocLinkOptions = { sourcePath: string; docs: readonly DocLinkTarget[] };
 
@@ -32,6 +34,7 @@ function isRepositorySource(path: string): boolean {
 
 export function createDocLinkResolver({ sourcePath, docs }: DocLinkOptions) {
   const routes = new Map(docs.map((doc) => [doc.sourcePath, `/zinc/docs/${doc.slug}/`]));
+  for (const doc of mergedDocs) routes.set(doc.sourcePath, `/zinc/docs/${doc.target}/`);
   return (href: string): string => {
     if (!href || /^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(href)) return href;
     try {

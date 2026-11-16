@@ -4,27 +4,13 @@ import Breadcrumbs from '../../../components/Breadcrumbs.astro';
 import DocsSearch from '../../../components/DocsSearch.astro';
 import { buildBreadcrumbList } from '../../../lib/structured-data';
 import { loadDocs } from '../../../lib/docs-loader';
-import { loadZigApi } from '../../../lib/zig-api-loader';
+import { docNavSections } from '../../../lib/docs-navigation';
 
 const docs = await loadDocs();
-const zigApi = await loadZigApi();
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const breadcrumbItems = [{ name: 'Home', href: '/' }, { name: 'ZINC', href: '/zinc/' }, { name: 'Docs' }];
-const starts = [
-  { slug: 'getting-started', title: 'Run your first model', description: 'Install ZINC, choose a model, and open a chat.' },
-  { slug: 'running-zinc', title: 'Use the command line', description: 'Choose models, run prompts, and configure the server.' },
-  { slug: 'api', title: 'Connect an app', description: 'Use the OpenAI-compatible API with curl or an SDK.' },
-  { slug: 'agent-setup', title: 'Connect an agent', description: 'Choose a model, discover the API, and connect a harness.' },
-];
-const setups = [
-  { slug: 'binary-releases', title: 'Binary installation', description: 'Release status, runtime requirements, verified installation, and rollback.' },
-  { slug: 'hardware-requirements', title: 'Hardware and memory', description: 'Supported GPUs, drivers, operating systems, and model sizing.' },
-  { slug: 'rocm', title: 'AMD ROCm setup', description: 'Install or build the HIP backend on a validated Radeon stack.' },
-  { slug: 'openclaw', title: 'OpenClaw setup', description: 'Connect OpenClaw and check the recorded model acceptance results.' },
-  { slug: 'opencode', title: 'OpenCode setup', description: 'Connect a coding client to your local model.' },
-  { slug: 'development', title: 'Build and contribute', description: 'Tests, debugging, benchmarking, and development tools.' },
-];
-const primarySlugs = new Set([...starts, ...setups].map(doc => doc.slug));
+const groups = docNavSections.filter(section => section.id !== 'engineering');
+const primarySlugs = new Set<string>(groups.flatMap(section => section.items.map(doc => doc.slug)));
 const references = docs.filter(doc => !primarySlugs.has(doc.slug));
 const allLinks = [
   ...docs.map(doc => ({ label: doc.title, href: `/zinc/docs/${doc.slug}/` })),
@@ -56,38 +42,36 @@ const allLinks = [
     <header class="hub-header">
       <p class="eyebrow">ZINC documentation</p>
       <h1>From your first chat<br />to the GPU kernels.</h1>
-      <p>Start with a model on your own machine. Find the setup, usage, and reference material as you need it.</p>
+      <p>Two guides take you from installation to a working app connection. Choose a client next, or look up a specific setting below.</p>
     </header>
 
     <DocsSearch />
 
-    <section class="group" aria-labelledby="start-heading">
-      <h2 id="start-heading">Start here</h2>
-      <ol class="guide-list">
-        {starts.map((doc, index) => (
-          <li><a href={`/zinc/docs/${doc.slug}/`}>
-            <span class="number" aria-hidden="true">0{index + 1}</span>
-            <div><h3>{doc.title}</h3><p>{doc.description}</p></div>
-            <span aria-hidden="true">→</span>
-          </a></li>
-        ))}
-      </ol>
-    </section>
+    {groups.map(section => (
+      <section class="group" aria-labelledby={`${section.id}-heading`}>
+        <h2 id={`${section.id}-heading`}>{section.label}</h2>
+        {section.id === 'start' ? (
+          <ol class="guide-list">
+            {section.items.map((doc, index) => (
+              <li><a href={`/zinc/docs/${doc.slug}/`}>
+                <span class="number" aria-hidden="true">0{index + 1}</span>
+                <div><h3>{doc.label}</h3><p>{doc.description}</p></div>
+                <span aria-hidden="true">→</span>
+              </a></li>
+            ))}
+          </ol>
+        ) : (
+          <div class="setup-list">
+            {section.items.map(doc => (
+              <a href={`/zinc/docs/${doc.slug}/`}><h3>{doc.label} <span aria-hidden="true">→</span></h3><p>{doc.description}</p></a>
+            ))}
+          </div>
+        )}
+      </section>
+    ))}
 
-    <section class="group" aria-labelledby="setup-heading">
-      <h2 id="setup-heading">Setup and tools</h2>
-      <div class="setup-list">
-        {setups.map(doc => (
-          <a href={`/zinc/docs/${doc.slug}/`}><h3>{doc.title} <span aria-hidden="true">→</span></h3><p>{doc.description}</p></a>
-        ))}
-      </div>
-    </section>
-
-    <section class="group reference" aria-labelledby="reference-heading">
-      <h2 id="reference-heading">Engineering and reference</h2>
-      <a class="api-link" href="/zinc/docs/zig-api/">
-        <div><h3>Zig API reference <span aria-hidden="true">→</span></h3><p>Generated from the source: {zigApi.moduleCount} modules and {zigApi.exportCount} exports.</p></div>
-      </a>
+    <section class="group reference" aria-labelledby="engineering-heading">
+      <h2 id="engineering-heading">Engineering and reports</h2>
       <details>
         <summary>Browse {references.length} engineering guides and reports</summary>
         <ul class="reference-list">

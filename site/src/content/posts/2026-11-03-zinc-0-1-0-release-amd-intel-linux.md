@@ -84,7 +84,7 @@ zinc --model-id qwen35-9b-q4k-m --context 4096 \
 
 Managed downloads use immutable upstream revisions and SHA256 pins. That matters when reporting a bug: a model name alone does not identify its weights, quantization or conversion. The managed ID and release version give us a much better starting point.
 
-The [installation guide](/zinc/docs/binary-releases/) covers custom directories, manual verification, runtime requirements and rollback. Omitting `ZINC_VERSION` selects the latest published stable release; setting it explicitly makes an installation reproducible.
+The [installation guide](/zinc/docs/getting-started/) covers custom directories, manual verification, runtime requirements and rollback. Omitting `ZINC_VERSION` selects the latest published stable release; setting it explicitly makes an installation reproducible.
 
 ## The models we qualified
 
@@ -185,7 +185,7 @@ _The release process carries the same archive identity through hardware qualific
 
 The release candidate and final version have separate embedded versions and separate qualification records. The final release is not an RC archive renamed after testing.
 
-Alongside the two archives, the release publishes an installer, SHA256 checksums, a per-file manifest, the model/qualification policy, validation results, release notes and signed provenance. The [provenance verification instructions](/zinc/docs/binary-releases/#verify-a-manual-download) explain how to verify the GitHub artifact attestations against the repository and candidate workflow.
+Alongside the two archives, the release publishes an installer, SHA256 checksums, a per-file manifest, the model/qualification policy, validation results, release notes and signed provenance. The [provenance verification instructions](/zinc/docs/getting-started/#verify-a-manual-download) explain how to verify the GitHub artifact attestations against the repository and candidate workflow.
 
 An attestation connects an asset's digest to its build workflow and source identity. The numerical and model tests establish a different property: what those bytes actually did on the tested GPUs. We want both records to travel with the download.
 
@@ -205,4 +205,4 @@ Intel has more work ahead. The [recorded seven-model diagnostic](/zinc/docs/inte
 
 The next step is to run against the latest upstream llama.cpp, profile the slow paths and retain correctness and recovery checks through each change. Native Intel compute support through Level Zero/oneAPI follows that Vulkan work, with kernel and driver choices based on the live stack. It will need its own qualification. Metal's stable hardware coverage and signing, CUDA development, larger contexts and concurrent workloads also remain separate work.
 
-For now, 0.1.0 gives us a permanent release to install and an exact baseline for the next improvement. Start with the [Linux installation guide](/zinc/docs/binary-releases/). If something goes wrong, include the version, GPU/driver, managed model ID, context and a prompt or request that reproduces it. Those details are how a surprising answer becomes the next regression test.
+For now, 0.1.0 gives us a permanent release to install and an exact baseline for the next improvement. Start with the [Linux installation guide](/zinc/docs/getting-started/). If something goes wrong, include the version, GPU/driver, managed model ID, context and a prompt or request that reproduces it. Those details are how a surprising answer becomes the next regression test.

@@ -3,24 +3,15 @@
 ZINC exposes a local OpenAI-compatible HTTP API. Point OpenAI-style clients at
 the server by changing the base URL.
 
-The examples use the installed `zinc` command from the [binary release](BINARY_RELEASES.md).
-For a source build, use `./zig-out/bin/zinc` or add its `bin` directory to PATH.
+For a first connection, follow [Run models and connect apps](RUNNING_ZINC.md#start-the-api).
+This page is the request/response reference. Examples use port 9090 and the
+installed `zinc` command. Use the loaded model ID from `/v1/models` when copying
+requests; ROCm/CUDA IDs are GGUF filenames.
 
-```bash
-# Start the server. Plain server mode defaults to port 8080.
-zinc --model-id qwen35-9b-q4k-m -p 8080
-
-export OPENAI_BASE_URL=http://localhost:8080/v1
-```
-
-`zinc chat` defaults to port 9090 unless `-p` is provided. Vulkan/Metal builds
-open the built-in browser UI; ROCm/CUDA builds provide the HTTP API only.
-
-For coding agents, use the [OpenClaw setup guide](/zinc/docs/openclaw/) or
-[OpenCode setup guide](/zinc/docs/opencode/). Their helpers discover the loaded
-model and available context. Configure sufficient server context first; see
-the [OpenClaw AMD acceptance matrix](/zinc/docs/openclaw-amd-validation/) for
-tested models and backend-specific limits.
+Jump to [backend coverage](#backend-coverage), [endpoints](#endpoints),
+[chat requests](#post-v1-chat-completions), [model discovery](#get-v1-models)
+or [errors](#error-responses). Client recipes are in [OpenClaw](/zinc/docs/openclaw/)
+and [OpenCode](/zinc/docs/opencode/).
 
 ## Backend coverage
 
@@ -28,18 +19,18 @@ Each executable contains one backend. Check `zinc --version` before selecting
 an interface or copying server settings. Vulkan is the Linux default; ROCm/HIP
 is a separate AMD build, Metal is a macOS preview, and CUDA is experimental.
 
-| Feature           | Vulkan / Metal                  | ROCm / CUDA                      |
-| ----------------- | ------------------------------- | -------------------------------- |
-| Chat responses    | JSON default; SSE optional      | SSE default; JSON optional       |
-| Raw responses     | JSON only                       | SSE default; JSON optional       |
-| Chat sampling     | Supported                       | Greedy                           |
-| Serving           | Serialized; requests queue      | Batched; Gemma MoE uses one slot |
-| Default context   | Auto-sized                      | 2,048 per slot                   |
-| Models            | Catalog and hot switching       | Startup model only               |
-| Browser chat      | Included                        | Unavailable                      |
-| Prefix reuse      | Eligible Vulkan models          | Unavailable                      |
-| Chat stop strings | Applied                         | Ignored                          |
-| Health details    | Model, queue, uptime and memory | Status, backend and context      |
+| Feature           | Vulkan / Metal                                     | ROCm / CUDA                      |
+| ----------------- | -------------------------------------------------- | -------------------------------- |
+| Chat responses    | JSON default; SSE optional                         | SSE default; JSON optional       |
+| Raw responses     | Stable 0.1.0: JSON only; development: SSE optional | SSE default; JSON optional       |
+| Chat sampling     | Supported                                          | Greedy                           |
+| Serving           | Serialized; requests queue                         | Batched; Gemma MoE uses one slot |
+| Default context   | Auto-sized                                         | 2,048 per slot                   |
+| Models            | Catalog and hot switching                          | Startup model only               |
+| Browser chat      | Included                                           | Unavailable                      |
+| Prefix reuse      | Eligible Vulkan models                             | Unavailable                      |
+| Chat stop strings | Applied                                            | Ignored                          |
+| Health details    | Model, queue, uptime and memory                    | Status, backend and context      |
 
 Both chat APIs accept `max_completion_tokens` and `max_tokens`; tools depend on
 the model template. Vulkan/Metal default to 256 output tokens. ROCm/CUDA default
@@ -53,7 +44,7 @@ portable requests.
 ROCm setup, runtime dependencies and optional KV/MTP controls are documented in
 the [ROCm guide](ROCM.md). Vulkan and ROCm use independent device lists, driver
 stacks and benchmark results. Release qualification is narrower than source
-compatibility; consult the [binary release guide](BINARY_RELEASES.md).
+compatibility; consult the [binary release guide](GETTING_STARTED.md).
 
 The detailed catalog, health and browser sections below describe **Vulkan/Metal**.
 For portable clients, set `stream` explicitly, get the loaded model from
@@ -90,7 +81,7 @@ execute a request or qualify a model's output quality.
 `chat_session_reuse` reflects the currently loaded eligible model and is false
 when absent or unqualified. On older servers, use the existing `/health` and
 `/v1/models` fields, set `stream` explicitly, and treat missing capability flags
-as unknown. See [Agent and App Setup](AGENT_SETUP.md) for a complete workflow.
+as unknown. See [Run models and connect apps](RUNNING_ZINC.md) for the complete workflow.
 
 ## Status and compatibility limits
 
@@ -229,7 +220,8 @@ Example request:
       }
     }
   ],
-  "tool_choice": "auto"
+  "tool_choice": "auto",
+  "stream": false
 }
 ```
 
@@ -317,15 +309,16 @@ Streaming tool calls are emitted atomically as `delta.tool_calls` chunks, with
 ### curl
 
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:9090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen35-9b-q4k-m",
     "messages": [{"role": "user", "content": "What is 2+2?"}],
-    "max_tokens": 64
+    "max_tokens": 64,
+    "stream": false
   }'
 
-curl -N http://localhost:8080/v1/chat/completions \
+curl -N http://localhost:9090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen35-9b-q4k-m",
@@ -351,7 +344,8 @@ Generate from a raw text prompt without applying a chat template.
 {
   "model": "qwen35-9b-q4k-m",
   "prompt": "The capital of France is",
-  "max_tokens": 64
+  "max_tokens": 64,
+  "stream": false
 }
 ```
 
@@ -425,11 +419,6 @@ The ID is the file basename, including its extension. `context_length` is the
 capacity of one request slot. Parent directories are omitted. These backends
 do not expose managed catalog/download/activation routes. Live discovery and generation passed after
 [GPU recovery](ROCM_AGENT_CONTEXT.md#remaining-hardware-validation).
-
-Model basenames must be valid UTF-8. The serializer returns a recoverable
-`InvalidUtf8` error before allocation for an invalid basename; it validates only
-the basename, so parent-directory bytes stay private and do not change a valid
-model ID. Valid Unicode, JSON escaping and allocation ownership are preserved.
 
 Vulkan/Metal builds provide the fuller response below.
 

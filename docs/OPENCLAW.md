@@ -1,99 +1,50 @@
 # OpenClaw with ZINC
 
-Connect OpenClaw to a model served by ZINC. This guide uses its direct agent
-command and a dedicated project configuration; the file-edit tasks below are
-examples of that integration. The
-[setup helper](https://github.com/zolotukhin/zinc/blob/main/tools/setup_openclaw.mjs)
-discovers the loaded model and its actual context capacity, creates a dedicated
-project config, validates it with the client, and runs a task.
+Connect OpenClaw to a model served by ZINC. This recipe configures one existing
+project, checks the connection, and runs a task. ZINC runs inference; OpenClaw's
+file and shell tools run on the client machine.
 
-The integration is tested with **OpenClaw 2026.11.1** and **Node.js 24.22.2**.
-That OpenClaw version requires Node **24.16 or newer in the 24.x line**, or
-**26.1 or newer**. See the [upstream release](https://github.com/openclaw/openclaw/releases/tag/v2026.11.1)
-and [one-shot command reference](https://docs.openclaw.ai/cli/agent).
-The helper itself uses only Node's standard library.
-
-The [AMD model acceptance report](OPENCLAW_AMD_VALIDATION.md) records the
-published binaries, actual file/tool outcomes, contexts and model-specific limits.
-The [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
-records the separate Arc Pro B70 results. The November 9 development-package
-replay passes both Gemma workspace tasks; earlier timeouts and the starter
-model's failed coding acceptance remain in their original records.
-
-For a complete Linux walkthrough, see
-[OpenCode and OpenClaw on AMD: R9700 and RX 9070 XT](https://zolotukhin.ai/blog/2026-11-07-opencode-openclaw-amd-r9700-rx-9070-xt/).
+Use **OpenClaw 2026.11.1** with **Node.js 24.22.2** for the recorded setup.
+The client's supported Node ranges are 24.16+ within 24.x, or 26.1+.
+See the [pinned upstream release](https://github.com/openclaw/openclaw/releases/tag/v2026.11.1).
 
 ## Start ZINC
 
-Choose the [Linux release](BINARY_RELEASES.md) for Vulkan or ROCm. Start one
-model with enough context for the agent's instructions, tool schemas, source
-files and tool results. On a 32 GB GPU, Qwen3.5 9B is a practical starting point.
-With the installed Vulkan binary:
+First [install ZINC and download Qwen3.5 9B](GETTING_STARTED.md). Stop any
+previous chat server, then use the common [16K server recipe](RUNNING_ZINC.md#start-the-api).
+Keep it running while you use OpenClaw. The default API address is
+`http://127.0.0.1:9090/v1`.
 
-```bash
-zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
-```
-
-For a checkout build, use `./zig-out/bin/zinc`. For an existing GGUF, use
-`-m /path/to/model.gguf`. Follow the
-[ROCm guide](ROCM.md) for that backend's model paths and device selection.
-Select your discrete GPU explicitly on systems with an integrated GPU too;
-check the server's device log before accepting a result.
-
-OpenClaw needs at least a 4,000-token context. Its coding prompt consumes
-several thousand tokens before your task begins. A model's advertised native
-window does not allocate GPU memory: configure the server first, then let setup
-discover its capacity. A 16K context is the starting point for this Qwen example;
-larger models need their own memory checks. Keep the backend's default KV
-precision for a comparable validation.
+Qwen3.5 9B is the smaller starting model in the recorded AMD agent checks.
+Check [model memory](HARDWARE_REQUIREMENTS.md#model-memory) and
+[tested scope](#tested-scope) before choosing another model. OpenClaw setup
+requires at least 4,000 context tokens; this recipe uses 16,384 for tools and history.
 
 ## Configure a project
 
-Install the pinned client with a compatible Node installation:
+On the client machine, install the pinned client and download the standalone helper:
 
 ```bash
 npm install --global openclaw@2026.11.1
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs -o setup-openclaw.mjs
+```
+
+Replace `../my-project` with an **existing project directory**. From the directory
+where you downloaded the helper, configure and check it:
+
+```bash
 node setup-openclaw.mjs setup --project ../my-project
 node setup-openclaw.mjs check --project ../my-project
 ```
 
-The [standalone helper](https://zolotukhin.ai/zinc/harnesses/setup-openclaw.mjs)
-needs no ZINC source checkout. In a source checkout, `node tools/setup_openclaw.mjs`
-accepts the same arguments. The project directory must
-already exist. `check` runs the real OpenClaw config validator and verifies ZINC
-health, model identity and available context; it does not generate tokens or
-prove coding ability.
+Setup discovers the loaded model ID and live context. It writes only the
+project's `openclaw.zinc.json`, leaving global OpenClaw settings alone. Review
+that file. If it already differs, rerun setup with `--force` to replace it.
+Use `--model <exact-discovery-id>` if discovery has more than one candidate.
 
-Setup writes `openclaw.zinc.json`. It preserves the user's global OpenClaw
-settings and refuses a differing project config unless passed `--force`.
-Symlink configs are rejected. The dedicated preset uses a single ZINC provider,
-chat completions, streaming tool usage, thinking off, and a bounded output
-budget. Filesystem tools stay within the project; shell tools run commands on
-the machine where OpenClaw runs. Use it in a project you intend the agent to edit.
-No gateway, messaging channel, background daemon, or delivery action is started.
-The preset omits bundled skills and the tool-search catalog to leave more of
-the context for code and tool results.
-
-For a checkout with the exact dependency tree used in AMD qualification, use
-`npm ci --prefix tools/openclaw-client` instead of a global install, then pass
-`--openclaw-bin tools/openclaw-client/node_modules/.bin/openclaw` to `check` and
-`run`. CI uses this locked client, including npm's integrity checks, in an
-isolated prefix. The ZINC runtime does not depend on these client packages.
-
-To connect to a different endpoint, supply its API base at setup time:
-
-```bash
-node setup-openclaw.mjs setup --project ../my-project \
-  --base-url "$ZINC_API_BASE_URL" --api-key-env ZINC_API_KEY
-```
-
-Export `ZINC_API_KEY` separately for a protected endpoint. The saved config
-contains an environment reference, never the key's value. Local unauthenticated
-servers use a dummy key. Keep configs containing private endpoint addresses out
-of version control. `--model` selects an exact **loaded** discovery ID; setup
-does not silently load or switch models. ROCm may report a GGUF filename as its
-ID. Rediscover after changing the server's model or context.
+`check` validates the real client's configuration and the server's health/model
+metadata. **It does not generate tokens or prove tool quality.** A failed check
+must be resolved before running a task. No ZINC source checkout is needed.
 
 ## Run and verify a task
 
@@ -102,85 +53,65 @@ node setup-openclaw.mjs run --project ../my-project --timeout 300 -- \
   "Fix the failing tests, run them, and explain the changes."
 ```
 
-The helper invokes `openclaw agent exec` with the project directory, explicit
-config and model, direct tools, the lean local-model prompt, and thinking off.
-Each task gets temporary client state. Task failure, timeout, interruption,
-oversized diagnostics or an unsuccessful JSON task report makes the helper
-fail. It stops its process group and removes that state on completion.
-Cancellation remains active while allocating or removing client state and while
-checking the project before a retry. A signal during those steps returns
-`OPENCLAW_INTERRUPTED` and prevents another client from starting.
-An interrupted evaluation also writes a partial summary and stops before
-starting another task.
+The helper invokes `openclaw agent exec` with this project, bounded output,
+thinking off and a lean local-model tool preset. It does not start a gateway,
+install a daemon or deliver messages. Each task uses temporary client state,
+which is removed when the run ends.
 
-OpenClaw 2026.11.1 can reject its prepared model runtime before admitting the
-agent run. For a local HTTP ZINC connection, the helper retries that exact
-preparation error once, within the original deadline. An empty report with no
-selected model/provider, payloads, usage or tool activity is required, together
-with an independent local forwarding check that no inference request was sent.
-The forwarder preserves response bytes and streaming; any non-metadata request
-blocks a retry. The helper also requires the project file fingerprint to stay
-unchanged. Linked, unreadable or oversized projects retain the original failure;
-the bounded check covers at most 4,096 entries and 16 MiB of files. Remote or
-HTTPS connections retain their normal failure result. Each attempt owns and removes its client
-state. The evaluator retains the first failure in a private diagnostics file
-and records `preparationRetries` in the task summary. Ordinary task failures
-keep their existing failure outcome.
+Task failure, timeout, interruption or an unsuccessful JSON task report returns
+failure. A successful report only means the client finished: inspect the diff
+and **run the project's acceptance command independently**. A model can finish
+without making the requested change.
 
-The helper also queries ZINC's optional `chat_session_reuse` health capability
-before a run. On qualified attention-only Vulkan models, successive tool turns
-share a fresh per-task `session_id` so the server can reuse an exact prompt
-prefix. The key is supplied through OpenClaw's native extra-body parameter in a
-private temporary config beside the saved config. The original file and its
-environment-based key references are preserved; the temporary copy is removed
-when the client exits, including after a timeout or interruption. Separate tasks
-get separate keys. Hybrid recurrent models, ROCm, older servers and failed
-capability discovery retain full prefill.
+## Custom endpoints and settings
 
-Development Vulkan builds also keep a verified canonical prefix when a client
-edits earlier messages. This is enabled by default for Intel Xe2 Gemma MoE;
-`ZINC_CHAT_PREFIX_ROLLBACK=0` on the server retains the previous reuse rules.
-The [Gemma qualification](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
-records the edited-history, invalidation, real-client and explicit-disable
-controls on the exact package.
-
-Set `ZINC_OPENCLAW_SESSION_REUSE=0` for an uncached client control. An explicit
-`session_id`, including an empty or null value, in the model's `extraBody` or
-`extra_body` parameters takes precedence. A cached task result is a separate
-measurement from a full-prefill benchmark; do not combine their timings into
-an engine speed claim.
-
-OpenClaw's successful task report means the client completed its run. Review
-the actual diff and run the project's acceptance command independently before
-accepting the change. In particular, a model can stop successfully without
-making the requested edits.
-
-## Repeatable validation
-
-Run these commands on your authorized inference worker, with ZINC already
-running. They do not start or stop the model server:
+For another server, pass its base URL during setup. Keep a protected endpoint's
+key in an environment variable:
 
 ```bash
-node tools/openclaw_eval.mjs --base-url http://127.0.0.1:9090/v1 \
-  --openclaw-bin openclaw --output /tmp/zinc-openclaw-trial
+node setup-openclaw.mjs setup --project ../my-project \
+  --base-url "$ZINC_API_BASE_URL" --api-key-env ZINC_API_KEY
 ```
 
-Use a fresh output directory. The evaluator checks an exact text response,
-then asks the real client to read a random receipt, fix a small JavaScript
-module, write that receipt and run tests. It independently reruns the tests and
-checks the protected input/test hashes and receipt bytes. A final text request
-and health check test recovery. Raw task logs stay in files marked private;
-`summary.json` contains the outcomes. These bounded tasks are acceptance checks,
-not a broad coding benchmark or a throughput comparison.
+Set those variables in your shell first. The generated config stores the endpoint
+and an environment reference for the key, not the key value. Keep private endpoint
+configuration out of version control. For remote GPUs, an
+[SSH tunnel](OPENCODE.md#use-your-own-endpoint) lets the default loopback URL work.
 
-The separate CPU protocol test uses the actual client with scripted streamed
-HTTP responses:
+| Option                                      | Purpose                                                               |
+| ------------------------------------------- | --------------------------------------------------------------------- |
+| `--output <tokens>`                         | Bound output per turn; default 1,024.                                 |
+| `--timeout <seconds>`                       | Bound the task; default 600.                                          |
+| `--openclaw-bin <path>`                     | Select an existing client executable.                                 |
+| `--dry-run --model <id> --context <tokens>` | Preview setup without writing files; explicit model/context required. |
+| `--force`                                   | Replace this helper's dedicated config after a model/context change.  |
 
-```bash
-node tools/validate_openclaw_harness.mjs --openclaw-bin openclaw \
-  --output /tmp/zinc-openclaw-protocol
-```
+## Troubleshooting
 
-It exercises fragmented tool arguments, correlated tool-result history, real
-file writes, command execution, API errors, cancellation and recovery without loading a model. CI runs this check
-with the pinned client; it is deliberately separate from GPU/model evidence.
+| Symptom                                 | Action                                                                                                                                                     |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Setup cannot discover a model           | Check `/health` and `/v1/models`; start a model before setup.                                                                                              |
+| Context too small or stale              | Restart ZINC with sufficient memory/context, then rerun setup with `--force`.                                                                              |
+| Client configuration rejected           | Confirm the pinned client and Node versions; rerun `check`.                                                                                                |
+| Client finishes but files are unchanged | Treat it as a failed task; inspect output, reduce task size and verify independently.                                                                      |
+| Preparation fails before a task starts  | Local HTTP preparation errors can be retried once by the helper only when no inference or file change occurred. Other failures retain their normal result. |
+
+Optional prompt reuse is enabled only when the server advertises the appropriate
+capability. Hybrid recurrent models, ROCm and older servers retain full prefill.
+`ZINC_OPENCLAW_SESSION_REUSE=0` disables the client optimization. Reuse behavior
+and development Gemma controls are documented in the [API reference](API.md#status-and-compatibility-limits).
+
+## Tested scope
+
+The [AMD acceptance report](OPENCLAW_AMD_VALIDATION.md) uses the published ZINC
+0.1.0 archives on the 32 GB R9700 with this client. Qwen3.5 9B passes at 16K;
+the starter 0.6B model does not qualify for agent tasks. Larger Qwen and Gemma
+rows have their own contexts and limits. That report does not qualify Intel or Metal.
+The later [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
+records separate development-package evidence.
+
+For contributor checks using the actual client against scripted responses, see
+[client harness development](DEVELOPMENT.md#client-harness-checks).
+The [helper source](https://github.com/zolotukhin/zinc/blob/main/tools/setup_openclaw.mjs)
+and [evaluator](https://github.com/zolotukhin/zinc/blob/main/tools/openclaw_eval.mjs)
+contain retry, cleanup and acceptance contracts.

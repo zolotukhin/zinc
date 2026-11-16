@@ -20,7 +20,7 @@ also include browser chat.
 ## Get running
 
 For published archives, runtime requirements and verified installation/rollback,
-see [binary releases](https://zolotukhin.ai/zinc/docs/binary-releases/) and
+see [binary releases](https://zolotukhin.ai/zinc/docs/getting-started/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
 [Linux 0.1.0](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0)
 is available for Vulkan and ROCm. The exact published binaries pass all three
@@ -106,7 +106,7 @@ for checkpoints, memory needs, and the exact Muse Glimmer GGUF used in testing.
 
 ## Connect harnesses
 
-The [agent and app workflow](https://zolotukhin.ai/zinc/docs/agent-setup/) covers
+The [agent and app workflow](https://zolotukhin.ai/zinc/docs/running-zinc/) covers
 server startup, model discovery, context sizing, and client checks.
 
 Connect **OpenClaw** with the [dedicated setup helper](tools/setup_openclaw.mjs):
@@ -128,7 +128,7 @@ Connect **OpenCode** to a running ZINC server with the
 chat and streaming tool calls, and runs headless tasks:
 
 ```bash
-bun add --global --trust @opencode/cli@2.0.21
+bun add --global --trust @opencode/cli@2.2.6
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 bun setup-opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
   --context auto --output 2048 --steps 16

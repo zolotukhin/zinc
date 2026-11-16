@@ -62,7 +62,7 @@ const themes = { light: 'github-light-high-contrast', dark: 'github-dark-high-co
 
 <section class="guide-section" aria-labelledby="quickstart">
   <h2 id="quickstart">Start with a short local run</h2>
-  <p>On a supported AMD GPU host, install the <a href="/zinc/docs/binary-releases/">Linux Vulkan or ROCm
+  <p>On a supported AMD GPU host, install the <a href="/zinc/docs/getting-started/">Linux Vulkan or ROCm
     release</a> for your driver stack. These commands use the installed <code>zinc</code> executable.
     Check the hardware notes below for Intel and the Apple Silicon preview.</p>
   <Code code={quickstart} lang="bash" themes={themes} />
@@ -89,7 +89,7 @@ const themes = { light: 'github-light-high-contrast', dark: 'github-dark-high-co
     </table>
   </div>
   <p>A backend existing is not evidence that every GPU or model is qualified. See the
-    <a href="/zinc/docs/binary-releases/">release scope</a>,
+    <a href="/zinc/docs/getting-started/">release scope</a>,
     <a href="/zinc/docs/intel-performance/#work-order-after-0-1-0">Intel catalog follow-up</a>
     and <a href="/zinc/docs/opencode-release-validation/">recorded client validation</a>
     for the exact coverage. The Intel managed-model correction requires a
@@ -173,7 +173,7 @@ const themes = { light: 'github-light-high-contrast', dark: 'github-dark-high-co
     ROCm may expose the GGUF filename. The 4K configuration is a connection check. For repository
     work, increase the server context only after checking memory, and match the client’s budget
     to the capacity actually allocated.</p>
-  <p>The <a href="/zinc/docs/agent-setup/">agent setup guide</a> links the standalone OpenCode and
+  <p>The <a href="/zinc/docs/running-zinc/">agent setup guide</a> links the standalone OpenCode and
     OpenClaw helpers and distinguishes stable commands from development features. ZINC returns
     model responses; the client executes tools. Verify the resulting patch and tests independently.
     Our <a href="/blog/2026-10-26-from-fast-tokens-to-a-verified-coding-task-on-rdna4/">recorded Qwen 3.8 task</a>

@@ -6,6 +6,10 @@ If you just want to run inference, see [Getting Started](/zinc/docs/getting-star
 
 ## Prerequisites
 
+Install Git and Python 3 first; the compiler wrapper uses Python to verify and
+unpack the pinned Zig download. These are source-build dependencies, not
+requirements for the published Linux binary.
+
 | Tool                | Version               | What it does                                                                  |
 | ------------------- | --------------------- | ----------------------------------------------------------------------------- |
 | **Zig**             | 0.17.1                | Host compiler for all Zig source                                              |
@@ -28,7 +32,7 @@ On Linux with Vulkan (AMD or Intel Arc GPU):
 # Zig 0.17.1 is selected and downloaded by scripts/zig.sh when needed.
 # Bun: https://bun.sh
 # Install glslc from the current LunarG Vulkan SDK.
-sudo apt install libvulkan-dev
+sudo apt install git python3 libvulkan-dev vulkan-tools
 ```
 
 ## Build
@@ -58,6 +62,20 @@ ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
 Each executable contains one backend. ROCm/CUDA compile embedded native kernels
 at runtime; they do not use Vulkan shaders, `glslc`, or `RADV_PERFTEST`.
 Check `zinc --version` and the [API matrix](/zinc/docs/api/#backend-coverage).
+
+For experimental NVIDIA CUDA, install the toolkit providing the Driver API,
+NVRTC, cuBLAS and CUDA runtime, then build explicitly:
+
+```bash
+CUDA_HOME=/usr/local/cuda ./scripts/zig.sh build -Dbackend=cuda -Doptimize=ReleaseFast
+```
+
+To follow the installed-command examples with a source build, add its `bin`
+directory to PATH from the repository root:
+
+```bash
+export PATH="$PWD/zig-out/bin:$PATH"
+```
 
 ## Test
 
@@ -96,6 +114,30 @@ The test suite covers:
 - API benchmark tool validation
 - Site build and Zig API documentation generation
 - Optional: OpenAI SDK compatibility, Qwen model smoke tests
+
+## Client harness checks
+
+Client setup lives in [OpenClaw](OPENCLAW.md) and [OpenCode](OPENCODE.md).
+To work on the helpers, install the documented client version and run the real
+client against scripted local responses. These checks use no model or GPU:
+
+```bash
+node tools/validate_openclaw_harness.mjs --output /tmp/zinc-openclaw-check
+bun tools/validate_opencode_harness.mjs --output /tmp/zinc-opencode-check
+```
+
+Choose fresh output directories. `result.json` records portable outcomes;
+raw diagnostics remain alongside it. OpenCode fixtures exercise tool bounds,
+API errors, timeout and repair with independent tests. OpenClaw fixtures cover
+configuration, task reports, cancellation and cleanup. These are protocol
+checks, not model-quality or performance measurements.
+
+For live model acceptance on a dedicated GPU worker, use
+[`tools/openclaw_eval.mjs`](../tools/openclaw_eval.mjs) or
+[`tools/opencode_eval.mjs`](../tools/opencode_eval.mjs), starting with `--help`.
+Retain exact client/server identity and failed outcomes as in the
+[AMD OpenClaw](OPENCLAW_AMD_VALIDATION.md) and [Intel OpenCode](INTEL_OPENCODE_VALIDATION.md)
+reports. Do not run those model evaluations on the development workstation.
 
 ## Format
 

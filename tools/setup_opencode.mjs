@@ -980,7 +980,7 @@ async function main() {
   }
   const opts = parseArgs();
   if (opts.help) {
-    console.log(`Usage: bun tools/setup_opencode.mjs [setup|check|run] [options] [-- task]
+    console.log(`Usage: bun setup-opencode.mjs [setup|check|run] [options] [-- task]
 
   --project DIR     Project directory (default: current directory)
   --model ID        Loaded model ID (default: qwen38-27b-q4k-m)
@@ -1001,12 +1001,12 @@ Setup writes opencode.zinc.json and a portable local hook in .zinc/.
 The hook bounds file reads and tool output; existing configs are left alone.
 Run/check read it. Override the endpoint with ZINC_API_BASE_URL and the key
 with ZINC_API_KEY; their values are never saved by this script.
-Install OpenCode first: bun install --global opencode-ai@1.19.4
+Install OpenCode first: bun add --global --trust @opencode/cli@2.2.6
 
-  bun tools/setup_opencode.mjs --project ./my-project
-  bun tools/setup_opencode.mjs --dry-run --context 32768
-  bun tools/setup_opencode.mjs check --project ./my-project
-  bun tools/setup_opencode.mjs run --project ./my-project --auto -- "Fix the failing tests"
+  bun setup-opencode.mjs --project ./my-project --model qwen35-9b-q4k-m --context auto
+  bun setup-opencode.mjs --dry-run --context 32768
+  bun setup-opencode.mjs check --project ./my-project
+  bun setup-opencode.mjs run --project ./my-project --auto -- "Fix the failing tests"
 
 Interactive: OPENCODE_CONFIG=./opencode.zinc.json opencode
 `);

@@ -19,6 +19,11 @@
 /zinc/performance            /zinc/benchmarks/                        301
 /zinc/performance/           /zinc/benchmarks/                        301
 /zinc/docs                   /zinc/docs/                              301
+# Consolidated onboarding guides; browsers retain existing section fragments.
+/zinc/docs/binary-releases    /zinc/docs/getting-started/              301
+/zinc/docs/binary-releases/   /zinc/docs/getting-started/              301
+/zinc/docs/agent-setup        /zinc/docs/running-zinc/                 301
+/zinc/docs/agent-setup/       /zinc/docs/running-zinc/                 301
 /zinc/docs/getting-started   /zinc/docs/getting-started/              301
 /zinc/docs/apple-silicon-reference /zinc/docs/apple-silicon-reference/ 301
 /zinc/docs/spec              /zinc/docs/spec/                         301

@@ -1,30 +1,196 @@
-# Running ZINC
+# Run models and connect apps
 
-Install the [binary release](BINARY_RELEASES.md) for your platform and backend,
-then run `zinc` from any working directory. Linux 0.1.0 provides Vulkan and ROCm
-archives; Metal remains a preview and CUDA is experimental.
+After [installing ZINC and running a first prompt](GETTING_STARTED.md), choose
+[browser chat](#browser-chat), a [terminal prompt](#terminal-prompts), or the
+[HTTP API](#start-the-api). These commands work with stable Linux 0.1.0;
+[development additions](#development-structured-discovery) are marked separately.
 
-## Install the command
+## Browser chat
 
-The installer creates `~/.local/bin/zinc` and keeps the executable with its
-matching runtime assets. Add the command directory to your shell's PATH:
+Vulkan and Metal include a browser interface:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-zinc --version
+zinc chat --model-id qwen35-9b-q4k-m -c 4096 --port 9090
 ```
 
-Zig and a source checkout are needed only when [building from source](DEVELOPMENT.md#build).
-That build produces `./zig-out/bin/zinc`; use that path directly or add its
-`bin` directory to PATH to follow the installed-command examples below.
-Each binary contains one backend. See [backend selection](GETTING_STARTED.md#choose-your-backend)
-and [API coverage](API.md#backend-coverage) before copying settings.
+Keep that terminal running. Open [localhost:9090](http://localhost:9090/) if the
+browser does not open automatically. Press Ctrl-C in the server terminal to
+stop it. ROCm/CUDA provide the API only; use an external chat client instead.
+Stop this server before starting another ZINC command on the same GPU or port.
 
-## Development: headless serving and JSON diagnostics
+## Terminal prompts
 
-These additions require current source newer than stable 0.1.0; check
-`zinc --help` before using them with an installed release. The legacy server
-commands elsewhere in this guide remain supported.
+Run one prompt and exit:
+
+```bash
+zinc --model-id qwen35-9b-q4k-m -c 4096 --chat \
+  --prompt "Explain KV caching in three sentences." -n 128
+```
+
+`--chat` applies the model's conversation template. Add `--system-prompt
+"Answer directly."` when you need a system instruction. Use `--raw` for a
+plain text continuation instead. `-n` limits generated tokens; `-c` sets the
+context capacity, including the prompt and output. See `zinc --help` for the
+installed version's options.
+
+## Start the API
+
+This is the common starting point for apps and agent clients. With the model
+already downloaded, start one server and leave it running:
+
+```bash
+zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
+```
+
+The 16K context leaves room for tools and conversation history. Check its
+[memory requirements](HARDWARE_REQUIREMENTS.md#model-memory) first; increase it
+only when the model and GPU can support it. A model's advertised native window
+does not reserve that much memory on your machine.
+
+In another terminal, check readiness and discover the loaded model:
+
+```bash
+curl --fail http://localhost:9090/health
+curl --fail http://localhost:9090/v1/models
+```
+
+Expect HTTP 200 and a loaded model with a positive `context_length`.
+Vulkan/Metal list catalog entries: select the row with `active: true`.
+ROCm/CUDA list only the loaded model, with its GGUF filename as the `id`.
+A healthy but idle Vulkan/Metal server is not ready to generate until a model
+is loaded.
+
+## Connect an app
+
+| Client setting      | Value                                                                  |
+| ------------------- | ---------------------------------------------------------------------- |
+| Provider / protocol | OpenAI-compatible **Chat Completions**                                 |
+| API base URL        | `http://localhost:9090/v1`                                             |
+| Model               | The loaded `id` from `/v1/models`                                      |
+| Context             | The loaded model's `context_length`, not its advertised maximum        |
+| API key             | `unused` if the client requires a nonempty value for this local server |
+
+The server listens on all interfaces and has no built-in API authentication.
+Keep its port private; for remote access, use an [SSH tunnel](OPENCODE.md#use-your-own-endpoint)
+or an authenticated gateway. A placeholder API key does not protect the server.
+
+To try a request directly, replace `LOADED_MODEL_ID` with that exact discovery
+ID. The other fields work across backends:
+
+```bash
+curl --fail-with-body http://localhost:9090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "LOADED_MODEL_ID",
+    "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "enable_thinking": false,
+    "max_tokens": 64,
+    "stream": false
+  }'
+```
+
+Expect a JSON response with `choices[0].message.content`. For streaming, set
+`"stream": true` and add `-N` to curl. Always set `stream`: Vulkan/Metal default
+to JSON, while ROCm/CUDA default to SSE. The [HTTP API reference](API.md) covers
+request fields, tool calls, error responses and backend differences. An
+OpenAI-compatible client must support Chat Completions; compatibility with
+other OpenAI endpoints is not implied.
+
+## Connect an agent
+
+ZINC generates responses; the client runs file and shell tools on the client
+machine. Start with a small task and verify the files and project tests yourself.
+The 0.6B installation-test model is not suitable for these agent workflows.
+
+| Client   | Follow this guide                   | What its check proves                                          |
+| -------- | ----------------------------------- | -------------------------------------------------------------- |
+| OpenClaw | [Setup, check and run](OPENCLAW.md) | Client configuration, server health and context; no generation |
+| OpenCode | [Setup, check and run](OPENCODE.md) | Live text, tool-call and streaming protocol requests           |
+
+Both guides use standalone helpers and an existing project directory; neither
+requires a ZINC checkout. OpenClaw discovers the model and context; OpenCode uses an explicit model ID
+and can discover its context. Repeat
+setup when changing the server model or context, and check the client guide's
+recorded model results before choosing a larger configuration. A successful
+protocol check alone does not prove that a task was completed correctly.
+
+## Models and cache
+
+Use managed IDs for routine downloads and runs, including on Metal:
+
+```bash
+zinc model list
+zinc model list --all
+zinc model list --json
+zinc model pull qwen35-9b-q4k-m
+zinc model use qwen35-9b-q4k-m
+zinc model active
+```
+
+`use` sets the default for future launches. It does not switch an already
+running native server. Vulkan/Metal support live model management through the
+[API](API.md#post-v1-models-activate); restart ROCm/CUDA to change models.
+
+For a GGUF you already have, replace `--model-id` with `-m`:
+
+```bash
+zinc --check -m /path/to/model.gguf -c 4096
+zinc -m /path/to/model.gguf -c 4096 --chat --prompt "Hello" -n 64
+```
+
+A GGUF outside the catalog still needs a supported architecture, quantization
+and enough memory. A framework checkpoint or model directory is not a GGUF file.
+
+To remove cached weights after stopping the process that uses them:
+
+```bash
+zinc model rm qwen35-9b-q4k-m
+```
+
+Vulkan/Metal can refuse removal while a local server has the model loaded.
+`--force` requests that server unload it first; for a custom server port, use
+`zinc --port 9090 model rm --force <id>`. Native servers have no unload endpoint;
+stop them before removing their model.
+
+## Device, context and KV settings
+
+| Setting                              | Use                                                                                                                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-d <index>`                         | Override Vulkan GPU selection; inspect `vulkaninfo --summary` and `zinc --check`.                                                                                       |
+| `ROCR_VISIBLE_DEVICES`               | Select visible ROCm devices before launch; native HIP indices differ from Vulkan.                                                                                       |
+| `CUDA_VISIBLE_DEVICES`               | Select visible CUDA devices before launch.                                                                                                                              |
+| `-c <tokens>` / `--context <tokens>` | Explicit context capacity. Vulkan/Metal otherwise auto-size; ROCm/CUDA default to 2,048 per slot, including with `-c 0`.                                                |
+| `--parallel 1`                       | One request slot. Vulkan/Metal serialize generation; a higher value does not multiply decode throughput. Native backends can batch, subject to model and memory limits. |
+| `--port <port>`                      | Explicit port. Plain server mode defaults to 8080; `chat` defaults to 9090.                                                                                             |
+
+ROCm/CUDA ignore `-d`; confirm the selected native device with `zinc --check`.
+`--kv-quant` is a reserved compatibility option with **no runtime effect**.
+For opt-in ROCm Q8 KV storage, use the [native-context guide](ROCM_NATIVE_CONTEXT.md);
+keep default precision for release qualification comparisons.
+
+## Troubleshooting
+
+| Symptom                               | Next check                                                                                                                                         |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zinc: command not found`             | Add `~/.local/bin` to PATH; rerun `zinc --version`.                                                                                                |
+| No GPU / runtime initialization fails | Run `zinc --check`; use the relevant [driver check](HARDWARE_REQUIREMENTS.md#driver-checks).                                                       |
+| Missing Vulkan shaders                | Keep the installed `bin/` and `share/` directories together, or rerun the installer.                                                               |
+| Wrong GPU                             | Check the backend and use the device controls above. Vulkan and native device indices are independent.                                             |
+| Out of memory                         | Stop your other model processes, reduce `-c`, use one slot or choose a smaller model. `--check` is an estimate, not proof of successful inference. |
+| Address in use / GPU reserved         | Stop the earlier server you started before launching its replacement.                                                                              |
+| API returns SSE instead of JSON       | Set `"stream": false` explicitly.                                                                                                                  |
+| Client cannot find a model            | Copy the loaded ID from `/v1/models`; native backends use a GGUF filename. Rerun client setup after model changes.                                 |
+| Agent exceeds context                 | Match the live context, shorten instructions/tool output, and use the client helper's bounded settings.                                            |
+| Slow, missing or corrupt output       | Capture version, command and server logs. On AMD RDNA4 Vulkan, confirm `RADV_PERFTEST=coop_matrix`; then check model/backend qualification.        |
+
+If it still fails, [file an issue](https://github.com/zolotukhin/zinc/issues) with
+`zinc --version`, `zinc --check`, GPU/driver, model ID, context and a reproducing
+prompt. Remove local credentials and private machine details from shared logs.
+
+## Development: structured discovery
+
+These features need source newer than stable 0.1.0. Check the installed
+`zinc --help` before using them:
 
 ```bash
 zinc --version --json
@@ -32,554 +198,32 @@ zinc --check --json --model-id qwen35-9b-q4k-m -c 16384 --parallel 1
 zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
 ```
 
-`serve` starts the API without opening a browser. `zinc chat --no-browser`
-starts browser chat without launching the browser automatically on Vulkan/Metal.
-The existing port defaults stay unchanged: 8080 for legacy server mode or
-`serve`, 9090 for `chat`. Use an explicit port in client configurations.
+`serve` never opens a browser. `zinc chat --no-browser` keeps the Vulkan/Metal
+browser UI available without opening it automatically. Port defaults remain
+8080 for `serve` and 9090 for `chat`.
 
-JSON version reports contain `schema_version: 1` and a `build` object with
-version, commit, target, optimization mode, and backend. JSON diagnostics use
-that same identity and add `result`, check counts, per-check status/messages,
-device information and optional model-memory estimates. Exit code 0 means no
-failed preflight checks, including runs with warnings; 1 means failure. Keep
-stdout for the JSON document and stderr for runtime logs.
-
-A native ROCm/CUDA model estimate includes weights, context-sized KV, recurrent
-state and serving slots, plus a stated runtime reserve. Lazy prefill, compiler
-and optional cache allocations can exceed that reserve. Only inspected weights exceeding free VRAM fail the native memory check;
-catalog requirements and estimated context/runtime overflow remain warnings.
-A warning or a memory estimate is not a successful inference test. Without a selected model,
-`--check` only checks system/device readiness.
-
-The [agent and app guide](AGENT_SETUP.md) covers discovery and older-server
-fallbacks.
-
-## Run a preflight check first
-
-This is the fastest way to answer "does this machine, selected GPU backend, and model look runnable at all?"
+JSON diagnostics write one document to stdout and runtime logs to stderr.
+`result` is `ready`, `ready_with_warnings` or `not_ready`; exit codes are 0
+without failures and 1 on failure. Native memory estimates include context and
+serving slots, but lazy runtime allocations can exceed the stated reserve.
 
 ```bash
-# AMD Vulkan only: set this before the first GPU check or inference
-export RADV_PERFTEST=coop_matrix
-
-# General preflight for the backend compiled into this binary
-zinc --check
-
-# Check one exact GGUF file
-zinc --check -m /path/to/model.gguf
-
-# Or check one managed model from the built-in catalog
-zinc --check --model-id qwen36-35b-a3b-q4k-xl
+curl --fail http://localhost:9090/v1/capabilities
 ```
 
-`--check` prints its progress as numbered sections and ends with a summary and verdict. The five sections are:
-
-- `Host Environment`: OS and the current shell's backend-relevant environment
-- `Linux AMD Prerequisites`: Mesa and GECC / RAS checks on AMD Linux systems
-- `Runtime Assets`: compiled shader directory and required `.spv` files
-- `Vulkan Device`: loader init, GPU enumeration, selected device, and tuning summary
-- `Model File`: GGUF metadata plus an estimated VRAM fit for the current engine
-
-The model section is the most operationally useful one. It reports:
-
-- `Tensor upload`: exact device-local weight bytes derived from the GGUF tensors
-- `VRAM fit`: estimated device-local total against the selected GPU's VRAM
-- `KV cache`: current estimate for the active runtime; the engine picks an auto context from the VRAM budget (85% utilization, aligned to 512 tokens) with a `4096` minimum floor — pass `-c <tokens>` to override
-- `GPU SSM state`: persistent device-local SSM state when the architecture uses it
-- `host-visible staging`: mapped/readback buffers, reported separately from device-local VRAM
-
-Important assumptions behind the fit estimate:
-
-- it reflects the current single-GPU runtime, not multi-GPU sharding
-- the auto-context heuristic floors at `4096` tokens and aligns to 512; use `-c` to request a smaller or larger context within the GGUF's architectural ceiling and the device's VRAM budget
-- it excludes Vulkan allocation alignment, descriptor pools, query pools, and driver overhead
-
-Exit behavior:
-
-- `READY [OK]` and `READY WITH WARNINGS [WARN]` exit with code `0`
-- `NOT READY [FAIL]` exits non-zero
-
-One common point of confusion on RDNA4: `RADV_PERFTEST` is checked in the shell where you run `--check`. A plain SSH shell can warn even if your long-running service sets `RADV_PERFTEST=coop_matrix` correctly. Intel Arc users do not set `RADV_PERFTEST`.
-
-### Historical development-node diagnostics
-
-These outputs were captured on **March 29, 2026** from `/root/zinc` on the shared RDNA4 host.
-
-General preflight:
-
-```bash
-# Command
-./zig-out/bin/zinc --check
-
-# Key output
-Summary       : 7 ok, 1 warn, 0 fail, 1 skip
-Verdict       : READY WITH WARNINGS [WARN]
-```
-
-Managed 35B catalog check:
-
-```bash
-# Command
-./zig-out/bin/zinc --check --model-id qwen36-35b-a3b-q4k-xl
-
-# Key output
-Managed model: Qwen3.6 35B-A3B UD Q4_K_XL (qwen36-35b-a3b-q4k-xl) [OK]
-VRAM fit (catalog): 21.41 / 31.86 GiB device-local (headroom 10.45 GiB) [OK]
-Summary       : 9 ok, 1 warn, 0 fail, 0 skip
-Verdict       : READY WITH WARNINGS [WARN]
-```
-
-Exact GGUF file check:
-
-```bash
-# Command
-./zig-out/bin/zinc --check -m /root/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
-
-# Key output
-Model: /root/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf [OK]
-Tensor upload: 20.70 GiB device-local weights
-VRAM fit: 21.41 / 31.86 GiB device-local (headroom 10.45 GiB) [OK]
-Summary       : 9 ok, 1 warn, 0 fail, 0 skip
-Verdict       : READY WITH WARNINGS [WARN]
-```
-
-The warning in all three cases came from the shell environment, not from model fit:
-
-```bash
-# The shared host shell did not have this set during the sample run
-RADV_PERFTEST: Not set in current shell [WARN]
-```
-
-## Troubleshooting (start here if something fails)
-
-If `--check` or the first prompt fails, run these in order. The bottom of this page has a fuller [common-mistakes list](#common-early-mistakes) and a [troubleshooting command reference](#fast-troubleshooting-commands).
-
-### 1. The first prompt is silent, wrong, or extremely slow on RDNA4
-
-Most likely cause: the cooperative-matrix path is not enabled in this shell. Set it and retry:
-
-```bash
-export RADV_PERFTEST=coop_matrix
-zinc --check                               # should report READY [OK] or READY WITH WARNINGS
-zinc --model-id qwen35-9b-q4k-m --prompt "hi" --chat
-```
-
-Use `--system-prompt <text>` with `--chat` when CLI prompt construction must
-match an API request that contains a system turn. Those tokens are included in
-prefill timing:
-
-```bash
-zinc --model-id qwen38-27b-q4k-m \
-  --chat \
-  --system-prompt "You are a helpful assistant. Answer directly. Do not show analysis." \
-  --prompt "Review this code."
-```
-
-`--check` prints `RADV_PERFTEST: coop_matrix [OK]` when this is right.
-
-### 2. "no Vulkan device found" / "loader init failed"
-
-The Vulkan driver is missing or the wrong one is installed.
-
-```bash
-sudo apt install -y libvulkan-dev vulkan-tools mesa-vulkan-drivers   # AMD: Mesa/RADV
-vulkaninfo --summary | head -40                                       # confirm the GPU is listed
-zinc --check                                            # rerun
-```
-
-For Intel Arc, ensure a recent Mesa (25.x+) with ANV. For AMD, RADV is the recommended driver — AMDVLK works but is not the primary test target.
-
-### 3. "model does not fit" / OOM during load
-
-The model is too large for current VRAM at the auto-allocated context length. Check the actual usage estimate:
-
-```bash
-zinc --check --model-id qwen35-9b-q4k-m
-# Look for: "VRAM fit (catalog): X.XX / Y.YY GiB device-local (headroom Z.ZZ GiB) [OK|WARN|FAIL]"
-```
-
-If headroom is negative or tight, pick a smaller model from `zinc model list`, lower context length with `--ctx`, or try the KV-cache compression flag described later on this page.
-
-### 4. macOS Metal: build succeeds but `--check` reports no device
-
-Make sure Xcode command-line tools are installed and you're on Apple Silicon (M1+):
-
-```bash
-xcode-select --install
-zinc --check
-```
-
-If you are on Intel Mac, ZINC's Metal path will not initialize — Apple Silicon only.
-
-### 5. Still stuck
-
-Open the [ZINC Discord](https://discord.gg/QRUgWH2aGV) or [file a GitHub issue](https://github.com/zolotukhin/zinc/issues) with the full `--check` output, your GPU model, and `vulkaninfo --summary` (Linux) or `system_profiler SPDisplaysDataType` (macOS).
-
-## Inspect the managed model catalog
-
-The built-in managed catalog only lists models ZINC has explicitly revalidated for specific GPU profiles. The default `model list` view is strict: a model only appears there if it is both tested for the detected GPU profile and estimated to fit current VRAM.
-
-```bash
-# Show models that are tested for the detected GPU profile
-# and estimated to fit current VRAM
-zinc model list
-
-# Show the full built-in catalog even if local GPU probing is unavailable
-zinc model list --all
-
-# Show the current managed default, if one is configured
-zinc model active
-```
-
-Example `zinc model list` output on an AMD RDNA4 32 GB system:
-
-```bash
-Detected GPU profile: amd-rdna4-32gb
-
-ID                             Released     Status        Fit    Installed   Active   Notes
-qwen35-9b-q4k-m                2026-02-28   supported     yes    yes         yes      tested + exact fit
-qwen36-35b-a3b-q4k-xl          2026-04-15   supported     yes    no          no       tested + exact fit
-qwen38-27b-q4k-m               2026-08-14   supported     yes    no          no       tested + catalog fit
-gemma4-31b-q4k-m               2026-04-02   supported     yes    no          no       tested + catalog fit
-gemma4-26b-a4b-q4k-m           2026-04-02   supported     yes    no          no       tested + catalog fit
-```
-
-For machine-readable output (useful for AI agents and scripts):
-
-```bash
-zinc model list --json
-```
-
-If you want ZINC to manage downloads and the default startup model for you:
-
-```bash
-# Download one managed model into the local cache
-zinc model pull qwen35-9b-q4k-m
-
-# Mark it as the default managed model for future runs
-zinc model use qwen35-9b-q4k-m
-
-# Inspect the current managed default
-zinc model active
-
-# Remove a cached managed model
-zinc model rm qwen35-9b-q4k-m
-
-# Force-unload it from the local server first if it is still active there
-zinc model rm --force qwen35-9b-q4k-m
-```
-
-`model rm` is conservative by default: if the local ZINC server still has that model loaded in GPU memory, the command refuses and leaves the cache untouched. Use `--force` to have the local server unload it first. If your server uses a non-default port, add `--port <port>` before `model rm`.
-
-## Run a single prompt from the terminal
-
-This is the best first command to try on RDNA4:
-
-```bash
-export RADV_PERFTEST=coop_matrix
-zinc \
-  -m /path/to/model.gguf \
-  --prompt "The capital of France is"
-```
-
-On Intel Arc, use the same command without the RDNA-only environment variable:
-
-```bash
-zinc \
-  -m /path/to/model.gguf \
-  --prompt "The capital of France is"
-```
-
-That runs a single CLI inference pass and prints the build, model, GPU, prefill, and decode logs directly to the terminal.
-
-## Pick a specific GPU
-
-In a Vulkan build, ZINC auto-selects the best compute-capable discrete GPU.
-If your machine exposes multiple Vulkan devices and you need to override that
-choice, choose one explicitly:
-
-```bash
-zinc \
-  -m /path/to/model.gguf \
-  -d 1 \
-  --prompt "Hello"
-```
-
-Useful when the Vulkan device list includes integrated graphics, llvmpipe, or multiple AMD devices.
-
-ROCm/CUDA use their native device lists instead. Set `ROCR_VISIBLE_DEVICES` or
-`CUDA_VISIBLE_DEVICES` before starting the process and inspect `zinc --check`.
-These builds currently ignore `-d`; a Vulkan index is not a native HIP/CUDA index.
-
-## Change context length
-
-```bash
-zinc \
-  -m /path/to/model.gguf \
-  -c 8192 \
-  --prompt "Summarize this document"
-```
-
-Use a larger context only if the model and GPU VRAM budget can support it.
-
-## KV cache configuration
-
-`--kv-quant 0/2/3/4` is a reserved compatibility option. It is parsed but does
-not configure runtime storage, so it does not reduce memory use. The
-[TurboQuant specification](/zinc/docs/turboquant-spec/) describes separate work.
-
-Use the active backend's documented KV controls and qualified precision.
-ROCm's optional `ZINC_KV_CACHE=q8` requires its supported model path and
-`--parallel 1` for serving; see [ROCm native context](/zinc/docs/rocm-native-context/).
-Keep the release's default cache settings for qualification comparisons.
-
-## Run ZINC as a server
-
-When you omit `--prompt`, ZINC starts an HTTP API server. Vulkan/Metal also
-include browser chat; ROCm/CUDA expose the API without that UI:
-
-```bash
-zinc \
-  -m /path/to/model.gguf \
-  -p 8080
-```
-
-Once the server reports that it is listening, check its local endpoints:
-
-- **Chat UI (Vulkan/Metal)**: [http://localhost:8080/](http://localhost:8080/) — a ChatGPT-like interface with streaming, markdown rendering, syntax highlighting, and copy buttons on code blocks.
-- **Health**: [http://localhost:8080/health](http://localhost:8080/health)
-
-### RDNA4 test-node deploy
-
-If you want to rebuild and restart the shared RDNA4 test server from your current checkout, use the helper script:
-
-```bash
-./scripts/deploy_rdna4_server.sh
-```
-
-That script uses `.env` for the active RDNA target, syncs the repo to `/root/zinc`,
-rebuilds it, restarts port `9090`, and finishes with a remote `/health` check.
-For multi-node setups, set `ZINC_RDNA_NODE=rdna1` or `ZINC_RDNA_NODE=rdna2`
-and define matching `ZINC_RDNA1_HOST/PORT/USER` or
-`ZINC_RDNA2_HOST/PORT/USER` keys. If no selector is set, the script falls back
-to `ZINC_RDNA_HOST/PORT/USER` and then `ZINC_HOST/PORT/USER`.
-
-Useful flags:
-
-- `--no-sync` when the remote checkout is already current
-- `--no-build` when you only want a restart
-- `--no-restart` when you only want to push code and compile
-- `--no-healthcheck` when you will validate separately
-
-Current limitation: generation is still serialized behind one engine lock. Overlapping clients complete cleanly, `/health` stays responsive, and queued generation work is reported, but decode itself is not yet parallel.
-
-## OpenAI-compatible API
-
-The server exposes `/v1` endpoints that work as a drop-in replacement for OpenAI and llama-server clients.
-
-### Streaming chat completion
-
-```bash
-curl -N http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3.5-35b",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "enable_thinking": true,
-    "stream": true,
-    "max_tokens": 256
-  }'
-```
-
-### Non-streaming chat completion
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3.5-35b",
-    "messages": [{"role": "user", "content": "What is 2+2?"}],
-    "enable_thinking": true,
-    "max_tokens": 32
-  }'
-```
-
-`enable_thinking` only has an effect when the active model's chat template exposes a thinking toggle. In the built-in chat UI, the Thinking checkbox is shown only for models that report this capability.
-
-### List models
-
-```bash
-# Show managed models, fit status, install state, and the active entry
-curl http://localhost:8080/v1/models
-```
-
-### Activate a managed model in a running server
-
-```bash
-# Switch the running server to an installed managed model
-curl http://localhost:8080/v1/models/activate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen35-9b-q4k-m"
-  }'
-```
-
-### Remove a managed model from a running server
-
-```bash
-# Remove an installed model if it is not currently loaded
-curl http://localhost:8080/v1/models/remove \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen35-9b-q4k-m"
-  }'
-
-# Force the server to unload it first if it is still active
-curl http://localhost:8080/v1/models/remove \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen35-9b-q4k-m",
-    "force": true
-  }'
-```
-
-Without `force`, a loaded target returns `409` and ZINC leaves the cached files untouched.
-
-### Use with OpenAI SDKs
-
-Node.js:
-
-```javascript
-import OpenAI from 'openai';
-const client = new OpenAI({ baseURL: 'http://localhost:8080/v1', apiKey: 'unused' });
-const stream = await client.chat.completions.create({
-  model: 'qwen3.5-35b',
-  messages: [{ role: 'user', content: 'Hello!' }],
-  stream: true,
-});
-for await (const chunk of stream) {
-  process.stdout.write(chunk.choices[0]?.delta?.content || '');
-}
-```
-
-### All endpoints
-
-| Method | Path                   | Description                                                          |
-| ------ | ---------------------- | -------------------------------------------------------------------- |
-| GET    | `/`                    | Built-in chat interface                                              |
-| GET    | `/health`              | Server status, loaded model, active/queued requests, uptime          |
-| GET    | `/v1/models`           | List managed models, fit status, install state, and the active entry |
-| POST   | `/v1/models/activate`  | Activate an installed managed model                                  |
-| POST   | `/v1/models/remove`    | Remove a cached managed model, optionally unloading it first         |
-| POST   | `/v1/chat/completions` | Chat completion (streaming + non-streaming)                          |
-| POST   | `/v1/completions`      | Text completion                                                      |
-
-The full API contract is documented in [Serving HTTP API](/zinc/docs/api/).
-
-## Export the decode graph
-
-ZINC can emit decode-graph artifacts directly from GGUF metadata. The JSON report is model-aware: it includes estimated bytes moved, FLOPs, hotspot ranking, and bottleneck hints for each node.
-
-```bash
-zinc \
-  -m /path/to/model.gguf \
-  --graph-report decode-graph.json \
-  --graph-dot decode-graph.dot
-```
-
-That is useful for:
-
-- graph inspection
-- hotspot and bandwidth analysis
-- custom tooling
-- Graphviz rendering
-- Bun-based HTML dashboards
-
-The fastest way to review the report is the HTML renderer:
-
-```bash
-bun run graph:render -- decode-graph.json decode-graph-report.html
-open decode-graph-report.html   # macOS
-# xdg-open decode-graph-report.html   # Linux
-```
-
-That dashboard is built by [`tools/render_graph_report.ts`](https://github.com/zolotukhin/zinc/blob/main/tools/render_graph_report.ts). It groups the raw graph into:
-
-- top hotspots
-- bottleneck mix
-- layer pressure
-- op mix
-- critical-path excerpt
-- searchable full node table
-
-The renderer only needs the JSON report. The DOT file is optional and is still useful when you want the full dependency graph structure.
-
-If you have Graphviz installed, you can still render the DOT file:
-
-```bash
-dot -Tsvg decode-graph.dot -o decode-graph.svg
-```
-
-## What a healthy run looks like
-
-A normal run usually includes lines like:
-
-```bash
-info(vulkan): Selected GPU 0: AMD Radeon Graphics
-info(loader): Loading model: /path/to/model.gguf
-info(forward): Prefill complete: ...
-info(forward): Generated ... tok/s
-```
-
-That is the simplest operational checklist:
-
-1. Vulkan device selected
-2. Model loaded
-3. Prefill finished
-4. Decode happened
-
-## Common early mistakes
-
-### Vulkan is present, but the wrong device is selected
-
-Use `-d` to pick the GPU you actually want.
-
-### The model path is wrong
-
-ZINC expects a GGUF file, not a Hugging Face directory or a framework checkpoint.
-
-### The machine builds, but runtime is unstable
-
-That usually points to environment issues before it points to the model:
-
-- wrong Vulkan driver stack
-- unsupported hardware path
-- missing `RADV_PERFTEST=coop_matrix` on RDNA4
-- model too large for the available VRAM
-
-## Fast troubleshooting commands
-
-```bash
-zinc --help
-zinc --check -m /path/to/model.gguf
-
-# Optional Vulkan-only diagnostic, if vulkan-tools is installed
-vulkaninfo --summary
-```
-
-Those commands answer most “why is this not working?” questions:
-
-- is the CLI wired correctly?
-- does the machine/model preflight look sane?
-- does Vulkan actually see the GPU?
-
-For source-build regression diagnostics, run `./scripts/zig.sh build test --summary all`
-from the checkout. See [development tests](DEVELOPMENT.md#test) for the compiler
-and tooling requirements; installed binary users can skip that step.
-
-## Related docs
-
-- [Getting started](/zinc/docs/getting-started/)
-- [Hardware requirements](/zinc/docs/hardware-requirements/)
-- [Serving HTTP API](/zinc/docs/api/)
-- [RDNA4 tuning](/zinc/docs/rdna4-tuning/)
+Schema version 1 reports build identity, backend, `active_model`,
+`context_length` and capability flags, also included in healthy `/health`
+responses. Idle Vulkan/Metal servers report null model/context. Tool support is
+model-dependent. See [capability fields](API.md#development-capability-discovery).
+
+On stable 0.1.0 this endpoint returns 404: use `/health` and `/v1/models` instead.
+Treat absent capability flags as unknown. In particular, only use chat session
+reuse when the loaded server explicitly advertises it.
+
+## Working on ZINC itself
+
+Use [Development](DEVELOPMENT.md) for building, testing, graph exports and
+remote deployment, plus the repository
+[AGENTS.md](https://github.com/zolotukhin/zinc/blob/main/AGENTS.md) and
+[codebase map](CODEBASE_MAP.md) for source changes. Those tools are unnecessary
+for installing a release or connecting an app.

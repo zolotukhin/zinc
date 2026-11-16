@@ -1,231 +1,181 @@
-# Getting started with ZINC
+# Install ZINC and run your first model
 
-Install ZINC, download a model, and open a local chat. Linux releases provide
-Vulkan and ROCm binaries. Apple Silicon uses the Metal preview; CUDA remains
-experimental.
+Install a Linux binary, download a model, and get a response. No Zig compiler,
+Python environment, or source checkout is needed for the stable release.
+GPU drivers and model weights are installed separately.
 
-The commands below use the installed `zinc` executable. Running a published
-release requires your GPU runtime and a model; it does not require Zig, Git,
-Python or a source checkout.
+Already installed? Continue to [Run models and connect apps](RUNNING_ZINC.md).
+Returning to maintain an installation? Jump to [upgrade and rollback](#upgrade-or-roll-back)
+or [manual verification](#verify-a-manual-download).
 
 ## Choose your backend
 
-Each binary contains one backend. Choose a Vulkan or ROCm
-archive when installing on Linux; backend selection is fixed in each executable.
+[Stable 0.1.0](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0)
+provides two **Linux x86_64** downloads. Each executable contains one backend.
 
-| GPU / platform                 | Backend         | Setup and interface                                                                                   |
-| ------------------------------ | --------------- | ----------------------------------------------------------------------------------------------------- |
-| AMD RDNA3 / RDNA4 on Linux     | Vulkan          | Follow the Vulkan steps below; CLI, browser chat and HTTP API                                         |
-| AMD R9700 (`gfx1201`) on Linux | ROCm/HIP        | [ROCm/HIP setup](/zinc/docs/rocm/); CLI and HTTP API                                                  |
-| Intel Arc Xe2 on Linux         | Vulkan          | [Intel guide](/zinc/docs/intel-gpu-reference/); CLI, browser chat and HTTP API                        |
-| Apple Silicon on macOS         | Metal · preview | macOS steps below; unsigned preview for 0.1.0                                                         |
-| NVIDIA on Linux / WSL2         | CUDA · source   | [Experimental CUDA requirements](/zinc/docs/hardware-requirements/#nvidia-rtx-gpus-experimental-cuda) |
+| Choose               | Qualified release hardware                       | Runtime requirements                                                      | Interfaces                  |
+| -------------------- | ------------------------------------------------ | ------------------------------------------------------------------------- | --------------------------- |
+| **Vulkan** (default) | AMD Radeon AI PRO R9700; Intel Arc Pro B70 / Xe2 | glibc 2.35+, Vulkan 1.3 loader and compatible GPU driver                  | CLI, browser chat, HTTP API |
+| **ROCm**             | AMD Radeon AI PRO R9700 (`gfx1201`)              | glibc 2.39+, ROCm 7.2.4 with HIP, hipRTC, hipBLAS and HIP/rocWMMA headers | CLI, HTTP API               |
 
-The ROCm reference is narrower than the Vulkan hardware range. Check the
-[hardware requirements](/zinc/docs/hardware-requirements/) and release validation
-for your exact card, driver, model and context. ROCm/CUDA use a different server
-from Vulkan/Metal; see [API coverage](/zinc/docs/api/#backend-coverage).
+Vulkan archives include compiled shaders, so `glslc` is unnecessary. ROCm
+compiles kernels at runtime and still needs its development libraries and
+headers; use the [ROCm prerequisites](ROCM.md#runtime-prerequisites).
 
-The chat UI steps below apply to Vulkan and Metal. For ROCm, use the
-[CLI and HTTP server commands](ROCM.md); that backend has no built-in browser UI.
+These are the release's tested GPU profiles, not a promise for every card with
+the same architecture. Other AMD GPUs, Metal previews and experimental CUDA
+have separate [hardware and release limits](HARDWARE_REQUIREMENTS.md).
+There is no stable 0.1.0 archive for macOS, Linux ARM64, musl/Alpine or Windows.
+Apple Silicon users should follow [preview or source installation](#build-from-source).
 
 ## Install ZINC
 
-**Apple Silicon:** choose an [unsigned Metal preview](BINARY_RELEASES.md) or
-follow the [macOS source-build steps](#macos-apple-silicon). Experimental CUDA
-and unreleased changes use the [source-build instructions](#build-from-source).
-The installer commands below are for Linux.
-
-For a supported Linux x86-64 machine, download the installer from the published
-release and inspect it before running it:
+Download the release installer and review it:
 
 ```bash
 curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
 ```
 
-Then install the Vulkan release and make the command available in this shell:
+For **Vulkan**:
 
 ```bash
 ZINC_VERSION=v0.1.0 bash install.sh
+```
+
+For **ROCm**, use this instead:
+
+```bash
+ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
+```
+
+Then make the command available in this shell:
+
+```bash
 export PATH="$HOME/.local/bin:$PATH"
 zinc --version
 ```
 
-For AMD ROCm, use `ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh` instead.
-Check the [release requirements and qualified hardware](BINARY_RELEASES.md)
-for your selected archive. Install the GPU driver/runtime first; prebuilt Vulkan
-archives already contain their compiled shaders and need no shader compiler.
-The installer keeps the runtime assets with the executable.
+Add that PATH line to your shell startup file to keep it for future terminals.
+The installer needs Bash, curl, tar and standard system utilities. It checks
+file integrity, architecture and runtime compatibility before activating the
+installation. The version output identifies the selected backend.
 
-**AMD with Vulkan:** set `export RADV_PERFTEST=coop_matrix` in this terminal
-before checking the GPU or running a model. Skip this for ROCm, Intel Arc,
-CUDA and macOS.
+The default command is `~/.local/bin/zinc`; its matching runtime assets live
+under `~/.local/share/zinc`. `ZINC_BIN_DIR` and `ZINC_INSTALL_DIR` override these
+locations. Reinstalling identical bytes is safe.
 
 ## Check your GPU
+
+For **AMD Vulkan on RDNA4**, set this in the shell that will run ZINC:
+
+```bash
+export RADV_PERFTEST=coop_matrix
+```
+
+Intel Vulkan, ROCm and Metal do not use that setting. Now check the installation:
 
 ```bash
 zinc --check
 ```
 
-Look for `READY [OK]`. In the Vulkan/Metal build used here, the check verifies
-GPU detection, shader assets, and runtime initialization. Resolve any reported setup issue before downloading
-a model.
+Proceed when the check reports `READY [OK]` or `READY WITH WARNINGS [WARN]`;
+read any warnings first. A failed check exits nonzero. This checks readiness,
+not model output quality. If it fails, use the
+[troubleshooting table](RUNNING_ZINC.md#troubleshooting) before downloading a model.
 
 ## Choose a model
-
-Browse the managed catalog for your GPU profile:
 
 ```bash
 zinc model list
 ```
 
-Check the model's memory requirements, then download one. This example uses
-Qwen 3.5 9B:
+This lists models tested for the detected GPU profile and estimated to fit its
+memory. For the full catalog, use `zinc model list --all`; for scripts, use
+`zinc model list --json`.
+
+**Qwen3.5 9B Q4_K_M** is the starting chat model in this guide. If it appears in
+your supported list, download it and check its fit at a modest 4K context:
 
 ```bash
 zinc model pull qwen35-9b-q4k-m
+zinc --check --model-id qwen35-9b-q4k-m -c 4096
 ```
 
-The download goes into ZINC's local cache and is verified against its SHA256
-checksum. A model ID refers to a specific checkpoint in this catalog. GGUF is
-the model file format; you can also [use a file you already have](#use-an-existing-gguf).
+Downloads use pinned upstream revisions and SHA256 checks and stay in ZINC's
+managed cache. Leave space for the model and future downloads. Larger context
+windows need additional memory; see [model sizing](HARDWARE_REQUIREMENTS.md#model-memory).
+
+For a smaller **Vulkan installation test**, the 639 MB `qwen3-0.6b-q8-0` model
+has [qualified coverage at 2K context](STARTER_QUALIFICATION.md). It is not a
+recommended chat or agent model. Memory fit and passing a small inference test
+do not establish coding ability.
 
 ## Run your first prompt
 
 ```bash
-zinc --model-id qwen35-9b-q4k-m \
-  --chat --prompt "What is the capital of France?"
+zinc --model-id qwen35-9b-q4k-m -c 4096 \
+  --chat --prompt "What is the capital of France? Answer in one sentence." -n 64
 ```
 
-`--chat` applies the model's conversation template. A coherent answer and a
-generated-token timing in the logs confirm that the inference path is working.
+Expect a response identifying Paris and a normal process exit. If output is
+missing or corrupt, preserve the version, check output and command for
+[troubleshooting](RUNNING_ZINC.md#troubleshooting).
 
-## Start the chat UI
+## What to do next
+
+- [Open browser chat](RUNNING_ZINC.md#browser-chat) on Vulkan/Metal.
+- [Start the API and connect an app](RUNNING_ZINC.md#start-the-api) on any backend.
+- Connect [OpenClaw](OPENCLAW.md) or [OpenCode](OPENCODE.md) with their standalone helpers.
+- [Choose another model or use an existing GGUF](RUNNING_ZINC.md#models-and-cache).
+
+## Upgrade or roll back
+
+Stop your running ZINC processes before switching versions. Rerun the installer
+with the next published `ZINC_VERSION`; omitting it selects the latest stable
+release. Explicit versions keep installations reproducible. RCs require an
+explicit version and have their own validation records.
+
+Restore the previous installation with:
 
 ```bash
-zinc chat --model-id qwen35-9b-q4k-m
+bash install.sh --rollback
 ```
 
-This starts the local server and opens the built-in chat in your browser.
-The default address is `http://localhost:9090/`.
+The installer switches the executable and matching runtime assets together.
+It does not delete or move models. The published 0.1.0 archives passed
+[installation, upgrade and rollback checks](/zinc/validation/public-install-upgrade-0.1.0-2026-11-03.json).
 
-To connect an app, set its OpenAI-compatible API base URL to
-`http://localhost:9090/v1` while the server is running. See the
-[API guide](/zinc/docs/api/) for requests, SDK examples, and backend limitations.
+## Verify a manual download
 
-## Connect a coding agent
+Download the chosen archive and `SHA256SUMS.txt` from the
+[same release](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0).
+Compare the archive's `sha256sum` with its entry, then extract it into its own
+directory. Keep `bin/` and `share/` together: the Vulkan executable needs the
+matching `share/zinc/shaders/` assets.
 
-Follow the [OpenClaw setup guide](/zinc/docs/openclaw/) for one-shot coding
-tasks, or the [OpenCode setup guide](/zinc/docs/opencode/) for coding rounds
-with a project verification command. Both guides include a setup helper and
-context requirements. Stop the chat server before restarting it with the
-larger context required by your client.
-
-For OpenClaw, the [AMD acceptance report](/zinc/docs/openclaw-amd-validation/)
-records the tested models, actual file edits and test results, and limits on
-Vulkan and ROCm. Check that matrix before choosing a model; a successful config
-check alone does not establish coding ability.
-
-## Use an existing GGUF
+The release also publishes `release-manifest.json`, `release-policy.json`,
+`validation.json` and `provenance.jsonl`. For independent provenance verification:
 
 ```bash
-zinc -m /path/to/model.gguf \
-  --chat --prompt "Explain a ring buffer."
+gh attestation verify zinc-v0.1.0-linux-x86_64-vulkan.tar.gz \
+  --bundle provenance.jsonl --repo zolotukhin/zinc \
+  --signer-workflow zolotukhin/zinc/.github/workflows/release-candidate.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
-Use a checkpoint supported by the selected backend. The
-[running guide](/zinc/docs/running-zinc/) covers server flags, system prompts,
-context size, and additional CLI options.
-
-## Manage cached models
-
-```bash
-zinc model use qwen35-9b-q4k-m  # set the default
-zinc model active              # show the default
-zinc model rm qwen35-9b-q4k-m   # remove the cached file
-```
-
-## Models in current work
-
-This list keeps the local ZINC models in one place. A model ID is present only when `zinc model pull` can install that checkpoint.
-
-| Model                        | Runtime    | Model ID or access                                                                                                                            | Fits on                       | Current status                             |
-| ---------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------ |
-| **Qwen 3.5 9B Q4_K_M**       | Local GGUF | `qwen35-9b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF)                                                              | 8+ GB VRAM or unified         | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
-| **Qwen 3.6 35B-A3B Q4_K_XL** | Local GGUF | `qwen36-35b-a3b-q4k-xl` · [checkpoint](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)                                                   | 24+ GB VRAM or unified        | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
-| **Qwen 3.8 27B Q4_K_M**      | Local GGUF | `qwen38-27b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)                                                            | 24+ GB VRAM or 32+ GB unified | AMD RDNA4 ROCm and Apple Metal             |
-| **Muse Glimmer 30B Q4_K_M**  | Local GGUF | Direct file · [exact 17 GB GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf) | 24+ GB VRAM or unified        | AMD ROCm and Apple Metal validation target |
-| **Gemma 4 26B-A4B Q4_K_M**   | Local GGUF | `gemma4-26b-a4b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)                                                 | 16+ GB VRAM or unified        | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
-| **Gemma 4 31B Q4_K_M**       | Local GGUF | `gemma4-31b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF)                                                         | 24+ GB VRAM or unified        | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
+The [published validation](/zinc/validation/release-candidate-0.1.0-2026-11-03.json)
+records exact GPU, driver, model and context combinations. See
+[release engineering](RELEASING.md) for the publishing process.
 
 ## Build from source
 
-Use a source build to develop ZINC, try unreleased changes, or target a backend
-without a published archive. Published binary users can skip this section.
+Use the [Development guide](DEVELOPMENT.md#prerequisites) for prerequisites,
+backend selection and the build command. It is also the path for unreleased
+features and experimental CUDA. A source build produces `./zig-out/bin/zinc`;
+add its `bin` directory to PATH to follow the usage guides.
 
-### Install dependencies
-
-You need Git, the development files for your GPU backend, and Python 3 for the
-initial compiler download. `scripts/zig.sh` downloads and verifies the pinned
-**Zig 0.17.1** compiler when needed. A separate system Zig installation is
-optional.
-
-#### macOS (Apple Silicon)
-
-Install the Xcode Command Line Tools:
-
-```bash
-xcode-select --install
-```
-
-Check that `git` and `python3` are available. Metal is included with macOS;
-you do not need Vulkan or ROCm.
-
-#### Linux (AMD or Intel Arc)
-
-For the default Vulkan build, install your GPU driver and the
-[LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home#linux). Its `glslc`
-must support `GL_EXT_integer_dot_product`; older distribution versions may
-not. Follow the SDK instructions to make its tools available in your shell.
-
-On Debian or Ubuntu, install the remaining prerequisites:
-
-```bash
-sudo apt update
-sudo apt install -y git python3 libvulkan-dev vulkan-tools
-```
-
-For **AMD ROCm**, follow the [ROCm setup guide](/zinc/docs/rocm/) instead of
-installing the Vulkan build dependencies. It lists the HIP libraries and the
-explicit `-Dbackend=rocm` build command.
-
-NVIDIA CUDA is experimental on Linux or WSL2. Native Windows is not supported.
-Check the [hardware requirements](/zinc/docs/hardware-requirements/) for the
-validated GPU, driver, OS, and memory combinations.
-
-### Clone and build
-
-```bash
-git clone https://github.com/zolotukhin/zinc.git
-cd zinc
-./scripts/zig.sh build -Doptimize=ReleaseFast
-```
-
-The build writes the executable to `./zig-out/bin/zinc` and its runtime assets
-to `zig-out/share/zinc/`. Run the build directly, or add it to PATH for the
-`zinc` examples on this page:
-
-```bash
-export PATH="$PWD/zig-out/bin:$PATH"
-zinc --version
-```
-
-Keep `zig-out/bin/` with `zig-out/share/` when using this build outside the checkout.
-The [development guide](DEVELOPMENT.md) covers tests and debugging.
-
-## What to read next
-
-- [Hardware requirements](/zinc/docs/hardware-requirements/): GPUs, drivers, memory, and OS support.
-- [Running ZINC](/zinc/docs/running-zinc/): CLI and server configuration.
-- [HTTP API](/zinc/docs/api/): connect apps and SDKs.
-- [Documentation index](/zinc/docs/): GPU references, tuning, and engineering reports.
+Apple Silicon also has unsigned Metal archives in the
+[preview workflow artifacts](https://github.com/zolotukhin/zinc/actions/workflows/release-preview.yml).
+They require native ARM64, macOS 15+ and the Mac's factory OS minimum. These
+previews are separate from stable Linux assets and have no notarization or
+stable hardware qualification claim.

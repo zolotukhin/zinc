@@ -60,7 +60,7 @@ function supplementalDocs(docs: DocPage[], siteUrl: string) {
         slug: doc.slug,
         title: meta?.title ?? doc.title,
         description: meta?.description ?? 'ZINC documentation.',
-        url: absoluteUrl(siteUrl, `/zinc/docs/${doc.slug}`),
+        url: absoluteUrl(siteUrl, `/zinc/docs/${doc.slug}/`),
         last_updated: doc.lastmod,
       };
     });
@@ -69,9 +69,8 @@ function supplementalDocs(docs: DocPage[], siteUrl: string) {
 function clientGuidance(base: string): string[] {
   return [
     '## Run ZINC or connect a client',
-    `- Agent and app workflow: ${absoluteUrl(base, '/zinc/docs/agent-setup/')}`,
-    `- Install a published binary: ${absoluteUrl(base, '/zinc/docs/binary-releases/')}`,
-    `- First model and GPU requirements: ${absoluteUrl(base, '/zinc/docs/getting-started/')}`,
+    `- Run models and connect apps: ${absoluteUrl(base, '/zinc/docs/running-zinc/')}`,
+    `- Install and run your first model: ${absoluteUrl(base, '/zinc/docs/getting-started/')}`,
     `- HTTP API and backend coverage: ${absoluteUrl(base, '/zinc/docs/api/')}`,
     `- OpenClaw setup: ${absoluteUrl(base, '/zinc/docs/openclaw/')}`,
     `- OpenCode setup: ${absoluteUrl(base, '/zinc/docs/opencode/')}`,
@@ -101,10 +100,10 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     'For changes to ZINC itself, use the development guide, repository AGENTS.md and generated Zig API.',
     '',
     '## ZINC Implementation Reference',
-    `- ZINC Zig API: ${absoluteUrl(base, '/zinc/docs/zig-api')}`,
+    `- ZINC Zig API: ${absoluteUrl(base, '/zinc/docs/zig-api/')}`,
     `- ZINC Zig API JSON: ${absoluteUrl(base, '/zinc/docs/zig-api.json')}`,
     `- ZINC Zig API Text: ${absoluteUrl(base, '/zinc/docs/zig-api.txt')}`,
-    `- ZINC Docs Landing: ${absoluteUrl(base, '/zinc/docs')}`,
+    `- ZINC Docs Landing: ${absoluteUrl(base, '/zinc/docs/')}`,
     '',
     `Zig API coverage: ${zigApi.sections.length} sections, ${zigApi.moduleCount} modules, ${zigApi.codeLineCount} Zig code lines, ${zigApi.exportCount} exports, ${zigApi.memberCount} methods.`,
     '',
@@ -119,7 +118,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     'HOCDB is a separate embedded time-series database. Use hocdb describe for its JSON CLI contract; its CLI is not an HTTP API.',
     '',
     '## Other Surfaces',
-    `- Blog: ${absoluteUrl(base, '/blog')}`,
+    `- Blog: ${absoluteUrl(base, '/blog/')}`,
     `- RSS: ${absoluteUrl(base, '/feed.xml')}`,
     '',
     '## Guidance',
@@ -142,7 +141,7 @@ export function renderLlmsFullTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl:
     `LLMs index: ${absoluteUrl(base, '/llms.txt')}`,
     '',
     ...clientGuidance(base),
-    `Zig API root: ${absoluteUrl(base, '/zinc/docs/zig-api')}`,
+    `Zig API root: ${absoluteUrl(base, '/zinc/docs/zig-api/')}`,
     `Zig API JSON: ${absoluteUrl(base, '/zinc/docs/zig-api.json')}`,
     `Zig API Text: ${absoluteUrl(base, '/zinc/docs/zig-api.txt')}`,
     '',
@@ -161,7 +160,7 @@ export function renderLlmsFullTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl:
       '',
       `### ${section.title}`,
       section.description,
-      `URL: ${absoluteUrl(base, `/zinc/docs/zig-api#${section.slug}`)}`,
+      `URL: ${absoluteUrl(base, `/zinc/docs/zig-api/#${section.slug}`)}`,
       `Coverage: ${section.modules.length} modules, ${section.symbolCount} symbols`,
     );
 
@@ -187,7 +186,7 @@ export function renderLlmsFullTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl:
     '- Releases: https://github.com/o1dstaRs/hocdb/releases',
   );
   lines.push('', '## Other Surfaces');
-  lines.push(`- Blog: ${absoluteUrl(base, '/blog')}`);
+  lines.push(`- Blog: ${absoluteUrl(base, '/blog/')}`);
   lines.push(`- RSS: ${absoluteUrl(base, '/feed.xml')}`);
   lines.push('');
 

@@ -15,7 +15,9 @@ const index = {
 test('both agent indexes put installed client setup before implementation references', () => {
   for (const render of [renderLlmsTxt, renderLlmsFullTxt]) {
     const text = render(index, [], 'https://example.test/');
-    expect(text).toContain('https://example.test/zinc/docs/agent-setup/');
+    expect(text).toContain('https://example.test/zinc/docs/running-zinc/');
+    expect(text).not.toContain('/zinc/docs/agent-setup/');
+    expect(text).not.toContain('/zinc/docs/binary-releases/');
     expect(text.indexOf('## Run ZINC or connect a client')).toBeLessThan(
       text.indexOf('ZINC Zig API:') < 0
         ? text.indexOf('Zig API root:')
@@ -33,8 +35,10 @@ test('both agent indexes put installed client setup before implementation refere
 });
 
 test('release notices distinguish stable installation, mixed guides and current source', () => {
-  expect(docsReleaseStatus('binary-releases').channel).toBe('stable');
-  for (const slug of ['agent-setup', 'api', 'running-zinc', 'getting-started']) {
+  for (const slug of ['getting-started', 'openclaw', 'opencode']) {
+    expect(docsReleaseStatus(slug).channel).toBe('stable');
+  }
+  for (const slug of ['api', 'running-zinc', 'hardware-requirements', 'rocm']) {
     expect(docsReleaseStatus(slug).channel).toBe('mixed');
   }
   expect(docsReleaseStatus('zig-api/compute-forward').channel).toBe('development');

@@ -1,304 +1,80 @@
-# ZINC hardware requirements
+# Hardware and memory
 
-ZINC runs on consumer GPUs through Vulkan, ROCm/HIP, Metal, and an experimental CUDA backend. This page covers the hardware, operating system, and driver stack needed for each path.
-
-Usage examples assume the installed `zinc` command is on PATH. Explicit source-build
-examples use `./zig-out/bin/zinc`, the build output; see [installation](BINARY_RELEASES.md)
-or [building from source](GETTING_STARTED.md#build-from-source) for your platform.
+Choose a GPU/backend using the table below, then follow
+[installation and first run](GETTING_STARTED.md). This page distinguishes
+published release qualification from broader source support.
 
 ## Supported platforms
 
-| Platform         | GPU                                     | Backend     | Status                                       |
-| ---------------- | --------------------------------------- | ----------- | -------------------------------------------- |
-| **Linux**        | AMD RDNA4 discrete (Navi 48 / Navi 44)  | Vulkan 1.3  | Supported and tuned                          |
-| **Linux**        | AMD RDNA4 discrete (`gfx1201`)          | ROCm/HIP    | Supported; R9700 is the validated reference  |
-| **Linux**        | AMD RDNA 3.5 APU (Strix Halo / gfx1151) | Vulkan 1.3  | Supported with APU-specific bandwidth tuning |
-| **Linux**        | AMD RDNA3                               | Vulkan 1.3  | Supported, less tuned                        |
-| **Linux**        | Intel Arc Xe2 / Battlemage              | Vulkan 1.3+ | Supported, validated benchmark target        |
-| **macOS**        | Apple Silicon M1 through M5             | Metal       | Source backend; unsigned 0.1.0 preview       |
-| **Linux / WSL2** | NVIDIA RTX 40/50 series                 | CUDA        | Experimental                                 |
+| Platform and GPU                      | Backend               | Evidence and limits                                                                         |
+| ------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------- |
+| Linux x86_64, AMD Radeon AI PRO R9700 | Vulkan or ROCm        | Both have stable 0.1.0 archives and qualified model/context rows.                           |
+| Linux x86_64, Intel Arc Pro B70 / Xe2 | Vulkan                | Stable 0.1.0 qualification; other Arc cards need their own fit and driver checks.           |
+| Other AMD RDNA3/RDNA4 and Strix Halo  | Vulkan source support | Outside the stable launch matrix. Source compatibility does not qualify every device/model. |
+| Apple Silicon M1–M5                   | Metal                 | Source backend and unsigned preview; no stable 0.1.0 Mac binary.                            |
+| NVIDIA RTX 4090/5090, Linux or WSL2   | CUDA                  | Experimental source backend; outside stable qualification.                                  |
 
-On AMD Radeon, Vulkan and ROCm are separate first-class builds. Vulkan is the broad RDNA3/RDNA4 path; ROCm uses HIP and dedicated AMD kernels, with the current public validation centered on `gfx1201`. Benchmark results are kept separate because the runtimes and driver stacks are different.
+The [release requirements](GETTING_STARTED.md#choose-your-backend) specify OS/ABI
+floors. The [published validation](/zinc/validation/release-candidate-0.1.0-2026-11-03.json)
+records tested drivers, model files, contexts and precision. An OS meeting an
+archive's glibc floor does not establish GPU driver compatibility.
 
-The [binary release guide](https://zolotukhin.ai/zinc/docs/binary-releases/) lists archive-specific OS/ABI floors. Release certification is narrower than source compatibility: use each release's validation report for the exact tested GPU, driver, backend and model combinations.
+## Driver checks
 
-## AMD GPUs (Linux)
+Run the check for your backend, then `zinc --check`:
 
-ZINC supports AMD consumer and workstation GPUs through Vulkan and, on validated RDNA4 stacks, ROCm/HIP.
-
-| Family                             | Examples                                                 | Notes                                                                                                                  |
-| ---------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| RDNA4 discrete (Navi 48 / gfx1201) | RX 9070, RX 9070 XT, RX 9070 GRE, Radeon AI PRO R9700    | Primary tuning target, hand-tuned shaders                                                                              |
-| RDNA4 discrete (Navi 44 / gfx1200) | RX 9060, RX 9060 XT                                      | Same RDNA4 ISA as Navi 48, smaller die, narrower bus                                                                   |
-| RDNA 3.5 APU (gfx1151)             | Strix Halo: Radeon 8060S, Radeon 8050S                   | Unified-memory iGPU; ZINC selects an APU bandwidth profile (~256 GB/s) distinct from the discrete 576–640 GB/s default |
-| RDNA3                              | RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600 | Supported, less tuned than RDNA4                                                                                       |
-
-Any AMD GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work through the Vulkan build. ROCm support is narrower and should be checked against the installed ROCm release and GPU target.
-
-### AMD Vulkan requirements
-
-- **OS**: Linux
-- **API**: Vulkan 1.3
-- **Driver**: RADV (Mesa) or AMDVLK
-- **Source-build shader compiler**: modern LunarG shaderc with `GL_EXT_integer_dot_product`; prebuilt Vulkan archives do not need `glslc`
-- **Recommended**: `export RADV_PERFTEST=coop_matrix` on RDNA4
-
-Verify your Vulkan stack:
+| Backend       | Check                                | What must be present                                                                             |
+| ------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| AMD Vulkan    | `vulkaninfo --summary`               | The intended AMD GPU and Vulkan 1.3 driver; RADV is the primary test path.                       |
+| Intel Vulkan  | `vulkaninfo --summary`               | The intended Intel Arc GPU with ANV/Mesa. Enable Resizable BAR for comparable performance.       |
+| ROCm          | `rocminfo`                           | A supported native `gfx*` target; matching HIP/hipRTC/hipBLAS libraries and HIP/rocWMMA headers. |
+| Metal preview | `system_profiler SPDisplaysDataType` | Native Apple Silicon; preview archives require macOS 15+ and the Mac's factory OS minimum.       |
+| CUDA source   | `nvidia-smi`                         | A working NVIDIA driver plus the CUDA Driver API, NVRTC, cuBLAS and runtime libraries.           |
 
 ```bash
-vulkaninfo --summary
-```
-
-If that command does not show your AMD GPU, the Vulkan build will not work. A working ROCm/HIP device is checked separately with `rocminfo`.
-
-### AMD ROCm/HIP requirements
-
-The validated ROCm reference is a Radeon AI PRO R9700 (`gfx1201`) running Linux kernel `7.2.2` and ROCm userspace `7.2.4`. Those exact versions document the measured machine; the build itself does not require one fixed kernel version.
-
-- **OS**: Linux
-- **Runtime**: ROCm/HIP with a working ROCr device
-- **Runtime compilation files**: HIP/hipRTC/hipBLAS development libraries and HIP/rocWMMA headers, including for prebuilt ROCm archives
-- **Current validated GPU target**: RDNA4 `gfx1201`
-
-Verify the runtime and build the ROCm backend explicitly:
-
-```bash
-rocminfo
-ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
-./zig-out/bin/zinc --check
-```
-
-If `rocminfo` cannot see the GPU, or HIP reports `hipErrorNoBinaryForGpu`, first check that the running `amdgpu` driver, ROCr runtime, and ROCm userspace support the same target. See the [ROCm backend guide](/zinc/docs/rocm/) for the full setup and troubleshooting notes.
-
-### AMD VRAM guide
-
-| VRAM  | What fits                                                        |
-| ----- | ---------------------------------------------------------------- |
-| 16 GB | 2B to 8B class models comfortably                                |
-| 32 GB | 27B dense models and 35B MoE models like Qwen3.6-35B-A3B Q4_K_XL |
-
-Exact fit depends on architecture, quantization, and context length. `--check -m <model>` prints a practical fit estimate.
-
-## Intel Arc GPUs (Linux)
-
-Intel Arc support is an official Linux Vulkan path. The current validated target is the Arc B-series / Battlemage line:
-
-| Family               | Examples                   | Notes                                                           |
-| -------------------- | -------------------------- | --------------------------------------------------------------- |
-| Arc B-series desktop | Arc B580, Arc B570         | Best fit for 7B/8B models; B580 is the stronger consumer target |
-| Arc Pro B-series     | Arc Pro B70, B65, B60, B50 | Larger VRAM options for local AI; B70/B65 are the 32 GB targets |
-
-### Intel requirements
-
-- **OS**: Linux
-- **API**: Vulkan 1.3 or newer, depending on card and driver
-- **Driver**: Intel ANV / Mesa Vulkan driver
-- **Platform**: UEFI with Resizable BAR enabled for benchmark-quality results
-
-Verify the Vulkan stack:
-
-```bash
-vulkaninfo --summary
-```
-
-If that command does not show your Intel Arc GPU, ZINC will not use it.
-
-### Intel VRAM guide
-
-| VRAM     | B-series cards | What fits                                    |
-| -------- | -------------- | -------------------------------------------- |
-| 10-12 GB | B570, B580     | 7B/8B class models                           |
-| 16 GB    | B50            | 8B with more context; some 12B experiments   |
-| 24 GB    | B60            | 20B class and tight larger-model experiments |
-| 32 GB    | B65, B70       | 27B dense and 35B MoE targets                |
-
-See [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for the full B-series card table, device IDs, memory bandwidth, Xe2 opcode notes, and ZINC tuning guidance.
-
-The [benchmark dashboard](/zinc/benchmarks/#intel) records matched Intel Vulkan measurements. The [Intel OpenCode report](/zinc/docs/intel-opencode-validation/) covers all seven catalog models on Arc Pro B70, including extended Gemma windows, tool calls, coding outcomes and recovery limits. Passing inference checks does not imply that every model is suitable for coding tasks.
-
-## Other Vulkan GPUs
-
-| Family            | Status                           |
-| ----------------- | -------------------------------- |
-| NVIDIA via Vulkan | Vulkan works, not primary target |
-
-## NVIDIA RTX GPUs (experimental CUDA)
-
-ZINC also has an experimental native CUDA backend for recent NVIDIA RTX cards. It is measured on RTX 5090 and RTX 4090 hardware, and remains outside the Linux Vulkan/ROCm 0.1.0 stable qualification. Metal is an unsigned preview for this release.
-
-- **OS**: Linux or WSL2
-- **Toolkit**: CUDA with Driver API, NVRTC, cuBLAS, and CUDA runtime libraries
-- **Current development targets**: RTX 5090 (Blackwell) and RTX 4090 (Ada)
-
-```bash
-CUDA_HOME=/usr/local/cuda ./scripts/zig.sh build -Dbackend=cuda -Doptimize=ReleaseFast
-./zig-out/bin/zinc --check
-```
-
-Native Windows builds are not supported. WSL2 is an experimental CUDA deployment path, not a supported Vulkan or ROCm environment.
-
-## Apple Silicon (macOS)
-
-ZINC has a native Metal backend with MSL compute shaders and zero-copy model
-loading via `newBufferWithBytesNoCopy`. The [API guide](/zinc/docs/api/) describes
-its OpenAI-compatible endpoints and backend-specific limitations.
-
-| Chip family                  | Metal GPU family | Status                                      |
-| ---------------------------- | ---------------- | ------------------------------------------- |
-| M1, M1 Pro, M1 Max, M1 Ultra | Apple7           | Supported                                   |
-| M2, M2 Pro, M2 Max, M2 Ultra | Apple8           | Supported                                   |
-| M3, M3 Pro, M3 Max, M3 Ultra | Apple9           | Supported                                   |
-| M4, M4 Pro, M4 Max           | Apple9           | Supported                                   |
-| M5, M5 Pro, M5 Max           | Apple10          | Supported (TensorOps investigation planned) |
-
-### Apple Silicon requirements
-
-- **OS**: macOS
-- **Source-build tools**: Xcode Command Line Tools (`xcode-select --install`)
-- Native Metal runtime; no external GPU framework or Python environment required
-
-### Apple Silicon memory guide
-
-Apple Silicon uses unified memory shared between CPU and GPU. There is no separate "VRAM" budget.
-
-| Unified memory         | What fits                                                 |
-| ---------------------- | --------------------------------------------------------- |
-| 8 GB                   | Too tight for most models                                 |
-| 16 GB                  | 2B models comfortably                                     |
-| 24 GB                  | 2B with headroom, 35B might be tight                      |
-| 32+ GB                 | 27B dense and 35B MoE models like Qwen3.6-35B-A3B Q4_K_XL |
-| 64+ GB (Pro/Max/Ultra) | Large models with generous context                        |
-
-ZINC uses zero-copy model loading on Metal, so a 1.2 GB model file does not require an additional 1.2 GB of GPU memory. The model weights stay in place and the GPU reads from the mmap'd pages directly.
-
-## Preflight check
-
-Once the binary is built, verify everything works:
-
-```bash
+zinc --version
 zinc --check
 ```
 
-On AMD RDNA4 with the Vulkan build, add the cooperative matrix flag. Do not set it for ROCm:
+Vulkan and ROCm use independent device lists and driver stacks. Set
+`RADV_PERFTEST=coop_matrix` only for AMD RDNA4 Vulkan. For ROCm runtime setup,
+GPU selection and failures, use the [ROCm guide](ROCM.md). Missing a compiler
+is not a reason to install development tools for a prebuilt Vulkan archive.
+
+## Model memory
+
+Model weights, KV cache, runtime scratch and other GPU users share the memory
+budget. A parameter count alone is not a reliable fit test. On Apple Silicon,
+the OS and applications also share unified memory with the GPU.
 
 ```bash
-export RADV_PERFTEST=coop_matrix
-zinc --check
-```
-
-The check command verifies:
-
-- GPU or accelerator detection for the selected Vulkan, ROCm, Metal, or CUDA build
-- Shader or kernel assets needed by that backend
-- Runtime initialization
-- Model fit (when `-m <model>` or `--model-id <id>` is passed)
-
-## Model catalog
-
-See which models ZINC supports on your machine:
-
-```bash
-# Models that fit this machine
 zinc model list
-
-# Full catalog including models that do not fit
 zinc model list --all
+zinc --check --model-id qwen35-9b-q4k-m -c 4096
 ```
 
-The catalog automatically selects the right GPU profile (`amd-rdna4-32gb`, `intel-arc`, `apple-silicon`, etc.) and shows which models are installed, active, and fit the available memory.
+The default list filters by tested GPU profile and estimated fit. `--all` shows
+entries that may be unsupported or too large; it is not a list of models you
+can necessarily run. For an exact local file, use `zinc --check -m
+/path/to/model.gguf -c 4096`.
 
-## System requirements (both platforms)
+Start at 4K context for chat. Client guides use 16K for tools and history, which
+requires more memory. The 32 GB R9700 and Arc Pro B70 are the recorded large-model
+targets; do not infer the same capacity for a smaller card or a Mac with the
+same total memory. Increase context or request slots only after checking fit
+and successfully running the intended workload. Preflight estimates can omit
+lazy allocations and driver overhead.
 
-| Resource       | Minimum                             | Recommended                     |
-| -------------- | ----------------------------------- | ------------------------------- |
-| **CPU**        | Any modern 64-bit (x86_64 or arm64) | Multi-core for serving          |
-| **System RAM** | 16 GB                               | 32 GB+ for larger models        |
-| **Storage**    | SSD                                 | NVMe SSD for fast model loading |
+Use an SSD with enough free space for each GGUF and future downloads. Reserve
+system RAM for the OS, tokenizer and host allocations as well as GPU memory.
+For agent work, consult the [OpenClaw](OPENCLAW.md#tested-scope) and
+[OpenCode](OPENCODE.md#tested-scope) task results: a model that fits or generates
+text may still fail file edits and tests.
 
-## Quick sanity check
+## Hardware and source references
 
-### Linux (AMD Vulkan)
-
-```bash
-lspci | grep -i "vga\|display\|amd\|radeon"
-vulkaninfo --summary
-zinc --check
-```
-
-### Linux (AMD ROCm)
-
-```bash
-lspci | grep -i "vga\|display\|amd\|radeon"
-rocminfo
-zinc --check
-```
-
-### Linux (Intel Arc)
-
-```bash
-lspci | grep -i "vga\|display\|intel\|arc"
-vulkaninfo --summary
-zinc --check
-```
-
-### macOS (Apple Silicon)
-
-```bash
-system_profiler SPDisplaysDataType | head -20
-zinc --check
-```
-
-### Linux or WSL2 (NVIDIA CUDA, experimental)
-
-```bash
-nvidia-smi
-zinc --check
-```
-
-## Shortest path to success
-
-First [install the matching binary](BINARY_RELEASES.md), or [build from source](GETTING_STARTED.md#build-from-source)
-and put its `bin` directory on PATH. Linux release users need no compiler.
-Metal preview users can follow the [macOS setup](GETTING_STARTED.md#macos-apple-silicon).
-
-### On Linux with an AMD GPU through Vulkan
-
-```bash
-export RADV_PERFTEST=coop_matrix
-zinc --check
-zinc model pull qwen35-9b-q4k-m
-zinc chat --model-id qwen35-9b-q4k-m
-```
-
-Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning/) for performance work.
-
-### On Linux with an AMD RDNA4 GPU through ROCm
-
-```bash
-rocminfo
-zinc --check
-zinc model pull qwen35-9b-q4k-m
-zinc --model-id qwen35-9b-q4k-m --chat --prompt "Hello"
-```
-
-Then see the [ROCm backend guide](/zinc/docs/rocm/) for the validated stack, GPU selection on multi-GPU hosts, troubleshooting, and performance switches.
-
-### On Linux with an Intel Arc GPU
-
-```bash
-zinc --check
-zinc model pull qwen35-9b-q4k-m
-zinc chat --model-id qwen35-9b-q4k-m
-```
-
-Then see [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for Arc B-series hardware details and current tuning notes.
-
-### On macOS with Apple Silicon
-
-```bash
-zinc --check
-zinc model pull qwen35-9b-q4k-m
-zinc chat --model-id qwen35-9b-q4k-m
-```
-
-Then see [Apple Silicon Reference](/zinc/docs/apple-silicon-reference/) and [Apple Metal Reference](/zinc/docs/apple-metal-reference/) for platform details.
+- [AMD GPU reference](AMD_GPU_REFERENCE.md) and [RDNA4 tuning](RDNA4_TUNING.md).
+- [Intel GPU reference](INTEL_GPU_REFERENCE.md) and [matched benchmarks](/zinc/benchmarks/#intel).
+- [Apple Silicon reference](APPLE_SILICON_REFERENCE.md) and [Metal reference](APPLE_METAL_REFERENCE.md).
+- [NVIDIA GPU reference](NVIDIA_GPU_REFERENCE.md).
+- [Build from source](DEVELOPMENT.md#build), including experimental CUDA.

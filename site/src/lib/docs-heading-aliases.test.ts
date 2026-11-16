@@ -35,17 +35,13 @@ test('heading aliases are scoped to their guide and do not add IDs to unrelated 
 
 test('installation-first guides preserve the previous build and diagnostic section links', () => {
   for (const [slug, id, oldId] of [
-    ['running-zinc', 'install-the-command', 'build-the-binary'],
-    [
-      'running-zinc',
-      'historical-development-node-diagnostics',
-      'sample-outputs-from-the-shared-rdna4-node',
-    ],
+    ['running-zinc', 'run-models-and-connect-apps', 'build-the-binary'],
+    ['running-zinc', 'troubleshooting', 'sample-outputs-from-the-shared-rdna4-node'],
     ['rocm', 'build-from-source', 'build-and-verify'],
   ]) {
     const heading = { type: 'element', tagName: 'h2', properties: { id }, children: [] as any[] };
     rehypeDocHeadingAliases({ slug })({ children: [heading] });
     expect(heading.properties.id).toBe(id);
-    expect(heading.children.map((child) => child.properties.id)).toEqual([oldId]);
+    expect(heading.children.map((child) => child.properties.id)).toContain(oldId);
   }
 });
