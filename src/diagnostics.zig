@@ -9,6 +9,7 @@ const host_io = @import("host_io");
 const builtin = @import("builtin");
 const gguf = @import("model/gguf.zig");
 const memory_plan = @import("gpu/memory_plan.zig");
+const kv_dtype = @import("compute/kv_dtype.zig");
 const loader_mod = @import("model/loader.zig");
 const gpu_detect = @import("vulkan/gpu_detect.zig");
 const instance_mod = @import("vulkan/instance.zig");
@@ -731,15 +732,25 @@ fn readGgufHeader(file: std.Io.File) !GgufHeader {
 }
 
 /// Compute a `FitEstimate` that breaks down VRAM usage for a model at a given budget.
-/// Derives weights, KV cache, SSM state, and runtime buffer sizes from the model config
-/// and returns per-category byte counts without evaluating fit status.
+/// Derives weights, KV cache, SSM state, and runtime buffer sizes from the model
+/// config, inspected projection widths and selected Vulkan KV layout. Returns
+/// per-category byte counts without evaluating fit status.
 /// @param inspection GGUF model inspection result supplying tensor byte count and config.
 /// @param vram_budget_bytes Device-local VRAM available, as reported by the Vulkan driver.
 /// @param requested_context_length Optional context ceiling override; null uses the model default.
 /// @returns A `FitEstimate` with per-category byte counts and a budget-headroom context maximum.
 pub fn estimateFit(inspection: ModelInspection, vram_budget_bytes: u64, requested_context_length: ?u32) FitEstimate {
+    return estimateFitWithKvBlockBytes(inspection, vram_budget_bytes, requested_context_length, kv_dtype.bytesPer32Elems());
+}
+
+fn estimateFitWithKvBlockBytes(inspection: ModelInspection, vram_budget_bytes: u64, requested_context_length: ?u32, kv_block_bytes: u64) FitEstimate {
     const config = inspection.config;
-    const profile = memory_plan.profile(config);
+    var profile = memory_plan.profileWithKvBlockBytes(config, kv_block_bytes);
+    if (inspection.kv_dimension_sum) |dimensions| {
+        // Match Vulkan's selected F16/F32/Q8 layout and actual Gemma layer
+        // widths. F32 metadata maxima falsely rejected 8K on a 32 GB card.
+        profile.device_local_bytes_per_token = dimensions / 32 * kv_block_bytes * 2;
+    }
     const max_ctx = memory_plan.effectiveContextCeiling(config, requested_context_length);
     const kv_cache_bytes = profile.deviceLocalContextBytes(max_ctx);
     const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(max_ctx);
@@ -977,6 +988,63 @@ test "estimateFit includes weights, kv cache, and runtime buffers" {
     try std.testing.expect(fit.runtime_device_local_bytes > fit.kv_cache_bytes);
     try std.testing.expect(fit.host_visible_bytes > 0);
     try std.testing.expect(fit.total_device_local_bytes > fit.weights_bytes);
+}
+
+test "Gemma 31B diagnostics budget actual projections and every Vulkan KV layout" {
+    var config: ModelConfig = std.mem.zeroes(ModelConfig);
+    config.architecture = .gemma;
+    config.n_layers = 60;
+    config.n_heads = 32;
+    config.n_kv_heads = 16;
+    config.head_dim = 512;
+    config.hidden_dim = 5376;
+    config.intermediate_dim = 21504;
+    config.vocab_size = 262144;
+    config.context_length = 131072;
+    const inspection = ModelInspection{
+        .config = config,
+        .file_size = 0,
+        .tensor_bytes = 18323733440,
+        .kv_dimension_sum = 50 * 4096 + 10 * 2048,
+        .tensor_count = 0,
+        .metadata_count = 0,
+    };
+    const card = @as(u64, 32) * 1024 * 1024 * 1024;
+    const half = estimateFitWithKvBlockBytes(inspection, card, 8192, 64);
+    const full = estimateFitWithKvBlockBytes(inspection, card, 8192, 128);
+    const quantized = estimateFitWithKvBlockBytes(inspection, card, 8192, 36);
+    try std.testing.expectEqual(@as(u64, 7381975040), half.kv_cache_bytes);
+    try std.testing.expectEqual(half.kv_cache_bytes * 2, full.kv_cache_bytes);
+    try std.testing.expectEqual(half.kv_cache_bytes / 64 * 36, quantized.kv_cache_bytes);
+    try std.testing.expectEqual(inspection.tensor_bytes, half.weights_bytes);
+    try std.testing.expectEqual(CheckStatus.ok, half.fitStatus());
+    try std.testing.expect(half.budget_max_ctx >= 8192);
+    try std.testing.expect(full.total_device_local_bytes > half.total_device_local_bytes);
+    try std.testing.expect(quantized.total_device_local_bytes < half.total_device_local_bytes);
+    // The reported 47 GiB came from both old assumptions together. Retain
+    // conservative metadata fallback and a real oversized-context rejection.
+    var unknown = inspection;
+    unknown.kv_dimension_sum = null;
+    try std.testing.expectEqual(CheckStatus.fail, estimateFitWithKvBlockBytes(unknown, card, 8192, 128).fitStatus());
+    try std.testing.expectEqual(CheckStatus.fail, estimateFitWithKvBlockBytes(inspection, card, 32768, 64).fitStatus());
+    var capped = inspection;
+    capped.config.context_length = 4096;
+    try std.testing.expectEqual(@as(u32, 4096), estimateFitWithKvBlockBytes(capped, card, 8192, 64).max_ctx);
+}
+
+test "uniform diagnostics preserve KV precision when projection metadata is unavailable" {
+    var config: ModelConfig = std.mem.zeroes(ModelConfig);
+    config.n_layers = 4;
+    config.n_heads = 8;
+    config.n_kv_heads = 2;
+    config.head_dim = 128;
+    config.hidden_dim = 1024;
+    config.context_length = 8192;
+    const inspection = ModelInspection{ .config = config, .file_size = 0, .tensor_bytes = 1024, .tensor_count = 0, .metadata_count = 0 };
+    for ([_]u64{ 64, 128, 36 }) |block_bytes| {
+        const fit = estimateFitWithKvBlockBytes(inspection, 1024 * 1024 * 1024, 4096, block_bytes);
+        try std.testing.expectEqual(@as(u64, 4 * (256 / 32) * 2 * 4096) * block_bytes, fit.kv_cache_bytes);
+    }
 }
 
 test "fitStatusForBytes distinguishes fit, warning margin, and overflow" {

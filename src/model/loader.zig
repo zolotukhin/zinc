@@ -6,6 +6,7 @@ const std = @import("std");
 const host_io = @import("host_io");
 const gguf = @import("gguf.zig");
 const config_mod = @import("config.zig");
+const memory_plan = @import("../gpu/memory_plan.zig");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
 const Buffer = @import("../vulkan/buffer.zig").Buffer;
@@ -29,6 +30,10 @@ pub const ModelInspection = struct {
     /// host-visible memory under `ZINC_OFFLOAD_MOE_EXPERTS=1`). Zero for dense
     /// models. Use this for exact, model-specific offload-fit accounting.
     offloadable_tensor_bytes: u64 = 0,
+    /// Sum of Gemma's per-layer projection widths for one K/V cache. Unlike
+    /// metadata maxima, this matches the mixed global/sliding allocations.
+    /// Null retains conservative metadata accounting for other architectures.
+    kv_dimension_sum: ?u64 = null,
     tensor_count: u64,
     metadata_count: usize,
 };
@@ -555,14 +560,40 @@ pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspec
         if (isMoEExpertTensor(tensor_info.name)) offloadable_tensor_bytes += sz;
     }
 
+    const config = extractConfigWithLogging(&gf, false);
     return .{
-        .config = extractConfigWithLogging(&gf, false),
+        .config = config,
         .file_size = stat.size,
         .tensor_bytes = tensor_bytes,
         .offloadable_tensor_bytes = offloadable_tensor_bytes,
+        .kv_dimension_sum = inspectionKvDimensionSum(&gf, config),
         .tensor_count = gf.tensor_count,
         .metadata_count = gf.metadata.count(),
     };
+}
+
+fn inspectionKvDimensionSum(gf: *const gguf.GGUFFile, config: ModelConfig) ?u64 {
+    if (config.architecture != .gemma or config.hidden_dim == 0) return null;
+    const fallback = memory_plan.kvDimensionFromProjections(config.n_kv_heads * config.head_dim, null, null);
+    var sum: u64 = 0;
+    for (0..@as(usize, config.n_layers) + config.n_nextn_layers) |layer| {
+        const dim = blk: {
+            var name: [128]u8 = undefined;
+            const key_name = std.fmt.bufPrint(&name, "blk.{d}.attn_k.weight", .{layer}) catch break :blk fallback;
+            const key = gf.findTensor(key_name) orelse break :blk fallback;
+            if (key.numElements() % config.hidden_dim != 0) break :blk fallback;
+            const key_rows = std.math.cast(u32, key.numElements() / config.hidden_dim) orelse break :blk fallback;
+            const value_name = std.fmt.bufPrint(&name, "blk.{d}.attn_v.weight", .{layer}) catch break :blk fallback;
+            // Global Gemma layers can reuse K as V; the runtime still owns
+            // both caches, so count this width once and let the profile double it.
+            const value = gf.findTensor(value_name) orelse key;
+            if (value.numElements() % config.hidden_dim != 0) break :blk fallback;
+            const value_rows = std.math.cast(u32, value.numElements() / config.hidden_dim) orelse break :blk fallback;
+            break :blk memory_plan.kvDimensionFromProjections(fallback, key_rows, value_rows);
+        };
+        sum += dim;
+    }
+    return sum;
 }
 
 /// Load a GGUF model: memory-map the file, parse headers, and DMA tensors to GPU VRAM.
@@ -874,6 +905,52 @@ test "offloadEnabled reflects cached state and never mutates it" {
     offload_state.store(-1, .release);
     try std.testing.expect(!offloadEnabled());
     try std.testing.expectEqual(@as(i8, -1), offload_state.load(.acquire));
+}
+
+test "Gemma inspection keeps mixed KV projections, K-as-V, and conservative fallbacks" {
+    const allocator = std.testing.allocator;
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .empty,
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+    for ([_]struct { name: []const u8, rows: u64 }{
+        .{ .name = "blk.0.attn_k.weight", .rows = 4096 },
+        .{ .name = "blk.0.attn_v.weight", .rows = 4096 },
+        .{ .name = "blk.1.attn_k.weight", .rows = 2048 },
+    }) |tensor| {
+        try gf.tensors.append(allocator, .{
+            .name = try allocator.dupe(u8, tensor.name),
+            .n_dims = 2,
+            .dims = .{ 5376, tensor.rows, 1, 1 },
+            .type_ = .f16,
+            .offset = 0,
+        });
+    }
+    var config: ModelConfig = std.mem.zeroes(ModelConfig);
+    config.architecture = .gemma;
+    config.hidden_dim = 5376;
+    config.n_kv_heads = 16;
+    config.head_dim = 512;
+    config.n_layers = 2;
+    try std.testing.expectEqual(@as(?u64, 4096 + 2048), inspectionKvDimensionSum(&gf, config));
+    // Missing appended projections reserve the metadata maximum rather than
+    // silently omitting a cache. Ordinary layers use the same fallback.
+    config.n_nextn_layers = 1;
+    try std.testing.expectEqual(@as(?u64, 4096 + 2048 + 8192), inspectionKvDimensionSum(&gf, config));
+    config.n_nextn_layers = 0;
+    gf.tensors.items[1].dims[1] = 2048; // Mismatched K/V widths.
+    try std.testing.expectEqual(@as(?u64, 8192 + 2048), inspectionKvDimensionSum(&gf, config));
+    gf.tensors.items[1].dims[1] = 4097; // Not block aligned.
+    try std.testing.expectEqual(@as(?u64, 8192 + 2048), inspectionKvDimensionSum(&gf, config));
+    gf.tensors.items[1].dims[0] = 5377; // Not a whole projection row.
+    try std.testing.expectEqual(@as(?u64, 8192 + 2048), inspectionKvDimensionSum(&gf, config));
+    config.architecture = .qwen2;
+    try std.testing.expectEqual(@as(?u64, null), inspectionKvDimensionSum(&gf, config));
 }
 
 test "extractConfig defaults gemma4 attention scale to 1.0" {

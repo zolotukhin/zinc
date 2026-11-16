@@ -332,6 +332,7 @@ def aggregate(args):
             expected = next(m for m in policy()["models"] if m["id"] == model["id"])
             require(model.get("sha256") == expected["sha256"] and model.get("context") == expected["context"] and model.get("passed") is True,
                     "model digest/context differs from policy")
+            require(model.get("diagnostics_passed") is True, "missing or failed packaged model diagnostics")
             verify_reference_agreement(model.get("reference_agreement"))
             if expected.get("sliding_window"):
                 sliding = model.get("sliding_window_reference") or {}
