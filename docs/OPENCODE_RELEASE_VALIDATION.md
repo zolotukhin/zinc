@@ -1,5 +1,12 @@
 # OpenCode model validation for the first release
 
+For the certified, unpublished maintenance candidate, see the separate
+[0.1.1 final-archive checks](releases/0.1.1-plan.md#final-archive-client-checks).
+They use the documented OpenCode 2.0.21 pin and retain separate 2.2.6 trials,
+exact archive identities, independent test results and failures. The
+chronological reports below keep their original clients, source revisions and
+outcomes.
+
 The [Intel OpenCode investigation](INTEL_OPENCODE_VALIDATION.md) records the
 November 1 actual-client timeout failures and the active-prefill cancellation
 fix. Independently passing edits are kept separate from completed client runs.
