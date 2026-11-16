@@ -12,9 +12,9 @@ const redirectsPath = resolve(import.meta.dir, '../../public/_redirects');
 function loadRedirects(): Redirect[] {
   return readFileSync(redirectsPath, 'utf8')
     .split('\n')
-    .map(line => line.trim())
-    .filter(line => line && !line.startsWith('#'))
-    .map(line => {
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
       const [from, to] = line.split(/\s+/);
       return { from, to };
     });
@@ -42,28 +42,71 @@ function resolveRedirect(path: string): string | null {
 
 describe('legacy search-index redirects', () => {
   const expected = new Map<string, string>([
-    ['/zinc/docs/rdna4-batched-prefill-2x/', '/blog/2026-06-05-how-zinc-rdna4-batched-prefill-went-from-42-to-208-tok-s/'],
+    ['/zinc/docs/testing-pr25-27b', '/topics/qwen3-8-local-inference/#hardware'],
+    ['/zinc/docs/testing-pr25-27b/', '/topics/qwen3-8-local-inference/#hardware'],
+    [
+      '/zinc/docs/rdna4-batched-prefill-2x/',
+      '/blog/2026-06-05-how-zinc-rdna4-batched-prefill-went-from-42-to-208-tok-s/',
+    ],
     ['/zinc/docs/TURBOQUANT_SPEC/', '/zinc/docs/turboquant-spec/'],
-    ['/zinc/docs/rdna4-performance-journey/', '/blog/2026-05-09-how-we-made-amd-qwen-inference-faster-than-llama-cpp-in-six-weeks-on-the-radeon-ai-pro-r9700/'],
-    ['/zinc/docs/src/server/model_manager_metal.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/server/model_manager_metal.zig'],
+    [
+      '/zinc/docs/rdna4-performance-journey/',
+      '/blog/2026-05-09-how-we-made-amd-qwen-inference-faster-than-llama-cpp-in-six-weeks-on-the-radeon-ai-pro-r9700/',
+    ],
+    [
+      '/zinc/docs/src/server/model_manager_metal.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/server/model_manager_metal.zig',
+    ],
     ['/zinc/docs/build.zig', 'https://github.com/zolotukhin/zinc/blob/main/build.zig'],
-    ['/zinc/docs/src/model/loader_metal.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/model/loader_metal.zig'],
-    ['/zinc/docs/src/server/runtime.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/server/runtime.zig'],
-    ['/zinc/docs/src/compute/forward_metal.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/compute/forward_metal.zig'],
-    ['/zinc/docs/apple-silicon-metal-enablement/APPLE_METAL_REFERENCE.md', '/zinc/docs/apple-metal-reference/'],
-    ['/cdn-cgi/l/email-protection', '/about/'],
-    ['/zinc/docs/src/metal/buffer.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/metal/buffer.zig'],
-    ['/zinc/docs/src/metal/device.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/metal/device.zig'],
-    ['/zinc/docs/benchmarks/metal_inference.zig', 'https://github.com/zolotukhin/zinc/blob/main/benchmarks/metal_inference.zig'],
+    [
+      '/zinc/docs/src/model/loader_metal.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/model/loader_metal.zig',
+    ],
+    [
+      '/zinc/docs/src/server/runtime.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/server/runtime.zig',
+    ],
+    [
+      '/zinc/docs/src/compute/forward_metal.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/compute/forward_metal.zig',
+    ],
+    [
+      '/zinc/docs/apple-silicon-metal-enablement/APPLE_METAL_REFERENCE.md',
+      '/zinc/docs/apple-metal-reference/',
+    ],
+    [
+      '/zinc/docs/src/metal/buffer.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/metal/buffer.zig',
+    ],
+    [
+      '/zinc/docs/src/metal/device.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/metal/device.zig',
+    ],
+    [
+      '/zinc/docs/benchmarks/metal_inference.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/benchmarks/metal_inference.zig',
+    ],
     ['/zinc/docs/rdna4-performance-plan/', '/zinc/docs/rdna4-tuning/'],
     ['/zinc/docs/performance-gap-analysis/', '/zinc/benchmarks/'],
     ['/zinc/docs/decode-throughput-plan/', '/zinc/benchmarks/'],
     ['/zinc/docs/qwen35-debug/', '/zinc/docs/'],
     ['/zinc/docs/zig-api/session/', '/zinc/docs/zig-api/'],
-    ['/zinc/docs/src/metal/pipeline.zig', 'https://github.com/zolotukhin/zinc/blob/main/src/metal/pipeline.zig'],
-    ['/zinc/docs/src/metal/shim.h', 'https://github.com/zolotukhin/zinc/blob/main/src/metal/shim.h'],
-    ['/zinc/docs/apple-silicon-metal-enablement/APPLE_SILICON_REFERENCE.md', '/zinc/docs/apple-silicon-reference/'],
-    ['/zinc/docs/tools/benchmark_api.mjs', 'https://github.com/zolotukhin/zinc/blob/main/tools/benchmark_api.mjs'],
+    [
+      '/zinc/docs/src/metal/pipeline.zig',
+      'https://github.com/zolotukhin/zinc/blob/main/src/metal/pipeline.zig',
+    ],
+    [
+      '/zinc/docs/src/metal/shim.h',
+      'https://github.com/zolotukhin/zinc/blob/main/src/metal/shim.h',
+    ],
+    [
+      '/zinc/docs/apple-silicon-metal-enablement/APPLE_SILICON_REFERENCE.md',
+      '/zinc/docs/apple-silicon-reference/',
+    ],
+    [
+      '/zinc/docs/tools/benchmark_api.mjs',
+      'https://github.com/zolotukhin/zinc/blob/main/tools/benchmark_api.mjs',
+    ],
   ]);
 
   it('maps every Search Console 404 to its closest live replacement', () => {
@@ -72,10 +115,23 @@ describe('legacy search-index redirects', () => {
     }
   });
 
+  it('excludes Cloudflare-managed service paths from crawling rather than promising a Pages redirect', () => {
+    expect(resolveRedirect('/cdn-cgi/l/email-protection')).toBeNull();
+    const groups = readFileSync(resolve(import.meta.dir, '../../public/robots.txt'), 'utf8').split(
+      /\n\s*\n/,
+    );
+    for (const agent of ['*', 'OAI-SearchBot', 'ChatGPT-User', 'Claude-SearchBot', 'Claude-User']) {
+      const group = groups.find((text) => text.split('\n').includes(`User-agent: ${agent}`));
+      expect(group, agent).toBeDefined();
+      expect(group).toContain('Allow: /\n');
+      expect(group).toContain('Disallow: /cdn-cgi/');
+    }
+  });
+
   it('keeps obsolete uppercase doc links out of current content', () => {
     const post = readFileSync(
       resolve(import.meta.dir, '../content/posts/2026-03-25-why-we-are-building-zinc.md'),
-      'utf8'
+      'utf8',
     );
 
     expect(post).not.toContain('/zinc/docs/TURBOQUANT_SPEC/');

@@ -1,14 +1,18 @@
 User-agent: OAI-SearchBot
 Allow: /
+Disallow: /cdn-cgi/
 
 User-agent: ChatGPT-User
 Allow: /
+Disallow: /cdn-cgi/
 
 User-agent: Claude-SearchBot
 Allow: /
+Disallow: /cdn-cgi/
 
 User-agent: Claude-User
 Allow: /
+Disallow: /cdn-cgi/
 
 User-agent: GPTBot
 Disallow: /
@@ -18,5 +22,8 @@ Disallow: /
 
 User-agent: *
 Allow: /
+# Cloudflare owns these service endpoints; they are not site content.
+# https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/
+Disallow: /cdn-cgi/
 
 Sitemap: https://zolotukhin.ai/sitemap-index.xml

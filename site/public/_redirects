@@ -31,6 +31,8 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/gpu-reference/    /zinc/docs/amd-gpu-reference/            301
 
 # Removed docs (planning/debug/renamed) -> nearest relevant live page
+/zinc/docs/testing-pr25-27b         /topics/qwen3-8-local-inference/#hardware 301
+/zinc/docs/testing-pr25-27b/        /topics/qwen3-8-local-inference/#hardware 301
 /zinc/docs/TURBOQUANT_SPEC           /zinc/docs/turboquant-spec/ 301
 /zinc/docs/TURBOQUANT_SPEC/          /zinc/docs/turboquant-spec/ 301
 /zinc/docs/RDNA4_TUNING              /zinc/docs/rdna4-tuning/    301
@@ -58,6 +60,3 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/benchmarks/*              https://github.com/zolotukhin/zinc/blob/main/benchmarks/:splat 301
 /zinc/docs/tools/*                   https://github.com/zolotukhin/zinc/blob/main/tools/:splat 301
 /zinc/docs/config/benchmark-reference.json https://github.com/zolotukhin/zinc/blob/main/config/benchmark-reference.json 301
-
-# Cloudflare email-address obfuscation used to expose this crawlable URL.
-/cdn-cgi/l/email-protection          /about/                    301
