@@ -1675,7 +1675,7 @@ class ReleaseTest(unittest.TestCase):
         # keep its known limitation and source-frozen evidence visible there.
         self.assertIn("slower decode than llama.cpp on all seven models", notes)
         self.assertIn("https://github.com/zolotukhin/zinc/blob/" + COMMIT + "/docs/INTEL_PERFORMANCE.md", notes)
-        self.assertNotIn("0.1.0", notes)
+        self.assertNotIn("native Windows have no 0.1.0 archive", notes)
 
     def test_release_changes_use_the_same_reviewed_scope_for_rc_and_final(self):
         directory = self.root / "reviewed-changes"
@@ -1701,7 +1701,16 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("zinc-v0.1.1-linux-x86_64-vulkan.tar.gz", notes)
         self.assertIn("zinc-v0.1.1-linux-x86_64-rocm.tar.gz", notes)
         self.assertIn("## Validated hardware and models", notes)
-        self.assertNotIn("0.1.0", notes)
+        self.assertNotIn("native Windows have no 0.1.0 archive", notes)
+
+    def test_release_changes_reject_symlinks_outside_the_reviewed_directory(self):
+        directory = self.root / "reviewed-changes"
+        directory.mkdir()
+        outside = self.root / "outside.md"
+        outside.write_text("Content outside the reviewed release directory.\n")
+        (directory / "0.1.1-changes.md").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "stay in the releases directory"):
+            release.release_changes("0.1.1", directory)
 
     def test_generated_notes_freeze_changes_alongside_exact_hardware_evidence(self):
         directory, reports = self.candidate()

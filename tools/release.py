@@ -394,7 +394,10 @@ def release_changes(release_version, directory=None):
     # Strict SemVer validation leaves only a numeric MAJOR.MINOR.PATCH basename.
     # Files are reviewed Markdown body fragments, preserved for release rendering.
     base_version = version(release_version).split("-", 1)[0].split("+", 1)[0]
-    path = Path(directory or ROOT / "docs/releases") / (base_version + "-changes.md")
+    base = Path(directory or ROOT / "docs/releases").resolve()
+    path = (base / (base_version + "-changes.md")).resolve()
+    # A reviewed filename must not follow a symlink into another directory.
+    require(path.parent == base, "release change notes must stay in the releases directory")
     return path.read_text().strip() if path.is_file() else ""
 
 
