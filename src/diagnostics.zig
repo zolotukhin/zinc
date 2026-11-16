@@ -740,6 +740,7 @@ fn readGgufHeader(file: std.Io.File) !GgufHeader {
 /// @param requested_context_length Optional context ceiling override; null uses the model default.
 /// @returns A `FitEstimate` with per-category byte counts and a budget-headroom context maximum.
 pub fn estimateFit(inspection: ModelInspection, vram_budget_bytes: u64, requested_context_length: ?u32) FitEstimate {
+    // This is the runtime's environment-driven selector, not a fixed default.
     return estimateFitWithKvBlockBytes(inspection, vram_budget_bytes, requested_context_length, kv_dtype.bytesPer32Elems());
 }
 
@@ -749,7 +750,10 @@ fn estimateFitWithKvBlockBytes(inspection: ModelInspection, vram_budget_bytes: u
     if (inspection.kv_dimension_sum) |dimensions| {
         // Match Vulkan's selected F16/F32/Q8 layout and actual Gemma layer
         // widths. F32 metadata maxima falsely rejected 8K on a 32 GB card.
-        profile.device_local_bytes_per_token = dimensions / 32 * kv_block_bytes * 2;
+        // Inspected rows are aligned, but callers can also construct this
+        // public summary. Round up without overflowing dimensions + 31.
+        const blocks = dimensions / 32 + @intFromBool(dimensions % 32 != 0);
+        profile.device_local_bytes_per_token = blocks * kv_block_bytes * 2;
     }
     const max_ctx = memory_plan.effectiveContextCeiling(config, requested_context_length);
     const kv_cache_bytes = profile.deviceLocalContextBytes(max_ctx);
@@ -1030,6 +1034,9 @@ test "Gemma 31B diagnostics budget actual projections and every Vulkan KV layout
     var capped = inspection;
     capped.config.context_length = 4096;
     try std.testing.expectEqual(@as(u32, 4096), estimateFitWithKvBlockBytes(capped, card, 8192, 64).max_ctx);
+    var unaligned = inspection;
+    unaligned.kv_dimension_sum = 1001;
+    try std.testing.expectEqual(@as(u64, 32 * 64 * 2 * 8192), estimateFitWithKvBlockBytes(unaligned, card, 8192, 64).kv_cache_bytes);
 }
 
 test "uniform diagnostics preserve KV precision when projection metadata is unavailable" {

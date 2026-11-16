@@ -58,6 +58,8 @@ def validate_model_diagnostics(report, model, context, backend):
 
 
 def model_diagnostics(tree, model, context, device, backend, work, env):
+    # Inspect metadata, not tensor payloads: the full weight hash is checked
+    # separately above. Keep a fixed deadline for a stuck GPU/metadata probe.
     # Machine output has a dedicated stream: GPU-driver logging belongs in
     # the private log, never mixed into JSON or copied into public evidence.
     document = work / "model-diagnostics.json"
