@@ -14,6 +14,7 @@
     "check:benchmarks": "bun tools/check-benchmarks.ts && bun run check:api-docs",
     "check:api-docs": "bun tools/check-api-docs.ts",
     "check:posts": "bun tools/check-posts.ts",
+    "check:indexability": "bun tools/check-indexability.ts",
     "check:harnesses": "bun tools/check-coding-harnesses.ts",
     "astro": "astro"
   },
