@@ -310,9 +310,9 @@ candidate-to-publication process; existing published bytes are preserved.
 is certified and unpublished, from source
 `4ab52f7d2d0ed595ef4199cc7680ba64e1915af5`. All three selected Linux GPU profiles
 and 20 model/backend rows passed, including installed model diagnostics.
-Independent verification recomputed the qualification gates, verified all
-eight offline-attested assets and checked the
-stable catalog. The [preparation record](releases/0.1.1-plan.md) links exact
+Independent verification recomputed the qualification gates, verified eight
+assets against `provenance.jsonl` (the ninth bundle file), and checked the stable
+catalog. The [preparation record](releases/0.1.1-plan.md) links exact
 archive identities, installation controls, supplementary actual-client checks
 and retained failures. Publication must promote the tested bytes through the
 protected publisher above; the current stable release remains 0.1.0.
