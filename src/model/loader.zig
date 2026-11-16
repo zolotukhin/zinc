@@ -577,6 +577,7 @@ fn inspectionKvDimensionSum(gf: *const gguf.GGUFFile, config: ModelConfig) ?u64 
     const fallback = memory_plan.kvDimensionFromProjections(config.n_kv_heads * config.head_dim, null, null);
     var sum: u64 = 0;
     for (0..@as(usize, config.n_layers) + config.n_nextn_layers) |layer| {
+        var used_fallback = true;
         const dim = blk: {
             var name: [128]u8 = undefined;
             const key_name = std.fmt.bufPrint(&name, "blk.{d}.attn_k.weight", .{layer}) catch break :blk fallback;
@@ -589,8 +590,10 @@ fn inspectionKvDimensionSum(gf: *const gguf.GGUFFile, config: ModelConfig) ?u64 
             const value = gf.findTensor(value_name) orelse key;
             if (value.numElements() % config.hidden_dim != 0) break :blk fallback;
             const value_rows = std.math.cast(u32, value.numElements() / config.hidden_dim) orelse break :blk fallback;
+            used_fallback = key_rows == 0 or key_rows % 32 != 0 or key_rows != value_rows;
             break :blk memory_plan.kvDimensionFromProjections(fallback, key_rows, value_rows);
         };
+        if (used_fallback) log.debug("Model preflight layer {d}: conservative KV width {d}; missing, mismatched or unaligned projections", .{ layer, dim });
         sum += dim;
     }
     return sum;
