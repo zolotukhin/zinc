@@ -1,10 +1,19 @@
 # Releasing ZINC
 
-The 0.1.0 launch is Linux first: Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. It builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
+Linux releases cover Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. The workflow builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
 [Linux 0.1.0 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0).
 The [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md)
 contains its exact-byte qualification and completed public-install checks.
+
+The [0.1.1 candidate plan](releases/0.1.1-plan.md) tracks the next maintenance
+release. Version-specific `docs/releases/<version>-changes.md` files supply
+reviewed change notes; the finalizer freezes them beside the generated hardware
+table. RCs share their base version's change notes and keep their own archive
+version and qualification.
+Change files contain Markdown body fragments (bullets, paragraphs, or headings
+at level three and deeper). The finalizer owns the release title, section
+headings, downloads, and certified hardware table.
 
 ## Version policy
 
@@ -246,7 +255,7 @@ After workflows merge to main and infrastructure is configured:
 
 1. Run the configuration preflight above, then dispatch `release-candidate.yml` on main with an explicit nightly/RC version first. Preparation checks out the immutable dispatched workflow SHA. `main` selects that snapshot; an explicit older full SHA must be its ancestor and have identical release qualification inputs. Changed policy, build/installer inputs, toolchain pins, catalog, release helpers or validation code require a fresh candidate. Dirty source and incomplete hardware assignments fail before outputs/builds.
 2. Review all three Linux reports and model results. The [starter review](STARTER_QUALIFICATION.md) promotes only Vulkan inference on R9700 and Intel, with chat/thinking recommendations disabled. Stable publication requires its explicit Vulkan backend scope and coverage for both selected roles (`amd-rdna4-32gb` and `intel-arc`); Apple-only or partial coverage cannot satisfy it. Adding a stable hardware role requires an explicit reviewed catalog mapping. All shipped model sizes must match the policy and default contexts must stay within the qualified limits. Catalog changes require a fresh candidate.
-3. Dispatch the final candidate with `version=0.1.0`. An RC cannot be renamed. Every final archive already embeds `0.1.0` and the full SHA.
+3. Dispatch the final candidate with the intended stable version, such as `version=0.1.1`. An RC cannot be renamed. Every final archive already embeds the selected version and the full SHA.
 4. Review the `release-candidate` artifact: two Linux archives, policy, checksums, validation, generated notes, installer and offline provenance. Artifacts expire after 14 days; rebuild/requalify if unavailable.
 5. Dispatch `release.yml` on main with the successful manual candidate run ID. Preflight verifies workflow identity, source ancestry, provenance, complete model/report matrix and protected environment. Review its summary, then approve `release`.
 6. Publication re-verifies, refreshes main immediately before writes, and requires the candidate source, candidate workflow and publisher to share the same qualification inputs. Documentation-only advancement remains valid; changed gates during approval require a fresh candidate. It creates the final tag at the tested SHA, creates/resumes only this candidate's draft, uploads missing assets without overwriting, downloads/verifies every byte, then publishes. Dependent jobs verify public downloads/installs without relying on token-created tag events to trigger another workflow.

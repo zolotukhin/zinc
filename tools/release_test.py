@@ -1200,19 +1200,19 @@ class ReleaseTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "marker").exists())
 
-    def candidate(self, all_targets=False):
+    def candidate(self, all_targets=False, release_version="9.8.7"):
         directory, reports = self.root / "candidate", self.root / "reports"
         directory.mkdir()
         reports.mkdir()
         artifacts = []
         scoped = policy() if all_targets else release_lib.release_policy()
         for spec in scoped["targets"]:
-            archive = directory / archive_name("9.8.7", spec["id"])
+            archive = directory / archive_name(release_version, spec["id"])
             archive.write_bytes(("CPU-only gate fixture: " + spec["id"]).encode())
             artifacts.append({"target": spec["id"], "filename": archive.name, "size_bytes": archive.stat().st_size,
                               "sha256": sha256(archive), "binary_sha256": "a" * 64,
                               "signing": {"status": "notarized" if spec["backend"] == "metal" else "unsigned"}})
-        data = {"schema_version": 1, "version": "9.8.7", "commit": COMMIT, "candidate_run": "123", "workflow_sha": COMMIT,
+        data = {"schema_version": 1, "version": release_version, "commit": COMMIT, "candidate_run": "123", "workflow_sha": COMMIT,
                 "policy_sha256": sha256(ROOT / "config/release/targets.json"), "artifacts": artifacts,
                 "required_profiles": [{k: p[k] for k in ("id", "target", "family")} for p in scoped["gpu_profiles"]]}
         write_json(directory / "release-manifest.json", data)
@@ -1249,9 +1249,9 @@ class ReleaseTest(unittest.TestCase):
             write_json(reports / (profile["id"] + ".json"), report)
         return directory, reports
 
-    def aggregate(self, directory, reports):
+    def aggregate(self, directory, reports, release_version="9.8.7"):
         with contextlib.redirect_stdout(io.StringIO()):
-            release.aggregate(SimpleNamespace(directory=directory, results=reports, version="9.8.7", commit=COMMIT))
+            release.aggregate(SimpleNamespace(directory=directory, results=reports, version=release_version, commit=COMMIT))
 
     def test_every_policy_model_is_pinned_in_the_managed_catalog(self):
         catalog = (ROOT / "src/model/catalog.zig").read_text()
@@ -1675,6 +1675,55 @@ class ReleaseTest(unittest.TestCase):
         # keep its known limitation and source-frozen evidence visible there.
         self.assertIn("slower decode than llama.cpp on all seven models", notes)
         self.assertIn("https://github.com/zolotukhin/zinc/blob/" + COMMIT + "/docs/INTEL_PERFORMANCE.md", notes)
+        self.assertNotIn("native Windows have no 0.1.0 archive", notes)
+
+    def test_release_changes_use_the_same_reviewed_scope_for_rc_and_final(self):
+        directory = self.root / "reviewed-changes"
+        directory.mkdir()
+        (directory / "0.1.1-changes.md").write_text("Reviewed 0.1.1 corrections.\n")
+        for value in ("0.1.1", "0.1.1-rc.1", "0.1.1+build.7"):
+            self.assertEqual(release.release_changes(value, directory), "Reviewed 0.1.1 corrections.")
+        self.assertEqual(release.release_changes("0.1.0", directory), "")
+        for invalid in ("../0.1.1", "0.1.1/../../secret", "0.1.1%2f..%2fsecret", "0.1.1\n"):
+            with self.subTest(version=invalid), self.assertRaises(ValueError):
+                release.release_changes(invalid, directory)
+
+    def test_real_0_1_1_changes_flow_into_frozen_candidate_notes(self):
+        directory, reports = self.candidate(release_version="0.1.1")
+        self.aggregate(directory, reports, release_version="0.1.1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.finalize(SimpleNamespace(directory=directory))
+        changes = (ROOT / "docs/releases/0.1.1-changes.md").read_text().strip()
+        notes = (directory / "release-notes.md").read_text()
+        self.assertTrue(changes)
+        self.assertEqual(notes.count(changes), 1)
+        self.assertIn("# ZINC v0.1.1", notes)
+        self.assertIn("zinc-v0.1.1-linux-x86_64-vulkan.tar.gz", notes)
+        self.assertIn("zinc-v0.1.1-linux-x86_64-rocm.tar.gz", notes)
+        self.assertIn("## Validated hardware and models", notes)
+        self.assertNotIn("native Windows have no 0.1.0 archive", notes)
+
+    def test_release_changes_reject_symlinks_outside_the_reviewed_directory(self):
+        directory = self.root / "reviewed-changes"
+        directory.mkdir()
+        outside = self.root / "outside.md"
+        outside.write_text("Content outside the reviewed release directory.\n")
+        (directory / "0.1.1-changes.md").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "stay in the releases directory"):
+            release.release_changes("0.1.1", directory)
+
+    def test_generated_notes_freeze_changes_alongside_exact_hardware_evidence(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        with patch.object(release, "release_changes", return_value="Reviewed changes for the candidate.") as changes, \
+                contextlib.redirect_stdout(io.StringIO()):
+            release.finalize(SimpleNamespace(directory=directory))
+        changes.assert_called_once_with("9.8.7")
+        notes = (directory / "release-notes.md").read_text()
+        self.assertEqual(notes.count("Reviewed changes for the candidate."), 1)
+        self.assertIn("## Validated hardware and models", notes)
+        self.assertIn("Only the combinations in `validation.json` are certified", notes)
+        self.assertIn(COMMIT, notes)
 
     def test_stable_starter_coverage_must_match_the_selected_linux_profiles(self):
         for profiles in ('', '"apple-silicon"', '"amd-rdna4-32gb"', '"intel-arc"', '"unknown-profile"',

@@ -8,7 +8,7 @@ version, source commit, backend, CPU/OS requirements, runtime dependencies,
 and signing status. Use the matching release's notes and `validation.json`
 for the GPU, driver, model, and context combinations actually tested.
 
-Stable 0.1.0 releases target Linux Vulkan/ROCm. Metal archives are unsigned
+Stable releases target Linux Vulkan/ROCm. Metal archives are unsigned
 previews and are not included in the Linux release's hardware qualification.
 
 ## Run the extracted package
@@ -23,6 +23,7 @@ From the extracted directory:
 ./bin/zinc --version
 ./bin/zinc --help
 ./bin/zinc --check
+./bin/zinc --check --json
 ```
 
 For AMD Vulkan, set `export RADV_PERFTEST=coop_matrix` before the GPU check
@@ -35,6 +36,17 @@ for your backend in the release notes. Replace the path in this example:
 ```bash
 ./bin/zinc -m /path/to/model.gguf -c 2048 --chat --prompt "Explain a ring buffer."
 ```
+
+For an application or agent, start an explicit server without opening a browser:
+
+```bash
+./bin/zinc serve --model-id qwen35-9b-q4k-m -c 4096 --parallel 1 --port 9090
+```
+
+Pull that managed model first with `./bin/zinc model pull qwen35-9b-q4k-m`.
+The server's `/v1/models` response advertises its current context and output
+limits. Use those limits when configuring a client. OpenCode and OpenClaw setup
+instructions are in the [agent and app guide](https://zolotukhin.ai/zinc/docs/agent-setup/).
 
 Metal and Vulkan also provide browser chat:
 
