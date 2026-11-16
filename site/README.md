@@ -81,19 +81,14 @@ command, `dist` as the output directory, and the Node version in `.node-version`
 
 ### Canonical hostname
 
-Keep `zolotukhin.ai` attached to the Pages project and `www.zolotukhin.ai`
-attached as a custom domain to the `canonical-host` Worker. The Worker permanently
-redirects `www` to the HTTPS apex, preserving paths and query strings. Cloudflare
-manages its DNS record and certificate through the custom-domain binding; a DNS
-record alone does not attach a hostname and can return HTTP 522. Pages continues
-to serve the apex site. Deploy the Worker when its source or binding changes:
+Keep both `zolotukhin.ai` and `www.zolotukhin.ai` attached to the Pages project.
+A DNS record alone does not attach a Pages hostname and can return HTTP 522.
+The sitemap and canonical tags use `https://zolotukhin.ai` for both hostnames.
 
-```bash
-bunx wrangler deploy --config wrangler.canonical-host.json
-```
-
-Verify that `https://www.zolotukhin.ai/zinc/docs/` returns a 301 to
-`https://zolotukhin.ai/zinc/docs/`. Hostname redirects are not supported in
-Pages `_redirects`; that file handles path changes. Cloudflare's retired
+A permanent `www` redirect must be configured in Cloudflare with access to the
+zone's DNS and redirect settings. Preserve the path and query string, and verify
+that `https://www.zolotukhin.ai/zinc/docs/` redirects to
+`https://zolotukhin.ai/zinc/docs/`. Pages `_redirects` does not support hostname
+rules; that file handles path changes. Cloudflare's retired
 `/cdn-cgi/l/email-protection` utility is handled before Pages and returns 404;
 current content must not link to it.

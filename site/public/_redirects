@@ -1,4 +1,4 @@
-# Pages handles HTTPS; the canonical-host Worker handles www (see ../README.md).
+# Pages handles HTTPS; hostname redirects require Cloudflare redirect rules.
 # Hostname rules are not supported in this file.
 
 /about                       /about/                                  301
