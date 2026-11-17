@@ -349,6 +349,52 @@ curl -N http://localhost:9090/v1/chat/completions \
 
 ---
 
+### MTP capability and execution status
+
+**Development:** per-request MTP control and completion metadata below are in
+current source; the published 0.1.1 archives predate this contract.
+
+Native HIP/ROCm and experimental CUDA serving report `supports_mtp`,
+`mtp_default_enabled`, `mtp_request_control`, and `mtp_unavailable_reason` on
+`/health` and the active `/v1/models` entry. Support requires a compatible dense
+NextN model, one request slot, and successfully prepared GPU state. ROCm defaults
+on; CUDA defaults off. An explicit `ZINC_MTP=0` remains an operator kill switch.
+
+When `mtp_request_control` is true, chat and raw completions accept nullable
+`enable_mtp`: `true` requests MTP and returns 400 if unavailable; `false` selects
+ordinary decode for this request; omission or `null` follows the server default.
+Each queued request keeps its own choice. Vulkan/Metal report request control as
+false and reject explicit overrides. Vulkan retains its existing global MTP
+policy and verifier; a missing support/default flag is unknown, not false.
+
+Capability describes the initialized model/runtime, not a claim that a reply
+used MTP. The chat UI uses `mtp_default_enabled` until the user chooses a mode;
+unsupported or unreported capability never silently becomes an opt-in.
+
+On native HIP/ROCm and CUDA, the final SSE chunk (before `[DONE]`) and
+non-streaming completion contain an
+`mtp` object:
+
+```json
+{
+  "mtp": {
+    "requested": null,
+    "enabled": true,
+    "used": true,
+    "drafted": 24,
+    "accepted": 18,
+    "cycles": 12,
+    "fallback_reason": null
+  }
+}
+```
+
+`requested` preserves the nullable request option; `enabled` is the resolved
+policy. `used` and the counters describe execution, so enabling MTP does not by
+itself justify showing it as active. A request that falls back to ordinary
+decoding reports `used: false` and a `fallback_reason`. No speedup is implied by
+support, activation, or draft acceptance alone.
+
 ## POST /v1/completions
 
 The request/JSON example below applies to all backends. Set `stream` explicitly:

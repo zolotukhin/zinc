@@ -685,6 +685,7 @@ fn buildHealthJson(
         .active_model = discovery.active_model,
         .context_length = discovery.context_length,
         .capabilities = discovery.capabilities,
+        .mtp_request_control = false,
         .active_requests = snapshot.active_requests,
         .queued_requests = snapshot.queued_requests,
         .uptime_seconds = snapshot.uptime_seconds,
@@ -755,7 +756,7 @@ fn handleModels(
         const download_error = if (is_download_target) download.errorMessage() else "";
         const entry_context_length: u32 = if (entry.active) memory_usage.context_capacity_tokens else 0;
         try body.print(allocator,
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","context_length":{d},"display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"required_vram_with_offload_bytes":{d},"requires_offload_to_fit":{s},"fit_source":"{s}","status":"{s}","recommended_for_chat":{s},"thinking_stable":{s},"supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","context_length":{d},"display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"required_vram_with_offload_bytes":{d},"requires_offload_to_fit":{s},"fit_source":"{s}","status":"{s}","recommended_for_chat":{s},"thinking_stable":{s},"supports_thinking_toggle":{s},"mtp_request_control":false,"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
         , .{
             entry.id,
             ts,
@@ -1286,6 +1287,7 @@ fn freeStopSequences(allocator: std.mem.Allocator, stop: []const []const u8) voi
 fn firstUnsupportedChatParam(body: ChatRequestBody) ?[]const u8 {
     if (body.n != 1) return "Field 'n' must be 1: only a single completion choice is generated";
     if (logprobsRequested(body.logprobs)) return "Field 'logprobs' is not supported: token log-probabilities are not computed";
+    if (runtime.mtpRequestError(body.enable_mtp)) |message| return message;
     return null;
 }
 
@@ -1379,6 +1381,7 @@ const ChatRequestBody = struct {
     temperature: f32 = 0.0,
     top_p: f32 = 1.0,
     enable_thinking: ?bool = null,
+    enable_mtp: ?bool = null,
     tools: []const RequestTool = &.{},
     tool_choice: ?std.json.Value = null,
     stop: ?std.json.Value = null,
@@ -3766,6 +3769,11 @@ fn handleCompletions(
     };
     defer parsed.deinit();
 
+    if (runtime.mtpRequestError(parsed.enable_mtp)) |message| {
+        try conn.sendError(400, "invalid_request_error", message);
+        return;
+    }
+
     if (parsed.prompt.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'prompt' is required");
         return;
@@ -4096,6 +4104,7 @@ const RawRequestBody = struct {
     stream: bool = false,
     stream_options: ?struct { include_usage: bool = false } = null,
     temperature: f32 = 1.0,
+    enable_mtp: ?bool = null,
 };
 
 const JsonMessage = struct {
@@ -4111,6 +4120,7 @@ const ParsedRequest = struct {
     stream: bool = false,
     include_usage: bool = false,
     temperature: f32 = 1.0,
+    enable_mtp: ?bool = null,
     allocator: std.mem.Allocator,
 
     fn deinit(self: *ParsedRequest) void {
@@ -4143,6 +4153,7 @@ fn parseRequestBody(body: []const u8, allocator: std.mem.Allocator) !ParsedReque
     result.stream = parsed.value.stream;
     result.include_usage = if (parsed.value.stream_options) |options| options.include_usage else false;
     result.temperature = parsed.value.temperature;
+    result.enable_mtp = parsed.value.enable_mtp;
     result.prompt = try decodeJsonText(allocator, parsed.value.prompt);
 
     if (parsed.value.messages) |messages| {
@@ -4818,6 +4829,32 @@ test "combinedStopStrings: appends client stops after the built-in list" {
 test "firstUnsupportedChatParam: defaults are accepted" {
     const body = ChatRequestBody{};
     try std.testing.expectEqual(@as(?[]const u8, null), firstUnsupportedChatParam(body));
+}
+
+test "shared chat accepts the server MTP default and rejects unavailable overrides" {
+    for ([_][]const u8{
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"enable_mtp\":null}",
+    }) |body| {
+        var parsed = try parseChatRequest(std.testing.allocator, body);
+        defer parsed.deinit();
+        try std.testing.expect(firstUnsupportedChatParam(parsed.parsed.value) == null);
+    }
+    for ([_]bool{ true, false }) |enabled| {
+        const request = ChatRequestBody{ .enable_mtp = enabled };
+        try std.testing.expectEqualStrings(runtime.mtp_unavailable_reason, firstUnsupportedChatParam(request).?);
+    }
+}
+
+test "MTP raw requests preserve opt-in for explicit capability validation" {
+    var enabled = try parseRequestBody("{\"prompt\":\"hello\",\"enable_mtp\":true}", std.testing.allocator);
+    defer enabled.deinit();
+    try std.testing.expectEqual(@as(?bool, true), enabled.enable_mtp);
+    try std.testing.expectEqualStrings(runtime.mtp_unavailable_reason, runtime.mtpRequestError(enabled.enable_mtp).?);
+    var disabled = try parseRequestBody("{\"prompt\":\"hello\",\"enable_mtp\":false}", std.testing.allocator);
+    defer disabled.deinit();
+    try std.testing.expectEqualStrings(runtime.mtp_unavailable_reason, runtime.mtpRequestError(disabled.enable_mtp).?);
+    try std.testing.expect(runtime.mtpRequestError(null) == null);
 }
 
 test "firstUnsupportedChatParam: only n=1 is accepted" {
@@ -6405,6 +6442,13 @@ test "buildHealthJson includes request counts and uptime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_active_bytes\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_tokens\":1024") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_capacity_tokens\":4096") != null);
+    var json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer json.deinit();
+    // Shared serving keeps the Vulkan verifier and process policy unchanged.
+    // Missing support/default metadata remains unknown, rather than false.
+    try std.testing.expect(json.value.object.get("supports_mtp") == null);
+    try std.testing.expect(json.value.object.get("mtp_default_enabled") == null);
+    try std.testing.expect(!json.value.object.get("mtp_request_control").?.bool);
 }
 test "findFirstStop picks earliest chat control marker" {
     const text = "Hello<|im_start|>assistant<|im_end|>";

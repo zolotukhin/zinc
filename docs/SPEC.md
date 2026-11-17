@@ -238,6 +238,12 @@ verified against the full target model. Intel Vulkan defaults to ordinary
 decode after its correctness gate; experimental MTP requires explicit opt-in.
 See the backend validation reports and benchmark rows for the actual settings.
 
+Native HIP/ROCm and experimental CUDA serving also resolve nullable per-request
+`enable_mtp` against initialized model capabilities. The worker latches the
+choice per request and publishes actual draft/acceptance counters before marking
+the response complete. [API MTP controls](API.md#mtp-capability-and-execution-status)
+describes capability discovery, defaults, fallback reporting and backend limits.
+
 The architecture-normalization layer is in `src/model/architecture.zig` and `src/model/config.zig`.
 
 ## 7. Decode Planning And Graph IR
