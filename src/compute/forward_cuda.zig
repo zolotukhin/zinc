@@ -768,6 +768,17 @@ const Q8AttentionScratch = struct {
 
 /// Per-token GPU forward state for qwen35 greedy decode.
 pub const ForwardCuda = struct {
+    pub const MtpProcessPolicy = struct {
+        operator_allowed: bool = true,
+        default_enabled: bool = is_rocm,
+    };
+
+    pub fn readMtpProcessPolicy() MtpProcessPolicy {
+        const configured = host_io.getenv("ZINC_MTP") != null;
+        const enabled = envFlag("ZINC_MTP", is_rocm);
+        return .{ .operator_allowed = !configured or enabled, .default_enabled = enabled };
+    }
+
     allocator: std.mem.Allocator,
     ctx: ?*shim.CudaCtx,
     model: *loader.Model,
@@ -947,6 +958,10 @@ pub const ForwardCuda = struct {
     mtp: ?MtpState = null,
     // Serialized serving worker override; CLI keeps the environment default.
     mtp_execution_override: ?bool = null,
+    /// Process policy is immutable after initialization; request overrides must
+    /// not bypass an operator kill switch or change the advertised default.
+    mtp_process_policy: MtpProcessPolicy = .{},
+
     use_spec_btok: bool = false,
     capture_spec_state: bool = false,
     use_attn_v2: bool = false, // ZINC_ATTN_V2: coalesced warp-per-key qwen prefill attention (token-tolerance)
@@ -1325,6 +1340,7 @@ pub const ForwardCuda = struct {
         const router_out_elems = @max(@as(u32, 1), 2 * d.n_experts_used);
         const state_layers = d.n_layers + model.config.n_nextn_layers;
         var self = ForwardCuda{
+            .mtp_process_policy = readMtpProcessPolicy(),
             .allocator = allocator,
             .ctx = ctx,
             .model = model,
@@ -2262,7 +2278,7 @@ pub const ForwardCuda = struct {
     /// CUDA server request to opt in while an unset CUDA default stays off.
     /// An explicit ZINC_MTP=0/off/false/no remains an operator kill switch.
     pub fn mtpUnavailableReason(self: *const ForwardCuda) ?[]const u8 {
-        if (host_io.getenv("ZINC_MTP") != null and !envFlag("ZINC_MTP", is_rocm))
+        if (!self.mtp_process_policy.operator_allowed)
             return "MTP was disabled by the server's ZINC_MTP setting.";
         return self.mtpModelUnavailableReason();
     }
@@ -2288,7 +2304,7 @@ pub const ForwardCuda = struct {
     }
 
     pub fn mtpDefaultEnabled(self: *const ForwardCuda) bool {
-        return self.mtpSupported() and envFlag("ZINC_MTP", is_rocm);
+        return self.mtpSupported() and self.mtp_process_policy.default_enabled;
     }
 
     /// Called only before starting the GPU worker, or by that worker while it
@@ -2300,7 +2316,7 @@ pub const ForwardCuda = struct {
     }
 
     pub fn mtpEnabled(self: *const ForwardCuda) bool {
-        return self.mtpSupported() and (self.mtp_execution_override orelse envFlag("ZINC_MTP", is_rocm));
+        return self.mtpSupported() and (self.mtp_execution_override orelse self.mtp_process_policy.default_enabled);
     }
 
     fn ensureMtpState(self: *ForwardCuda) !*MtpState {

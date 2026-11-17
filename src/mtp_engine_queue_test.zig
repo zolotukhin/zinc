@@ -97,6 +97,7 @@ test "MTP model compatibility and execution preference do not conflate a CUDA de
     forward.d.n_layers = 2;
     forward.d.n_experts = 0;
     forward.mtp_execution_override = null;
+    forward.mtp_process_policy = ForwardCuda.readMtpProcessPolicy();
     try std.testing.expect(forward.mtpModelUnavailableReason() != null);
     model.config.n_nextn_layers = 1;
     forward.d.n_experts = 2;
@@ -124,6 +125,19 @@ test "MTP model compatibility and execution preference do not conflate a CUDA de
     try std.testing.expectEqual(allowed, forward.mtpEnabled());
     _ = forward.setMtpExecutionOverride(original);
     try std.testing.expectEqual(forward.mtpDefaultEnabled(), forward.mtpEnabled());
+    // A default-off policy still allows an explicit request, but an operator
+    // kill switch cannot be bypassed. Neither mode reads a changed environment.
+    forward.mtp_process_policy = .{ .operator_allowed = true, .default_enabled = false };
+    try std.testing.expect(forward.mtpSupported());
+    try std.testing.expect(!forward.mtpDefaultEnabled());
+    _ = forward.setMtpExecutionOverride(true);
+    try std.testing.expect(forward.mtpEnabled());
+    forward.mtp_process_policy = .{ .operator_allowed = false, .default_enabled = true };
+    try std.testing.expect(!forward.mtpSupported());
+    try std.testing.expect(!forward.mtpDefaultEnabled());
+    try std.testing.expect(!forward.mtpEnabled());
+    _ = forward.setMtpExecutionOverride(null);
+    try std.testing.expect(!forward.mtpEnabled());
 }
 
 test "single-slot serving reuses target state only within capacity" {

@@ -36,7 +36,9 @@ pub fn resolveRequest(capability: Capability, requested: ?bool) !bool {
 }
 
 pub fn draftBudget(remaining_output: u32, position: u32, max_context: u32) u32 {
-    // The verifier consumes the already-published seed plus the draft window.
+    // Three is the native verifier's maximum capacity, not an environment
+    // override: ForwardCuda.mtpCycle further clamps this by ZINC_MTP_DRAFTS
+    // (or its adaptive policy). Reserve the already-published seed as well.
     return @min(3, @min(remaining_output, (max_context -| position) -| 1));
 }
 

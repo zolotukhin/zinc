@@ -238,7 +238,7 @@ async function fetchApi(fetchImpl, url, options, timeoutMs) {
   try {
     return await fetchImpl(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
   } catch {
-    throw new Error('Server request failed or timed out; no server state was changed.');
+    throw new Error('Server request failed or timed out.');
   }
 }
 
