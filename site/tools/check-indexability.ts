@@ -39,6 +39,7 @@ export async function checkHocdbSocialPreview(html: string, png: Uint8Array) {
   const bytes = Buffer.from(png);
   assert.ok(bytes.length > 24, 'HOCDB preview PNG must not be empty');
   assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG signature');
+  // PNG requires IHDR first, immediately after the eight-byte signature.
   assert.equal(bytes.subarray(12, 16).toString(), 'IHDR', 'PNG image header');
   assert.equal(bytes.readUInt32BE(16), 1200, 'PNG width must match metadata');
   assert.equal(bytes.readUInt32BE(20), 630, 'PNG height must match metadata');
