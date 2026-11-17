@@ -14,6 +14,17 @@ pub const supports_model_management = gpu.is_vulkan or gpu.is_metal;
 pub const supports_sampling_controls = gpu.is_vulkan or gpu.is_metal;
 /// Whether the backend supports GPU kernel profiling during inference.
 pub const supports_runtime_profiling = gpu.is_vulkan or gpu.is_metal;
+/// Per-request MTP overrides are currently implemented by the native serving
+/// worker. Vulkan retains its existing model/driver/environment policy; do not
+/// equate the absence of this request control with an absent Vulkan verifier.
+pub const mtp_unavailable_reason = "Per-request MTP control is unavailable on this backend; use the server's ZINC_MTP policy.";
+
+pub fn mtpRequestError(enabled: ?bool) ?[]const u8 {
+    // Vulkan may already be speculating under its global policy. Treating false
+    // as a no-op would promise ordinary decode while still running MTP. Until
+    // this runtime has a real request override, accept only the server default.
+    return if (enabled != null) mtp_unavailable_reason else null;
+}
 
 /// Tokenizer module (shared across all backends).
 pub const tokenizer_mod = @import("../model/tokenizer.zig");

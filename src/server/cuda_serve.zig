@@ -36,17 +36,18 @@ const forwardgemma = @import("../compute/forward_cuda_gemma.zig");
 const forwardcuda = @import("../compute/forward_cuda.zig");
 const prefill_policy = @import("../compute/prefill_policy.zig");
 const shim = @import("../cuda/c.zig").shim;
+const mtp_policy = @import("mtp_policy.zig");
+
+pub const MtpCapability = mtp_policy.Capability;
+pub const SubmitOptions = mtp_policy.SubmitOptions;
+pub const MtpResult = mtp_policy.Result;
 
 const log = std.log.scoped(.cuda_serve);
-
-/// Draft depth per MTP cycle in serving. Matches the CLI default; the engine
-/// clamps it to its own maximum and to ZINC_MTP_DRAFTS.
-const mtp_serve_max_drafts: u32 = 3;
 
 /// One line per request, in the same shape the Vulkan server emits, so the
 /// benchmark harness records acceptance for ROCm server runs too
 /// (tools/performance_suite.mjs parseZincSpeculative matches this prefix).
-fn logMtpAcceptance(drafted: u32, accepted: u32, cycles: u32) void {
+fn logMtpAcceptance(drafted: u64, accepted: u64, cycles: u64) void {
     const pct = if (drafted > 0)
         100.0 * @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(drafted))
     else
@@ -142,6 +143,8 @@ pub const ReqChannel = struct {
     /// Transport disconnected or reached a stop sequence. The worker observes
     /// this under the mutex and releases the slot at the next token boundary.
     cancelled: bool = false,
+    /// Written before done/failed is published; read after the channel drains.
+    mtp: MtpResult = .{},
     /// Per-request device timings. The worker records these before publishing
     /// completion; the HTTP handler reads them after `finished` is observed.
     prefill_tokens: u64 = 0,
@@ -166,6 +169,9 @@ pub const ServeEngine = struct {
     eos: u32,
     /// Optional model-specific end-of-turn token (ATEM `<|eot|>`).
     eot: ?u32,
+    slot_ctx: u32,
+    /// Immutable after initialization, including successful context preparation.
+    mtp_capability: MtpCapability = .{},
 
     mutex: host_io.Mutex = .{},
     cond: host_io.Condition = .{},
@@ -188,13 +194,6 @@ pub const ServeEngine = struct {
     prefill_wall_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     peak_batch: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
-    /// NextN/MTP self-speculation for the single-slot case. The draft/verify
-    /// path writes the single-sequence KV, not the per-slot KV the batched loop
-    /// uses, so it only runs when this engine owns exactly one slot. Multi-slot
-    /// serving keeps the batched path, which amortizes weights across requests
-    /// and is the better trade there anyway.
-    mtp_single: bool = false,
-
     /// Allocate slot-based per-sequence state + a scheduler with `nslots` concurrent
     /// slots, each `slot_ctx` tokens deep. The forward (`fwd`) must already be
     /// initialized; it may be EITHER a gemma or qwen forward (dispatched by `Forward`).
@@ -206,18 +205,35 @@ pub const ServeEngine = struct {
         eos: u32,
         eot: ?u32,
     ) !ServeEngine {
+        if (nslots == 0 or nslots > scheduler_max) return error.InvalidParallelism;
         try fwd.allocSlots(nslots, slot_ctx);
         errdefer fwd.freeSlots();
         const sched = try scheduler.Scheduler.init(allocator, nslots);
-        const mtp_single = nslots == 1 and switch (fwd) {
-            .qwen => |q| q.mtpEnabled() and (q.mtpPrepare() catch |err| blk: {
-                log.warn("NextN/MTP setup failed ({s}); serving with ordinary decode", .{@errorName(err)});
-                break :blk false;
-            }),
-            .gemma => false,
+        const capability: MtpCapability = if (nslots != 1)
+            .{ .unavailable_reason = "MTP currently requires exactly one request slot." }
+        else switch (fwd) {
+            .gemma => .{ .unavailable_reason = "This model architecture does not expose the supported NextN/MTP layer." },
+            .qwen => |q| blk: {
+                if (q.mtpUnavailableReason()) |reason| break :blk .{ .unavailable_reason = reason };
+                const default_enabled = q.mtpDefaultEnabled();
+                const previous = q.setMtpExecutionOverride(true);
+                defer _ = q.setMtpExecutionOverride(previous);
+                const prepared = q.mtpPrepare() catch |err| {
+                    log.warn("NextN/MTP setup failed ({s}); ordinary decode remains available", .{@errorName(err)});
+                    break :blk .{ .unavailable_reason = "MTP context preparation failed; ordinary decoding remains available." };
+                };
+                if (!prepared) break :blk .{ .unavailable_reason = "MTP context preparation did not produce a usable draft context." };
+                break :blk .{ .supports_mtp = true, .default_enabled = default_enabled, .unavailable_reason = "" };
+            },
         };
-        log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}, eot={?d}, mtp={}", .{ nslots, slot_ctx, eos, eot, mtp_single });
-        return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos, .eot = eot, .mtp_single = mtp_single };
+        log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}, eot={?d}, mtp_supported={}, mtp_default={}", .{
+            nslots, slot_ctx, eos, eot, capability.supports_mtp, capability.default_enabled,
+        });
+        return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos, .eot = eot, .slot_ctx = slot_ctx, .mtp_capability = capability };
+    }
+
+    pub fn mtpCapability(self: *const ServeEngine) MtpCapability {
+        return self.mtp_capability;
     }
 
     pub fn deinit(self: *ServeEngine) void {
@@ -246,12 +262,32 @@ pub const ServeEngine = struct {
     /// (the `Request` borrows the slice), and call `finish(id)` afterward.
     /// @returns the request id (used to wait/finish).
     pub fn submit(self: *ServeEngine, prompt_tokens: []const u32, max_tokens: u32, chan: *ReqChannel) !u64 {
+        return self.submitWithOptions(prompt_tokens, max_tokens, chan, .{});
+    }
+
+    pub fn submitWithOptions(self: *ServeEngine, prompt_tokens: []const u32, max_tokens: u32, chan: *ReqChannel, options: SubmitOptions) !u64 {
+        const enabled = try mtp_policy.resolveRequest(self.mtp_capability, options.enable_mtp);
+        if (prompt_tokens.len == 0) return error.EmptyPrompt;
+        if (prompt_tokens.len >= self.slot_ctx) return error.ContextTooSmall;
+        if (max_tokens == 0) return error.InvalidMaxTokens;
+        const token_budget = @min(max_tokens, self.slot_ctx - @as(u32, @intCast(prompt_tokens.len)));
         self.mutex.lock();
         defer self.mutex.unlock();
-        const id = try self.sched.enqueue(prompt_tokens, .{ .max_tokens = max_tokens });
-        try self.registry.put(self.allocator, id, chan);
-        self.cond.broadcast(); // wake the worker if idle
+        // Reserve registry space before enqueueing, so an allocation failure
+        // cannot leave a queued request borrowing a handler's destroyed channel.
+        try self.registry.ensureUnusedCapacity(self.allocator, 1);
+        const id = try self.sched.enqueue(prompt_tokens, .{ .max_tokens = token_budget });
+        chan.mtp = .{ .requested = options.enable_mtp, .enabled = enabled };
+        self.registry.putAssumeCapacity(id, chan);
+        self.cond.broadcast();
         return id;
+    }
+
+    pub fn cancel(self: *ServeEngine, chan: *ReqChannel) void {
+        self.mutex.lock();
+        chan.cancelled = true;
+        self.mutex.unlock();
+        self.cond.broadcast();
     }
 
     /// Block until fresh tokens are available for `chan` or it finishes, then copy
@@ -284,12 +320,6 @@ pub const ServeEngine = struct {
         _ = self.registry.remove(id);
         self.mutex.unlock();
         chan.tokens.deinit(self.allocator);
-    }
-
-    pub fn cancel(self: *ServeEngine, id: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.registry.get(id)) |chan| chan.cancelled = true;
     }
 
     pub fn executionFailed(self: *const ServeEngine) bool {
@@ -336,12 +366,42 @@ pub const ServeEngine = struct {
     }
 
     fn recordDecodeTiming(self: *ServeEngine, id: u64, wall_ns: u64) void {
+        self.recordDecodeTimingCount(id, 1, wall_ns);
+    }
+
+    fn recordDecodeTimingCount(self: *ServeEngine, id: u64, tokens: u64, wall_ns: u64) void {
         self.mutex.lock();
         if (self.registry.get(id)) |chan| {
-            chan.decode_tokens += 1;
+            chan.decode_tokens += tokens;
             chan.decode_wall_ns += wall_ns;
         }
         self.mutex.unlock();
+    }
+
+    fn requestMtpResult(self: *ServeEngine, id: u64) MtpResult {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return if (self.registry.get(id)) |chan| chan.mtp else .{};
+    }
+
+    fn recordMtpResult(self: *ServeEngine, id: u64, result: MtpResult) void {
+        self.mutex.lock();
+        if (self.registry.get(id)) |chan| chan.mtp = result;
+        self.mutex.unlock();
+    }
+
+    fn requestCancelled(self: *ServeEngine, id: u64) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return if (self.registry.get(id)) |chan| chan.cancelled else true;
+    }
+
+    fn publishChecked(self: *ServeEngine, id: u64, token: u32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const chan = self.registry.get(id) orelse return error.RequestGone;
+        try chan.tokens.append(self.allocator, token);
+        self.cond.broadcast();
     }
 
     /// Mark a request finished (worker-only): flip its channel `done`, free the slot.
@@ -369,140 +429,123 @@ pub const ServeEngine = struct {
     }
 
     fn requestShouldStop(self: *ServeEngine, req: anytype) bool {
-        self.mutex.lock();
-        const cancelled = if (self.registry.get(req.id)) |chan| chan.cancelled else false;
-        self.mutex.unlock();
-        if (cancelled) return true;
+        if (self.requestCancelled(req.id)) return true;
         if (req.shouldStop(self.eos)) return true;
         const eot = self.eot orelse return false;
         if (req.generated_tokens.items.len == 0) return false;
         return req.generated_tokens.items[req.generated_tokens.items.len - 1] == eot;
     }
 
-    /// Run one request end to end on the single-sequence path with NextN/MTP
-    /// self-speculation, publishing tokens as they are committed.
-    ///
-    /// The batched loop cannot host this: `mtpCycle` drafts into the
-    /// single-sequence KV and rolls it back on a rejected draft, so it needs the
-    /// whole sequence to itself. With one slot that is exactly what a request
-    /// has. Every published token is a target-model output — drafts are only
-    /// kept where this target path agreed. Single-sequence and slot paths can
-    /// use different numerical kernels; exact output equivalence needs its own
-    /// control rather than following from draft acceptance alone.
-    ///
-    /// @returns false when MTP was unavailable for this request, so the caller
-    /// falls back to the ordinary slot path.
+    /// MTP owns the single-sequence KV while ordinary requests use slot KV.
+    /// Reset and prefill the corresponding state at every request boundary.
+    /// Every metadata update completes before finishSlot/failSlot wakes a reader.
     fn runMtpRequest(self: *ServeEngine, slot_id: u32, timer_opt: *?host_io.Timer) bool {
         const q = switch (self.fwd) {
             .qwen => |ptr| ptr,
             .gemma => return false,
         };
         const req = &self.sched.slots[slot_id].?;
-        const np = req.prompt_tokens.len;
-        if (np == 0) return false;
-
-        // The previous request left recurrent state behind; the KV is overwritten
-        // from position 0 by this prefill.
+        const id = req.id;
+        var result = self.requestMtpResult(id);
+        if (!result.enabled) return false;
+        const previous = q.setMtpExecutionOverride(true);
+        defer _ = q.setMtpExecutionOverride(previous);
         q.resetState() catch |err| {
-            log.err("request {d} state reset failed: {s}", .{ req.id, @errorName(err) });
-            return false;
+            log.err("request {d} MTP state reset failed: {s}", .{ id, @errorName(err) });
+            result.fallback_reason = "MTP state reset failed.";
+            self.recordMtpResult(id, result);
+            self.failSlot(slot_id);
+            return true;
         };
-
         const pf_t0 = if (timer_opt.*) |*tm| tm.read() else 0;
-        var next_tok = q.prefillBatched(req.prompt_tokens) catch |err| {
+        const seed = q.prefillBatched(req.prompt_tokens) catch |err| {
             self.fwd.checkExecution() catch {
+                result.fallback_reason = "GPU execution failed during MTP prefill.";
+                self.recordMtpResult(id, result);
                 self.failSlot(slot_id);
                 return true;
             };
-            log.warn("request {d} batched prefill failed ({s}); using the slot path", .{ req.id, @errorName(err) });
+            log.warn("request {d} MTP prefill failed ({s}); using ordinary slot decoding", .{ id, @errorName(err) });
+            result.fallback_reason = "MTP prefill failed; used ordinary decoding.";
+            self.recordMtpResult(id, result);
             return false;
         };
-        const computed_tokens = self.fwd.computedPrefillTokens(np);
+        const primed = q.mtpPrime(req.prompt_tokens) catch |err| blk: {
+            self.fwd.checkExecution() catch {
+                result.fallback_reason = "GPU execution failed during MTP priming.";
+                self.recordMtpResult(id, result);
+                self.failSlot(slot_id);
+                return true;
+            };
+            log.warn("request {d} MTP priming failed ({s}); using ordinary slot decoding", .{ id, @errorName(err) });
+            break :blk false;
+        };
+        if (!primed) {
+            result.fallback_reason = "MTP priming failed; used ordinary decoding.";
+            self.recordMtpResult(id, result);
+            return false;
+        }
         if (timer_opt.*) |*tm| {
             const elapsed = tm.read() - pf_t0;
             _ = self.prefill_wall_ns.fetchAdd(elapsed, .monotonic);
+            const computed_tokens = self.fwd.computedPrefillTokens(req.prompt_tokens.len);
             _ = self.prefill_tokens.fetchAdd(computed_tokens, .monotonic);
-            self.recordPrefillTiming(req.id, computed_tokens, elapsed);
+            self.recordPrefillTiming(id, computed_tokens, elapsed);
         }
-
-        // Priming reads the prompt rows the batched prefill just produced, so it
-        // has to happen before any decode step overwrites them.
-        const primed = q.mtpPrime(req.prompt_tokens) catch |err| blk: {
-            self.fwd.checkExecution() catch {
-                self.failSlot(slot_id);
-                return true;
-            };
-            log.warn("request {d} NextN/MTP priming failed ({s}); ordinary decode", .{ req.id, @errorName(err) });
-            break :blk false;
-        };
-        if (!primed) return false;
-
         req.transition(.decoding) catch {};
-        var pos: u32 = @intCast(np);
-        var drafted: u32 = 0;
-        var accepted: u32 = 0;
-        var cycles: u32 = 0;
-        // Every exit below is a finished request, including the ones that end
-        // inside emitToken, so report acceptance from a defer rather than the
-        // one path that falls out of the loop.
-        defer if (drafted > 0) logMtpAcceptance(drafted, accepted, cycles);
-
-        // Emit the prefill's token, then let each cycle commit it and hand back
-        // the next one.
-        if (!self.emitToken(slot_id, next_tok, timer_opt)) return true;
-
-        while (true) {
-            const req_now = &self.sched.slots[slot_id].?;
-            const room = req_now.params.max_tokens -| @as(u32, @intCast(req_now.generated_tokens.items.len));
-            if (room == 0) break;
-            const max_drafts = @min(mtp_serve_max_drafts, room);
-            const dec_t0 = if (timer_opt.*) |*tm| tm.read() else 0;
-            const result = q.mtpCycle(next_tok, pos, max_drafts, self.eos) catch |err| {
-                log.err("request {d} NextN/MTP cycle failed: {s}", .{ req_now.id, @errorName(err) });
-                self.failSlot(slot_id);
-                return true;
-            };
-            if (timer_opt.*) |*tm| {
-                const elapsed = tm.read() - dec_t0;
-                _ = self.decode_wall_ns.fetchAdd(elapsed, .monotonic);
-                _ = self.decode_tokens.fetchAdd(1 + result.n_accepted, .monotonic);
-                _ = self.decode_steps.fetchAdd(1, .monotonic);
-                self.recordDecodeTiming(req_now.id, elapsed);
-            }
-            cycles += 1;
-            drafted += result.n_drafted;
-            accepted += result.n_accepted;
-            // The cycle committed the seed plus every accepted draft.
-            pos += 1 + result.n_accepted;
-
-            var i: u32 = 0;
-            while (i < result.n_accepted) : (i += 1) {
-                if (!self.emitToken(slot_id, result.drafts[i], timer_opt)) return true;
-            }
-            next_tok = result.next_token;
-            if (!self.emitToken(slot_id, next_tok, timer_opt)) return true;
-        }
-
+        var context = MtpDecodeContext{ .engine = self, .q = q, .slot_id = slot_id, .timer = timer_opt };
+        mtp_policy.runDecode(&context, .{
+            .max_tokens = req.params.max_tokens,
+            .initial_position = @intCast(req.prompt_tokens.len),
+            .max_context = @min(self.slot_ctx, q.max_ctx),
+            .eos = self.eos,
+            .eot = self.eot,
+        }, seed, &result) catch |err| {
+            log.err("request {d} MTP decoding failed: {s}", .{ id, @errorName(err) });
+            result.fallback_reason = "MTP decoding failed after generation began.";
+            self.recordMtpResult(id, result);
+            self.failSlot(slot_id);
+            return true;
+        };
+        self.recordMtpResult(id, result);
+        if (result.cycles > 0) logMtpAcceptance(result.drafted, result.accepted, result.cycles);
         self.finishSlot(slot_id);
         return true;
     }
 
-    /// Append + publish one token. Returns false once the request is complete
-    /// (stop token or budget), having released the slot.
-    fn emitToken(self: *ServeEngine, slot_id: u32, token: u32, timer_opt: *?host_io.Timer) bool {
-        _ = timer_opt;
-        const req = &self.sched.slots[slot_id].?;
-        req.appendToken(token) catch {
-            self.failSlot(slot_id);
-            return false;
-        };
-        self.publish(req.id, token);
-        if (self.requestShouldStop(req)) {
-            self.finishSlot(slot_id);
-            return false;
+    const MtpDecodeContext = struct {
+        engine: *ServeEngine,
+        q: *forwardcuda.ForwardCuda,
+        slot_id: u32,
+        timer: *?host_io.Timer,
+
+        pub fn isCancelled(self: *@This()) bool {
+            return self.engine.requestCancelled(self.engine.sched.slots[self.slot_id].?.id);
         }
-        return true;
-    }
+
+        pub fn cycle(self: *@This(), seed: u32, pos: u32, budget: u32, eos: u32) !forwardcuda.MtpCycleResult {
+            const cycle_start = if (self.timer.*) |*tm| tm.read() else 0;
+            const result = try self.q.mtpCycle(seed, pos, budget, eos);
+            _ = self.engine.decode_steps.fetchAdd(1, .monotonic);
+            if (self.timer.*) |*tm| {
+                const elapsed = tm.read() - cycle_start;
+                _ = self.engine.decode_wall_ns.fetchAdd(elapsed, .monotonic);
+                self.engine.recordDecodeTimingCount(self.engine.sched.slots[self.slot_id].?.id, 0, elapsed);
+            }
+            if (self.engine.peak_batch.load(.monotonic) < 1) self.engine.peak_batch.store(1, .monotonic);
+            return result;
+        }
+
+        pub fn emit(self: *@This(), token: u32, is_decode: bool) !void {
+            const req = &self.engine.sched.slots[self.slot_id].?;
+            try req.appendToken(token);
+            try self.engine.publishChecked(req.id, token);
+            if (is_decode) {
+                _ = self.engine.decode_tokens.fetchAdd(1, .monotonic);
+                self.engine.recordDecodeTimingCount(req.id, 1, 0);
+            }
+        }
+    };
 
     fn workerLoop(self: *ServeEngine) void {
         const fwd = self.fwd;
@@ -538,11 +581,12 @@ pub const ServeEngine = struct {
             for (prefill_buf[0..npf]) |slot_id| {
                 const req = &self.sched.slots[slot_id].?;
                 const np = req.prompt_tokens.len;
+                if (self.requestCancelled(req.id)) {
+                    self.finishSlot(slot_id);
+                    continue;
+                }
+                if (self.runMtpRequest(slot_id, &timer_opt)) continue;
                 const pf_t0 = if (timer_opt) |*tm| tm.read() else 0;
-                // One slot and a NextN block: run the whole request on the
-                // single-sequence path so it can self-speculate (~1.8x decode).
-                // Falls through to the slot path when that is unavailable.
-                if (self.mtp_single and self.runMtpRequest(slot_id, &timer_opt)) continue;
                 // Clear any accumulated state from this slot's previous request
                 // BEFORE prefilling the new one from pos=0 (qwen SSM recurrent state;
                 // no-op for gemma). Slots are reused when nslots < concurrent clients.
@@ -631,16 +675,22 @@ pub const ServeEngine = struct {
             // DECODE one batched step over the whole running batch (mixed
             // positions/slots) — the amortization win: weights read once for all B.
             const dec = self.sched.activeDecoding();
-            const ndec = dec.len;
-            if (ndec > 0) {
-                @memcpy(dec_buf[0..ndec], dec);
-                for (dec_buf[0..ndec], 0..) |slot_id, i| {
-                    const req = &self.sched.slots[slot_id].?;
-                    const gen_n = req.generated_tokens.items.len;
-                    tks[i] = req.generated_tokens.items[gen_n - 1];
-                    pss[i] = @intCast(req.prompt_tokens.len + gen_n - 1);
-                    sls[i] = slot_id;
+            @memcpy(dec_buf[0..dec.len], dec);
+            var ndec: usize = 0;
+            for (dec_buf[0..dec.len]) |slot_id| {
+                const req = &self.sched.slots[slot_id].?;
+                if (self.requestCancelled(req.id)) {
+                    self.finishSlot(slot_id);
+                    continue;
                 }
+                const gen_n = req.generated_tokens.items.len;
+                tks[ndec] = req.generated_tokens.items[gen_n - 1];
+                pss[ndec] = @intCast(req.prompt_tokens.len + gen_n - 1);
+                sls[ndec] = slot_id;
+                dec_buf[ndec] = slot_id;
+                ndec += 1;
+            }
+            if (ndec > 0) {
                 const dec_t0 = if (timer_opt) |*tm| tm.read() else 0;
                 fwd.decodeBatch(tks[0..ndec], pss[0..ndec], sls[0..ndec], out[0..ndec]) catch |err| {
                     log.err("batched decode failed for {d} active request(s): {s}", .{ ndec, @errorName(err) });

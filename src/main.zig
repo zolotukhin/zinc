@@ -168,6 +168,7 @@ comptime {
     _ = @import("compute/bounded_prefill.zig");
     _ = @import("server/http.zig");
     _ = @import("server/runtime.zig");
+    if (builtin.is_test) _ = @import("server/mtp_policy_test.zig");
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
@@ -2135,6 +2136,7 @@ const ServeReqBody = struct {
     /// Expose model reasoning in a `<think>` envelope when the template has a
     /// structured internal channel (including Muse Glimmer's ATEM protocol).
     enable_thinking: ?bool = null,
+    enable_mtp: ?bool = null,
 
     fn tokenLimit(self: ServeReqBody, is_chat: bool, default: u32) !u32 {
         // Match the shared chat parser's modern alias without changing raw
@@ -2150,6 +2152,274 @@ const ServeReqBody = struct {
         return self.max_tokens orelse self.n_predict orelse default;
     }
 };
+
+/// The native worker supports explicit off independently of model capability:
+/// false and null are valid; true requires initialized NextN state.
+fn serveMtpRequestError(enabled: ?bool, capability: anytype) ?[]const u8 {
+    if ((enabled orelse false) and !capability.supports_mtp) return capability.unavailable_reason;
+    return null;
+}
+
+fn buildCudaServeHealthJson(allocator: std.mem.Allocator, model_path: ?[]const u8, context_length: u32, capability: anytype) ![]u8 {
+    const value = try capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), model_path, context_length);
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .status = "ok",
+        .schema_version = value.schema_version,
+        .build = value.build,
+        .backend = value.backend,
+        .model = value.active_model orelse "",
+        .active_model = value.active_model,
+        .context_length = value.context_length,
+        .capabilities = value.capabilities,
+        .supports_mtp = capability.supports_mtp,
+        .mtp_default_enabled = capability.default_enabled,
+        .mtp_request_control = true,
+        .mtp_unavailable_reason = capability.unavailable_reason,
+    }, .{});
+}
+
+fn buildCudaServeModelsJson(allocator: std.mem.Allocator, model_path: ?[]const u8, context_length: u32, supports_thinking: bool, capability: anytype) ![]u8 {
+    const path = model_path orelse "zinc";
+    const entry = catalog_mod.findForLoadedModel(null, path, "");
+    return model_discovery_mod.serializeChatModel(allocator, path, context_length, .{
+        .display_name = if (entry) |e| e.display_name else null,
+        .homepage_url = if (entry) |e| e.homepage_url else null,
+        .supports_thinking_toggle = supports_thinking,
+        .mtp = .{ .supports_mtp = capability.supports_mtp, .default_enabled = capability.default_enabled, .unavailable_reason = capability.unavailable_reason },
+    });
+}
+
+const ServeUsage = struct {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+};
+
+const ServeTimings = struct {
+    prompt_n: usize,
+    prompt_ms: f64,
+    prompt_per_second: f64,
+    predicted_n: usize,
+    predicted_ms: f64,
+    predicted_per_second: f64,
+};
+
+fn cudaServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u64, decode_ns: u64) ServeTimings {
+    return .{
+        .prompt_n = prompt_tokens,
+        .prompt_ms = @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0,
+        .prompt_per_second = if (prefill_ns == 0) 0 else @as(f64, @floatFromInt(prompt_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns)),
+        .predicted_n = generated_tokens,
+        .predicted_ms = @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0,
+        .predicted_per_second = if (decode_ns == 0) 0 else @as(f64, @floatFromInt(generated_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns)),
+    };
+}
+
+fn cudaServeFinishReason(generated_tokens: usize, max_tokens: u32, last_token: ?u32, eos: u32, eot: ?u32) []const u8 {
+    if (last_token) |token| {
+        if (token == eos or (eot != null and token == eot.?)) return "stop";
+    }
+    return if (generated_tokens >= @as(usize, max_tokens)) "length" else "stop";
+}
+
+fn buildCudaServeFinishJson(allocator: std.mem.Allocator, is_chat: bool, finish_reason: []const u8, mtp: anytype, usage: ServeUsage, timings: ServeTimings) ![]u8 {
+    if (is_chat) {
+        const Choice = struct { index: u32 = 0, delta: struct {} = .{}, finish_reason: []const u8 };
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .id = "chatcmpl-zinc",
+            .created = 0,
+            .model = "zinc",
+            .object = "chat.completion.chunk",
+            .choices = [_]Choice{.{ .finish_reason = finish_reason }},
+            .mtp = mtp,
+            .usage = usage,
+            .timings = timings,
+        }, .{});
+    }
+    const Choice = struct { index: u32 = 0, text: []const u8 = "", finish_reason: []const u8 };
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .id = "cmpl-zinc",
+        .created = 0,
+        .model = "zinc",
+        .object = "text_completion",
+        .choices = [_]Choice{.{ .finish_reason = finish_reason }},
+        .mtp = mtp,
+        .usage = usage,
+        .timings = timings,
+    }, .{});
+}
+
+fn buildCudaServeResponseJson(allocator: std.mem.Allocator, is_chat: bool, content: []const u8, finish_reason: []const u8, mtp: anytype, usage: ServeUsage, timings: ServeTimings) ![]u8 {
+    if (is_chat) {
+        const Message = struct { role: []const u8 = "assistant", content: []const u8 };
+        const Choice = struct { index: u32 = 0, message: Message, finish_reason: []const u8 };
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .id = "chatcmpl-zinc",
+            .created = 0,
+            .model = "zinc",
+            .object = "chat.completion",
+            .choices = [_]Choice{.{ .message = .{ .content = content }, .finish_reason = finish_reason }},
+            .usage = usage,
+            .mtp = mtp,
+            .timings = timings,
+        }, .{});
+    }
+    const Choice = struct { index: u32 = 0, text: []const u8, finish_reason: []const u8 };
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .id = "cmpl-zinc",
+        .created = 0,
+        .model = "zinc",
+        .object = "text_completion",
+        .choices = [_]Choice{.{ .text = content, .finish_reason = finish_reason }},
+        .usage = usage,
+        .mtp = mtp,
+        .timings = timings,
+    }, .{});
+}
+
+fn buildCudaServeErrorJson(allocator: std.mem.Allocator, message: []const u8, mtp: anytype) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .@"error" = .{ .type = "server_error", .message = message },
+        .mtp = mtp,
+    }, .{});
+}
+
+const TestServeMtpCapability = struct {
+    supports_mtp: bool,
+    default_enabled: bool,
+    unavailable_reason: []const u8,
+};
+
+test "MTP serving request validates explicit opt-in without disabling defaults" {
+    const unsupported = TestServeMtpCapability{ .supports_mtp = false, .default_enabled = false, .unavailable_reason = "This model has no NextN weights" };
+    try std.testing.expect(serveMtpRequestError(null, unsupported) == null);
+    try std.testing.expect(serveMtpRequestError(false, unsupported) == null);
+    const parsed = try std.json.parseFromSlice(ServeReqBody, std.testing.allocator, "{\"prompt\":\"hello\",\"enable_mtp\":true}", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(unsupported.unavailable_reason, serveMtpRequestError(parsed.value.enable_mtp, unsupported).?);
+    const supported = TestServeMtpCapability{ .supports_mtp = true, .default_enabled = true, .unavailable_reason = "" };
+    try std.testing.expect(serveMtpRequestError(true, supported) == null);
+    for ([_][]const u8{ "{\"prompt\":\"hello\"}", "{\"prompt\":\"hello\",\"enable_mtp\":null}" }) |body| {
+        const request = try std.json.parseFromSlice(ServeReqBody, std.testing.allocator, body, .{});
+        defer request.deinit();
+        try std.testing.expect(request.value.enable_mtp == null);
+    }
+}
+
+test "MTP serving health and model discovery report the same runtime capability" {
+    const allocator = std.testing.allocator;
+    for ([_]TestServeMtpCapability{
+        .{ .supports_mtp = true, .default_enabled = true, .unavailable_reason = "" },
+        .{ .supports_mtp = true, .default_enabled = false, .unavailable_reason = "" },
+        .{ .supports_mtp = false, .default_enabled = false, .unavailable_reason = "MTP requires one request slot" },
+    }) |capability| {
+        const health = try buildCudaServeHealthJson(allocator, "/fixtures/Qwen3.8-27B-Q4_K_M.gguf", 8192, capability);
+        defer allocator.free(health);
+        const models = try buildCudaServeModelsJson(allocator, "/fixtures/Qwen3.8-27B-Q4_K_M.gguf", 8192, true, capability);
+        defer allocator.free(models);
+        var parsed_health = try std.json.parseFromSlice(std.json.Value, allocator, health, .{});
+        defer parsed_health.deinit();
+        var parsed_models = try std.json.parseFromSlice(std.json.Value, allocator, models, .{});
+        defer parsed_models.deinit();
+        const model = parsed_models.value.object.get("data").?.array.items[0];
+        inline for (.{ "supports_mtp", "mtp_default_enabled", "mtp_request_control" }) |field| {
+            try std.testing.expectEqual(parsed_health.value.object.get(field).?.bool, model.object.get(field).?.bool);
+        }
+        try std.testing.expectEqual(capability.supports_mtp, model.object.get("supports_mtp").?.bool);
+        try std.testing.expectEqual(capability.default_enabled, model.object.get("mtp_default_enabled").?.bool);
+        try std.testing.expectEqualStrings(capability.unavailable_reason, model.object.get("mtp_unavailable_reason").?.string);
+        try std.testing.expect(model.object.get("active").?.bool);
+        try std.testing.expect(model.object.get("supports_thinking_toggle").?.bool);
+        // Keep the common discovery contract while adding MTP: the basename ID
+        // is also health's active_model and never reveals a parent directory.
+        try std.testing.expectEqualStrings("Qwen3.8-27B-Q4_K_M.gguf", model.object.get("id").?.string);
+        try std.testing.expectEqualStrings(model.object.get("id").?.string, parsed_health.value.object.get("active_model").?.string);
+        try std.testing.expectEqualStrings("zinc", model.object.get("owned_by").?.string);
+        try std.testing.expectEqual(@as(i64, 0), model.object.get("created").?.integer);
+        try std.testing.expectEqual(@as(i64, 1), parsed_health.value.object.get("schema_version").?.integer);
+        try std.testing.expect(parsed_health.value.object.get("build") != null);
+        try std.testing.expect(parsed_health.value.object.get("capabilities").?.object.get("browser_ui").?.bool == (capabilities_mod.currentBackend() != .cuda));
+        try std.testing.expect(std.mem.indexOf(u8, health, "/fixtures/") == null);
+        try std.testing.expect(std.mem.indexOf(u8, models, "/fixtures/") == null);
+    }
+}
+
+test "MTP terminal stream metadata preserves effective mode and actual fallback" {
+    const allocator = std.testing.allocator;
+    const result = .{ .requested = @as(?bool, null), .enabled = true, .used = false, .drafted = @as(u64, 0), .accepted = @as(u64, 0), .cycles = @as(u64, 0), .fallback_reason = @as(?[]const u8, "NextN priming failed") };
+    for ([_]bool{ true, false }) |is_chat| {
+        const usage = ServeUsage{ .prompt_tokens = 3, .completion_tokens = 2, .total_tokens = 5 };
+        const json = try buildCudaServeFinishJson(allocator, is_chat, "stop", result, usage, cudaServeTimings(3, 2, 30_000_000, 20_000_000));
+        defer allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(if (is_chat) "chatcmpl-zinc" else "cmpl-zinc", parsed.value.object.get("id").?.string);
+        try std.testing.expectEqualStrings("zinc", parsed.value.object.get("model").?.string);
+        try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("created").?.integer);
+        const mtp = parsed.value.object.get("mtp").?.object;
+        try std.testing.expect(mtp.get("requested").? == .null);
+        try std.testing.expect(mtp.get("enabled").?.bool);
+        try std.testing.expect(!mtp.get("used").?.bool);
+        try std.testing.expectEqualStrings("NextN priming failed", mtp.get("fallback_reason").?.string);
+        const choice = parsed.value.object.get("choices").?.array.items[0];
+        try std.testing.expectEqualStrings("stop", choice.object.get("finish_reason").?.string);
+        try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("usage").?.object.get("completion_tokens").?.integer);
+        const rate = parsed.value.object.get("timings").?.object.get("predicted_per_second").?;
+        try std.testing.expectApproxEqAbs(@as(f64, 100), switch (rate) {
+            .float => |value| value,
+            .integer => |value| @as(f64, @floatFromInt(value)),
+            else => return error.InvalidTimingNumber,
+        }, 0.001);
+    }
+}
+
+test "MTP serving response metadata describes emitted tokens and exact content" {
+    const allocator = std.testing.allocator;
+    const content = "Zig \"code\"\nline\t<&>";
+    const result = .{ .requested = @as(?bool, false), .enabled = false, .used = false, .drafted = @as(u64, 0), .accepted = @as(u64, 0), .cycles = @as(u64, 0), .fallback_reason = @as(?[]const u8, null) };
+    const usage = ServeUsage{ .prompt_tokens = 3, .completion_tokens = 2, .total_tokens = 5 };
+    for ([_]bool{ true, false }) |is_chat| {
+        const json = try buildCudaServeResponseJson(allocator, is_chat, content, "length", result, usage, cudaServeTimings(3, 2, 0, 0));
+        defer allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        const choice = parsed.value.object.get("choices").?.array.items[0].object;
+        const actual = if (is_chat) choice.get("message").?.object.get("content").?.string else choice.get("text").?.string;
+        try std.testing.expectEqualStrings(content, actual);
+        try std.testing.expect(!parsed.value.object.get("mtp").?.object.get("enabled").?.bool);
+        try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("usage").?.object.get("completion_tokens").?.integer);
+        const timings = parsed.value.object.get("timings").?.object;
+        try std.testing.expectEqual(@as(i64, 2), timings.get("predicted_n").?.integer);
+        const rate = timings.get("predicted_per_second").?;
+        try std.testing.expectEqual(@as(f64, 0), switch (rate) {
+            .float => |value| value,
+            .integer => |value| @as(f64, @floatFromInt(value)),
+            else => return error.InvalidTimingNumber,
+        });
+    }
+}
+
+test "MTP serving errors preserve execution status and explain fallback" {
+    const allocator = std.testing.allocator;
+    const result = .{ .requested = @as(?bool, true), .enabled = true, .used = false, .drafted = @as(u64, 0), .accepted = @as(u64, 0), .cycles = @as(u64, 0), .fallback_reason = @as(?[]const u8, "GPU execution failed") };
+    const json = try buildCudaServeErrorJson(allocator, "GPU generation failed", result);
+    defer allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("GPU generation failed", parsed.value.object.get("error").?.object.get("message").?.string);
+    try std.testing.expect(!parsed.value.object.get("mtp").?.object.get("used").?.bool);
+    try std.testing.expectEqualStrings("GPU execution failed", parsed.value.object.get("mtp").?.object.get("fallback_reason").?.string);
+}
+
+test "MTP serving stop tokens take precedence over an exact output budget" {
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(1, 1, 2, 2, null));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(4, 4, 10, 2, 10));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(5, 5, 2, 2, 10));
+    try std.testing.expectEqualStrings("length", cudaServeFinishReason(1, 1, 7, 2, 10));
+    try std.testing.expectEqualStrings("length", cudaServeFinishReason(4, 4, 7, 2, null));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(3, 4, 7, 2, null));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(0, 1, null, 2, null));
+}
 
 fn handleServeConn(ctx: *ServeConnCtx) void {
     defer ctx.allocator.destroy(ctx);
@@ -2173,17 +2443,11 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
             conn.sendError(503, "server_error", "GPU execution failed; restart the server") catch {};
             return;
         }
-        var health_buf: [4096]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&health_buf);
-        const value = capabilities_mod.nativeInfo(capabilities_mod.currentBackend(), ctx.model_path, ctx.slot_ctx) catch {
-            conn.sendError(500, "internal_error", "Failed to describe the loaded model") catch {};
+        const health = buildCudaServeHealthJson(ctx.allocator, ctx.model_path, ctx.slot_ctx, ctx.engine.mtpCapability()) catch {
+            conn.sendError(500, "internal_error", "Failed to describe runtime capability") catch {};
             return;
         };
-        capabilities_mod.writeHealth(value, &writer) catch {
-            conn.sendError(500, "internal_error", "Failed to serialize health") catch {};
-            return;
-        };
-        const health = writer.buffered();
+        defer ctx.allocator.free(health);
         conn.sendJson(200, health) catch {};
         return;
     }
@@ -2203,25 +2467,12 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
         return;
     }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/models")) {
-        if (ctx.model_path) |mp| {
-            const entry = catalog_mod.findForLoadedModel(null, mp, "");
-            const json = (if (comptime gpu.is_rocm)
-                model_discovery_mod.serializeChatModel(ctx.allocator, mp, ctx.slot_ctx, .{
-                    .display_name = if (entry) |e| e.display_name else null,
-                    .homepage_url = if (entry) |e| e.homepage_url else null,
-                    .supports_thinking_toggle = ctx.tokenizer.supportsThinkingToggle(),
-                })
-            else
-                model_discovery_mod.serializeModels(ctx.allocator, mp, ctx.slot_ctx)) catch |err| {
-                log.warn("Failed to serialize models: {s}", .{@errorName(err)});
-                conn.sendError(500, "internal_error", "failed to serialize models") catch {};
-                return;
-            };
-            defer ctx.allocator.free(json);
-            conn.sendJson(200, json) catch {};
-        } else {
-            conn.sendError(500, "internal_error", "no model loaded") catch {};
-        }
+        const json = buildCudaServeModelsJson(ctx.allocator, ctx.model_path, ctx.slot_ctx, ctx.tokenizer.supportsThinkingToggle(), ctx.engine.mtpCapability()) catch {
+            conn.sendError(500, "internal_error", "Failed to describe the loaded model") catch {};
+            return;
+        };
+        defer ctx.allocator.free(json);
+        conn.sendJson(200, json) catch {};
         return;
     }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/stats")) {
@@ -2250,6 +2501,10 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         return;
     };
     defer parsed.deinit();
+    if (serveMtpRequestError(parsed.value.enable_mtp, ctx.engine.mtpCapability())) |message| {
+        try conn.sendError(400, "invalid_request_error", message);
+        return;
+    }
     var max_tokens = parsed.value.tokenLimit(is_chat, ctx.default_max) catch {
         try conn.sendError(400, "invalid_request_error", "max_tokens and max_completion_tokens must agree when both are provided");
         return;
@@ -2268,6 +2523,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     defer if (forced_tool_name) |name| allocator.free(name);
     var forced_tool_first_arg: ?[]u8 = null;
     defer if (forced_tool_first_arg) |name| allocator.free(name);
+    const enable_mtp = parsed.value.enable_mtp;
 
     if (ctx.debug_ids) {
         // Gate contract: body is JSON {"prompt":"t0,t1,...","max_tokens":N}; the
@@ -2356,7 +2612,11 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
 
     // ── Submit + stream ──────────────────────────────────────────────────────
     var chan = cuda_serve_mod.ReqChannel{};
-    const id = ctx.engine.submit(prompt_tokens, max_tokens, &chan) catch {
+    const id = ctx.engine.submitWithOptions(prompt_tokens, max_tokens, &chan, .{ .enable_mtp = enable_mtp }) catch |err| {
+        if (err == error.MtpUnavailable) {
+            try conn.sendError(400, "invalid_request_error", ctx.engine.mtpCapability().unavailable_reason);
+            return;
+        }
         try conn.sendError(500, "server_error", "enqueue failed");
         return;
     };
@@ -2367,7 +2627,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     if (stream_response) {
         conn.sendSseStart() catch {
             // Client gone before headers — still drain the engine so it frees the slot.
-            ctx.engine.cancel(id);
+            ctx.engine.cancel(&chan);
             drainQuietly(ctx.engine, &chan);
             return;
         };
@@ -2387,6 +2647,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var write_failed = false;
     var generation_failed = false;
     var ended_on_eog = false;
+    var last_generated_token: ?u32 = null;
     var detector = tool_format_mod.StreamingDetector{ .allocator = allocator, .tools = tool_definitions, .native_gemma = tool_format_mod.forTokenizer(ctx.tokenizer).native_gemma };
     defer detector.deinit();
     var any_tool_call_emitted = false;
@@ -2395,6 +2656,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var last_tool_keepalive_ns = host_io.nanoTimestamp();
     while (true) {
         const ch = ctx.engine.nextChunk(&chan, &buf);
+        if (ch.n > 0) last_generated_token = buf[ch.n - 1];
         generation_failed = generation_failed or ch.failed;
         // A tool call may buffer thousands of tokens before its closing tag.
         // Keep the stream live and detect a disconnected client while waiting.
@@ -2404,7 +2666,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 write_failed = true;
                 // The worker borrows chan/prompt_tokens until finished: cancel
                 // immediately, then keep draining rather than returning early.
-                ctx.engine.cancel(id);
+                ctx.engine.cancel(&chan);
             };
             last_tool_keepalive_ns = now_ns;
         }
@@ -2489,24 +2751,30 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 stream_pending.shrinkRetainingCapacity(remaining);
             }
         }
-        if (write_failed) ctx.engine.cancel(id);
+        if (write_failed) ctx.engine.cancel(&chan);
         if (ch.finished) break;
     }
     const generated_tokens = chan.consumed;
+    const finish_reason = if (ended_on_eog) "stop" else cudaServeFinishReason(generated_tokens, max_tokens, last_generated_token, ctx.engine.eos, ctx.engine.eot);
+    const usage = ServeUsage{ .prompt_tokens = prompt_tokens.len, .completion_tokens = generated_tokens, .total_tokens = prompt_tokens.len + generated_tokens };
+    // Usage counts the canonical prompt; timing counts only rows actually
+    // computed, preserving prompt-cache benchmark semantics.
+    const timings = cudaServeTimings(@intCast(chan.prefill_tokens), generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
     logServeTimings(@intCast(chan.prefill_tokens), generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
     if (generation_failed) {
         log.warn("request {d} failed during GPU generation", .{id});
+        const metadata = try buildCudaServeErrorJson(allocator, "GPU generation failed", chan.mtp);
+        defer allocator.free(metadata);
         if (stream_response) {
             if (!write_failed) {
-                conn.writeSseEvent("{\"error\":{\"type\":\"server_error\",\"message\":\"GPU generation failed\"}}") catch {};
+                conn.writeSseEvent(metadata) catch {};
                 conn.writeSseDone() catch {};
             }
         } else {
-            try conn.sendError(500, "server_error", "GPU generation failed");
+            try conn.sendJson(500, metadata);
         }
         return;
     }
-    const finish_reason = @tagName(routes_mod.completionFinishReason(max_tokens, max_tokens, generated_tokens, ended_on_eog));
     if (stream_response) {
         if (!write_failed) {
             if (tools_active) {
@@ -2530,16 +2798,18 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             }
             // Agent clients need a terminal finish reason to decide whether to
             // execute tools or finish their turn. Include usage for compaction.
-            var finish_buf: [512]u8 = undefined;
             const reason: []const u8 = if (any_tool_call_emitted) "tool_calls" else finish_reason;
-            const finish = try std.fmt.bufPrint(&finish_buf, "{{\"id\":\"chatcmpl-zinc\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"zinc\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}", .{ reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens });
-            try conn.writeSseEvent(finish);
+            const finish = try buildCudaServeFinishJson(allocator, is_chat, reason, chan.mtp, usage, timings);
+            defer allocator.free(finish);
+            if (!ctx.debug_ids) try conn.writeSseEvent(finish);
             try conn.writeSseDone();
         }
         return;
     }
     if (write_failed) {
-        try conn.sendError(500, "server_error", "response buffering failed");
+        const metadata = try buildCudaServeErrorJson(allocator, "response buffering failed", chan.mtp);
+        defer allocator.free(metadata);
+        try conn.sendJson(500, metadata);
         return;
     }
 
@@ -2551,10 +2821,9 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         try conn.sendError(500, "server_error", "model returned invalid UTF-8");
         return;
     }
-    var escaped = try jsonEscapeAlloc(allocator, response_output);
-    defer allocator.free(escaped);
-    var response: std.ArrayList(u8) = .empty;
-    defer response.deinit(allocator);
+    var response_content = response_output;
+    var fallback_content: ?[]u8 = null;
+    defer if (fallback_content) |value| allocator.free(value);
     if (tools_active) {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -2572,32 +2841,22 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 .created = 0,
                 .model = "zinc",
                 .choices = .{.{ .index = 0, .message = .{ .role = "assistant", .content = @as(?[]const u8, null), .tool_calls = api_tools }, .finish_reason = "tool_calls" }},
-                .usage = .{ .prompt_tokens = prompt_tokens.len, .completion_tokens = generated_tokens, .total_tokens = prompt_tokens.len + generated_tokens },
+                .usage = usage,
+                .mtp = chan.mtp,
+                .timings = timings,
             }, .{});
             try conn.sendJson(200, json);
             return;
         }
         if (forced_tool_name != null) {
             // Failed prefilled calls remain the same sanitized text as SSE.
-            const fallback = try jsonEscapeAlloc(allocator, parsed_tools.text_content);
-            allocator.free(escaped);
-            escaped = fallback;
+            fallback_content = try allocator.dupe(u8, parsed_tools.text_content);
+            response_content = fallback_content.?;
         }
     }
-    if (is_chat) {
-        try response.print(
-            allocator,
-            "{{\"id\":\"chatcmpl-zinc\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{s}\"}},\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}",
-            .{ escaped, finish_reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens },
-        );
-    } else {
-        try response.print(
-            allocator,
-            "{{\"id\":\"cmpl-zinc\",\"object\":\"text_completion\",\"choices\":[{{\"index\":0,\"text\":\"{s}\",\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}",
-            .{ escaped, finish_reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens },
-        );
-    }
-    try conn.sendJson(200, response.items);
+    const response = try buildCudaServeResponseJson(allocator, is_chat, response_content, finish_reason, chan.mtp, usage, timings);
+    defer allocator.free(response);
+    try conn.sendJson(200, response);
 }
 
 fn logServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u64, decode_ns: u64) void {
@@ -2613,6 +2872,7 @@ fn logServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u6
 /// Drain a request's stream without writing (client disconnected) so the worker
 /// runs it to completion and frees the slot.
 fn drainQuietly(engine: *cuda_serve_mod.ServeEngine, chan: *cuda_serve_mod.ReqChannel) void {
+    engine.cancel(chan);
     var buf: [32]u32 = undefined;
     while (true) {
         const ch = engine.nextChunk(chan, &buf);

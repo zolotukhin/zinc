@@ -1,0 +1,530 @@
+import { expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+class Element {
+  value = '';
+  className = '';
+  disabled = false;
+  hidden = false;
+  open = false;
+  checked = false;
+  indeterminate = false;
+  title = '';
+  ariaLabel = '';
+  scrollTop = 0;
+  scrollHeight = 100;
+  clientHeight = 100;
+  style: Record<string, string> = {};
+  parentNode: Element | null = null;
+  children: Element[] = [];
+  listeners = new Map<string, Array<(event: any) => void>>();
+  htmlWrites = 0;
+  private text = '';
+  private html = '';
+  get parentElement() {
+    return this.parentNode;
+  }
+  classList = {
+    toggle() {},
+    add() {},
+    remove() {},
+  };
+  get textContent() {
+    return this.text;
+  }
+  set textContent(value: string) {
+    this.text = value;
+    this.children = [];
+  }
+  get innerHTML() {
+    return this.html;
+  }
+  set innerHTML(value: string) {
+    this.htmlWrites++;
+    this.html = value;
+    this.children = [];
+    if (value.includes('class="reasoning-summary"')) {
+      for (const name of ['reasoning-state', 'reasoning-body', 'stream-markdown']) {
+        const child = new Element();
+        child.className = name;
+        this.appendChild(child);
+      }
+    } else if (value.includes('class="av"')) {
+      for (const name of ['av', 'bbl']) {
+        const child = new Element();
+        child.className = name;
+        this.appendChild(child);
+      }
+    }
+  }
+  appendChild(child: Element) {
+    child.remove();
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  insertBefore(child: Element, reference: Element) {
+    child.remove();
+    child.parentNode = this;
+    this.children.splice(this.children.indexOf(reference), 0, child);
+    return child;
+  }
+  remove() {
+    if (this.parentNode)
+      this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+    this.parentNode = null;
+  }
+  querySelector(selector: string): Element | null {
+    for (const child of this.children) {
+      if (child.className.split(' ').includes(selector.slice(1))) return child;
+      const nested = child.querySelector(selector);
+      if (nested) return nested;
+    }
+    return null;
+  }
+  querySelectorAll() {
+    return [];
+  }
+  addEventListener(type: string, listener: (event: any) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) || []), listener]);
+  }
+  dispatch(type: string, event: any = {}) {
+    for (const listener of this.listeners.get(type) || []) listener.call(this, event);
+  }
+  focus() {}
+  insertAdjacentHTML(_position: string, html: string) {
+    this.html += html;
+  }
+}
+
+function harness(
+  fetchMock: (url: string, options?: any) => Promise<any> = async () => {
+    throw new Error('offline');
+  },
+) {
+  const source = readFileSync(resolve(import.meta.dir, '../src/server/chat.html'), 'utf8')
+    .match(/<script>([\s\S]*)<\/script>\s*<\/body>/)![1]
+    .replace(/init\(\);\s*setGenerating\(false\);\s*I\.focus\(\);/, '');
+  const elements = new Map<string, Element>();
+  const getElement = (id: string) => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id)!;
+  };
+  const timers = new Map<number, () => void>();
+  const timerDelays = new Map<number, number>();
+  const frames = new Map<number, () => void>();
+  let nextTimer = 1;
+  let writes = 0;
+  const factory = new Function(
+    'document',
+    'location',
+    'localStorage',
+    'window',
+    'setTimeout',
+    'clearTimeout',
+    'requestAnimationFrame',
+    'cancelAnimationFrame',
+    'fetch',
+    `${source}
+    return {md, send, clearConversation, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
+      setResetSupport(value){supportsChatSessionReset=value}, replaceSend(fn){send=fn}, replaceStop(fn){stopGeneration=fn}, setHistory(value){H=value}, setModels(value){models=value}, generating(){return isGenerating}, history(){return H}};`,
+  );
+  const api = factory(
+    { getElementById: getElement, createElement: () => new Element(), querySelectorAll: () => [] },
+    { origin: 'http://localhost:8080' },
+    { getItem: () => null, setItem: () => writes++ },
+    { addEventListener() {}, crypto: { randomUUID: () => 'chat-test' } },
+    (fn: () => void, delay: number) => {
+      const id = nextTimer++;
+      timers.set(id, fn);
+      timerDelays.set(id, delay);
+      return id;
+    },
+    (id: number) => {
+      timers.delete(id);
+      timerDelays.delete(id);
+    },
+    (fn: () => void) => {
+      const id = nextTimer++;
+      frames.set(id, fn);
+      return id;
+    },
+    (id: number) => frames.delete(id),
+    fetchMock,
+  );
+  return { api, getElement, timers, timerDelays, frames, writes: () => writes };
+}
+
+test('Enter preserves the next draft during generation and ignores IME composition', () => {
+  const { api, getElement } = harness();
+  const input = getElement('i');
+  let sent = 0,
+    stopped = 0,
+    prevented = 0;
+  api.replaceSend(() => sent++);
+  api.replaceStop(() => stopped++);
+  const key = (key: string, extra = {}) => ({ key, preventDefault: () => prevented++, ...extra });
+  input.value = 'Hello';
+  api.setGenerating(false);
+  input.dispatch('keydown', key('Enter', { isComposing: true }));
+  input.dispatch('keydown', key('Enter', { keyCode: 229 }));
+  expect(sent).toBe(0);
+  input.dispatch('keydown', key('Enter'));
+  expect(sent).toBe(1);
+  expect(prevented).toBe(1);
+  api.setGenerating(true);
+  input.dispatch('keydown', key('Enter'));
+  expect(sent).toBe(1);
+  expect(stopped).toBe(0);
+  expect(prevented).toBe(1);
+  input.dispatch('keydown', key('Escape'));
+  expect(stopped).toBe(1);
+});
+
+test('send readiness and accessible action reflect the composer state', () => {
+  const { api, getElement } = harness();
+  const input = getElement('i'),
+    button = getElement('b');
+  api.setGenerating(false);
+  expect(button.disabled).toBe(true);
+  input.value = '  ';
+  input.dispatch('input');
+  expect(button.disabled).toBe(true);
+  input.value = 'Hello';
+  input.dispatch('input');
+  expect(button.disabled).toBe(false);
+  expect(button.ariaLabel).toBe('Send message');
+  input.value = '';
+  api.setGenerating(true);
+  expect(button.disabled).toBe(false);
+  expect(button.ariaLabel).toBe('Stop generating');
+});
+
+test('typing coalesces draft persistence and final saves cancel pending writes', () => {
+  const { api, getElement, timers, writes } = harness();
+  const input = getElement('i');
+  input.value = 'H';
+  input.dispatch('input');
+  input.value = 'Hello';
+  input.dispatch('input');
+  expect(writes()).toBe(0);
+  expect(timers.size).toBe(1);
+  api.saveChatState();
+  expect(writes()).toBe(1);
+  expect(timers.size).toBe(0);
+});
+
+test('stream renders coalesce to one animation frame and flush uses the newest update', () => {
+  const { api, frames } = harness();
+  const rendered: number[] = [];
+  api.scheduleRender(() => rendered.push(1));
+  api.scheduleRender(() => rendered.push(2));
+  expect(frames.size).toBe(1);
+  expect(rendered).toEqual([]);
+  api.flushPendingRender();
+  expect(rendered).toEqual([2]);
+  expect(frames.size).toBe(0);
+});
+
+test("live Markdown retains containers and the reader's reasoning disclosure choice", () => {
+  const { api } = harness();
+  const bubble = new Element(),
+    cursor = new Element();
+  api.updateLiveAssistant(bubble, '<think>Compare the first result', true, cursor);
+  const details = bubble.querySelector('.reasoning-block')!;
+  const text = details.querySelector('.stream-markdown')!;
+  expect(details.open).toBe(true);
+  details.open = false;
+  api.updateLiveAssistant(
+    bubble,
+    '<think>Compare the first result and check its dimensions',
+    true,
+    cursor,
+  );
+  expect(bubble.querySelector('.reasoning-block')).toBe(details);
+  expect(details.querySelector('.stream-markdown')).toBe(text);
+  expect(text.querySelector('.markdown-tail')!.innerHTML).toContain('check its dimensions');
+  expect(details.open).toBe(false);
+  api.updateLiveAssistant(
+    bubble,
+    '<think>Compare the first result and check its dimensions</think>\nThe result is correct.',
+    false,
+    cursor,
+  );
+  expect(details.open).toBe(false);
+  const answer = bubble.children.find((child) => child.className === 'stream-markdown')!;
+  expect(answer.querySelector('.markdown-tail')!.innerHTML).toBe('<p>The result is correct.</p>');
+  api.updateLiveAssistant(
+    bubble,
+    '<think>Compare the first result and check its dimensions</think>\nThe result is correct. Here is why.',
+    false,
+    cursor,
+  );
+  expect(bubble.children.find((child) => child.className === 'stream-markdown')).toBe(answer);
+  expect(bubble.htmlWrites).toBe(0);
+});
+
+test('live Markdown formats headings and emphasis before completion', () => {
+  const { api } = harness();
+  const bubble = new Element();
+  api.updateLiveAssistant(
+    bubble,
+    '# Zig Programming Language\n\nZig is **simple, fast, safe**.',
+    false,
+  );
+  const answer = bubble.querySelector('.stream-markdown')!;
+  expect(answer.querySelector('.markdown-committed')!.innerHTML).toContain(
+    '<h1>Zig Programming Language</h1>',
+  );
+  expect(answer.querySelector('.markdown-tail')!.innerHTML).toContain(
+    '<strong>simple, fast, safe</strong>',
+  );
+});
+
+test('live Markdown leaves completed blocks unchanged while the formatted tail grows', () => {
+  const { api } = harness();
+  const element = new Element();
+  api.updateStreamMarkdown(element, '# Title\n\nFirst **paragraph**.\n\nSecond');
+  const first = element.children[0];
+  const writes = first.htmlWrites;
+  api.updateStreamMarkdown(element, '# Title\n\nFirst **paragraph**.\n\nSecond paragraph.');
+  expect(element.children[0]).toBe(first);
+  expect(first.htmlWrites).toBe(writes);
+  expect(element.querySelector('.markdown-tail')!.innerHTML).toContain('Second paragraph.');
+});
+
+test('live Markdown preserves blank-separated list items and fenced code as whole blocks', () => {
+  const { api } = harness();
+  const list = new Element();
+  api.updateStreamMarkdown(list, '1. First\n\n2. Second\n\n');
+  expect(list.children.length).toBe(1);
+  expect(list.children[0].innerHTML.match(/<ol>/g)?.length).toBe(1);
+  api.updateStreamMarkdown(list, '1. First\n\n2. Second\n\nNext paragraph.\n');
+  expect(list.children[0].className).toBe('markdown-committed');
+  expect(list.children[0].innerHTML).toContain('<li>Second</li>');
+  const code = new Element();
+  api.updateStreamMarkdown(code, '```zig\nconst a = 1;\n\nconst b = 2;');
+  expect(code.children.length).toBe(1);
+  expect(code.children[0].innerHTML).toContain('const b = 2;');
+  expect(code.children[0].innerHTML).toContain('code-block');
+  api.updateStreamMarkdown(code, '```zig\nconst a = 1;\n\nconst b = 2;\n```\nNext line');
+  expect(code.children[0].className).toBe('markdown-committed');
+  expect(code.children[0].innerHTML).toContain('Copy</button>');
+});
+
+test('streaming through individual character chunks matches completed Markdown', () => {
+  const { api } = harness();
+  for (const source of [
+    '# Zig Programming Language\n\nZig is **simple, fast, safe**.\n\n## Features\n\n- **Fast** compilation\n\n- No hidden allocations\n\n| Feature | Status |\n| --- | --- |\n| Native | Yes |\n\n> A useful **quote**\n> with a second line\n\n```zig\nconst n = 1;\n\nconst x = 2;\n```\n\nDone.\n',
+    'Paragraph\n```c++\nint main() {}\n```\n## Heading\nBody.\n',
+    '1. First item\n\n   continuation\n\n2. Second item\n\nA new paragraph.\n',
+    'A | B\n--- | ---\n> quote | data\n- item | data\n# heading | data\na | b\n',
+  ]) {
+    const element = new Element();
+    for (let end = 1; end <= source.length; end++)
+      api.updateStreamMarkdown(element, source.slice(0, end));
+    expect(element.children.map((child) => child.innerHTML).join('')).toBe(api.md(source));
+  }
+});
+
+test('stream scrolling respects the reader and the latest button resumes following', () => {
+  const { api, getElement } = harness();
+  const messages = getElement('messages'),
+    jump = getElement('jump-latest');
+  api.setHistory([{ role: 'user', content: 'Hello' }]);
+  messages.scrollHeight = 1000;
+  messages.clientHeight = 400;
+  messages.scrollTop = 200;
+  messages.dispatch('scroll');
+  api.autoScroll();
+  expect(messages.scrollTop).toBe(200);
+  expect(jump.hidden).toBe(false);
+  jump.dispatch('click');
+  expect(messages.scrollTop).toBe(1000);
+  expect(jump.hidden).toBe(true);
+});
+
+test('MTP stays visible with an explanation and cannot activate on an unsupported engine', () => {
+  const { api, getElement } = harness();
+  api.setModels([
+    {
+      id: 'rdna-model',
+      active: true,
+      supports_mtp: false,
+      mtp_unavailable_reason: 'Unavailable in this runtime',
+    },
+  ]);
+  getElement('mtp').checked = true;
+  getElement('mtp').dispatch('change');
+  expect(api.mtpEnabledForRequest()).toBe(false);
+  expect(getElement('mtp-control').hidden).toBe(false);
+  expect(getElement('mtp').disabled).toBe(true);
+  expect(getElement('mtp-label').textContent).toBe('MTP unavailable');
+  expect(getElement('mtp-control').title).toBe('Unavailable in this runtime');
+  expect(getElement('mtp-status').title).toBe('Unavailable in this runtime');
+});
+
+test('missing MTP metadata is unknown rather than unsupported', () => {
+  const { api, getElement } = harness();
+  api.setModels([{ id: 'qwen38-27b-q4k-m', active: true }]);
+  api.updateMtpUi();
+  expect(getElement('mtp-label').textContent).toBe('MTP status unreported');
+  expect(getElement('mtp').indeterminate).toBe(true);
+  expect(getElement('mtp-control').title).toContain('may enable MTP automatically');
+  expect(getElement('mtp-status').textContent).not.toContain('unavailable');
+});
+
+test('MTP opt-in routes to the engine only when capability is advertised', async () => {
+  let body: any;
+  const { api, getElement } = harness(async (_url, options) => {
+    body = JSON.parse(options.body);
+    return {
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"choices":[{"delta":{"content":"Ready."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+            ),
+          );
+          controller.close();
+        },
+      }),
+    };
+  });
+  api.setModels([
+    {
+      id: 'mtp-model',
+      active: true,
+      supports_mtp: true,
+      mtp_default_enabled: false,
+      mtp_request_control: true,
+    },
+  ]);
+  getElement('mtp').checked = true;
+  getElement('mtp').dispatch('change');
+  expect(getElement('mtp-control').hidden).toBe(false);
+  api.setGenerating(true);
+  expect(getElement('mtp').disabled).toBe(true);
+  api.setGenerating(false);
+  getElement('i').value = 'Hello';
+  await api.send();
+  expect(body.enable_mtp).toBe(true);
+  api.setModels([{ id: 'other-model', active: true, supports_mtp: false }]);
+  api.updateMtpUi();
+  expect(api.mtpEnabledForRequest()).toBe(false);
+  api.setModels([{ id: 'automatic-model', active: true }]);
+  api.updateMtpUi();
+  getElement('i').value = 'Use your engine defaults';
+  await api.send();
+  expect(body).not.toHaveProperty('enable_mtp');
+});
+
+test('final answer recovery stays locked and can be stopped without losing the next draft', async () => {
+  let markRecoveryStarted!: () => void;
+  const recoveryStarted = new Promise<void>((resolve) => {
+    markRecoveryStarted = resolve;
+  });
+  let recoverySignal: AbortSignal | undefined;
+  let requests = 0;
+  const { api, getElement } = harness(async (_url, options) => {
+    requests++;
+    if (requests === 1) {
+      const chunks =
+        [
+          {
+            choices: [
+              {
+                delta: {
+                  content:
+                    '<think>I need to compare the matrix dimensions.\nThen check whether the inner dimensions match before multiplying.',
+                },
+              },
+            ],
+          },
+          { choices: [{ delta: {}, finish_reason: 'length' }] },
+        ]
+          .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+          .join('') + 'data: [DONE]\n\n';
+      return new Response(chunks);
+    }
+    recoverySignal = options.signal;
+    markRecoveryStarted();
+    return new Promise((_resolve, reject) => {
+      recoverySignal!.addEventListener('abort', () =>
+        reject(new DOMException('Stopped', 'AbortError')),
+      );
+    });
+  });
+  api.setModels([{ id: 'test-model', active: true, supports_thinking_toggle: true }]);
+  const input = getElement('i');
+  input.value = 'Explain matrix multiplication';
+  api.setGenerating(false);
+  const turn = api.send();
+  await recoveryStarted;
+  expect(api.generating()).toBe(true);
+  expect(getElement('b').ariaLabel).toBe('Stop generating');
+  expect(getElement('cb').disabled).toBe(true);
+  input.value = 'My next question';
+  api.stopGeneration();
+  await turn;
+  expect(recoverySignal!.aborted).toBe(true);
+  expect(api.generating()).toBe(false);
+  expect(input.value).toBe('My next question');
+  expect(api.history().find((message: any) => message.role === 'assistant').incomplete).toBe(true);
+});
+
+test('new chat clears locally and only resets a server that advertises session reuse', async () => {
+  const requests: any[] = [];
+  const { api, getElement } = harness(async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return { ok: true };
+  });
+  api.setHistory([{ role: 'user', content: 'old conversation' }]);
+  api.clearConversation();
+  expect(api.history()).toEqual([]);
+  expect(getElement('i').value).toBe('');
+  expect(requests).toHaveLength(0);
+  api.setResetSupport(true);
+  api.clearConversation();
+  expect(requests).toHaveLength(1);
+  expect(requests[0].url).toEndWith('/v1/chat/reset');
+  expect(requests[0].body.session_id.length).toBeGreaterThan(0);
+});
+
+test('long prefill gets an initial deadline, streamed output gets a shorter idle limit, and Stop cancels both', async () => {
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  let signal!: AbortSignal;
+  const { api, getElement, timerDelays } = harness(async (_url, options) => {
+    signal = options.signal;
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          stream = controller;
+          signal.addEventListener('abort', () =>
+            controller.error(new DOMException('Stopped', 'AbortError')),
+          );
+        },
+      }),
+    );
+  });
+  api.setModels([{ id: 'native-model', active: true }]);
+  getElement('i').value = 'A long prompt';
+  const turn = api.send();
+  await Promise.resolve();
+  expect([...timerDelays.values()]).toContain(600000);
+  expect(api.generating()).toBe(true);
+  stream.enqueue(
+    new TextEncoder().encode('data: {"choices":[{"delta":{"content":"First token"}}]}\n\n'),
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  expect([...timerDelays.values()]).toContain(120000);
+  api.stopGeneration();
+  await turn;
+  expect(signal.aborted).toBe(true);
+  expect(api.generating()).toBe(false);
+  expect([...timerDelays.values()]).not.toContain(600000);
+  expect([...timerDelays.values()]).not.toContain(120000);
+});

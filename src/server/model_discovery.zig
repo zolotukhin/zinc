@@ -9,6 +9,7 @@ pub const ChatModel = struct {
     display_name: ?[]const u8 = null,
     homepage_url: ?[]const u8 = null,
     supports_thinking_toggle: bool = false,
+    mtp: @import("mtp_policy.zig").Capability = .{},
 };
 
 /// Describe the already-loaded native model to the shared browser UI. This is
@@ -30,6 +31,10 @@ pub fn serializeChatModel(allocator: std.mem.Allocator, model_path: []const u8, 
             .managed = false,
             .installed = true,
             .supports_thinking_toggle = options.supports_thinking_toggle,
+            .supports_mtp = options.mtp.supports_mtp,
+            .mtp_default_enabled = options.mtp.default_enabled,
+            .mtp_request_control = true,
+            .mtp_unavailable_reason = options.mtp.unavailable_reason,
         }},
     }, .{});
 }

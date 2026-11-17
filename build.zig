@@ -1120,6 +1120,26 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     run_unit_tests.setEnvironmentVariable("ZINC_RUN_GPU_TESTS", if (gpu_tests) "1" else "0");
 
+    // Queue policy is CPU-only even though it uses the CUDA-family engine's
+    // real submit/cancel code. The shim header supplies opaque C types; this
+    // test executable does not link or initialize a CUDA/ROCm runtime.
+    const mtp_queue_test_mod = createModule(b, .{
+        .root_source_file = b.path("src/mtp_engine_queue_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mtp_queue_test_mod.addOptions("build_options", build_options);
+    mtp_queue_test_mod.addIncludePath(b.path("src/cuda"));
+    addCudaBindings(b, target, mtp_queue_test_mod);
+    const mtp_queue_tests = addTest(b, .{
+        .name = "mtp-queue-cpu-tests",
+        .root_module = mtp_queue_test_mod,
+    });
+    const run_mtp_queue_tests = b.addRunArtifact(mtp_queue_tests);
+    const mtp_queue_step = b.step("test-mtp-queue", "Test MTP request queue propagation without a GPU");
+    mtp_queue_step.dependOn(&run_mtp_queue_tests.step);
+
     const zinc_rt_unit_tests = addTest(b, .{
         .name = "zinc-rt-ir-smoke",
         .root_module = zinc_rt_lib_mod,
@@ -1163,9 +1183,11 @@ pub fn build(b: *std.Build) void {
         b.addSystemCommand(&.{ bun_exe, "test" })
     else
         b.addSystemCommand(&.{
-            bun_exe,     "test",
-            "loops/",    "tools/",
-            "site/src/", "tests/chat_ui_markdown.test.ts",
+            bun_exe,                              "test",
+            "loops/",                             "tools/",
+            "site/src/",                          "tests/chat_ui_markdown.test.ts",
+            "tests/chat_ui_interactions.test.ts", "tests/chat_ui_models.test.ts",
+            "tests/chat_ui_highlighting.test.ts", "tests/mtp_ui_propagation.test.ts",
         });
     run_bun_tests.setCwd(b.path("."));
     addBunDirToPath(b, run_bun_tests, bun_exe);
@@ -1192,6 +1214,7 @@ pub fn build(b: *std.Build) void {
     addBunDirToPath(b, print_summary, bun_exe);
     print_summary.setEnvironmentVariable("ZINC_REQUIRE_FULL_TESTS", if (full_tests) "1" else "0");
     print_summary.step.dependOn(&run_unit_tests.step);
+    print_summary.step.dependOn(&run_mtp_queue_tests.step);
     print_summary.step.dependOn(&run_zinc_rt_unit_tests.step);
     print_summary.step.dependOn(&run_forward_zinc_rt_tests.step);
     print_summary.step.dependOn(&run_host_io_tests.step);

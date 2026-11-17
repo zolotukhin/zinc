@@ -768,6 +768,17 @@ const Q8AttentionScratch = struct {
 
 /// Per-token GPU forward state for qwen35 greedy decode.
 pub const ForwardCuda = struct {
+    pub const MtpProcessPolicy = struct {
+        operator_allowed: bool = true,
+        default_enabled: bool = is_rocm,
+    };
+
+    pub fn readMtpProcessPolicy() MtpProcessPolicy {
+        const configured = host_io.getenv("ZINC_MTP") != null;
+        const enabled = envFlag("ZINC_MTP", is_rocm);
+        return .{ .operator_allowed = !configured or enabled, .default_enabled = enabled };
+    }
+
     allocator: std.mem.Allocator,
     ctx: ?*shim.CudaCtx,
     model: *loader.Model,
@@ -945,6 +956,12 @@ pub const ForwardCuda = struct {
     // that actually opt into/use the appended NextN layer, so ordinary serving
     // keeps its existing memory footprint.
     mtp: ?MtpState = null,
+    // Serialized serving worker override; CLI keeps the environment default.
+    mtp_execution_override: ?bool = null,
+    /// Process policy is immutable after initialization; request overrides must
+    /// not bypass an operator kill switch or change the advertised default.
+    mtp_process_policy: MtpProcessPolicy = .{},
+
     use_spec_btok: bool = false,
     capture_spec_state: bool = false,
     use_attn_v2: bool = false, // ZINC_ATTN_V2: coalesced warp-per-key qwen prefill attention (token-tolerance)
@@ -1323,6 +1340,7 @@ pub const ForwardCuda = struct {
         const router_out_elems = @max(@as(u32, 1), 2 * d.n_experts_used);
         const state_layers = d.n_layers + model.config.n_nextn_layers;
         var self = ForwardCuda{
+            .mtp_process_policy = readMtpProcessPolicy(),
             .allocator = allocator,
             .ctx = ctx,
             .model = model,
@@ -1699,6 +1717,12 @@ pub const ForwardCuda = struct {
 
     // ---- Effort 28 inc 4: per-sequence slot state (batched decode plumbing) ----
 
+    /// A single slot shares the already allocated target KV/SSM cache when its
+    /// capacity fits (including Q8 KV). Multiple slots need independent regions.
+    pub fn canReuseSingleSlotState(n_slots: u32, slot_ctx: u32, max_ctx: u32) bool {
+        return n_slots == 1 and slot_ctx > 0 and slot_ctx <= max_ctx;
+    }
+
     /// Allocate per-sequence slot state for `n_slots` concurrent sequences, each
     /// with up to `slot_ctx` positions. Attn layers get slot KV; ssm layers get
     /// per-slot conv + recurrent state (zero-initialised). A single slot aliases
@@ -1715,6 +1739,8 @@ pub const ForwardCuda = struct {
         const ctx = self.ctx;
         const f4 = @sizeOf(f32);
         const d = self.d;
+        // Publish each host array immediately and initialize every handle, so
+        // any subsequent allocation failure can safely release the partial set.
         inline for (.{ &self.kv_k_slots, &self.kv_v_slots, &self.ssm_conv_slots, &self.ssm_state_slots }) |field| {
             field.* = try self.allocator.alloc(CudaBuffer, d.n_layers);
             @memset(field.*.?, std.mem.zeroes(CudaBuffer));
@@ -1723,7 +1749,7 @@ pub const ForwardCuda = struct {
         const vv = self.kv_v_slots.?;
         const cc = self.ssm_conv_slots.?;
         const ss = self.ssm_state_slots.?;
-        const reuse_single = n_slots == 1 and slot_ctx <= self.max_ctx;
+        const reuse_single = canReuseSingleSlotState(n_slots, slot_ctx, self.max_ctx);
         for (0..d.n_layers) |li| {
             const L: u32 = @intCast(li);
             if (self.layer_is_attn[L]) {
@@ -2248,18 +2274,49 @@ pub const ForwardCuda = struct {
         return tok;
     }
 
-    /// Whether this model/runtime can use its appended Qwen3.8 NextN block.
-    /// ROCm enables it by default; ZINC_MTP=0 is the explicit compatibility
-    /// escape hatch. CUDA can opt in with ZINC_MTP=1 while that path matures.
-    pub fn mtpEnabled(self: *const ForwardCuda) bool {
-        if (!envFlag("ZINC_MTP", is_rocm)) return false;
-        if (self.model.config.n_nextn_layers != 1 or self.d.n_experts != 0) return false;
+    /// Model compatibility is separate from the default policy, allowing a
+    /// CUDA server request to opt in while an unset CUDA default stays off.
+    /// An explicit ZINC_MTP=0/off/false/no remains an operator kill switch.
+    pub fn mtpUnavailableReason(self: *const ForwardCuda) ?[]const u8 {
+        if (!self.mtp_process_policy.operator_allowed)
+            return "MTP was disabled by the server's ZINC_MTP setting.";
+        return self.mtpModelUnavailableReason();
+    }
+
+    /// Inspect NextN compatibility without conflating the process default or
+    /// operator policy with the weights supplied by the model.
+    pub fn mtpModelUnavailableReason(self: *const ForwardCuda) ?[]const u8 {
+        if (self.d.n_experts != 0) return "MTP serving currently requires a dense model.";
+        if (self.model.config.n_nextn_layers != 1)
+            return "This model does not contain exactly one compatible NextN/MTP layer.";
         const L = self.d.n_layers;
-        return self.model.getLayer(L, "nextn.eh_proj.weight") != null and
-            self.model.getLayer(L, "nextn.enorm.weight") != null and
-            self.model.getLayer(L, "nextn.hnorm.weight") != null and
-            self.model.getLayer(L, "attn_q.weight") != null and
-            self.model.getLayer(L, "ffn_gate.weight") != null;
+        if (self.model.getLayer(L, "nextn.eh_proj.weight") == null or
+            self.model.getLayer(L, "nextn.enorm.weight") == null or
+            self.model.getLayer(L, "nextn.hnorm.weight") == null or
+            self.model.getLayer(L, "attn_q.weight") == null or
+            self.model.getLayer(L, "ffn_gate.weight") == null)
+            return "The model is missing weights required by its NextN/MTP layer.";
+        return null;
+    }
+
+    pub fn mtpSupported(self: *const ForwardCuda) bool {
+        return self.mtpUnavailableReason() == null;
+    }
+
+    pub fn mtpDefaultEnabled(self: *const ForwardCuda) bool {
+        return self.mtpSupported() and self.mtp_process_policy.default_enabled;
+    }
+
+    /// Called only before starting the GPU worker, or by that worker while it
+    /// owns the single sequence. Restore the returned value at the end of scope.
+    pub fn setMtpExecutionOverride(self: *ForwardCuda, enabled: ?bool) ?bool {
+        const previous = self.mtp_execution_override;
+        self.mtp_execution_override = enabled;
+        return previous;
+    }
+
+    pub fn mtpEnabled(self: *const ForwardCuda) bool {
+        return self.mtpSupported() and (self.mtp_execution_override orelse self.mtp_process_policy.default_enabled);
     }
 
     fn ensureMtpState(self: *ForwardCuda) !*MtpState {
