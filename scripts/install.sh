@@ -73,7 +73,6 @@ case "$os-$arch" in
       backend="$(linux_backend)" || fail "select a backend explicitly for this machine"
       if [ "$backend" = rocm ]; then
         log "AMD detected: selecting native HIP/ROCm; checking runtime-compilation headers"
-        check_hip_headers
       fi
     fi
     ;;
@@ -92,6 +91,7 @@ if [ "$operation" = install ]; then
     macos-aarch64-metal|linux-x86_64-vulkan|linux-x86_64-rocm) ;;
     *) fail "unsupported backend '$backend' for $platform" ;;
   esac
+  if [ "$platform-$backend" = linux-x86_64-rocm ]; then check_hip_headers; fi
 fi
 target="$platform-$backend"
 install_root="${ZINC_INSTALL_DIR:-$HOME/.local/share/zinc}"

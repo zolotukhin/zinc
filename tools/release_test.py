@@ -905,9 +905,14 @@ class ReleaseTest(unittest.TestCase):
     def test_rollback_restores_a_hip_receipt_even_with_mixed_gpus_and_a_conflicting_override(self):
         # This is a native CPU stub reporting a HIP package identity. No model,
         # GPU, HIP installation or runtime compilation is involved.
+        toolkit = self.root / "fixture-toolkit"
+        for header in ("hip/hip_runtime_api.h", "hip/hiprtc.h", "hipblas/hipblas.h", "rocwmma/rocwmma.hpp"):
+            path = toolkit / "include" / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("// fixture\n")
         hip = self.tree("9.8.6", target_id="linux-x86_64-rocm")
         self.bundle(hip)
-        first = self.install("9.8.6", ZINC_BACKEND="rocm")
+        first = self.install("9.8.6", ZINC_BACKEND="rocm", ROCM_PATH=str(toolkit))
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         vulkan = self.tree("9.8.7")
         self.bundle(vulkan)

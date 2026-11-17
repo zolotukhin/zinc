@@ -72,6 +72,16 @@ test('explicit backend selection and rollback bypass mixed-GPU auto-detection', 
       mkdirSync(device, { recursive: true });
       writeFileSync(join(device, 'vendor'), vendor + '\n');
     }
+    for (const header of [
+      'hip/hip_runtime_api.h',
+      'hip/hiprtc.h',
+      'hipblas/hipblas.h',
+      'rocwmma/rocwmma.hpp',
+    ]) {
+      const path = join(root, 'toolkit/include', header);
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, '// fixture\n');
+    }
     for (const backend of ['rocm', 'vulkan', '']) {
       const rollback = backend === '';
       const result = spawnSync(
@@ -83,6 +93,7 @@ test('explicit backend selection and rollback bypass mixed-GPU auto-detection', 
             PATH: bin + ':' + process.env.PATH,
             ZINC_BACKEND: backend,
             ZINC_DRM_SYSFS_ROOT: join(root, 'drm'),
+            ROCM_PATH: join(root, 'toolkit'),
             ZINC_INSTALL_DIR: join(root, 'install'),
             ZINC_BIN_DIR: join(root, 'commands'),
             ZINC_VERSION: 'invalid',
@@ -101,7 +112,7 @@ test('explicit backend selection and rollback bypass mixed-GPU auto-detection', 
   }
 });
 
-test('automatic HIP selection checks its headers before downloading and explains the alternative', () => {
+test('automatic and explicit HIP installs check headers before downloading and explain the alternative', () => {
   const root = mkdtempSync(join(tmpdir(), 'zinc-hip-prerequisites-'));
   try {
     const bin = join(root, 'bin');
@@ -124,16 +135,18 @@ test('automatic HIP selection checks its headers before downloading and explains
       ZINC_BIN_DIR: join(root, 'commands'),
       ZINC_VERSION: 'invalid',
     };
-    const invoke = () =>
+    const invoke = (backend = '') =>
       spawnSync('bash', [join(import.meta.dir, '../scripts/install.sh')], {
-        env,
+        env: { ...env, ZINC_BACKEND: backend },
         encoding: 'utf8',
       });
-    const missing = invoke();
-    expect(missing.status).not.toBe(0);
-    expect(missing.stderr).toContain('runtime-compilation headers are missing');
-    expect(missing.stderr).toContain('https://zolotukhin.ai/zinc/docs/rocm/');
-    expect(missing.stderr).toContain('ZINC_BACKEND=vulkan');
+    for (const backend of ['', 'rocm']) {
+      const missing = invoke(backend);
+      expect(missing.status).not.toBe(0);
+      expect(missing.stderr).toContain('runtime-compilation headers are missing');
+      expect(missing.stderr).toContain('https://zolotukhin.ai/zinc/docs/rocm/');
+      expect(missing.stderr).toContain('ZINC_BACKEND=vulkan');
+    }
     for (const header of [
       'hip/hip_runtime_api.h',
       'hip/hiprtc.h',

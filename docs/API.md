@@ -140,6 +140,9 @@ keeps the GGUF basename as its ID and adds `active`, `installed`, `managed`,
 `display_name`, `homepage_url` and `supports_thinking_toggle` for the UI.
 The row is always active and `managed` is false: it describes the loaded
 startup model, rather than offering a downloadable/hot-switchable catalog.
+`created` remains the legacy value `0`; the local GGUF does not supply a
+creation timestamp. `active_model: null` is the canonical no-model state;
+the legacy display-only `model` alias is an empty string in that case.
 CUDA and the published 0.1.1 HIP archive retain their existing endpoint coverage.
 HIP sampling remains greedy and model-management routes remain unavailable.
 
