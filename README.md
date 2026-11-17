@@ -22,20 +22,20 @@ also include browser chat.
 For published archives, runtime requirements and verified installation/rollback,
 see [binary releases](https://zolotukhin.ai/zinc/docs/getting-started/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
-[Linux 0.1.0](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0)
+[Linux 0.1.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1)
 is available for Vulkan and ROCm. The exact published binaries pass all three
 GPU profiles and public installation checks; see the
-[release record](docs/releases/0.1.0-plan.md).
+[release record](docs/releases/0.1.1-plan.md).
 Install the published Linux Vulkan release without a source checkout:
 
 ```bash
-curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh -o install.sh
 ```
 
 Inspect the downloaded script, then install and add the command to PATH:
 
 ```bash
-ZINC_VERSION=v0.1.0 bash install.sh
+ZINC_VERSION=v0.1.1 bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -74,7 +74,7 @@ fallback between Vulkan and ROCm. For a validated AMD ROCm stack, choose its arc
 when installing:
 
 ```bash
-ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.1 ZINC_BACKEND=rocm bash install.sh
 zinc --check
 ```
 
@@ -128,7 +128,7 @@ Connect **OpenCode** to a running ZINC server with the
 chat and streaming tool calls, and runs headless tasks:
 
 ```bash
-bun add --global --trust @opencode/cli@2.2.6
+bun add --global --trust @opencode/cli@2.0.21
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 bun setup-opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
   --context auto --output 2048 --steps 16

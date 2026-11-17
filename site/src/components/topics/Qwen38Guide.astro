@@ -78,12 +78,12 @@ const themes = { light: 'github-light-high-contrast', dark: 'github-dark-high-co
   <h2 id="hardware">Choose the backend and release together</h2>
   <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen 3.8 hardware support">
     <table>
-      <caption>Support and qualification as of November 15, 2026</caption>
+      <caption>Qualified paths and remaining limits for ZINC 0.1.1</caption>
       <thead><tr><th scope="col">Hardware</th><th scope="col">Path</th><th scope="col">What to expect</th></tr></thead>
       <tbody>
         <tr><th scope="row">Radeon AI PRO R9700, 32 GB</th><td>Linux Vulkan or ROCm</td><td>Published Qwen 3.8 measurements and release validation. Pick the package for the backend you intend to use.</td></tr>
-        <tr><th scope="row">Intel Arc Pro B70</th><td>Linux Vulkan</td><td>The model passed GPU qualification, but the shipped 0.1.0 catalog omitted its Intel profile. Current source fixes managed selection; keep MTP off.</td></tr>
-        <tr><th scope="row">Apple Silicon</th><td>Metal preview</td><td>Listed in the managed catalog, with earlier benchmark data. macOS remains an unsigned preview rather than a stable 0.1.0 binary release.</td></tr>
+        <tr><th scope="row">Intel Arc Pro B70</th><td>Linux Vulkan</td><td>The model passed GPU qualification. ZINC 0.1.1 includes the managed-selection fix for the missing 0.1.0 Intel profile; keep MTP off.</td></tr>
+        <tr><th scope="row">Apple Silicon</th><td>Metal preview</td><td>Listed in the managed catalog, with earlier benchmark data. macOS remains an unsigned preview with no stable binary release.</td></tr>
         <tr><th scope="row">NVIDIA</th><td>Experimental CUDA</td><td>Source-only backend. There is no qualified Qwen 3.8 NVIDIA release path in this guide.</td></tr>
       </tbody>
     </table>
@@ -92,8 +92,8 @@ const themes = { light: 'github-light-high-contrast', dark: 'github-dark-high-co
     <a href="/zinc/docs/getting-started/">release scope</a>,
     <a href="/zinc/docs/intel-performance/#work-order-after-0-1-0">Intel catalog follow-up</a>
     and <a href="/zinc/docs/opencode-release-validation/">recorded client validation</a>
-    for the exact coverage. The Intel managed-model correction requires a
-    <a href="/zinc/docs/development/">development build</a> newer than 0.1.0.</p>
+    for the exact coverage. The Intel managed-model correction is included in the
+    <a href="/zinc/docs/getting-started/">0.1.1 release</a>.</p>
 </section>
 
 <section class="guide-section" aria-labelledby="benchmarks">

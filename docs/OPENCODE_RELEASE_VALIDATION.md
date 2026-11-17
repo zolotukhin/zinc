@@ -1,8 +1,8 @@
 # OpenCode model validation for the first release
 
-For the certified, unpublished maintenance candidate, see the separate
+For the published maintenance release, see the separate
 [0.1.1 final-archive checks](releases/0.1.1-plan.md#final-archive-client-checks).
-They use the documented OpenCode 2.0.21 pin and retain separate 2.2.6 trials,
+All 36 core fixtures pass with the documented OpenCode 2.0.21 pin. The checks retain separate 2.2.6 trials,
 exact archive identities, independent test results and failures. The
 chronological reports below keep their original clients, source revisions and
 outcomes.

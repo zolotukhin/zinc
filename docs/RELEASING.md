@@ -2,12 +2,12 @@
 
 Linux releases cover Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. The workflow builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
-[Linux 0.1.0 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0).
-The [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.0-plan.md)
+[Linux 0.1.1 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1).
+The [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.1-plan.md)
 contains its exact-byte qualification and completed public-install checks.
 
-The [0.1.1 candidate plan](releases/0.1.1-plan.md) tracks the next maintenance
-release. Version-specific `docs/releases/<version>-changes.md` files supply
+The [0.1.1 record](releases/0.1.1-plan.md) retains its preparation, publication
+and earlier failed attempts. Version-specific `docs/releases/<version>-changes.md` files supply
 reviewed change notes; the finalizer freezes them beside the generated hardware
 table. RCs share their base version's change notes and keep their own archive
 version and qualification.
@@ -210,7 +210,7 @@ python3 tools/release.py preflight --repo zolotukhin/zinc --json
 
 The default command only reads configuration and exits nonzero when blocked or
 unable to inspect it. It checks the selected release profiles: two runner roles
-covering three Linux profiles for 0.1.0. Each needs an online matching worker.
+covering the three selected Linux profiles. Each needs an online matching worker.
 It verifies the worker/publication environments allow only main, and publication
 has a required reviewer. If the release scope includes a signed target, it also
 checks the signing environment and six Apple secret names. Preview-only roles
@@ -237,7 +237,7 @@ the helper verifies that it exists and is an ancestor of that frozen main commit
 before dispatch. The candidate job rechecks ancestry against main.
 
 ```bash
-python3 tools/release.py preflight --repo zolotukhin/zinc --dispatch 0.1.0-rc.1
+python3 tools/release.py preflight --repo zolotukhin/zinc --dispatch 0.1.2-rc.1
 ```
 
 Passing configuration does not certify the hardware, private worker files,
@@ -304,15 +304,19 @@ memory-rejection and performance-regression qualification remains necessary
 before advertising those features. Future releases follow the same
 candidate-to-publication process; existing published bytes are preserved.
 
-## Prepared 0.1.1 candidate
+## Published 0.1.1
 
 [Candidate run 43941111324](https://github.com/zolotukhin/zinc/actions/runs/43941111324)
-is certified and unpublished, from source
+is the certified source of the published release, from commit
 `4ab52f7d2d0ed595ef4199cc7680ba64e1915af5`. All three selected Linux GPU profiles
 and 20 model/backend rows passed, including installed model diagnostics.
 Independent verification recomputed the qualification gates, verified eight
 assets against `provenance.jsonl` (the ninth bundle file), and checked the stable
 catalog. The [preparation record](releases/0.1.1-plan.md) links exact
 archive identities, installation controls, supplementary actual-client checks
-and retained failures. Publication must promote the tested bytes through the
-protected publisher above; the current stable release remains 0.1.0.
+and retained failures. The [protected publisher](https://github.com/zolotukhin/zinc/actions/runs/43992810248)
+passed publication and both public-install jobs. All nine anonymous downloads
+match the certified files. The [public installation rehearsal](/zinc/validation/public-install-upgrade-0.1.1-2026-11-17.json)
+passed 12 controls across the two backends, including upgrade from 0.1.0,
+rollback, reinstall, command-link repair and default stable selection, with
+cache sentinels preserved. The current stable release is 0.1.1.

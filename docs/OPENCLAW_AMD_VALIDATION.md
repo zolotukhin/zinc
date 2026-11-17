@@ -1,9 +1,12 @@
 # OpenClaw on AMD: model acceptance
 
-The separate [0.1.1 candidate checks](releases/0.1.1-plan.md#final-archive-client-checks)
-record the newer archive identities and retained task failures. That candidate
-is certified and unpublished. The results below retain their original 0.1.0
-scope and outcomes.
+The latest [published 0.1.1 checks](releases/0.1.1-plan.md#final-archive-client-checks)
+record the exact archive identities and **35/36 OpenClaw tasks passed** across
+six larger models on AMD Vulkan and ROCm. Qwen3.6 35B-A3B Vulkan wrote an
+incorrect receipt; that task remains failed despite passing the frozen code
+tests and keeping protected files intact. Most rows use 16K, Gemma 31B uses 8K,
+and its ROCm row sets `ZINC_PREFILL_CHUNK=128`. This cohort does not qualify
+Intel or Metal. The report below retains its original 0.1.0 scope and outcomes.
 
 The first OpenClaw validation uses the **published ZINC 0.1.0 Linux archives**
 on a **Radeon AI PRO R9700 32 GB**. It tests the actual **OpenClaw 2026.11.1**

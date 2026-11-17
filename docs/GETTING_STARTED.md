@@ -10,7 +10,7 @@ or [manual verification](#verify-a-manual-download).
 
 ## Choose your backend
 
-[Stable 0.1.0](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0)
+[Stable 0.1.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1)
 provides two **Linux x86_64** downloads. Each executable contains one backend.
 
 | Choose               | Qualified release hardware                       | Runtime requirements                                                      | Interfaces                  |
@@ -25,7 +25,7 @@ headers; use the [ROCm prerequisites](ROCM.md#runtime-prerequisites).
 These are the release's tested GPU profiles, not a promise for every card with
 the same architecture. Other AMD GPUs, Metal previews and experimental CUDA
 have separate [hardware and release limits](HARDWARE_REQUIREMENTS.md).
-There is no stable 0.1.0 archive for macOS, Linux ARM64, musl/Alpine or Windows.
+There is no stable 0.1.1 archive for macOS, Linux ARM64, musl/Alpine or Windows.
 Apple Silicon users should follow [preview or source installation](#build-from-source).
 
 ## Install ZINC
@@ -33,19 +33,19 @@ Apple Silicon users should follow [preview or source installation](#build-from-s
 Download the release installer and review it:
 
 ```bash
-curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh -o install.sh
 ```
 
 For **Vulkan**:
 
 ```bash
-ZINC_VERSION=v0.1.0 bash install.sh
+ZINC_VERSION=v0.1.1 bash install.sh
 ```
 
 For **ROCm**, use this instead:
 
 ```bash
-ZINC_VERSION=v0.1.0 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.1 ZINC_BACKEND=rocm bash install.sh
 ```
 
 Then make the command available in this shell:
@@ -78,8 +78,8 @@ Intel Vulkan, ROCm and Metal do not use that setting. Now check the installation
 zinc --check
 ```
 
-Proceed when the check reports `READY [OK]` or `READY WITH WARNINGS [WARN]`;
-read any warnings first. A failed check exits nonzero. This checks readiness,
+Proceed only when the check exits successfully with a ready verdict; read
+any warnings first. A failed check exits nonzero. This checks readiness,
 not model output quality. If it fails, use the
 [troubleshooting table](RUNNING_ZINC.md#troubleshooting) before downloading a model.
 
@@ -142,13 +142,13 @@ bash install.sh --rollback
 ```
 
 The installer switches the executable and matching runtime assets together.
-It does not delete or move models. The published 0.1.0 archives passed
-[installation, upgrade and rollback checks](/zinc/validation/public-install-upgrade-0.1.0-2026-11-03.json).
+It does not delete or move models. The published 0.1.1 archives passed
+[installation, upgrade and rollback checks](/zinc/validation/public-install-upgrade-0.1.1-2026-11-17.json).
 
 ## Verify a manual download
 
 Download the chosen archive and `SHA256SUMS.txt` from the
-[same release](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0).
+[same release](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1).
 Compare the archive's `sha256sum` with its entry, then extract it into its own
 directory. Keep `bin/` and `share/` together: the Vulkan executable needs the
 matching `share/zinc/shaders/` assets.
@@ -157,13 +157,13 @@ The release also publishes `release-manifest.json`, `release-policy.json`,
 `validation.json` and `provenance.jsonl`. For independent provenance verification:
 
 ```bash
-gh attestation verify zinc-v0.1.0-linux-x86_64-vulkan.tar.gz \
+gh attestation verify zinc-v0.1.1-linux-x86_64-vulkan.tar.gz \
   --bundle provenance.jsonl --repo zolotukhin/zinc \
   --signer-workflow zolotukhin/zinc/.github/workflows/release-candidate.yml \
   --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
-The [published validation](/zinc/validation/release-candidate-0.1.0-2026-11-03.json)
+The [published validation](/zinc/validation/release-candidate-0.1.1-2026-11-16.json)
 records exact GPU, driver, model and context combinations. See
 [release engineering](RELEASING.md) for the publishing process.
 

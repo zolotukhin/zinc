@@ -5,6 +5,7 @@ import TerminalWindow from '../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import benchmarkData from '../../data/zinc-performance.json';
 import pinnedZigVersion from '../../../../.zig-version?raw';
+import { STABLE_RELEASE } from '../../lib/docs-release-status';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const compilerVersion = pinnedZigVersion.trim();
@@ -88,14 +89,14 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="section-copy">
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
-      <p><a href="/zinc/docs/getting-started/">Install Linux 0.1.0</a>, then download a model and open a chat. Published Vulkan and ROCm archives include the executable and its runtime assets.</p>
+      <p><a href="/zinc/docs/getting-started/">Install Linux {STABLE_RELEASE}</a>, then download a model and open a chat. Published Vulkan and ROCm archives include the executable and its runtime assets.</p>
       <p>Install your GPU driver/runtime first. You can run the release without Zig or a source checkout. Apple Silicon is an unsigned preview; see the <a href="/zinc/docs/getting-started/#build-from-source">source-build instructions</a> for development and experimental backends.</p>
       <p class="setup-note">AMD with Vulkan: set <code>RADV_PERFTEST=coop_matrix</code> before the GPU check or chat. Choose the separate <a href="/zinc/docs/rocm/">ROCm archive</a> when using that runtime.</p>
     </div>
     <div class="terminal-wrap">
-      <TerminalWindow title="Install and chat · Linux Vulkan" density="compact" code={`curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.0/install.sh -o install.sh
+      <TerminalWindow title="Install and chat · Linux Vulkan" density="compact" code={`curl -fL https://github.com/zolotukhin/zinc/releases/download/v${STABLE_RELEASE}/install.sh -o install.sh
 # Inspect install.sh, then:
-ZINC_VERSION=v0.1.0 bash install.sh
+ZINC_VERSION=v${STABLE_RELEASE} bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
 zinc --check
@@ -109,7 +110,7 @@ zinc chat --model-id qwen35-9b-q4k-m`} />
     <div class="section-copy">
       <p class="eyebrow">Use your hardware</p>
       <h2 id="hardware-heading">Choose your GPU path.</h2>
-      <p>Linux 0.1.0 qualification targets AMD with Vulkan or ROCm and Intel Arc with Vulkan. Metal stays an unsigned preview; CUDA is experimental. Exact GPU and model coverage varies by backend.</p>
+      <p>Linux {STABLE_RELEASE} qualification targets AMD with Vulkan or ROCm and Intel Arc with Vulkan. Metal stays an unsigned preview; CUDA is experimental. Exact GPU and model coverage varies by backend.</p>
       <a class="text-link" href="/zinc/docs/hardware-requirements/">Check hardware and memory requirements →</a>
     </div>
     <div class="platforms">
@@ -130,7 +131,7 @@ zinc chat --model-id qwen35-9b-q4k-m`} />
       <p>Stop the earlier chat server before starting this one. This installed Vulkan example gives Qwen 3.5 9B a 16K context; follow the <a href="/zinc/docs/rocm/">ROCm guide</a> for that backend's model paths and device selection.</p>
     </div>
     <div class="terminal-wrap" data-harness-server>
-      <TerminalWindow title="1. Start a model server" density="compact" code={`zinc --model-id qwen35-9b-q4k-m \\
+      <TerminalWindow title="1. Start a model server" density="compact" code={`zinc serve --model-id qwen35-9b-q4k-m \\
   -c 16384 --parallel 1 --port 9090`} />
       <p class="caption">Download a standalone helper below and run it on your client machine. No ZINC source checkout is needed. The examples connect to <code>http://127.0.0.1:9090/v1</code>. Point <code>--project</code> at an existing project you want the agent to edit. For a remote GPU server, use the endpoint instructions in your client's guide.</p>
     </div>
@@ -146,12 +147,12 @@ node setup-openclaw.mjs run --project ../my-project -- \\
   "Fix the failing tests and run them."`} />
         <p class="caption"><code>check</code> validates the config and server; it does not prove coding ability. Review the resulting diff and independently run your project's tests after each task.</p>
         <p class="harness-links"><a href="/zinc/docs/openclaw/">OpenClaw setup guide →</a> <a href="/zinc/harnesses/setup-openclaw.mjs" download="setup-openclaw.mjs">Download helper ↓</a></p>
-        <p class="caption">Six larger models passed bounded file-and-test tasks on AMD Vulkan and ROCm. The small starter model did not qualify. See <a href="/zinc/docs/openclaw-amd-validation/">model results and limits</a>; this report does not qualify Intel or Metal.</p>
+        <p class="caption">The 0.1.1 AMD cohort passed 35/36 OpenClaw tasks across six larger models on Vulkan and ROCm; one incorrect receipt remains failed. The small starter model did not qualify. See <a href="/zinc/docs/openclaw-amd-validation/">model results and limits</a>; this report does not qualify Intel or Metal.</p>
       </article>
       <article class="harness-client terminal-wrap" aria-labelledby="opencode-heading" data-coding-harness="opencode">
         <h3 id="opencode-heading">OpenCode</h3>
         <p class="harness-intro">Coding rounds with streaming tool calls and an independent project verification command. Requires Bun 1.4.4 or newer.</p>
-        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.2.6
+        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.0.21
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 bun setup-opencode.mjs --project ../my-project \\
   --model qwen35-9b-q4k-m --context auto --output 2048 --steps 16

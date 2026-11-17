@@ -2,8 +2,8 @@
 
 After [installing ZINC and running a first prompt](GETTING_STARTED.md), choose
 [browser chat](#browser-chat), a [terminal prompt](#terminal-prompts), or the
-[HTTP API](#start-the-api). These commands work with stable Linux 0.1.0;
-[development additions](#development-structured-discovery) are marked separately.
+[HTTP API](#start-the-api). These commands work with stable Linux 0.1.1,
+including [structured discovery](#structured-discovery).
 
 ## Browser chat
 
@@ -39,7 +39,7 @@ This is the common starting point for apps and agent clients. With the model
 already downloaded, start one server and leave it running:
 
 ```bash
-zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
+zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090
 ```
 
 The 16K context leaves room for tools and conversation history. Check its
@@ -187,10 +187,10 @@ If it still fails, [file an issue](https://github.com/zolotukhin/zinc/issues) wi
 `zinc --version`, `zinc --check`, GPU/driver, model ID, context and a reproducing
 prompt. Remove local credentials and private machine details from shared logs.
 
-## Development: structured discovery
+## Structured discovery
 
-These features need source newer than stable 0.1.0. Check the installed
-`zinc --help` before using them:
+Available in ZINC 0.1.1 and later. Check the installed `zinc --version` and
+`zinc --help` before applying these commands to an older installation:
 
 ```bash
 zinc --version --json
@@ -217,9 +217,9 @@ curl --fail http://localhost:9090/v1/capabilities
 Schema version 1 reports build identity, backend, `active_model`,
 `context_length` and capability flags, also included in healthy `/health`
 responses. Idle Vulkan/Metal servers report null model/context. Tool support is
-model-dependent. See [capability fields](API.md#development-capability-discovery).
+model-dependent. See [capability fields](API.md#capability-discovery).
 
-On stable 0.1.0 this endpoint returns 404: use `/health` and `/v1/models` instead.
+On older 0.1.0 servers this endpoint returns 404: use `/health` and `/v1/models` instead.
 Treat absent capability flags as unknown. In particular, only use chat session
 reuse when the loaded server explicitly advertises it.
 

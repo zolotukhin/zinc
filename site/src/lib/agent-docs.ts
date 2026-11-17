@@ -1,6 +1,6 @@
 import type { DocPage } from './docs-loader';
 import type { ZigApiIndex } from './zig-api-loader';
-import { STABLE_RELEASE } from './docs-release-status';
+import { STABLE_RELEASE, STABLE_VALIDATION_PATH } from './docs-release-status';
 
 interface SupplementalDocMeta {
   slug: string;
@@ -74,14 +74,15 @@ function clientGuidance(base: string): string[] {
     `- HTTP API and backend coverage: ${absoluteUrl(base, '/zinc/docs/api/')}`,
     `- OpenClaw setup: ${absoluteUrl(base, '/zinc/docs/openclaw/')}`,
     `- OpenCode setup: ${absoluteUrl(base, '/zinc/docs/opencode/')}`,
+    `- Published release qualification: ${absoluteUrl(base, STABLE_VALIDATION_PATH)}`,
     '',
     `Stable Linux release: ${STABLE_RELEASE}. Use the installed zinc command; no Zig compiler or source checkout is needed. Each executable contains one backend. Metal is a preview; CUDA is experimental.`,
-    '1. Inspect zinc --version, run zinc --check, and use zinc model list --json to choose a model that fits and has the required validation.',
-    '2. Pull qwen35-9b-q4k-m, then start zinc --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090. Keep the server running while the client uses it.',
+    '1. Inspect zinc --version --json, run zinc --check, and use zinc model list --json to choose a model that fits and has the required validation.',
+    '2. Pull qwen35-9b-q4k-m, then start zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090. Keep the server running while the client uses it.',
     '3. Check http://localhost:9090/health and discover the loaded ID and context at http://localhost:9090/v1/models. API base: http://localhost:9090/v1. Set stream explicitly.',
     '4. Use the standalone helper linked from the client guide. Run its setup and check commands before a task; verify the outcome independently.',
     '',
-    'Development additions (newer than stable 0.1.0): zinc serve, --no-browser, --version --json, --check --json and GET /v1/capabilities. Check zinc --help before using them. Discovery includes build identity, backend, active_model, context_length and capabilities. On older servers, use /health and /v1/models; absent capabilities are unknown.',
+    'Structured discovery (0.1.1+): zinc serve, --no-browser, --version --json, --check --json and GET /v1/capabilities are released features. Check zinc --help for the installed version. Discovery includes build identity, backend, active_model, context_length and capabilities. On older servers, use /health and /v1/models; absent capabilities are unknown.',
     'Memory fit and protocol capabilities do not prove task quality. Never assume context size, model switching, tools or sampling support from a backend name alone.',
     '',
   ];

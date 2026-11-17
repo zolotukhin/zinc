@@ -19,18 +19,18 @@ Each executable contains one backend. Check `zinc --version` before selecting
 an interface or copying server settings. Vulkan is the Linux default; ROCm/HIP
 is a separate AMD build, Metal is a macOS preview, and CUDA is experimental.
 
-| Feature           | Vulkan / Metal                                     | ROCm / CUDA                      |
-| ----------------- | -------------------------------------------------- | -------------------------------- |
-| Chat responses    | JSON default; SSE optional                         | SSE default; JSON optional       |
-| Raw responses     | Stable 0.1.0: JSON only; development: SSE optional | SSE default; JSON optional       |
-| Chat sampling     | Supported                                          | Greedy                           |
-| Serving           | Serialized; requests queue                         | Batched; Gemma MoE uses one slot |
-| Default context   | Auto-sized                                         | 2,048 per slot                   |
-| Models            | Catalog and hot switching                          | Startup model only               |
-| Browser chat      | Included                                           | Unavailable                      |
-| Prefix reuse      | Eligible Vulkan models                             | Unavailable                      |
-| Chat stop strings | Applied                                            | Ignored                          |
-| Health details    | Model, queue, uptime and memory                    | Status, backend and context      |
+| Feature           | Vulkan / Metal                  | ROCm / CUDA                      |
+| ----------------- | ------------------------------- | -------------------------------- |
+| Chat responses    | JSON default; SSE optional      | SSE default; JSON optional       |
+| Raw responses     | JSON default; SSE optional      | SSE default; JSON optional       |
+| Chat sampling     | Supported                       | Greedy                           |
+| Serving           | Serialized; requests queue      | Batched; Gemma MoE uses one slot |
+| Default context   | Auto-sized                      | 2,048 per slot                   |
+| Models            | Catalog and hot switching       | Startup model only               |
+| Browser chat      | Included                        | Unavailable                      |
+| Prefix reuse      | Eligible Vulkan models          | Unavailable                      |
+| Chat stop strings | Applied                         | Ignored                          |
+| Health details    | Model, queue, uptime and memory | Status, backend and context      |
 
 Both chat APIs accept `max_completion_tokens` and `max_tokens`; tools depend on
 the model template. Vulkan/Metal default to 256 output tokens. ROCm/CUDA default
@@ -50,11 +50,13 @@ The detailed catalog, health and browser sections below describe **Vulkan/Metal*
 For portable clients, set `stream` explicitly, get the loaded model from
 `/v1/models`, and do not assume model switching, sampling or prefix caching.
 
-## Development: capability discovery
+## Capability discovery
 
-Newer source builds add `GET /v1/capabilities`. This endpoint and the additional
-health fields below are not in stable 0.1.0. Check `zinc --version` and use the
-release's documented API when it returns 404.
+The Linux 0.1.1 releases include `GET /v1/capabilities` and the additional
+health fields below. Current Metal/CUDA source builds implement this schema
+too, while remaining preview/experimental backends. These fields are absent
+in 0.1.0. Check `zinc --version`; on older servers, fall back to `/health` and
+`/v1/models` when the endpoint returns 404.
 
 ```bash
 curl --fail http://localhost:9090/v1/capabilities
@@ -97,7 +99,7 @@ as unknown. See [Run models and connect apps](RUNNING_ZINC.md) for the complete 
   `session_id` when this is true. Missing or false capability means full
   requests without assumed cache support; changed or displaced prefixes fall
   back to full prefill.
-- Development Vulkan builds use canonical prefix replay by default for Intel
+- Vulkan 0.1.1 uses canonical prefix replay by default for Intel
   Xe2 Gemma MoE. `ZINC_CHAT_PREFIX_ROLLBACK=0` disables it; `=1` opts other
   eligible attention-only models into this control. It preserves only the exact
   shared prefix and recomputes the changed suffix, including a dropped Gemma
@@ -110,19 +112,19 @@ as unknown. See [Run models and connect apps](RUNNING_ZINC.md) for the complete 
 
 ## Endpoints
 
-| Method | Path                   | Available on                                  |
-| ------ | ---------------------- | --------------------------------------------- |
-| POST   | `/v1/chat/completions` | All four backends                             |
-| POST   | `/v1/completions`      | All four backends                             |
-| GET    | `/v1/capabilities`     | All four; development builds newer than 0.1.0 |
-| GET    | `/v1/models`           | All four backends; different detail           |
-| GET    | `/health`              | All four backends; different detail           |
-| POST   | `/v1/models/pull`      | Vulkan / Metal                                |
-| POST   | `/v1/models/activate`  | Vulkan / Metal                                |
-| POST   | `/v1/models/remove`    | Vulkan / Metal                                |
-| GET    | `/` or `/chat`         | Vulkan / Metal                                |
-| GET    | `/stats`               | ROCm / CUDA                                   |
-| POST   | `/generate`            | ROCm / CUDA; raw completion alias             |
+| Method | Path                   | Available on                            |
+| ------ | ---------------------- | --------------------------------------- |
+| POST   | `/v1/chat/completions` | All four backends                       |
+| POST   | `/v1/completions`      | All four backends                       |
+| GET    | `/v1/capabilities`     | Linux 0.1.1+; current Metal/CUDA source |
+| GET    | `/v1/models`           | All four backends; different detail     |
+| GET    | `/health`              | All four backends; different detail     |
+| POST   | `/v1/models/pull`      | Vulkan / Metal                          |
+| POST   | `/v1/models/activate`  | Vulkan / Metal                          |
+| POST   | `/v1/models/remove`    | Vulkan / Metal                          |
+| GET    | `/` or `/chat`         | Vulkan / Metal                          |
+| GET    | `/stats`               | ROCm / CUDA                             |
+| POST   | `/generate`            | ROCm / CUDA; raw completion alias       |
 
 Unavailable endpoints return 404 on ROCm/CUDA. Set `stream` explicitly for both
 completion routes. The coverage matrix above describes their response defaults.
@@ -333,8 +335,8 @@ curl -N http://localhost:9090/v1/chat/completions \
 ## POST /v1/completions
 
 The request/JSON example below applies to all backends. Set `stream` explicitly:
-Vulkan/Metal default to JSON; ROCm/CUDA default to SSE. Development builds after
-0.1.0 also support raw SSE on Vulkan/Metal; the 0.1.0 archives return JSON there.
+Vulkan/Metal default to JSON; ROCm/CUDA default to SSE. Linux Vulkan 0.1.1 and
+current Metal source support raw SSE; the 0.1.0 Vulkan archives return JSON there.
 
 Generate from a raw text prompt without applying a chat template.
 
