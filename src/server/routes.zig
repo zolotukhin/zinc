@@ -635,9 +635,15 @@ const ChatResetBody = struct {
     session_id: []const u8 = "",
 };
 
-/// Drop a chat session's prompt-reuse entry and zero the active-context gauge.
-/// Called by the chat UI's Clear button. Waits for the generation lock: a finished
-/// request keeps holding it while it warms the reuse cache after the response.
+/// Clear only the named session, without parking an HTTP thread behind a long
+/// generation or disturbing another conversation's active-context gauge.
+fn resetChatSession(server_state: *ServerState, session_id: []const u8) !void {
+    if (session_id.len == 0 or session_id.len > 256) return error.InvalidSessionId;
+    if (!server_state.generation_mutex.tryLock()) return error.GenerationBusy;
+    defer server_state.generation_mutex.unlock();
+    server_state.clearChatReuseSession(session_id);
+}
+
 fn handleChatReset(
     conn: *http.Connection,
     server_state: *ServerState,
@@ -650,11 +656,15 @@ fn handleChatReset(
     };
     defer parsed.deinit();
 
-    server_state.generation_mutex.lock();
-    defer server_state.generation_mutex.unlock();
-
-    if (parsed.value.session_id.len > 0) server_state.clearChatReuseSession(parsed.value.session_id);
-    server_state.clearActiveContext();
+    resetChatSession(server_state, parsed.value.session_id) catch |err| {
+        if (err == error.InvalidSessionId) {
+            try conn.sendError(400, "invalid_request_error", "A nonempty session_id of at most 256 bytes is required");
+        } else {
+            try conn.sendError(409, "conflict_error", "Generation is in progress; retry the session reset after it finishes");
+        }
+        return;
+    };
+    // The GPU lock is already released before writing to a client.
     try conn.sendJson(200, "{\"object\":\"chat.reset\",\"reset\":true}");
 }
 
@@ -6407,6 +6417,33 @@ test "ServerState snapshot tracks active queued and uptime" {
     try std.testing.expectEqual(@as(u32, 2), snapshot.queued_requests);
     try std.testing.expectEqual(@as(u32, 1536), snapshot.active_context_tokens);
     try std.testing.expectEqual(@as(u64, 12), snapshot.uptime_seconds);
+}
+
+test "chat reset is scoped to its session and rejects empty or oversized identifiers" {
+    var state = ServerState.init(0);
+    defer state.deinit();
+    try state.chat_reuse_cache.store("session-a", "model.gguf", &.{ 1, 2 }, 10);
+    try state.chat_reuse_cache.store("session-b", "model.gguf", &.{ 3, 4 }, 20);
+    state.setActiveContextTokens(42);
+    try std.testing.expectError(error.InvalidSessionId, resetChatSession(&state, ""));
+    try std.testing.expectError(error.InvalidSessionId, resetChatSession(&state, &@as([257]u8, @splat('a'))));
+    try resetChatSession(&state, "session-a");
+    try std.testing.expectEqual(@as(usize, 1), state.chat_reuse_cache.entries.items.len);
+    try std.testing.expectEqualStrings("session-b", state.chat_reuse_cache.entries.items[0].session_id);
+    try std.testing.expectEqual(@as(u32, 42), state.active_context_tokens.load(.monotonic));
+    try resetChatSession(&state, "unknown");
+    try std.testing.expectEqual(@as(usize, 1), state.chat_reuse_cache.entries.items.len);
+}
+
+test "chat reset fails immediately while generation owns the GPU and releases the lock on success" {
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.generation_mutex.lock();
+    try std.testing.expectError(error.GenerationBusy, resetChatSession(&state, "session-a"));
+    state.generation_mutex.unlock();
+    try resetChatSession(&state, "session-a");
+    try std.testing.expect(state.generation_mutex.tryLock());
+    state.generation_mutex.unlock();
 }
 
 test "buildHealthJson includes request counts and uptime" {

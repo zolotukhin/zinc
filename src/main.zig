@@ -2153,8 +2153,8 @@ const ServeReqBody = struct {
     }
 };
 
-/// Capability validation is separate from request policy: false and null are
-/// always valid, while an explicit true needs this model/runtime to be ready.
+/// The native worker supports explicit off independently of model capability:
+/// false and null are valid; true requires initialized NextN state.
 fn serveMtpRequestError(enabled: ?bool, capability: anytype) ?[]const u8 {
     if ((enabled orelse false) and !capability.supports_mtp) return capability.unavailable_reason;
     return null;
@@ -2226,6 +2226,9 @@ fn buildCudaServeFinishJson(allocator: std.mem.Allocator, is_chat: bool, finish_
     if (is_chat) {
         const Choice = struct { index: u32 = 0, delta: struct {} = .{}, finish_reason: []const u8 };
         return std.json.Stringify.valueAlloc(allocator, .{
+            .id = "chatcmpl-zinc",
+            .created = 0,
+            .model = "zinc",
             .object = "chat.completion.chunk",
             .choices = [_]Choice{.{ .finish_reason = finish_reason }},
             .mtp = mtp,
@@ -2235,6 +2238,9 @@ fn buildCudaServeFinishJson(allocator: std.mem.Allocator, is_chat: bool, finish_
     }
     const Choice = struct { index: u32 = 0, text: []const u8 = "", finish_reason: []const u8 };
     return std.json.Stringify.valueAlloc(allocator, .{
+        .id = "cmpl-zinc",
+        .created = 0,
+        .model = "zinc",
         .object = "text_completion",
         .choices = [_]Choice{.{ .finish_reason = finish_reason }},
         .mtp = mtp,
@@ -2249,6 +2255,8 @@ fn buildCudaServeResponseJson(allocator: std.mem.Allocator, is_chat: bool, conte
         const Choice = struct { index: u32 = 0, message: Message, finish_reason: []const u8 };
         return std.json.Stringify.valueAlloc(allocator, .{
             .id = "chatcmpl-zinc",
+            .created = 0,
+            .model = "zinc",
             .object = "chat.completion",
             .choices = [_]Choice{.{ .message = .{ .content = content }, .finish_reason = finish_reason }},
             .usage = usage,
@@ -2259,6 +2267,8 @@ fn buildCudaServeResponseJson(allocator: std.mem.Allocator, is_chat: bool, conte
     const Choice = struct { index: u32 = 0, text: []const u8, finish_reason: []const u8 };
     return std.json.Stringify.valueAlloc(allocator, .{
         .id = "cmpl-zinc",
+        .created = 0,
+        .model = "zinc",
         .object = "text_completion",
         .choices = [_]Choice{.{ .text = content, .finish_reason = finish_reason }},
         .usage = usage,
@@ -2343,6 +2353,9 @@ test "MTP terminal stream metadata preserves effective mode and actual fallback"
         defer allocator.free(json);
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
         defer parsed.deinit();
+        try std.testing.expectEqualStrings(if (is_chat) "chatcmpl-zinc" else "cmpl-zinc", parsed.value.object.get("id").?.string);
+        try std.testing.expectEqualStrings("zinc", parsed.value.object.get("model").?.string);
+        try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("created").?.integer);
         const mtp = parsed.value.object.get("mtp").?.object;
         try std.testing.expect(mtp.get("requested").? == .null);
         try std.testing.expect(mtp.get("enabled").?.bool);
@@ -2634,6 +2647,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var write_failed = false;
     var generation_failed = false;
     var ended_on_eog = false;
+    var last_generated_token: ?u32 = null;
     var detector = tool_format_mod.StreamingDetector{ .allocator = allocator, .tools = tool_definitions, .native_gemma = tool_format_mod.forTokenizer(ctx.tokenizer).native_gemma };
     defer detector.deinit();
     var any_tool_call_emitted = false;
@@ -2642,6 +2656,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var last_tool_keepalive_ns = host_io.nanoTimestamp();
     while (true) {
         const ch = ctx.engine.nextChunk(&chan, &buf);
+        if (ch.n > 0) last_generated_token = buf[ch.n - 1];
         generation_failed = generation_failed or ch.failed;
         // A tool call may buffer thousands of tokens before its closing tag.
         // Keep the stream live and detect a disconnected client while waiting.
@@ -2740,10 +2755,12 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         if (ch.finished) break;
     }
     const generated_tokens = chan.consumed;
-    const finish_reason = @tagName(routes_mod.completionFinishReason(max_tokens, max_tokens, generated_tokens, ended_on_eog));
+    const finish_reason = if (ended_on_eog) "stop" else cudaServeFinishReason(generated_tokens, max_tokens, last_generated_token, ctx.engine.eos, ctx.engine.eot);
     const usage = ServeUsage{ .prompt_tokens = prompt_tokens.len, .completion_tokens = generated_tokens, .total_tokens = prompt_tokens.len + generated_tokens };
-    const timings = cudaServeTimings(prompt_tokens.len, generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
-    logServeTimings(prompt_tokens.len, generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
+    // Usage counts the canonical prompt; timing counts only rows actually
+    // computed, preserving prompt-cache benchmark semantics.
+    const timings = cudaServeTimings(@intCast(chan.prefill_tokens), generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
+    logServeTimings(@intCast(chan.prefill_tokens), generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
     if (generation_failed) {
         log.warn("request {d} failed during GPU generation", .{id});
         const metadata = try buildCudaServeErrorJson(allocator, "GPU generation failed", chan.mtp);
