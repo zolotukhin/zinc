@@ -4,6 +4,47 @@ import { resolve } from 'node:path';
 
 const site = 'https://zolotukhin.ai';
 
+/** Social crawlers consume the static head and PNG, without running scripts. */
+export async function checkHocdbSocialPreview(html: string, png: Uint8Array) {
+  const metadata = new Map<string, string[]>();
+  await new HTMLRewriter()
+    .on('head meta', {
+      element(element) {
+        const key = element.getAttribute('property') ?? element.getAttribute('name') ?? '';
+        metadata.set(key, [...(metadata.get(key) ?? []), element.getAttribute('content') ?? '']);
+      },
+    })
+    .transform(new Response(html))
+    .text();
+
+  const image = `${site}/hocdb/social-card-v1.png`;
+  for (const [key, value] of Object.entries({
+    'og:image': image,
+    'og:image:secure_url': image,
+    'og:image:type': 'image/png',
+    'og:image:width': '1200',
+    'og:image:height': '630',
+    'twitter:card': 'summary_large_image',
+    'twitter:image': image,
+    'twitter:image:src': image,
+  })) {
+    assert.deepEqual(metadata.get(key), [value], `HOCDB social preview: ${key}`);
+  }
+  const alt = metadata.get('og:image:alt');
+  assert.equal(alt?.length, 1, 'HOCDB preview needs one descriptive alt text');
+  assert.match(alt![0], /HOCDB.*time-series storage/);
+  assert.deepEqual(metadata.get('twitter:image:alt'), alt, 'social preview alt text must agree');
+
+  // Catch a missing/wrong image and metadata that no longer matches its pixels.
+  const bytes = Buffer.from(png);
+  assert.ok(bytes.length > 24, 'HOCDB preview PNG must not be empty');
+  assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG signature');
+  // PNG requires IHDR first, immediately after the eight-byte signature.
+  assert.equal(bytes.subarray(12, 16).toString(), 'IHDR', 'PNG image header');
+  assert.equal(bytes.readUInt32BE(16), 1200, 'PNG width must match metadata');
+  assert.equal(bytes.readUInt32BE(20), 630, 'PNG height must match metadata');
+}
+
 /** Check the original HTML: indexing must not depend on client-side scripts. */
 export async function checkHtmlIndexability(html: string, canonical: string, headerRobots = '') {
   const canonicals: string[] = [];
@@ -134,6 +175,10 @@ export async function checkBuiltIndexability(dist = resolve(import.meta.dir, '..
     if (!/\bnoindex\b/i.test(robotHeaders(headers, path)))
       errors.push(`download is missing noindex: ${path}`);
   }
+  await checkHocdbSocialPreview(
+    await read('/hocdb/index.html'),
+    await readFile(resolve(dist, 'hocdb/social-card-v1.png')),
+  );
   assert.deepEqual(errors, [], 'built pages, sitemap, feed, and download directives must agree');
   return {
     pages: pages.size,
