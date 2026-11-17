@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">HOCDB — time-series storage for apps and agents</title>
+  <desc id="description">An embedded Zig database with a native JSON CLI. An orange time-series trace sits above query and snapshot commands on a dark background.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#283340"/>
+    </pattern>
+    <linearGradient id="area" x1="0" x2="0" y1="0" y2="1">
+      <stop stop-color="#f18a4b" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#f18a4b" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0d1117"/>
+  <rect x="672" width="528" height="544" fill="url(#grid)"/>
+  <rect x="0" width="8" height="630" fill="#f18a4b"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <g fill="none" stroke="#f18a4b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M76 90V68M90 90V57M104 90V74M118 90V62"/>
+    </g>
+    <text x="138" y="80" fill="#b2bfcd" font-size="15" font-weight="700" letter-spacing="2.4">LOCAL DATA. CLEAR ANSWERS.</text>
+    <text x="70" y="237" fill="#f4f2ed" font-size="124" font-weight="700" letter-spacing="-7">HOCDB</text>
+    <text x="76" y="311" fill="#f4f2ed" font-size="40" letter-spacing="-1">Time-series storage</text>
+    <text x="76" y="363" fill="#b2bfcd" font-size="40" letter-spacing="-1">for apps and agents.</text>
+    <rect x="76" y="419" width="3" height="61" rx="1.5" fill="#f18a4b"/>
+    <text x="95" y="441" fill="#d3dce5" font-size="23">Embedded Zig database</text>
+    <text x="95" y="476" fill="#d3dce5" font-size="23">Native JSON CLI</text>
+    <rect x="704" y="125" width="424" height="377" rx="18" fill="#141c26" stroke="#33404f"/>
+    <g font-family="Menlo, Consolas, monospace">
+      <text x="734" y="166" fill="#b2bfcd" font-size="13" letter-spacing="1.5">TIMESTAMPED RECORDS</text>
+      <circle cx="1092" cy="161" r="5" fill="#f18a4b"/>
+      <g stroke="#293543" stroke-width="1">
+        <path d="M734 211H1098M734 258H1098M734 305H1098M734 352H1098"/>
+        <path d="M734 196V352M825 196V352M916 196V352M1007 196V352M1098 196V352"/>
+      </g>
+      <!-- A schematic time series, not a benchmark or performance claim. -->
+      <path d="M734 321L760 301L786 309L812 266L838 285L864 260L890 270L916 241L942 254L968 220L994 233L1020 202L1046 219L1072 193L1098 205V352H734Z" fill="url(#area)"/>
+      <path d="M734 321L760 301L786 309L812 266L838 285L864 260L890 270L916 241L942 254L968 220L994 233L1020 202L1046 219L1072 193L1098 205" fill="none" stroke="#f18a4b" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="1098" cy="205" r="5" fill="#f18a4b" stroke="#141c26" stroke-width="3"/>
+      <path d="M704 381H1128" stroke="#33404f"/>
+      <text x="734" y="424" fill="#f18a4b" font-size="19">$ <tspan fill="#e0e7ef">hocdb query</tspan></text>
+      <text x="734" y="465" fill="#f18a4b" font-size="19">$ <tspan fill="#e0e7ef">hocdb snapshot</tspan></text>
+    </g>
+    <path d="M76 544H1128" stroke="#293543"/>
+    <text x="76" y="588" fill="#e0e7ef" font-size="22">zolotukhin.ai/hocdb</text>
+    <text x="1128" y="586" text-anchor="end" fill="#b2bfcd" font-size="15" letter-spacing="1.5">LOCAL BY DEFAULT</text>
+  </g>
+</svg>
