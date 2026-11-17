@@ -29,8 +29,10 @@ pub fn render(comptime backend: Backend, full: bool) []const u8 {
     const serving_options = if (accelerator)
         \\  --parallel <n>           Request slots (default: 4); supported models batch decode
         \\                           Gemma MoE uses one slot; single-slot MTP needs --parallel 1
-        \\  chat                     Start the HTTP chat API on port 9090; no built-in browser UI
-        \\
+    ++ "\n" ++ (if (backend == .rocm)
+        "  chat                     Start the built-in browser chat (default port: 9090)\n"
+    else
+        "  chat                     Start the HTTP chat API on port 9090; no built-in browser UI\n") ++ "\n"
     else
         \\  --parallel <n>           Requests in flight (default: 4); generation is serialized
         \\  chat                     Start the built-in browser chat (default port: 9090)
@@ -63,7 +65,7 @@ pub fn render(comptime backend: Backend, full: bool) []const u8 {
         \\
         \\Server options:
         \\  serve                    Start the HTTP API without opening a browser
-        \\  --no-browser             Keep browser chat headless (Vulkan/Metal)
+        \\  --no-browser             Keep browser chat headless (HIP/Vulkan/Metal)
         \\  -p, --port <port>        Server port (default: 8080)
         \\
         ++ serving_options ++
@@ -102,8 +104,10 @@ test "help describes each backend without promising another backend's features" 
     inline for (.{ Backend.vulkan, Backend.metal, Backend.rocm, Backend.cuda }) |backend| {
         inline for (.{ false, true }) |full| {
             const text = render(backend, full);
+            if (backend != .cuda) try std.testing.expect(std.mem.indexOf(u8, text, "Start the built-in browser chat") != null);
+            if (backend == .rocm or backend == .cuda) try std.testing.expect(std.mem.indexOf(u8, text, "single-slot MTP needs --parallel 1\n  chat") != null);
             if (backend == .rocm or backend == .cuda) {
-                try std.testing.expect(std.mem.indexOf(u8, text, "no built-in browser UI") != null);
+                try std.testing.expectEqual(backend == .cuda, std.mem.indexOf(u8, text, "no built-in browser UI") != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "default: 2048") != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "generation is serialized") == null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "--profile") == null);

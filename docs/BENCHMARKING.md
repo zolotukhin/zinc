@@ -51,6 +51,12 @@ The RDNA ZINC requests intentionally omit the OpenAI `model` field. The model is
 # Metal target (Apple Silicon, runs locally)
 bun tools/performance_suite.mjs --target metal
 
+# AMD RDNA default: native HIP / ROCm, with a matching llama.cpp HIP build.
+bun tools/performance_suite.mjs --target rdna --phase all --mtp off \
+  --rdna-sync --rdna-build --rdna-start-llama --rdna-backend rocm \
+  --rdna-llama-device "${ZINC_RDNA_LLAMA_DEVICE:?Set the llama.cpp HIP device}" \
+  --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-rocm.json
+
 # AMD Vulkan, remote node from .env. Select the baseline device from
 # vulkaninfo and set ZINC_RDNA_LLAMA_DEVICE to that device's llama.cpp name.
 bun tools/performance_suite.mjs --target rdna --phase all --mtp off \
@@ -59,7 +65,9 @@ bun tools/performance_suite.mjs --target rdna --phase all --mtp off \
   --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-vulkan.json
 
 # Pick a specific RDNA node when .env defines ZINC_RDNA1_* and ZINC_RDNA2_*.
-bun tools/performance_suite.mjs --target rdna --rdna-node rdna2 --rdna-sync --rdna-build --rdna-backend vulkan
+bun tools/performance_suite.mjs --target rdna \
+  --rdna-node "${ZINC_RDNA_NODE:?Set your configured GPU node}" \
+  --rdna-sync --rdna-build --rdna-backend rocm
 
 # Intel Arc target (separate remote node from .env)
 bun tools/performance_suite.mjs --target intel --intel-sync --intel-build --intel-start-llama
@@ -74,6 +82,10 @@ bun tools/performance_suite.mjs --target all --rdna-sync --rdna-build --rdna-sta
 ```
 
 Defaults are 1 warmup + 3 measured runs per scenario; pass `--runs N --warmup M` to override. Pass `--no-site-write` to leave `site/src/data/zinc-performance.json` alone (the run still emits a `/tmp` artifact via `--output`). The suite stamps `provenance.zinc.version` from `git describe --dirty`; when `--rdna-sync` is used, provenance comes from the local tree that was synced, not from the remote workdir's stale `.git` metadata. Commit (or stash) before publishing — a `-dirty` tag means reviewers cannot reproduce the exact tree.
+
+The RDNA backend defaults to HIP / ROCm. `ZINC_RDNA_BACKEND` changes that default;
+an explicit `--rdna-backend` takes precedence. Use `--rdna-backend vulkan` for
+Vulkan investigations and pair it with the matching llama.cpp Vulkan backend.
 
 The run count, warmup count, timeout and RDNA device-index arguments require complete unsigned decimal safe integers. Leading zeroes are accepted. Fractions, exponents, signs, surrounding whitespace, suffixes and unsafe integers fail before a benchmark starts. Run count must be positive; the other three retain their existing zero behavior. The environment-based RDNA device selector follows the same validation.
 

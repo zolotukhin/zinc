@@ -25,13 +25,13 @@ const examples = [
   return { label, zinc: median(zinc?.decode_tps), baseline: median(scenario?.baseline?.decode_tps) };
 });
 const platforms = [
-  { name: 'AMD Radeon', backend: 'Vulkan', note: 'Linux · RDNA3 / RDNA4', href: '/zinc/docs/getting-started/#linux-amd-or-intel-arc', link: 'Vulkan setup' },
-  { name: 'AMD Radeon', backend: 'ROCm / HIP', note: 'Linux · R9700 / gfx1201 validated', href: '/zinc/docs/rocm/', link: 'ROCm setup' },
+  { name: 'AMD Radeon', backend: 'HIP / ROCm · preferred', note: 'Linux · RDNA · R9700 / gfx1201 qualified', href: '/zinc/docs/rocm/', link: 'HIP setup' },
+  { name: 'AMD Radeon', backend: 'Vulkan · alternative', note: 'Linux · RDNA3 / RDNA4', href: '/zinc/docs/getting-started/#choose-your-backend', link: 'Vulkan setup' },
   { name: 'Apple Silicon', backend: 'Metal · preview', note: 'macOS · M-series', href: '/zinc/docs/getting-started/#macos-apple-silicon', link: 'Mac setup' },
   { name: 'Intel Arc', backend: 'Vulkan', note: 'Linux · Xe2 / Battlemage', href: '/zinc/docs/intel-gpu-reference/', link: 'Intel setup' },
   { name: 'NVIDIA RTX', backend: 'CUDA · experimental', note: 'Linux / WSL2', href: '/zinc/docs/hardware-requirements/', link: 'Requirements' },
 ];
-const description = 'Run GGUF language models on your own GPU with ZINC. Start with browser chat, use the command line, or connect an app through the OpenAI-compatible API.';
+const description = 'Run GGUF language models with native HIP / ROCm on AMD RDNA or Vulkan on Intel. Use the command line, browser chat or an OpenAI-compatible local API.';
 ---
 
 <BaseLayout
@@ -69,7 +69,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="use-cases" aria-label="Ways to use ZINC">
       <a href="/zinc/docs/getting-started/#start-the-chat-ui">
         <span class="number" aria-hidden="true">01</span>
-        <div><h2>Chat in your browser</h2><p>Local conversations in Vulkan and Metal builds.</p></div>
+        <div><h2>Chat in your browser</h2><p>Vulkan and Metal, plus current HIP source builds.</p></div>
         <span aria-hidden="true">↗</span>
       </a>
       <a href="/zinc/docs/running-zinc/">
@@ -89,20 +89,20 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="section-copy">
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
-      <p><a href="/zinc/docs/getting-started/">Install Linux {STABLE_RELEASE}</a>, then download a model and open a chat. Published Vulkan and ROCm archives include the executable and its runtime assets.</p>
+      <p><a href="/zinc/docs/getting-started/">Install Linux {STABLE_RELEASE}</a>, then download a model and start the API. Published HIP / ROCm and Vulkan archives include the executable and its runtime assets.</p>
       <p>Install your GPU driver/runtime first. You can run the release without Zig or a source checkout. Apple Silicon is an unsigned preview; see the <a href="/zinc/docs/getting-started/#build-from-source">source-build instructions</a> for development and experimental backends.</p>
-      <p class="setup-note">AMD with Vulkan: set <code>RADV_PERFTEST=coop_matrix</code> before the GPU check or chat. Choose the separate <a href="/zinc/docs/rocm/">ROCm archive</a> when using that runtime.</p>
+      <p class="setup-note">For AMD RDNA, start with <a href="/zinc/docs/rocm/">native HIP / ROCm</a> and its runtime prerequisites. Intel Arc uses Vulkan; AMD Vulkan is an alternative and needs <code>RADV_PERFTEST=coop_matrix</code> on RDNA4.</p>
     </div>
     <div class="terminal-wrap">
-      <TerminalWindow title="Install and chat · Linux Vulkan" density="compact" code={`curl -fL https://github.com/zolotukhin/zinc/releases/download/v${STABLE_RELEASE}/install.sh -o install.sh
+      <TerminalWindow title="Install and serve · AMD HIP / ROCm" density="compact" code={`curl -fL https://github.com/zolotukhin/zinc/releases/download/v${STABLE_RELEASE}/install.sh -o install.sh
 # Inspect install.sh, then:
-ZINC_VERSION=v${STABLE_RELEASE} bash install.sh
+ZINC_VERSION=v${STABLE_RELEASE} ZINC_BACKEND=rocm bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-zinc chat --model-id qwen35-9b-q4k-m`} />
-      <p class="caption">The example downloads Qwen 3.5 9B. Check <a href="/zinc/docs/hardware-requirements/">memory requirements</a> or use <code>zinc model list</code> to browse the catalog.</p>
+zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1`} />
+      <p class="caption">This stable HIP example serves Qwen 3.5 9B through the API. HIP browser chat is available in current source builds; stable {STABLE_RELEASE} includes browser chat on Vulkan. See <a href="/zinc/docs/running-zinc/#browser-chat">browser options</a>, <a href="/zinc/docs/hardware-requirements/">memory requirements</a> and <code>zinc model list</code>.</p>
     </div>
   </section>
 
@@ -110,7 +110,7 @@ zinc chat --model-id qwen35-9b-q4k-m`} />
     <div class="section-copy">
       <p class="eyebrow">Use your hardware</p>
       <h2 id="hardware-heading">Choose your GPU path.</h2>
-      <p>Linux {STABLE_RELEASE} qualification targets AMD with Vulkan or ROCm and Intel Arc with Vulkan. Metal stays an unsigned preview; CUDA is experimental. Exact GPU and model coverage varies by backend.</p>
+      <p>HIP / ROCm is the preferred AMD RDNA path. Linux {STABLE_RELEASE} qualifies the R9700 on HIP and Vulkan, and Intel Arc on Vulkan. Metal stays an unsigned preview; CUDA is experimental. Other cards need their own runtime and model checks.</p>
       <a class="text-link" href="/zinc/docs/hardware-requirements/">Check hardware and memory requirements →</a>
     </div>
     <div class="platforms">
@@ -128,7 +128,7 @@ zinc chat --model-id qwen35-9b-q4k-m`} />
       <p class="eyebrow">Connect harnesses</p>
       <h2 id="harness-heading">Use OpenClaw or OpenCode.</h2>
       <p>Connect OpenClaw or OpenCode to a model served by ZINC. Start the server on your GPU machine, then run the client in a second terminal.</p>
-      <p>Stop the earlier chat server before starting this one. This installed Vulkan example gives Qwen 3.5 9B a 16K context; follow the <a href="/zinc/docs/rocm/">ROCm guide</a> for that backend's model paths and device selection.</p>
+      <p>Stop the earlier chat server before starting this one. This HIP / ROCm example gives Qwen 3.5 9B a 16K context; follow the <a href="/zinc/docs/rocm/">HIP guide</a> for runtime prerequisites and GPU selection. Context is a memory choice, not the model's maximum window.</p>
     </div>
     <div class="terminal-wrap" data-harness-server>
       <TerminalWindow title="1. Start a model server" density="compact" code={`zinc serve --model-id qwen35-9b-q4k-m \\

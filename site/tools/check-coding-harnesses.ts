@@ -77,7 +77,13 @@ try {
         );
         const install = page.locator('[data-installed-quickstart]');
         const installCode = await install.locator('pre code').innerText();
-        assert.ok(installCode.includes(`ZINC_VERSION=v${STABLE_RELEASE} bash install.sh`));
+        assert.ok(
+          installCode.includes(`ZINC_VERSION=v${STABLE_RELEASE} ZINC_BACKEND=rocm bash install.sh`),
+        );
+        assert.match(installCode, /zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1/);
+        const platforms = page.locator('.platform');
+        assert.match(await platforms.first().innerText(), /HIP \/ ROCm.*preferred/);
+        assert.match(await platforms.nth(1).innerText(), /Vulkan.*alternative/);
         assert.ok(installCode.includes(`/releases/download/v${STABLE_RELEASE}/install.sh`));
         assert.match(installCode, /export PATH="\$HOME\/\.local\/bin:\$PATH"/);
         assert.match(installCode, /(?:^|\n)zinc --check/);

@@ -507,6 +507,21 @@ test('parseArgs accepts the ROCm RDNA backend', () => {
   expect(parseArgs(['--target', 'rdna', '--rdna-backend', 'rocm']).rdnaBackend).toBe('rocm');
 });
 
+test('RDNA benchmarks default to HIP and preserve environment and explicit Vulkan choices', () => {
+  const saved = process.env.ZINC_RDNA_BACKEND;
+  try {
+    delete process.env.ZINC_RDNA_BACKEND;
+    expect(parseArgs(['--target', 'rdna']).rdnaBackend).toBe('rocm');
+    expect(parseArgs(['--target', 'rdna', '--rdna-backend', 'vulkan']).rdnaBackend).toBe('vulkan');
+    process.env.ZINC_RDNA_BACKEND = 'vulkan';
+    expect(parseArgs(['--target', 'rdna']).rdnaBackend).toBe('vulkan');
+    expect(parseArgs(['--target', 'rdna', '--rdna-backend', 'rocm']).rdnaBackend).toBe('rocm');
+  } finally {
+    if (saved === undefined) delete process.env.ZINC_RDNA_BACKEND;
+    else process.env.ZINC_RDNA_BACKEND = saved;
+  }
+});
+
 test('RDNA benchmark identities keep Vulkan and ROCm publications separate', () => {
   expect(rdnaTargetIdentity('vulkan')).toEqual({ id: 'rdna', label: 'AMD RDNA · Vulkan' });
   expect(rdnaTargetIdentity('auto')).toEqual({ id: 'rdna', label: 'AMD RDNA · Vulkan' });

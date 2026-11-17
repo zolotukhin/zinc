@@ -34,6 +34,30 @@ semver() {
   fi
 }
 version_at_least() { awk -v actual="$1" -v required="$2" 'BEGIN { n=split(actual,a,"."); m=split(required,b,"."); for(i=1;i<=n||i<=m;i++){if(a[i]+0>b[i]+0)exit 0;if(a[i]+0<b[i]+0)exit 1}exit 0 }'; }
+# An AMD-only machine should get its native HIP backend. Mixed-vendor systems
+# need an explicit choice: an AMD display APU must not hide an Intel/NVIDIA GPU.
+linux_backend() {
+  local vendor_file vendor amd=0 other=0
+  for vendor_file in "${ZINC_DRM_SYSFS_ROOT:-/sys/class/drm}"/card[0-9]*/device/vendor; do
+    [ -r "$vendor_file" ] || continue
+    read -r vendor < "$vendor_file" || true
+    case "$vendor" in
+      0x1002) amd=1 ;;
+      0x8086|0x10de) other=1 ;;
+    esac
+  done
+  if [ "$amd" = 1 ] && [ "$other" = 1 ]; then
+    printf '%s\n' 'Multiple GPU vendors detected; set ZINC_BACKEND=rocm for AMD or ZINC_BACKEND=vulkan for Intel/portable Vulkan.' >&2
+    return 1
+  fi
+  if [ "$amd" = 1 ]; then printf '%s\n' rocm; else printf '%s\n' vulkan; fi
+}
+check_hip_headers() {
+  local include="${ROCM_PATH:-/opt/rocm}/include" header
+  for header in hip/hip_runtime_api.h hip/hiprtc.h hipblas/hipblas.h rocwmma/rocwmma.hpp; do
+    [ -r "$include/$header" ] || fail "HIP/ROCm selected for AMD, but runtime-compilation headers are missing. Install the matching HIP/hipRTC/hipBLAS and rocWMMA development files: https://zolotukhin.ai/zinc/docs/rocm/ . For the Vulkan alternative, explicitly set ZINC_BACKEND=vulkan."
+  done
+}
 operation=install
 if [ "$#" -gt 0 ]; then
   [ "$#" -eq 1 ] && [ "$1" = --rollback ] || fail "usage: install.sh [--rollback]"
@@ -42,7 +66,16 @@ fi
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os-$arch" in
-  Linux-x86_64) platform=linux-x86_64; backend="${ZINC_BACKEND:-vulkan}" ;;
+  Linux-x86_64)
+    platform=linux-x86_64
+    backend="${ZINC_BACKEND:-}"
+    if [ -z "$backend" ] && [ "$operation" = install ]; then
+      backend="$(linux_backend)" || fail "select a backend explicitly for this machine"
+      if [ "$backend" = rocm ]; then
+        log "AMD detected: selecting native HIP/ROCm; checking runtime-compilation headers"
+      fi
+    fi
+    ;;
   Darwin-arm64) platform=macos-aarch64; backend="${ZINC_BACKEND:-metal}" ;;
   Darwin-x86_64)
     if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
@@ -51,10 +84,15 @@ case "$os-$arch" in
     fail "Intel Macs do not have a supported binary release" ;;
   *) fail "no binary release for $os/$arch" ;;
 esac
-case "$platform-$backend" in
-  macos-aarch64-metal|linux-x86_64-vulkan|linux-x86_64-rocm) ;;
-  *) fail "unsupported backend '$backend' for $platform" ;;
-esac
+# Rollback validates the saved receipt in verify_tree; a current backend
+# override, missing HIP headers or changed GPU inventory cannot select it.
+if [ "$operation" = install ]; then
+  case "$platform-$backend" in
+    macos-aarch64-metal|linux-x86_64-vulkan|linux-x86_64-rocm) ;;
+    *) fail "unsupported backend '$backend' for $platform" ;;
+  esac
+  if [ "$platform-$backend" = linux-x86_64-rocm ]; then check_hip_headers; fi
+fi
 target="$platform-$backend"
 install_root="${ZINC_INSTALL_DIR:-$HOME/.local/share/zinc}"
 bin_dir="${ZINC_BIN_DIR:-$HOME/.local/bin}"

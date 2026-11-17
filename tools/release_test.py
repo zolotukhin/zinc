@@ -844,9 +844,9 @@ class ReleaseTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def tree(self, release_version="9.8.7", exit_code=0):
-        spec = target(NATIVE)
-        tree = self.root / "release" / ("v" + release_version) / archive_name(release_version, NATIVE).removesuffix(".tar.gz")
+    def tree(self, release_version="9.8.7", exit_code=0, target_id=NATIVE):
+        spec = target(target_id)
+        tree = self.root / "release" / ("v" + release_version) / archive_name(release_version, target_id).removesuffix(".tar.gz")
         (tree / "bin").mkdir(parents=True)
         report = (f"zinc {release_version}\ncommit: {COMMIT}\n"
                   f"target: {'aarch64-macos-none' if sys.platform == 'darwin' else 'x86_64-linux-gnu'}\n"
@@ -863,10 +863,10 @@ class ReleaseTest(unittest.TestCase):
         for name in ["README.md", "LICENSE"]:
             (tree / name).write_text(name + "\n")
         meta = {"schema_version": 1, "name": "zinc", "version": release_version, "tag": "v" + release_version,
-                "commit": COMMIT, "target": NATIVE, "backend": spec["backend"], "cpu": "baseline",
+                "commit": COMMIT, "target": target_id, "backend": spec["backend"], "cpu": "baseline",
                 "optimize": "ReleaseFast", "minimum_os": spec["minimum_os"], "minimum_glibc": spec["minimum_glibc"]}
         write_json(tree / "VERSION.json", meta)
-        receipt = {"format": "1", "version": release_version, "commit": COMMIT, "target": NATIVE,
+        receipt = {"format": "1", "version": release_version, "commit": COMMIT, "target": target_id,
                    "backend": spec["backend"], "minimum_os": spec["minimum_os"], "minimum_glibc": spec["minimum_glibc"],
                    "binary_sha256": sha256(tree / "bin/zinc")}
         (tree / "INSTALL-METADATA").write_text("".join(f"{k}={v}\n" for k, v in receipt.items()))
@@ -900,6 +900,34 @@ class ReleaseTest(unittest.TestCase):
     def assert_installed(self, expected):
         self.assertEqual((self.root / "installation/current").resolve().name,
                          archive_name(expected, NATIVE).removesuffix(".tar.gz"))
+
+    @unittest.skipIf(sys.platform == "darwin", "Linux HIP receipt requires an ELF fixture")
+    def test_rollback_restores_a_hip_receipt_even_with_mixed_gpus_and_a_conflicting_override(self):
+        # This is a native CPU stub reporting a HIP package identity. No model,
+        # GPU, HIP installation or runtime compilation is involved.
+        toolkit = self.root / "fixture-toolkit"
+        for header in ("hip/hip_runtime_api.h", "hip/hiprtc.h", "hipblas/hipblas.h", "rocwmma/rocwmma.hpp"):
+            path = toolkit / "include" / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("// fixture\n")
+        hip = self.tree("9.8.6", target_id="linux-x86_64-rocm")
+        self.bundle(hip)
+        first = self.install("9.8.6", ZINC_BACKEND="rocm", ROCM_PATH=str(toolkit))
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        vulkan = self.tree("9.8.7")
+        self.bundle(vulkan)
+        second = self.install("9.8.7", ZINC_BACKEND="vulkan")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        drm = self.root / "mixed-drm"
+        for card, vendor in (("card0", "0x1002"), ("card1", "0x8086")):
+            device = drm / card / "device"
+            device.mkdir(parents=True)
+            (device / "vendor").write_text(vendor + "\n")
+        rollback = self.install("9.8.7", "--rollback", ZINC_BACKEND="cuda",
+                                ZINC_DRM_SYSFS_ROOT=str(drm), ROCM_PATH=str(self.root / "missing-toolkit"))
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
+        self.assertEqual((self.root / "installation/current").resolve(), self.root / "installation" / hip.name)
+        self.assertIn("rolled back to zinc 9.8.6 (rocm)", rollback.stdout)
 
     def test_semver_rejects_paths_shell_text_and_numeric_prerelease_zeroes(self):
         for value in ["../0.1.0", "v0.1.0", "01.0.0", "1.2", "0.1.0-01", "0.1.0\n", "$(touch marker)"]:
@@ -1673,6 +1701,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("not recommended for chat, reasoning or coding", notes)
         self.assertNotIn("qwen3-0.6b-q8-0 --chat", notes)
         self.assertIn("qwen35-9b-q4k-m --chat", notes)
+        self.assertLess(notes.index('ZINC_BACKEND=rocm'), notes.index('ZINC_BACKEND=vulkan'))
+        self.assertIn('prefer native HIP / ROCm', notes)
+        self.assertIn('capabilities.browser_ui', notes)
         # Public notes are generated independently of the preparation brief;
         # keep its known limitation and source-frozen evidence visible there.
         self.assertIn("slower decode than llama.cpp on all seven models", notes)

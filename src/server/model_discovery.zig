@@ -5,6 +5,35 @@
 //! length. Never exposes parent directories or other private metadata.
 const std = @import("std");
 
+pub const ChatModel = struct {
+    display_name: ?[]const u8 = null,
+    homepage_url: ?[]const u8 = null,
+    supports_thinking_toggle: bool = false,
+};
+
+/// Describe the already-loaded native model to the shared browser UI. This is
+/// a single active, manually loaded model, not a hot-switchable catalog entry.
+pub fn serializeChatModel(allocator: std.mem.Allocator, model_path: []const u8, context_length: u32, options: ChatModel) ![]u8 {
+    const model_id = std.fs.path.basename(model_path);
+    if (!std.unicode.utf8ValidateSlice(model_id)) return error.InvalidUtf8;
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .object = "list",
+        .data = &.{.{
+            .id = model_id,
+            .object = "model",
+            .created = 0,
+            .owned_by = "zinc",
+            .context_length = context_length,
+            .display_name = options.display_name orelse model_id,
+            .homepage_url = options.homepage_url,
+            .active = true,
+            .managed = false,
+            .installed = true,
+            .supports_thinking_toggle = options.supports_thinking_toggle,
+        }},
+    }, .{});
+}
+
 /// Model discovery serializer — produces OpenAI-compatible /v1/models JSON.
 /// Returns an allocator-owned byte slice; caller must free with the same allocator.
 pub fn serializeModels(allocator: std.mem.Allocator, model_path: []const u8, context_length: u32) ![]u8 {
@@ -28,6 +57,44 @@ test "serializeModels basic" {
     defer allocator.free(result);
     const expected = "{\"object\":\"list\",\"data\":[{\"id\":\"model.gguf\",\"object\":\"model\",\"created\":0,\"owned_by\":\"zinc\",\"context_length\":8192}]}";
     try std.testing.expectEqualStrings(expected, result);
+}
+
+test "native browser discovery identifies only the loaded model and its real controls" {
+    const bytes = try serializeChatModel(std.testing.allocator, "/fixtures/private/Qwen\"27B.gguf", 65536, .{
+        .display_name = "Qwen 27B",
+        .homepage_url = "https://example.com/model",
+        .supports_thinking_toggle = true,
+    });
+    defer std.testing.allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    const models = parsed.value.object.get("data").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), models.len);
+    const model = models[0].object;
+    try std.testing.expectEqualStrings("Qwen\"27B.gguf", model.get("id").?.string);
+    try std.testing.expectEqualStrings("Qwen 27B", model.get("display_name").?.string);
+    try std.testing.expectEqual(@as(i64, 65536), model.get("context_length").?.integer);
+    try std.testing.expect(model.get("active").?.bool and model.get("installed").?.bool);
+    try std.testing.expect(!model.get("managed").?.bool);
+    try std.testing.expect(model.get("supports_thinking_toggle").?.bool);
+    const legacy_bytes = try serializeModels(std.testing.allocator, "/fixtures/private/Qwen\"27B.gguf", 65536);
+    defer std.testing.allocator.free(legacy_bytes);
+    const legacy = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, legacy_bytes, .{});
+    defer legacy.deinit();
+    const original = legacy.value.object.get("data").?.array.items[0].object;
+    // Browser additions preserve every pre-existing OpenAI discovery field.
+    inline for (.{ "id", "object", "owned_by" }) |key| try std.testing.expectEqualStrings(original.get(key).?.string, model.get(key).?.string);
+    inline for (.{ "created", "context_length" }) |key| try std.testing.expectEqual(original.get(key).?.integer, model.get(key).?.integer);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "private") == null);
+    try std.testing.expectError(error.InvalidUtf8, serializeChatModel(std.testing.allocator, "bad\xff.gguf", 65536, .{}));
+
+    const unknown = try serializeChatModel(std.testing.allocator, "unknown.gguf", 32768, .{});
+    defer std.testing.allocator.free(unknown);
+    const fallback = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unknown, .{});
+    defer fallback.deinit();
+    const item = fallback.value.object.get("data").?.array.items[0].object;
+    try std.testing.expectEqualStrings("unknown.gguf", item.get("display_name").?.string);
+    try std.testing.expect(!item.get("supports_thinking_toggle").?.bool);
 }
 
 test "serializeModels basename includes extension" {

@@ -54,9 +54,14 @@ per-scenario timings:
 ```bash
 source .env
 bun tools/performance_suite.mjs \
-  --target rdna --phase all --rdna-sync --rdna-build \
+  --target rdna --rdna-backend rocm --phase all --rdna-sync --rdna-build \
   --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-rdna-suite.json
 ```
+
+HIP / ROCm is the default RDNA comparison. For the historical Vulkan reference
+or a Vulkan investigation, explicitly select `--rdna-backend vulkan` and use
+the matching llama.cpp backend. The source-level Vulkan diagnostics below
+remain specific to that backend.
 
 For HTTP latency diagnostics, run the following as one shell command **on the
 remote node**, with `ZINC_WORKDIR` and `ZINC_MODEL` set to your checkout and GGUF.

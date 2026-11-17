@@ -4561,7 +4561,8 @@ fn freeParsedToolOutput(allocator: std.mem.Allocator, parsed: tool_format.Parsed
 
 // ── Built-in Chat UI ─────────────────────────────────────────
 
-fn serveChatUi(conn: *http.Connection) !void {
+/// Serve the same embedded interface on Vulkan, Metal and native HIP servers.
+pub fn serveChatUi(conn: *http.Connection) !void {
     const html = @embedFile("chat.html");
     var buf: [256]u8 = undefined;
     const header = std.fmt.bufPrint(&buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{html.len}) catch return error.HeaderTooLarge;

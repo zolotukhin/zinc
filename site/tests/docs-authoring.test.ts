@@ -128,7 +128,7 @@ describe('installed command documentation', () => {
   test('the first-model flow installs a release and delegates builds to the contributor guide', async () => {
     const guide = await readFile(resolve(import.meta.dir, '../../docs/GETTING_STARTED.md'), 'utf8');
     const [usage, source] = guide.split('## Build from source');
-    expect(usage).toContain(`ZINC_VERSION=v${STABLE_RELEASE} bash install.sh`);
+    expect(usage).toContain(`ZINC_VERSION=v${STABLE_RELEASE} ZINC_BACKEND=rocm bash install.sh`);
     expect(usage).toContain('zinc --check');
     expect(usage).not.toMatch(/git clone|scripts\/zig\.sh build|zig-out\/bin\/zinc/);
     expect(source).toContain('DEVELOPMENT.md#prerequisites');
@@ -164,6 +164,28 @@ test('active install recipes and qualification links follow the stable release',
   for (const name of ['docs/GETTING_STARTED.md', 'docs/HARDWARE_REQUIREMENTS.md', 'docs/ROCM.md']) {
     expect(await readFile(resolve(root, name), 'utf8'), name).toContain(STABLE_VALIDATION_PATH);
   }
+});
+
+test('AMD onboarding chooses HIP first and preserves Intel and released UI boundaries', async () => {
+  const root = resolve(import.meta.dir, '../..');
+  for (const name of ['README.md', 'docs/GETTING_STARTED.md']) {
+    const markdown = await readFile(resolve(root, name), 'utf8');
+    const recipes = consumerShellExamples(markdown).filter((code) =>
+      code.includes('bash install.sh'),
+    );
+    expect(recipes[0], name).toContain('ZINC_BACKEND=rocm');
+    expect(
+      recipes.some((code) => code.includes('ZINC_BACKEND=vulkan')),
+      name,
+    ).toBe(true);
+  }
+  const rocm = await readFile(resolve(root, 'docs/ROCM.md'), 'utf8');
+  expect(rocm).toContain('## Development: browser chat on HIP');
+  expect(rocm).toContain('not in the published 0.1.1 archive');
+  expect(rocm).toContain('not a model limit');
+  expect(rocm).toContain('64K F32');
+  const page = await readFile(resolve(root, 'site/src/pages/zinc/index.astro'), 'utf8');
+  expect(page.indexOf("backend: 'HIP / ROCm")).toBeLessThan(page.indexOf("backend: 'Vulkan"));
 });
 
 test('shared harness introductions do not classify OpenClaw as a coding-only client', async () => {

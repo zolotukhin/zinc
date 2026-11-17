@@ -387,9 +387,9 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
 }
 
 // One decision and one opener for browser chat. Explicit serving is headless;
-// ROCm/CUDA do not ship a browser UI even when invoked through `chat`.
+// HIP shares the embedded UI; experimental CUDA remains API-only.
 fn maybeLaunchChatUi(config: Config, backend: capabilities_mod.Backend, opener: anytype) void {
-    if (config.command == .chat and !config.no_browser and (backend == .vulkan or backend == .metal)) opener(config.port);
+    if (config.command == .chat and !config.no_browser and capabilities_mod.info(backend, null, null, false).capabilities.browser_ui) opener(config.port);
 }
 
 fn launchChatUi(port: u16) void {
@@ -2092,6 +2092,8 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
     log.info("API base URL: http://localhost:{d}/v1", .{config.port});
     log.info("Health: http://localhost:{d}/health", .{config.port});
 
+    maybeLaunchChatUi(config, capabilities_mod.currentBackend(), launchChatUi);
+
     while (true) {
         const conn = server.accept() catch |err| {
             log.warn("accept failed: {s}", .{@errorName(err)});
@@ -2160,6 +2162,12 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
         conn.sendJson(200, "{}") catch {};
         return;
     }
+    if (comptime gpu.is_rocm) {
+        if (req.method == .GET and (std.mem.eql(u8, req.path, "/") or std.mem.eql(u8, req.path, "/chat"))) {
+            routes_mod.serveChatUi(&conn) catch {};
+            return;
+        }
+    }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/health")) {
         if (ctx.engine.executionFailed()) {
             conn.sendError(503, "server_error", "GPU execution failed; restart the server") catch {};
@@ -2196,7 +2204,15 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
     }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/models")) {
         if (ctx.model_path) |mp| {
-            const json = model_discovery_mod.serializeModels(ctx.allocator, mp, ctx.slot_ctx) catch |err| {
+            const entry = catalog_mod.findForLoadedModel(null, mp, "");
+            const json = (if (comptime gpu.is_rocm)
+                model_discovery_mod.serializeChatModel(ctx.allocator, mp, ctx.slot_ctx, .{
+                    .display_name = if (entry) |e| e.display_name else null,
+                    .homepage_url = if (entry) |e| e.homepage_url else null,
+                    .supports_thinking_toggle = ctx.tokenizer.supportsThinkingToggle(),
+                })
+            else
+                model_discovery_mod.serializeModels(ctx.allocator, mp, ctx.slot_ctx)) catch |err| {
                 log.warn("Failed to serialize models: {s}", .{@errorName(err)});
                 conn.sendError(500, "internal_error", "failed to serialize models") catch {};
                 return;
@@ -4039,7 +4055,7 @@ test "chat opens one browser only on UI backends and respects no-browser" {
     inline for (.{ capabilities_mod.Backend.vulkan, capabilities_mod.Backend.metal, capabilities_mod.Backend.rocm, capabilities_mod.Backend.cuda }) |backend| {
         Fake.calls = 0;
         maybeLaunchChatUi(.{ .command = .chat, .port = 9191 }, backend, Fake.open);
-        try std.testing.expectEqual(@as(usize, if (backend == .vulkan or backend == .metal) 1 else 0), Fake.calls);
+        try std.testing.expectEqual(@as(usize, if (backend != .cuda) 1 else 0), Fake.calls);
         if (Fake.calls != 0) try std.testing.expectEqual(@as(u16, 9191), Fake.port);
         Fake.calls = 0;
         maybeLaunchChatUi(.{ .command = .chat, .no_browser = true }, backend, Fake.open);

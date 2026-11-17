@@ -13,10 +13,10 @@ or [manual verification](#verify-a-manual-download).
 [Stable 0.1.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1)
 provides two **Linux x86_64** downloads. Each executable contains one backend.
 
-| Choose               | Qualified release hardware                       | Runtime requirements                                                      | Interfaces                  |
-| -------------------- | ------------------------------------------------ | ------------------------------------------------------------------------- | --------------------------- |
-| **Vulkan** (default) | AMD Radeon AI PRO R9700; Intel Arc Pro B70 / Xe2 | glibc 2.35+, Vulkan 1.3 loader and compatible GPU driver                  | CLI, browser chat, HTTP API |
-| **ROCm**             | AMD Radeon AI PRO R9700 (`gfx1201`)              | glibc 2.39+, ROCm 7.2.4 with HIP, hipRTC, hipBLAS and HIP/rocWMMA headers | CLI, HTTP API               |
+| Choose                                  | Qualified release hardware                       | Runtime requirements                                                      | Interfaces                  |
+| --------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------- | --------------------------- |
+| **HIP / ROCm** (preferred for AMD RDNA) | AMD Radeon AI PRO R9700 (`gfx1201`)              | glibc 2.39+, ROCm 7.2.4 with HIP, hipRTC, hipBLAS and HIP/rocWMMA headers | CLI, HTTP API               |
+| **Vulkan** (Intel; AMD alternative)     | Intel Arc Pro B70 / Xe2; AMD Radeon AI PRO R9700 | glibc 2.35+, Vulkan 1.3 loader and compatible GPU driver                  | CLI, browser chat, HTTP API |
 
 Vulkan archives include compiled shaders, so `glslc` is unnecessary. ROCm
 compiles kernels at runtime and still needs its development libraries and
@@ -36,16 +36,16 @@ Download the release installer and review it:
 curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh -o install.sh
 ```
 
-For **Vulkan**:
-
-```bash
-ZINC_VERSION=v0.1.1 bash install.sh
-```
-
-For **ROCm**, use this instead:
+For **AMD RDNA**, select the native **HIP / ROCm** archive:
 
 ```bash
 ZINC_VERSION=v0.1.1 ZINC_BACKEND=rocm bash install.sh
+```
+
+For **Intel Arc**, or the alternative **AMD Vulkan** path:
+
+```bash
+ZINC_VERSION=v0.1.1 ZINC_BACKEND=vulkan bash install.sh
 ```
 
 Then make the command available in this shell:
@@ -59,6 +59,13 @@ Add that PATH line to your shell startup file to keep it for future terminals.
 The installer needs Bash, curl, tar and standard system utilities. It checks
 file integrity, architecture and runtime compatibility before activating the
 installation. The version output identifies the selected backend.
+
+Use the explicit backend above with the published 0.1.1 installer. The current
+source installer selects HIP on AMD-only Linux machines and checks
+runtime-compilation headers before every HIP install. It selects Vulkan on Intel or
+GPU-less hosts and requires a choice on mixed-vendor machines. Rollback uses
+the saved installation receipt. This selection does not install drivers or
+qualify additional GPU models.
 
 The default command is `~/.local/bin/zinc`; its matching runtime assets live
 under `~/.local/share/zinc`. `ZINC_BIN_DIR` and `ZINC_INSTALL_DIR` override these

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "backend": "rocm",
+  "gpu": "AMD Radeon AI PRO R9700",
+  "model_id": "Qwen3.8-27B-Q4_K_M.gguf",
+  "context": 65536,
+  "kv_format": "f32",
+  "slots": 1,
+  "checks": [
+    {
+      "name": "json_chat",
+      "passed": true,
+      "answer": "READY"
+    },
+    {
+      "name": "sse_chat",
+      "passed": true,
+      "events": 3,
+      "answer": "STREAM_READY"
+    },
+    {
+      "name": "prompt_beyond_16k",
+      "passed": true,
+      "prompt_tokens": 21040,
+      "answer": "HARBOR_7429",
+      "wall_seconds": 122.11,
+      "scope": "one synthetic retrieval, not a long-task or performance qualification"
+    },
+    {
+      "name": "fresh_request_after_long_prompt",
+      "passed": true,
+      "answer": "RECOVERED"
+    }
+  ],
+  "checked_at": "2026-11-17T19:52:02Z",
+  "source": {
+    "base_commit": "ce49c3613fb5c734187667da4698f9f91548dd88",
+    "archive_sha256": "15715c358d0118dfacc545c206b0b921148c99baf085b7b5591378d13cb11e1d",
+    "state": "unreleased HIP browser host changes",
+    "binary_sha256": "05fdc4f98048cdc6169d00695f22576d318d359f19fd800dbee65526ea41148b"
+  },
+  "release_qualification": false,
+  "scope": "One R9700, Qwen3.8 27B Q4_K_M, one slot at 64K F32 capacity. Synthetic retrieval beyond 16K and short-request recovery; not a full 64K quality or performance certification.",
+  "browser": {
+    "passed": true,
+    "backend": "rocm",
+    "context": 65536,
+    "ui_sha256": "702ad38348312b4b0826745bdbb87aeec86b44c264b79904557076c796d59f04",
+    "model_selector_disabled": true,
+    "thinking_toggle_enabled": true,
+    "real_streamed_answer": "BROWSER_READY",
+    "page_errors": []
+  }
+}

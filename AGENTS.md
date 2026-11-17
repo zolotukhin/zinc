@@ -8,12 +8,21 @@ contributing to ZINC itself; user-facing examples use the installed `zinc` comma
 
 ## Commands
 
-```bash
-# Build Vulkan on Linux or Metal on macOS (one backend per binary)
-./scripts/zig.sh build -Doptimize=ReleaseFast
+For AMD RDNA work, use **HIP / ROCm by default**: select the `rocm` archive
+or build with `-Dbackend=rocm`. Vulkan is the Intel path and an explicit AMD
+alternative. Check the compiled backend with `zinc --version`; each binary
+contains one backend. The portable Linux build-system default of Vulkan is
+not the recommended AMD runtime choice.
 
-# AMD ROCm is an explicit Linux build; see docs/ROCM.md for prerequisites
+```bash
+# AMD RDNA: native HIP / ROCm (Linux; see docs/ROCM.md for prerequisites)
 ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
+
+# Intel or the explicit AMD Vulkan alternative (Linux)
+./scripts/zig.sh build -Dbackend=vulkan -Doptimize=ReleaseFast
+
+# Apple Silicon preview (macOS)
+./scripts/zig.sh build -Dbackend=metal -Doptimize=ReleaseFast
 
 # Run inference
 ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--debug]
