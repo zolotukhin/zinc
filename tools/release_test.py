@@ -921,7 +921,7 @@ class ReleaseTest(unittest.TestCase):
         rollback = self.install("9.8.7", "--rollback", ZINC_BACKEND="cuda",
                                 ZINC_DRM_SYSFS_ROOT=str(drm), ROCM_PATH=str(self.root / "missing-toolkit"))
         self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
-        self.assertEqual((self.root / "installation/current").resolve(), hip)
+        self.assertEqual((self.root / "installation/current").resolve(), self.root / "installation" / hip.name)
         self.assertIn("rolled back to zinc 9.8.6 (rocm)", rollback.stdout)
 
     def test_semver_rejects_paths_shell_text_and_numeric_prerelease_zeroes(self):
