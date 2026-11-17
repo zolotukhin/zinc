@@ -62,6 +62,8 @@ test('both agent indexes put installed client setup before implementation refere
     expect(text).toContain('http://localhost:9090/v1/models');
     expect(text).toContain('standalone helper');
     expect(text).toContain(`Stable Linux release: ${STABLE_RELEASE}`);
+    expect(text).toContain('AMD RDNA: prefer HIP / ROCm');
+    expect(text).toContain('Intel Arc uses ZINC_BACKEND=vulkan');
     expect(text).toContain('https://example.test' + STABLE_VALIDATION_PATH);
     expect(text).toContain('Structured discovery (0.1.1+)');
     expect(text).toContain('are released features');

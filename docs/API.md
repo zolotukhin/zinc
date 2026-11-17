@@ -16,8 +16,10 @@ and [OpenCode](/zinc/docs/opencode/).
 ## Backend coverage
 
 Each executable contains one backend. Check `zinc --version` before selecting
-an interface or copying server settings. Vulkan is the Linux default; ROCm/HIP
-is a separate AMD build, Metal is a macOS preview, and CUDA is experimental.
+an interface or copying server settings. HIP / ROCm is the preferred AMD RDNA
+path; Vulkan serves Intel and provides an AMD alternative. Metal is a macOS
+preview, and CUDA is experimental. The matrix below describes stable 0.1.1;
+[current HIP browser support](#development-hip-browser-chat) is listed separately.
 
 | Feature           | Vulkan / Metal                  | ROCm / CUDA                      |
 | ----------------- | ------------------------------- | -------------------------------- |
@@ -128,6 +130,18 @@ as unknown. See [Run models and connect apps](RUNNING_ZINC.md) for the complete 
 
 Unavailable endpoints return 404 on ROCm/CUDA. Set `stream` explicitly for both
 completion routes. The coverage matrix above describes their response defaults.
+
+## Development: HIP browser chat
+
+Current HIP source builds also serve the shared interface at `GET /` and
+`GET /chat`, and advertise `capabilities.browser_ui: true`. They add the
+legacy `model` display key to native health. Their single `/v1/models` row
+keeps the GGUF basename as its ID and adds `active`, `installed`, `managed`,
+`display_name`, `homepage_url` and `supports_thinking_toggle` for the UI.
+The row is always active and `managed` is false: it describes the loaded
+startup model, rather than offering a downloadable/hot-switchable catalog.
+CUDA and the published 0.1.1 HIP archive retain their existing endpoint coverage.
+HIP sampling remains greedy and model-management routes remain unavailable.
 
 ---
 

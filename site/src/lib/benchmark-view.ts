@@ -66,7 +66,7 @@ export function hasMtpVariants(target: BenchmarkRecord) {
 
 export function backendLabel(target: BenchmarkRecord) {
   const labels: Record<string, string> = {
-    'rdna-rocm': 'ROCm',
+    'rdna-rocm': 'HIP / ROCm',
     rdna: 'Vulkan',
     'rdna-zinc-rt': 'ZINC_RT',
     intel: 'Vulkan',

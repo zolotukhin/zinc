@@ -43,7 +43,7 @@ pub fn info(backend: Backend, model: ?[]const u8, context: ?u32, reuse: bool) In
             .text_streaming = accelerator,
             .model_management = !accelerator,
             .model_switching = !accelerator,
-            .browser_ui = !accelerator,
+            .browser_ui = backend != .cuda,
             .sampling = !accelerator,
             .chat_session_reuse = backend == .vulkan and model != null and reuse,
         },
@@ -69,6 +69,9 @@ pub fn writeHealth(value: Info, writer: *std.Io.Writer) !void {
         .schema_version = value.schema_version,
         .build = value.build,
         .backend = value.backend,
+        // The shared chat UI reads this legacy display-name key. Native IDs
+        // remain the GGUF basename and never expose the parent directory.
+        .model = value.active_model,
         .active_model = value.active_model,
         .context_length = value.context_length,
         .capabilities = value.capabilities,
@@ -112,7 +115,7 @@ test "all backends share discovery schema and advertise only supported features"
         const accelerator = backend == .rocm or backend == .cuda;
         try std.testing.expectEqual(accelerator, value.capabilities.text_streaming);
         try std.testing.expectEqual(!accelerator, value.capabilities.model_switching);
-        try std.testing.expectEqual(!accelerator, value.capabilities.browser_ui);
+        try std.testing.expectEqual(backend != .cuda, value.capabilities.browser_ui);
         try std.testing.expectEqual(backend == .vulkan, value.capabilities.chat_session_reuse);
         var buffer: [4096]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
@@ -136,6 +139,7 @@ test "native health and discovery share identity without leaking parent paths" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("model\".gguf", parsed.value.object.get("active_model").?.string);
+    try std.testing.expectEqualStrings("model\".gguf", parsed.value.object.get("model").?.string);
     try std.testing.expectEqualStrings("ok", parsed.value.object.get("status").?.string);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "private") == null);
     try std.testing.expectError(error.InvalidUtf8, nativeInfo(.rocm, "/fixtures/bad\xff.gguf", 2048));

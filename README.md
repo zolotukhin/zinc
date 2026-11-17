@@ -23,10 +23,11 @@ For published archives, runtime requirements and verified installation/rollback,
 see [binary releases](https://zolotukhin.ai/zinc/docs/getting-started/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
 [Linux 0.1.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1)
-is available for Vulkan and ROCm. The exact published binaries pass all three
-GPU profiles and public installation checks; see the
+is available for HIP/ROCm on AMD and Vulkan on Intel or as an AMD alternative.
+The exact published binaries pass all three GPU profiles and public installation checks; see the
 [release record](docs/releases/0.1.1-plan.md).
-Install the published Linux Vulkan release without a source checkout:
+For AMD RDNA, use HIP/ROCm as the default path. Install the published Linux
+release without a source checkout:
 
 ```bash
 curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh -o install.sh
@@ -35,23 +36,22 @@ curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh 
 Inspect the downloaded script, then install and add the command to PATH:
 
 ```bash
-ZINC_VERSION=v0.1.1 bash install.sh
+ZINC_VERSION=v0.1.1 ZINC_BACKEND=rocm bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Install your GPU driver/runtime first. The installer keeps the executable and
-its matching runtime assets together; running the Vulkan release needs no Zig,
-Git, Python or `glslc`. For Apple Silicon previews, experimental CUDA, or
+its matching runtime assets together. HIP/ROCm needs its matching libraries
+and runtime-compilation headers; see the [HIP setup guide](docs/ROCM.md).
+No Zig compiler, Git or Python is needed. For Apple Silicon previews, experimental CUDA, or
 unreleased changes, see [building from source](#build-and-contribute).
 
-On AMD with Vulkan, set `export RADV_PERFTEST=coop_matrix` in the same terminal
-before the GPU check or inference. Then check your GPU, download a model, and
-open the chat:
+Then check your GPU, download a model, and start the API:
 
 ```bash
 zinc --check
 zinc model pull qwen35-9b-q4k-m
-zinc chat --model-id qwen35-9b-q4k-m
+zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1
 ```
 
 The example uses Qwen 3.5 9B. Check the
@@ -61,20 +61,20 @@ You can also load an existing file with `-m /path/to/model.gguf`.
 
 ## Choose your GPU path
 
-| Hardware                            | Backend             | Setup                                                                         |
-| ----------------------------------- | ------------------- | ----------------------------------------------------------------------------- |
-| AMD Radeon RDNA3 / RDNA4            | Vulkan              | [Linux Vulkan setup](https://zolotukhin.ai/zinc/docs/getting-started/)        |
-| AMD Radeon AI PRO R9700 (`gfx1201`) | ROCm/HIP            | [Validated ROCm setup](https://zolotukhin.ai/zinc/docs/rocm/)                 |
-| Apple Silicon                       | Metal · preview     | [macOS](https://zolotukhin.ai/zinc/docs/getting-started/#macos-apple-silicon) |
-| Intel Arc Xe2 / Battlemage          | Vulkan              | [Intel guide](https://zolotukhin.ai/zinc/docs/intel-gpu-reference/)           |
-| NVIDIA RTX                          | CUDA · experimental | [Requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)        |
+| Hardware                   | Backend                    | Setup                                                                           |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------------------- |
+| AMD Radeon RDNA3 / RDNA4   | **HIP / ROCm · preferred** | [HIP setup; R9700 (`gfx1201`) qualified](https://zolotukhin.ai/zinc/docs/rocm/) |
+| AMD Radeon                 | Vulkan · alternative       | [Linux Vulkan setup](https://zolotukhin.ai/zinc/docs/getting-started/)          |
+| Apple Silicon              | Metal · preview            | [macOS](https://zolotukhin.ai/zinc/docs/getting-started/#macos-apple-silicon)   |
+| Intel Arc Xe2 / Battlemage | Vulkan                     | [Intel guide](https://zolotukhin.ai/zinc/docs/intel-gpu-reference/)             |
+| NVIDIA RTX                 | CUDA · experimental        | [Requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)          |
 
 Each binary contains one backend; there is no runtime switch or automatic
-fallback between Vulkan and ROCm. For a validated AMD ROCm stack, choose its archive
-when installing:
+fallback between HIP/ROCm and Vulkan. Other RDNA cards need their own runtime,
+model and memory checks. On Intel, or when choosing AMD Vulkan, install explicitly:
 
 ```bash
-ZINC_VERSION=v0.1.1 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.1 ZINC_BACKEND=vulkan bash install.sh
 zinc --check
 ```
 
@@ -84,7 +84,9 @@ validated cards, operating systems, drivers, and current limitations.
 
 ## Use it your way
 
-**Browser chat** in the default Vulkan or Metal build starts the UI and local API together:
+**Browser chat** starts the UI and local API together. Current HIP source builds
+support the loaded startup model; published 0.1.1 includes this UI on Vulkan,
+and Metal provides it as a preview. See the [version-specific guide](docs/RUNNING_ZINC.md#browser-chat).
 
 ```bash
 zinc chat --model-id qwen35-9b-q4k-m

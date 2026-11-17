@@ -77,6 +77,7 @@ function clientGuidance(base: string): string[] {
     `- Published release qualification: ${absoluteUrl(base, STABLE_VALIDATION_PATH)}`,
     '',
     `Stable Linux release: ${STABLE_RELEASE}. Use the installed zinc command; no Zig compiler or source checkout is needed. Each executable contains one backend. Metal is a preview; CUDA is experimental.`,
+    'AMD RDNA: prefer HIP / ROCm and install with ZINC_BACKEND=rocm. Intel Arc uses ZINC_BACKEND=vulkan; Vulkan is also an AMD alternative. Check the HIP runtime prerequisites and exact qualified hardware before installing.',
     '1. Inspect zinc --version --json, run zinc --check, and use zinc model list --json to choose a model that fits and has the required validation.',
     '2. Pull qwen35-9b-q4k-m, then start zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1 --port 9090. Keep the server running while the client uses it.',
     '3. Check http://localhost:9090/health and discover the loaded ID and context at http://localhost:9090/v1/models. API base: http://localhost:9090/v1. Set stream explicitly.',
@@ -124,7 +125,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     '',
     '## Guidance',
     '- Use the Zig API for internal implementation details, symbols, signatures, and module relationships.',
-    '- Use the Serving HTTP API page and its backend coverage matrix for client-facing contracts; ROCm/CUDA do not expose the Vulkan/Metal browser UI or hot model management.',
+    '- Use the Serving HTTP API page and its backend coverage matrix for client-facing contracts. HIP browser chat is a development feature, absent from stable 0.1.1; native HIP/CUDA do not offer hot model management.',
     '- For code analysis, use the Zig API JSON export. For a running server, use health, models and capability discovery.',
     '',
   ].join('\n');

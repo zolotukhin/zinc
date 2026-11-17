@@ -534,8 +534,8 @@ export const topicHubs: TopicHub[] = [
     shortTitle: 'AMD RDNA4',
     description: 'A practical guide to local LLM inference on AMD RDNA4 GPUs: R9700, RX 9070 XT, Vulkan, ROCm, llama.cpp comparisons, prefill, decode, and ZINC.',
     keywords: 'AMD RDNA4 LLM inference, Radeon AI PRO R9700 inference, RX 9070 XT LLM, AMD GPU local LLM, Vulkan LLM inference, ROCm HIP inference, llama.cpp RDNA4',
-    summary: 'ZINC supports RDNA4 consumer and workstation GPUs through both Vulkan and ROCm.',
-    practicalAnswer: 'If you want local LLM inference on AMD RDNA4, ZINC offers independently tuned Vulkan and ROCm paths. Vulkan is the broad compatibility route; ROCm uses HIP and dedicated gfx1201 kernels. The important performance split is decode versus prefill: decode is mostly memory and scheduling, while prefill needs batched kernels and model-aware tiling.',
+    summary: 'Start with native HIP / ROCm for AMD RDNA4; Vulkan is an alternative. Stable qualification covers the R9700.',
+    practicalAnswer: 'For local LLM inference on AMD RDNA4, HIP / ROCm is the preferred ZINC path, with native AMD kernels and a qualified R9700 stack. Vulkan remains an alternative. Other cards need their own runtime and model checks. Compare decode and prefill separately: decode is mostly memory and scheduling, while prefill needs batched kernels and model-aware tiling.',
     bestUse: 'Use this page for readers choosing AMD hardware or validating whether Vulkan local inference is real on RDNA4. The page should answer the hardware, driver, benchmark, and baseline questions before sending them to deep posts.',
     status: [
       {

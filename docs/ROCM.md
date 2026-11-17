@@ -1,6 +1,8 @@
-# AMD ROCm setup
+# AMD HIP / ROCm setup
 
-Use this guide when you have chosen the ROCm build. For installation and the
+HIP / ROCm is the preferred backend for AMD RDNA. Use the separate `rocm`
+archive and verify that the installed runtime supports your GPU target.
+Vulkan remains an alternative. For installation and the
 first prompt, follow [Getting Started](GETTING_STARTED.md). For serving and
 clients, follow [Run models and connect apps](RUNNING_ZINC.md#start-the-api).
 
@@ -54,16 +56,44 @@ context and `--parallel 1` initially. ROCm otherwise defaults to **2,048 tokens
 per slot**, even with `-c 0`. Multiple slots need separate cache capacity;
 Gemma 4 26B-A4B currently uses one slot regardless of a larger requested value.
 
-The server provides CLI/HTTP chat, raw completions, health and loaded-model
-discovery. Browser chat and hot model switching are unavailable. Sampling is
+The stable 0.1.1 server provides CLI/HTTP chat, raw completions, health and loaded-model
+discovery. That release has no browser chat or hot model switching. Sampling is
 greedy; `temperature`, `top_p` and client `stop` strings do not change it.
 Set `stream` explicitly because ROCm defaults to SSE. The
 [API matrix](API.md#backend-coverage) is the canonical endpoint reference.
+
+## Development: browser chat on HIP
+
+Current source builds include `/` and `/chat` on the native HIP server.
+After a [ROCm source build](#build-from-source), start the loaded model with:
+
+```bash
+zinc chat --model-id qwen38-27b-q4k-m -c 65536 --parallel 1
+```
+
+This interface chats with the startup model. Restart the server to change it;
+hot model switching and sampling controls remain unavailable on HIP.
+Use `--no-browser` over SSH and forward the server port to your computer.
+This feature is not in the published 0.1.1 archive. A remote preview may serve
+an updated UI separately while using the same native HIP API.
+
+The [R9700 browser/API preview check](/zinc/validation/rocm-browser-chat-2026-11-17.json)
+records 64K F32 capacity, a 21,040-token synthetic retrieval and a fresh request
+afterwards. It is development evidence, separate from stable release qualification.
 
 ## Context, KV cache and MTP
 
 Start with default precision and the release's tested model/context rows.
 A successful small prompt does not qualify a long coding session.
+
+The 16K examples are conservative starting configurations, not a model limit.
+On the 32 GB R9700, the separate Qwen 3.8 27B investigation records a 64K F32
+KV run and a 262,144-token Q8 run. F32 KV at 64K uses about 8.5 GiB including
+the NextN attention block, in addition to weights and runtime memory. The full
+native window needs opt-in Q8 KV on that card; see the exact precision and
+validation scope in [Native context and Q8 KV](ROCM_NATIVE_CONTEXT.md).
+Allocate a larger context explicitly and keep `--parallel 1`; fit and an
+advertised capacity do not prove long-task quality.
 
 - [Agent context validation](ROCM_AGENT_CONTEXT.md) covers bounded prefill,
   long prompts, recovery and repository-task limits. Keep tool outputs and

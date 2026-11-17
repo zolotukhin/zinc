@@ -124,7 +124,7 @@ export const docHeadingAliases: HeadingAliases = {
     ],
   },
   rocm: {
-    'amd-rocm-setup': ['rocm-backend', 'install-and-run', 'run-a-model'],
+    'amd-hip-rocm-setup': ['amd-rocm-setup', 'rocm-backend', 'install-and-run', 'run-a-model'],
     'runtime-prerequisites': ['validated-stack'],
     'serving-limits': ['http-api-coverage', 'api-client-notes'],
     'context-kv-cache-and-mtp': ['long-coding-sessions', 'fair-llama-cpp-comparison'],

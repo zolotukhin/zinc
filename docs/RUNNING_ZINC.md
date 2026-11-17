@@ -15,8 +15,18 @@ zinc chat --model-id qwen35-9b-q4k-m -c 4096 --port 9090
 
 Keep that terminal running. Open [localhost:9090](http://localhost:9090/) if the
 browser does not open automatically. Press Ctrl-C in the server terminal to
-stop it. ROCm/CUDA provide the API only; use an external chat client instead.
+stop it. ROCm/CUDA in stable 0.1.1 provide the API only; use an external chat client instead.
 Stop this server before starting another ZINC command on the same GPU or port.
+
+### Development: HIP browser chat
+
+Current HIP source builds serve the same browser interface for the loaded
+startup model. After [building ROCm](ROCM.md#build-from-source), use
+`zinc chat --model-id qwen38-27b-q4k-m -c 65536 --parallel 1` on a card with
+enough memory. It supports streaming and the model's thinking toggle;
+model switching and sampling remain unavailable. This is not in the published
+0.1.1 archive. See [context and KV choices](ROCM.md#context-kv-cache-and-mtp)
+before increasing the window. Over SSH, use `--no-browser` and forward port 9090.
 
 ## Terminal prompts
 

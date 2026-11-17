@@ -1673,6 +1673,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("not recommended for chat, reasoning or coding", notes)
         self.assertNotIn("qwen3-0.6b-q8-0 --chat", notes)
         self.assertIn("qwen35-9b-q4k-m --chat", notes)
+        self.assertLess(notes.index('ZINC_BACKEND=rocm'), notes.index('ZINC_BACKEND=vulkan'))
+        self.assertIn('prefer native HIP / ROCm', notes)
+        self.assertIn('capabilities.browser_ui', notes)
         # Public notes are generated independently of the preparation brief;
         # keep its known limitation and source-frozen evidence visible there.
         self.assertIn("slower decode than llama.cpp on all seven models", notes)
