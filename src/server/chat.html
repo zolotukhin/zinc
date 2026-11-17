@@ -2422,6 +2422,7 @@
       }
 
       let runtimeMtpCapability = null;
+      let supportsChatSessionReset = false;
       function setRuntimeMtpCapability(info) {
         if (typeof info?.supports_mtp === 'boolean') runtimeMtpCapability = info;
       }
@@ -2635,6 +2636,7 @@
           if (!response.ok) throw new Error('Health unavailable');
           let data = await response.json();
           if (data.status !== 'ok') throw new Error('Health unavailable');
+          supportsChatSessionReset = data.capabilities?.chat_session_reuse === true;
           ST.textContent = 'Connected';
           ST.className = 'badge ok';
           setModelTag(data.model);
@@ -2642,6 +2644,7 @@
           setRuntimeMtpCapability(data);
           updateMtpUi();
         } catch (error) {
+          supportsChatSessionReset = false;
           ST.textContent = 'Reconnecting';
           ST.className = 'badge';
         } finally {
@@ -3685,7 +3688,8 @@
         updateComposerState();
         SS.textContent = 'conversation cleared';
         I.focus();
-        // Drop the server's prompt-reuse entry and zero the ctx gauge for the old session.
+        // Native backends do not advertise session reuse or expose this route.
+        if (!supportsChatSessionReset || !oldSessionId) return;
         fetch(base + '/chat/reset', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

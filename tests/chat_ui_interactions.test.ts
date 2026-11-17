@@ -126,8 +126,8 @@ function harness(
     'cancelAnimationFrame',
     'fetch',
     `${source}
-    return {md, send, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
-      replaceSend(fn){send=fn}, replaceStop(fn){stopGeneration=fn}, setHistory(value){H=value}, setModels(value){models=value}, generating(){return isGenerating}, history(){return H}};`,
+    return {md, send, clearConversation, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
+      setResetSupport(value){supportsChatSessionReset=value}, replaceSend(fn){send=fn}, replaceStop(fn){stopGeneration=fn}, setHistory(value){H=value}, setModels(value){models=value}, generating(){return isGenerating}, history(){return H}};`,
   );
   const api = factory(
     { getElementById: getElement, createElement: () => new Element(), querySelectorAll: () => [] },
@@ -468,4 +468,22 @@ test('final answer recovery stays locked and can be stopped without losing the n
   expect(api.generating()).toBe(false);
   expect(input.value).toBe('My next question');
   expect(api.history().find((message: any) => message.role === 'assistant').incomplete).toBe(true);
+});
+
+test('new chat clears locally and only resets a server that advertises session reuse', async () => {
+  const requests: any[] = [];
+  const { api, getElement } = harness(async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return { ok: true };
+  });
+  api.setHistory([{ role: 'user', content: 'old conversation' }]);
+  api.clearConversation();
+  expect(api.history()).toEqual([]);
+  expect(getElement('i').value).toBe('');
+  expect(requests).toHaveLength(0);
+  api.setResetSupport(true);
+  api.clearConversation();
+  expect(requests).toHaveLength(1);
+  expect(requests[0].url).toEndWith('/v1/chat/reset');
+  expect(requests[0].body.session_id.length).toBeGreaterThan(0);
 });
