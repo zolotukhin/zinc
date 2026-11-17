@@ -4,6 +4,7 @@ import { resolve, sep } from 'node:path';
 // Both packages are already declared and locked in site/package.json and site/bun.lock.
 import { chromium } from 'playwright';
 import axe from 'axe-core';
+import { STABLE_RELEASE, STABLE_VALIDATION_PATH } from '../src/lib/docs-release-status';
 
 // Exercise the built onboarding pages without starting a client or loading a model.
 const dist = resolve(import.meta.dir, '../dist');
@@ -43,6 +44,13 @@ try {
     await evidence.json(),
     await Bun.file(resolve(import.meta.dir, `../public${evidencePath}`)).json(),
   );
+  const releaseEvidence = await (await fetch(`${base}${STABLE_VALIDATION_PATH}`)).json();
+  assert.equal(releaseEvidence.published, true);
+  assert.equal(releaseEvidence.version, STABLE_RELEASE);
+  const clientPins = [
+    ...new Set(releaseEvidence.supplementary.actual_clients.map((row: any) => row.opencode)),
+  ];
+  assert.equal(clientPins.length, 1);
 
   for (const javaScriptEnabled of [false, true]) {
     for (const width of [320, 390, 1440]) {
@@ -69,7 +77,8 @@ try {
         );
         const install = page.locator('[data-installed-quickstart]');
         const installCode = await install.locator('pre code').innerText();
-        assert.match(installCode, /ZINC_VERSION=v0\.1\.0 bash install\.sh/);
+        assert.ok(installCode.includes(`ZINC_VERSION=v${STABLE_RELEASE} bash install.sh`));
+        assert.ok(installCode.includes(`/releases/download/v${STABLE_RELEASE}/install.sh`));
         assert.match(installCode, /export PATH="\$HOME\/\.local\/bin:\$PATH"/);
         assert.match(installCode, /(?:^|\n)zinc --check/);
         assert.doesNotMatch(installCode, /zig-out|git clone|scripts\/zig\.sh/);
@@ -87,6 +96,12 @@ try {
         assert.match(await claw.innerText(), /independently run your project's tests/);
         assert.match(await claw.innerText(), /small starter model did not qualify/);
         assert.match(await claw.innerText(), /does not qualify Intel or Metal/);
+        const counts = releaseEvidence.supplementary.actual_client_counts;
+        assert.ok(
+          (await claw.innerText()).includes(
+            `${counts.openclaw_tasks_passed}/${counts.openclaw_tasks_total}`,
+          ),
+        );
         assert.match(await claw.locator('pre code').innerText(), /openclaw@2026\.11\.1/);
         assert.match(
           await claw.locator('pre code').innerText(),
@@ -94,6 +109,9 @@ try {
         );
         const code = section.locator('[data-coding-harness="opencode"]');
         assert.match(await code.locator('pre code').innerText(), /--auto --verify 'bun test'/);
+        assert.ok(
+          (await code.locator('pre code').innerText()).includes(`@opencode/cli@${clientPins[0]}`),
+        );
 
         for (const client of ['openclaw', 'opencode']) {
           const card = section.locator(`[data-coding-harness="${client}"]`);

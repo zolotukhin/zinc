@@ -5,6 +5,7 @@ type HeadingAliases = Record<string, Record<string, string[]>>;
 export const docHeadingAliases: HeadingAliases = {
   api: {
     'backend-coverage': ['compatibility-notes'],
+    'capability-discovery': ['development-capability-discovery'],
     'status-and-compatibility-limits': [
       'status-known-gaps-read-first',
       'status--known-gaps-read-first',
@@ -43,7 +44,8 @@ export const docHeadingAliases: HeadingAliases = {
       'install-the-command',
       'build-the-binary',
     ],
-    'development-structured-discovery': [
+    'structured-discovery': [
+      'development-structured-discovery',
       'development-headless-serving-and-json-diagnostics',
       'development-structured-discovery-and-headless-serving',
     ],
@@ -127,6 +129,9 @@ export const docHeadingAliases: HeadingAliases = {
     'serving-limits': ['http-api-coverage', 'api-client-notes'],
     'context-kv-cache-and-mtp': ['long-coding-sessions', 'fair-llama-cpp-comparison'],
     'build-from-source': ['build-and-verify'],
+  },
+  releasing: {
+    'published-0-1-1': ['prepared-0-1-1-candidate'],
   },
   openclaw: {
     'tested-scope': ['repeatable-validation'],

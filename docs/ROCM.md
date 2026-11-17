@@ -10,7 +10,7 @@ Check `zinc --version` before applying backend-specific settings.
 
 ## Runtime prerequisites
 
-The stable 0.1.0 ROCm archive needs Linux x86_64 with **glibc 2.39+** and the
+The stable 0.1.1 ROCm archive needs Linux x86_64 with **glibc 2.39+** and the
 validated **ROCm 7.2.4** stack: HIP, hipRTC, hipBLAS, HIP headers and rocWMMA
 headers. Ubuntu 24.04 is the reference userspace. Even the prebuilt archive
 compiles embedded kernels at runtime, so runtime libraries alone are insufficient.
@@ -31,7 +31,7 @@ The release reference is the Radeon AI PRO R9700 (`gfx1201`) with Linux kernel
 a fixed build requirement. The running `amdgpu` driver, ROCr runtime and ROCm
 userspace must support the same GPU target. This evidence does not qualify
 every RDNA3/RDNA4 card. See the
-[exact release results](/zinc/validation/release-candidate-0.1.0-2026-11-03.json).
+[exact release results](/zinc/validation/release-candidate-0.1.1-2026-11-16.json).
 
 ## Select a GPU
 

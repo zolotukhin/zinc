@@ -38,6 +38,9 @@ test('installation-first guides preserve the previous build and diagnostic secti
     ['running-zinc', 'run-models-and-connect-apps', 'build-the-binary'],
     ['running-zinc', 'troubleshooting', 'sample-outputs-from-the-shared-rdna4-node'],
     ['rocm', 'build-from-source', 'build-and-verify'],
+    ['running-zinc', 'structured-discovery', 'development-structured-discovery'],
+    ['running-zinc', 'structured-discovery', 'development-headless-serving-and-json-diagnostics'],
+    ['api', 'capability-discovery', 'development-capability-discovery'],
   ]) {
     const heading = { type: 'element', tagName: 'h2', properties: { id }, children: [] as any[] };
     rehypeDocHeadingAliases({ slug })({ children: [heading] });

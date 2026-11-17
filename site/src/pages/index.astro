@@ -3,6 +3,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import { getCollection } from 'astro:content';
 import benchmarkData from '../data/zinc-performance.json';
 import { rowsFor, scenarioOrder, overallRatio } from '../lib/benchmark-view';
+import { STABLE_RELEASE } from '../lib/docs-release-status';
 
 const allPosts = (await getCollection('posts', ({ data }) => !data.draft))
   .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
@@ -92,7 +93,7 @@ const modelWork = [
     </header>
     <div class="section-body">
       <div class="project-copy">
-        <p>ZINC runs on AMD Radeon, Intel Arc and Apple Silicon. Linux 0.1.0 qualification covers Vulkan on AMD and Intel, plus ROCm on the R9700. Metal stays an unsigned preview; NVIDIA CUDA is experimental.</p>
+        <p>ZINC runs on AMD Radeon, Intel Arc and Apple Silicon. Linux {STABLE_RELEASE} qualification covers Vulkan on AMD and Intel, plus ROCm on the R9700. Metal stays an unsigned preview; NVIDIA CUDA is experimental.</p>
         <p class="hardware-line">AMD / Vulkan &amp; ROCm&nbsp;&nbsp;·&nbsp;&nbsp; Intel / Vulkan&nbsp;&nbsp;·&nbsp;&nbsp; Apple / Metal</p>
       </div>
 

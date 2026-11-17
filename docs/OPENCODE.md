@@ -2,9 +2,11 @@
 
 Connect OpenCode to a local ZINC server, configure an existing project, and run
 a bounded coding task with an independent test command. Use **Bun 1.4.4+** and
-**OpenCode 2.2.6**, the client in the latest recorded
-[Intel replay](INTEL_OPENCODE_VALIDATION.md#november-9-full-catalog-opencode-replay).
-Earlier 1.19.4 and 2.0.21 results remain in the [validation reports](#tested-scope).
+**OpenCode 2.0.21**, the pin used by the
+[0.1.1 final-archive AMD cohort](releases/0.1.1-plan.md#final-archive-client-checks).
+The [Intel development-package replay](INTEL_OPENCODE_VALIDATION.md#november-9-full-catalog-opencode-replay)
+used 2.2.6; its client, source and task limits remain separate. CPU protocol
+checks cover both versions, but do not establish model task quality.
 
 ## Start the model server
 
@@ -22,7 +24,7 @@ Use Qwen3.5 9B as a smaller starting point. Check
 On the client machine, install the pinned client and download the standalone helper:
 
 ```bash
-bun add --global --trust @opencode/cli@2.2.6
+bun add --global --trust @opencode/cli@2.0.21
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 ```
 
@@ -89,7 +91,7 @@ exceed context. Use short, testable tasks before attempting a whole repository.
 
 Optional prompt reuse is gated by the server's advertised capability and the
 loaded model. See [API compatibility limits](API.md#status-and-compatibility-limits)
-for attention-only Vulkan reuse and development Gemma behavior. It does not
+for attention-only Vulkan reuse and the Gemma behavior released in 0.1.1. It does not
 turn a full-prefill benchmark into a comparable cached run.
 
 ## Use your own endpoint

@@ -99,14 +99,17 @@ configuration out of version control. For remote GPUs, an
 Optional prompt reuse is enabled only when the server advertises the appropriate
 capability. Hybrid recurrent models, ROCm and older servers retain full prefill.
 `ZINC_OPENCLAW_SESSION_REUSE=0` disables the client optimization. Reuse behavior
-and development Gemma controls are documented in the [API reference](API.md#status-and-compatibility-limits).
+and Gemma controls are documented in the [API reference](API.md#status-and-compatibility-limits).
 
 ## Tested scope
 
-The [AMD acceptance report](OPENCLAW_AMD_VALIDATION.md) uses the published ZINC
-0.1.0 archives on the 32 GB R9700 with this client. Qwen3.5 9B passes at 16K;
-the starter 0.6B model does not qualify for agent tasks. Larger Qwen and Gemma
-rows have their own contexts and limits. That report does not qualify Intel or Metal.
+The [0.1.1 release checks](releases/0.1.1-plan.md#final-archive-client-checks)
+use the published archives on the 32 GB R9700 with this client. Qwen3.5 9B
+passes at 16K; the complete AMD cohort passes 35/36 tasks. One Qwen3.6 35B-A3B
+Vulkan task wrote an incorrect receipt and remains failed. Larger Qwen and
+Gemma rows have their own contexts and limits. The starter 0.6B does not
+qualify for agent tasks, and this cohort does not qualify Intel or Metal.
+The earlier [0.1.0 AMD report](OPENCLAW_AMD_VALIDATION.md) retains its own outcomes.
 The later [Intel client matrix](INTEL_OPENCODE_VALIDATION.md#november-9-gemma-cache-and-client-qualification)
 records separate development-package evidence.
 

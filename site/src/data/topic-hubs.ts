@@ -512,7 +512,7 @@ export const topicHubs: TopicHub[] = [
       },
       {
         question: 'Can I run the managed model on Intel Arc?',
-        answer: 'The Arc Pro B70 Vulkan qualification includes Qwen 3.8. The published 0.1.0 catalog omitted its Intel profile; current source fixes that selection problem. Use the development build for the managed model ID on Intel and keep MTP disabled.',
+        answer: 'The Arc Pro B70 Vulkan qualification includes Qwen 3.8. ZINC 0.1.1 fixes managed-model selection for the Intel profile omitted from 0.1.0. Install 0.1.1 or later and keep MTP disabled.',
       },
       {
         question: 'Does a 262,144-token model window mean I can use it immediately?',

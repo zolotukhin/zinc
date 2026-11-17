@@ -8,6 +8,7 @@ import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkRehype from 'remark-rehype';
 import rehypeStringify from 'rehype-stringify';
+import { STABLE_RELEASE, STABLE_VALIDATION_PATH } from '../src/lib/docs-release-status';
 
 const parser = unified().use(remarkParse).use(remarkGfm);
 const renderer = unified().use(remarkParse).use(remarkGfm).use(remarkRehype).use(rehypeStringify);
@@ -127,7 +128,7 @@ describe('installed command documentation', () => {
   test('the first-model flow installs a release and delegates builds to the contributor guide', async () => {
     const guide = await readFile(resolve(import.meta.dir, '../../docs/GETTING_STARTED.md'), 'utf8');
     const [usage, source] = guide.split('## Build from source');
-    expect(usage).toContain('ZINC_VERSION=v0.1.0 bash install.sh');
+    expect(usage).toContain(`ZINC_VERSION=v${STABLE_RELEASE} bash install.sh`);
     expect(usage).toContain('zinc --check');
     expect(usage).not.toMatch(/git clone|scripts\/zig\.sh build|zig-out\/bin\/zinc/);
     expect(source).toContain('DEVELOPMENT.md#prerequisites');
@@ -135,19 +136,33 @@ describe('installed command documentation', () => {
   });
 });
 
-test('stable examples do not silently require development-only CLI and discovery features', async () => {
-  for (const file of [
-    'README.md',
-    'docs/GETTING_STARTED.md',
-    'docs/RUNNING_ZINC.md',
-    'docs/API.md',
-  ]) {
-    const markdown = await readFile(resolve(import.meta.dir, '../..', file), 'utf8');
-    for (const example of consumerShellExamples(markdown)) {
-      expect(example, file).not.toMatch(
-        /\bzinc serve\b|--no-browser|\bzinc (?:--version|--check) --json|\/v1\/capabilities/,
-      );
-    }
+test('0.1.1 discovery is documented as released while older-server fallback remains explicit', async () => {
+  const root = resolve(import.meta.dir, '../..');
+  const running = await readFile(resolve(root, 'docs/RUNNING_ZINC.md'), 'utf8');
+  const api = await readFile(resolve(root, 'docs/API.md'), 'utf8');
+  const section = running.split('## Structured discovery\n')[1]?.split('\n## ')[0];
+  expect(section).toContain('Available in ZINC 0.1.1 and later');
+  expect(consumerShellExamples(running).join('\n')).toMatch(/\bzinc serve\b/);
+  expect(consumerShellExamples(running).join('\n')).toContain('zinc --version --json');
+  expect(consumerShellExamples(running).join('\n')).toContain('/v1/capabilities');
+  expect(api).toContain('## Capability discovery');
+  expect(api).not.toContain('## Development: capability discovery');
+  expect(api).toContain('fall back to `/health` and');
+  expect(api).toContain('`/v1/models` when the endpoint returns 404');
+});
+
+test('active install recipes and qualification links follow the stable release', async () => {
+  const root = resolve(import.meta.dir, '../..');
+  for (const name of ['README.md', 'docs/GETTING_STARTED.md']) {
+    const markdown = await readFile(resolve(root, name), 'utf8');
+    const examples = consumerShellExamples(markdown).join('\n');
+    expect(examples.match(/ZINC_VERSION=v(\d+\.\d+\.\d+)/)?.[1], name).toBe(STABLE_RELEASE);
+    expect(examples.match(/releases\/download\/v(\d+\.\d+\.\d+)\/install\.sh/)?.[1], name).toBe(
+      STABLE_RELEASE,
+    );
+  }
+  for (const name of ['docs/GETTING_STARTED.md', 'docs/HARDWARE_REQUIREMENTS.md', 'docs/ROCM.md']) {
+    expect(await readFile(resolve(root, name), 'utf8'), name).toContain(STABLE_VALIDATION_PATH);
   }
 });
 

@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "version": "0.1.1",
-  "status": "certified-unpublished",
-  "published": false,
+  "status": "published",
+  "published": true,
   "recorded_at_utc": "2026-11-16T21:36:57.220076+00:00",
   "candidate": {
     "run": 43941111324,
@@ -1424,14 +1424,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "vulkan",
@@ -1578,7 +1570,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T20:55:23.310372+00:00"
+        "completed_at_utc": "2026-11-16T20:55:23.310372+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -1776,14 +1794,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "rocm",
@@ -1930,7 +1940,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T20:58:41.415576+00:00"
+        "completed_at_utc": "2026-11-16T20:58:41.415576+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -2128,14 +2164,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "vulkan",
@@ -2282,7 +2310,33 @@
         },
         "gpu_idle_after": true,
         "passed": false,
-        "completed_at_utc": "2026-11-16T21:01:18.532267+00:00"
+        "completed_at_utc": "2026-11-16T21:01:18.532267+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -2480,14 +2534,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "rocm",
@@ -2634,7 +2680,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:04:25.791575+00:00"
+        "completed_at_utc": "2026-11-16T21:04:25.791575+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -2832,14 +2904,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "vulkan",
@@ -2986,7 +3050,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:15:05.366409+00:00"
+        "completed_at_utc": "2026-11-16T21:15:05.366409+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -3184,14 +3274,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "rocm",
@@ -3338,7 +3420,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:21:48.922634+00:00"
+        "completed_at_utc": "2026-11-16T21:21:48.922634+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -3536,14 +3644,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "vulkan",
@@ -3690,7 +3790,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:29:15.526486+00:00"
+        "completed_at_utc": "2026-11-16T21:29:15.526486+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -3888,14 +4014,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "rocm",
@@ -4042,7 +4160,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:36:45.691712+00:00"
+        "completed_at_utc": "2026-11-16T21:36:45.691712+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -4240,14 +4384,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "vulkan",
@@ -4394,7 +4530,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:07:13.373493+00:00"
+        "completed_at_utc": "2026-11-16T21:07:13.373493+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -4592,14 +4754,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "rocm",
@@ -4746,7 +4900,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T21:10:00.857997+00:00"
+        "completed_at_utc": "2026-11-16T21:10:00.857997+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -4941,14 +5121,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "vulkan",
@@ -5091,7 +5263,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T20:24:26.485460+00:00"
+        "completed_at_utc": "2026-11-16T20:24:26.485460+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       },
       {
         "schema_version": 1,
@@ -5291,14 +5489,6 @@
         "openclaw": "2026.11.1",
         "opencode": "2.0.21",
         "trial": "explicit-json-recovery",
-        "harness_sha256": {
-          "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-          "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-          "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-          "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-          "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-          "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-        },
         "diagnostics": {
           "exit_status": 0,
           "backend": "rocm",
@@ -5441,7 +5631,33 @@
         },
         "gpu_idle_after": true,
         "passed": true,
-        "completed_at_utc": "2026-11-16T20:52:26.696699+00:00"
+        "completed_at_utc": "2026-11-16T20:52:26.696699+00:00",
+        "harness_files": [
+          {
+            "name": "openclaw_eval.mjs",
+            "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+          },
+          {
+            "name": "setup_openclaw.mjs",
+            "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+          },
+          {
+            "name": "opencode_eval.mjs",
+            "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+          },
+          {
+            "name": "opencode_eval_fixtures.mjs",
+            "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+          },
+          {
+            "name": "setup_opencode.mjs",
+            "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+          },
+          {
+            "name": "validate_opencode_api.mjs",
+            "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+          }
+        ]
       }
     ],
     "actual_client_counts": {
@@ -5704,14 +5920,6 @@
           "openclaw": "2026.11.1",
           "opencode": "2.0.21",
           "trial": "",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -5855,10 +6063,291 @@
           "failure_kind": "JSONDecodeError",
           "gpu_idle_after": true,
           "passed": false,
-          "completed_at_utc": "2026-11-16T20:32:52.043243+00:00"
+          "completed_at_utc": "2026-11-16T20:32:52.043243+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         }
       }
-    ]
+    ],
+    "public_installation": {
+      "schema_version": 1,
+      "version": "0.1.1",
+      "candidate_run": 43941111324,
+      "publisher_run": 43992810248,
+      "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+      "scope": "real public GitHub installer and downloads; isolated CPU installation/version controls, no model loading",
+      "recorded_at_utc": "2026-11-17T03:39:53.539235+00:00",
+      "installer_sha256": "d7cfc1246876d6a66bb8332c02236b97a2f7193771217c1c1867502708ba1cda",
+      "checks": [
+        {
+          "backend": "vulkan",
+          "case": "baseline-install",
+          "requested_version": "v0.1.0",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.0",
+          "source": "c3d4c0a23defa92b12394af09750554615b3cf41",
+          "binary_sha256": "afe439ecf05bd1932b68f53a55ffb1b647c2a9e7a188cbb2c38bc3b9354d1810",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "vulkan",
+          "case": "upgrade",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "vulkan",
+          "case": "rollback",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.0",
+          "source": "c3d4c0a23defa92b12394af09750554615b3cf41",
+          "binary_sha256": "afe439ecf05bd1932b68f53a55ffb1b647c2a9e7a188cbb2c38bc3b9354d1810",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "vulkan",
+          "case": "reinstall",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "vulkan",
+          "case": "link-repair",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "vulkan",
+          "case": "default-stable",
+          "requested_version": null,
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "rocm",
+          "case": "baseline-install",
+          "requested_version": "v0.1.0",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.0",
+          "source": "c3d4c0a23defa92b12394af09750554615b3cf41",
+          "binary_sha256": "e3f3be8923d324b0e875834f125fa14aa4378f4185414fc0793efcb107e85a91",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "rocm",
+          "case": "upgrade",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "rocm",
+          "case": "rollback",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.0",
+          "source": "c3d4c0a23defa92b12394af09750554615b3cf41",
+          "binary_sha256": "e3f3be8923d324b0e875834f125fa14aa4378f4185414fc0793efcb107e85a91",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "rocm",
+          "case": "reinstall",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "rocm",
+          "case": "link-repair",
+          "requested_version": "v0.1.1",
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        },
+        {
+          "backend": "rocm",
+          "case": "default-stable",
+          "requested_version": null,
+          "public_default_base_url": true,
+          "passed": true,
+          "exit_status": 0,
+          "version": "0.1.1",
+          "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "cache_preserved": true,
+          "command_link_matches_current": true,
+          "version_command_exit_status": 0
+        }
+      ],
+      "passed": true
+    },
+    "retained_client_report_inspection": {
+      "read_only": true,
+      "candidate_run": 43941111324,
+      "results": [
+        {
+          "candidate_run": "43941111324",
+          "backend": "vulkan",
+          "model": "qwen36-35b-a3b-q4k-xl",
+          "client_report_shapes": {
+            "ok": {
+              "type": "bool",
+              "length": null
+            },
+            "status": {
+              "type": "str",
+              "length": 2
+            },
+            "final": {
+              "type": "str",
+              "length": 406
+            },
+            "payloads": {
+              "type": "list",
+              "length": 1
+            },
+            "usage": {
+              "type": "dict",
+              "length": 7
+            },
+            "codeModeEngaged": {
+              "type": "bool",
+              "length": null
+            },
+            "assistantTurns": {
+              "type": "int",
+              "length": null
+            },
+            "toolSummary": {
+              "type": "dict",
+              "length": 3
+            },
+            "model": {
+              "type": "str",
+              "length": 21
+            },
+            "provider": {
+              "type": "str",
+              "length": 4
+            },
+            "sessionId": {
+              "type": "str",
+              "length": 36
+            }
+          },
+          "tool_summary_shape": {
+            "calls": "int",
+            "tools": "list",
+            "failures": "int"
+          },
+          "report_fields_containing_expected_receipt": [],
+          "report_fields_containing_written_receipt": [
+            "report.final",
+            "report.payloads[0].text"
+          ],
+          "original_workspace_checks": {
+            "contract.json": true,
+            "feature.test.mjs": true,
+            "receipt": false,
+            "tests": true
+          },
+          "original_outcome_unchanged": true
+        }
+      ]
+    }
   },
   "retained_attempts": [
     {
@@ -6053,14 +6542,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "vulkan",
@@ -6195,7 +6676,33 @@
           },
           "gpu_idle_after": true,
           "passed": false,
-          "completed_at_utc": "2026-11-16T09:16:40.841801+00:00"
+          "completed_at_utc": "2026-11-16T09:16:40.841801+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -6365,14 +6872,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -6507,7 +7006,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T09:22:27.276703+00:00"
+          "completed_at_utc": "2026-11-16T09:22:27.276703+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         }
       ]
     },
@@ -7910,14 +8435,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "vulkan",
@@ -8052,7 +8569,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T09:57:37.125375+00:00"
+          "completed_at_utc": "2026-11-16T09:57:37.125375+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -8222,14 +8765,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -8364,7 +8899,33 @@
           },
           "gpu_idle_after": true,
           "passed": false,
-          "completed_at_utc": "2026-11-16T10:08:15.714267+00:00"
+          "completed_at_utc": "2026-11-16T10:08:15.714267+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -8534,14 +9095,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "vulkan",
@@ -8676,7 +9229,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:08:17.408284+00:00"
+          "completed_at_utc": "2026-11-16T18:08:17.408284+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -8846,14 +9425,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -8988,7 +9559,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:11:26.094928+00:00"
+          "completed_at_utc": "2026-11-16T18:11:26.094928+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -9158,14 +9755,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "vulkan",
@@ -9300,7 +9889,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:21:49.909646+00:00"
+          "completed_at_utc": "2026-11-16T18:21:49.909646+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -9470,14 +10085,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -9612,7 +10219,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:28:22.264838+00:00"
+          "completed_at_utc": "2026-11-16T18:28:22.264838+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -9782,14 +10415,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "vulkan",
@@ -9924,7 +10549,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:35:00.767364+00:00"
+          "completed_at_utc": "2026-11-16T18:35:00.767364+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -10094,14 +10745,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -10236,7 +10879,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:42:24.530409+00:00"
+          "completed_at_utc": "2026-11-16T18:42:24.530409+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -10406,14 +11075,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "vulkan",
@@ -10548,7 +11209,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:14:42.214937+00:00"
+          "completed_at_utc": "2026-11-16T18:14:42.214937+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -10718,14 +11405,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -10860,7 +11539,33 @@
           },
           "gpu_idle_after": true,
           "passed": true,
-          "completed_at_utc": "2026-11-16T18:16:56.905526+00:00"
+          "completed_at_utc": "2026-11-16T18:16:56.905526+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -10880,14 +11585,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 1,
             "backend": "vulkan",
@@ -10902,7 +11599,33 @@
           "failure_kind": "AssertionError",
           "gpu_idle_after": true,
           "passed": false,
-          "completed_at_utc": "2026-11-16T18:42:33.396565+00:00"
+          "completed_at_utc": "2026-11-16T18:42:33.396565+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         },
         {
           "schema_version": 1,
@@ -11071,14 +11794,6 @@
           "node": "24.22.2",
           "openclaw": "2026.11.1",
           "opencode": "2.2.6",
-          "harness_sha256": {
-            "openclaw_eval.mjs": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c",
-            "setup_openclaw.mjs": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c",
-            "opencode_eval.mjs": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c",
-            "opencode_eval_fixtures.mjs": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d",
-            "setup_opencode.mjs": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717",
-            "validate_opencode_api.mjs": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
-          },
           "diagnostics": {
             "exit_status": 0,
             "backend": "rocm",
@@ -11209,7 +11924,33 @@
           },
           "gpu_idle_after": true,
           "passed": false,
-          "completed_at_utc": "2026-11-16T19:19:55.888255+00:00"
+          "completed_at_utc": "2026-11-16T19:19:55.888255+00:00",
+          "harness_files": [
+            {
+              "name": "openclaw_eval.mjs",
+              "sha256": "6f11112f57b3197a5809987a95e53429326cbd2fd2b7cc79dfbfe34b355d276c"
+            },
+            {
+              "name": "setup_openclaw.mjs",
+              "sha256": "8bacbf68c6955563d28f01d5b053193d484ce850acae05652fbe115d22d4319c"
+            },
+            {
+              "name": "opencode_eval.mjs",
+              "sha256": "939c4390b566576c7ea839c5e7dabe8324065438d7e48e8c7a989dc257cbc81c"
+            },
+            {
+              "name": "opencode_eval_fixtures.mjs",
+              "sha256": "590c00b307a7771f6e8168dd66fabd41727b5156975c0b9988cb42867b9d4e1d"
+            },
+            {
+              "name": "setup_opencode.mjs",
+              "sha256": "95c70eff29f4ce6511acb0caf6ae475a1cac010b7a8789d294bdd4bfb8322717"
+            },
+            {
+              "name": "validate_opencode_api.mjs",
+              "sha256": "529bd7955bc76e538028f928f2e1209f0e3c6d04c84226128d6063a088ce72f5"
+            }
+          ]
         }
       ],
       "actual_client_counts": {
@@ -11245,10 +11986,10 @@
     "reason": "initial operator-host test used integrated graphics because host and dedicated container GPU indices differ; owned processes stopped; replacement preflights explicitly verify gfx1201"
   },
   "scope_limits": [
-    "Linux x86_64 Vulkan on R9700 and Intel Xe2, and ROCm on R9700; certified candidate is unpublished",
+    "Published Linux x86_64 Vulkan on R9700 and Intel Xe2, and ROCm on R9700; publication preserves the exact certified 0.1.1 bytes",
     "Release-policy contexts: 2048 for the starter, 4096 for larger models; actual-client AMD campaigns use one slot at 16384, except Gemma 31B at 8192",
     "Gemma 31B ROCm supplementary client trials use ZINC_PREFILL_CHUNK=128 and default F32 KV; this does not expand default-path 4096-token qualification",
-    "Current actual-client cohort uses the documented OpenCode 2.0.21 pin; the separate 2.2.6 failures and all earlier failed trials remain visible",
+    "The current actual-client cohort uses OpenCode 2.0.21; published setup recipes now match that cohort. Separate 2.2.6 failures and all earlier failed trials remain visible",
     "Starter inference checks do not qualify the 0.6B model for coding or agent tasks",
     "Model task-delivery failures remain failures; neither a successful client exit nor a separate control replaces independent tests and protected-file checks",
     "Bounded client fixtures do not establish universal coding quality or long-running soak stability",
@@ -11258,5 +11999,125 @@
     "Native memory reports remain conservative estimates, including lazy scratch/JIT/cache caveats; actual requests separately test allocation and inference",
     "No new latest-llama.cpp throughput or all-dimension performance claim",
     "Metal remains an unsigned preview; CUDA and native Intel remain outside the stable Linux promise"
-  ]
+  ],
+  "last_updated_at_utc": "2026-11-17T03:46:18.625970+00:00",
+  "publication": {
+    "publisher_run": 43992810248,
+    "url": "https://github.com/zolotukhin/zinc/actions/runs/43992810248",
+    "publisher_source": "336607b3f7946df13448dd40d40511c4216d13d3",
+    "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+    "published_at_utc": "2026-11-17T03:34:29Z",
+    "status": "passed",
+    "approval": "normal required-reviewer approval on the main-only release environment",
+    "rebuilt": false,
+    "public_install_jobs": [
+      {
+        "name": "Public install linux-x86_64-rocm (CPU only)",
+        "url": "https://github.com/zolotukhin/zinc/actions/runs/43992810248/job/133798256385",
+        "conclusion": "success"
+      },
+      {
+        "name": "Public install linux-x86_64-vulkan (CPU only)",
+        "url": "https://github.com/zolotukhin/zinc/actions/runs/43992810248/job/133798256405",
+        "conclusion": "success"
+      }
+    ],
+    "public_download_verification": {
+      "schema_version": 1,
+      "version": "0.1.1",
+      "candidate_run": 43941111324,
+      "publisher_run": 43992810248,
+      "source": "4ab52f7d2d0ed595ef4199cc7680ba64e1915af5",
+      "release_url": "https://github.com/zolotukhin/zinc/releases/tag/v0.1.1",
+      "published_at_utc": "2026-11-17T03:34:29Z",
+      "verified_at_utc": "2026-11-17T03:38:47.353351+00:00",
+      "tag_matches_certified_source": true,
+      "inventory_matches": true,
+      "anonymous_downloads_passed": 9,
+      "bundle_and_catalog_verified": true,
+      "offline_provenance_subjects_verified": 8,
+      "qualification_gates_recomputed": true,
+      "assets": [
+        {
+          "name": "SHA256SUMS.txt",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/SHA256SUMS.txt",
+          "anonymous_download": true,
+          "size_bytes": 208,
+          "sha256": "61156ccbc51fa7a8a303d5b92112e8473a22941ed6119bb17d9d662a1a08a4c3",
+          "matches_certified": true
+        },
+        {
+          "name": "install.sh",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh",
+          "anonymous_download": true,
+          "size_bytes": 15802,
+          "sha256": "d7cfc1246876d6a66bb8332c02236b97a2f7193771217c1c1867502708ba1cda",
+          "matches_certified": true
+        },
+        {
+          "name": "provenance.jsonl",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/provenance.jsonl",
+          "anonymous_download": true,
+          "size_bytes": 11940,
+          "sha256": "489f81a9adcd157ced5975553fe90c3ab35e9846b65482d924cdf22c6f427a00",
+          "matches_certified": true
+        },
+        {
+          "name": "release-manifest.json",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/release-manifest.json",
+          "anonymous_download": true,
+          "size_bytes": 1901,
+          "sha256": "8bc0666854ead8995cd286ea1f25f4ff2bb5c95a0ef31fe0f472a3252f5ebac9",
+          "matches_certified": true
+        },
+        {
+          "name": "release-notes.md",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/release-notes.md",
+          "anonymous_download": true,
+          "size_bytes": 6385,
+          "sha256": "aea0692ec8ba0bd0540149af0fc5577999e2b7673cf198d8d7231b3827129041",
+          "matches_certified": true
+        },
+        {
+          "name": "release-policy.json",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/release-policy.json",
+          "anonymous_download": true,
+          "size_bytes": 8003,
+          "sha256": "cbcc6c2c821396e1ff464b689125a123c039971175f22f1fa8800830cefbe43a",
+          "matches_certified": true
+        },
+        {
+          "name": "validation.json",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/validation.json",
+          "anonymous_download": true,
+          "size_bytes": 34214,
+          "sha256": "2e3841e97d38dcce8e2884469339a3ac541b00e8744e3a3a6ff4c7401248136a",
+          "matches_certified": true
+        },
+        {
+          "name": "zinc-v0.1.1-linux-x86_64-rocm.tar.gz",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/zinc-v0.1.1-linux-x86_64-rocm.tar.gz",
+          "anonymous_download": true,
+          "size_bytes": 5313645,
+          "sha256": "fd5a70764fbd92396b8c23cfb8e2772c99bbedb54478aeebd17dd6232b16e97f",
+          "matches_certified": true
+        },
+        {
+          "name": "zinc-v0.1.1-linux-x86_64-vulkan.tar.gz",
+          "url": "https://github.com/zolotukhin/zinc/releases/download/v0.1.1/zinc-v0.1.1-linux-x86_64-vulkan.tar.gz",
+          "anonymous_download": true,
+          "size_bytes": 7873306,
+          "sha256": "b1367bb8c0296f7d2f68bc6a27345228eedac4929d6892a60986223a1f9a5179",
+          "matches_certified": true
+        }
+      ],
+      "passed": true
+    },
+    "client_recipe_alignment": {
+      "previous_pin": "2.2.6",
+      "published_pin": "2.0.21",
+      "reason": "Active setup recipes now match the final-archive AMD cohort. Earlier Intel development-package and 2.2.6 trial outcomes remain source/client-specific; no general client regression is inferred."
+    }
+  },
+  "schema_notes": "Schema 2 stores supplemental harness checksums as explicit name/sha256 entries. All recorded digest values, model outcomes, qualification reports and earlier failed trials are preserved."
 }
