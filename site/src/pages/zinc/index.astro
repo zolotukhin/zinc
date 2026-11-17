@@ -31,7 +31,7 @@ const platforms = [
   { name: 'Intel Arc', backend: 'Vulkan', note: 'Linux · Xe2 / Battlemage', href: '/zinc/docs/intel-gpu-reference/', link: 'Intel setup' },
   { name: 'NVIDIA RTX', backend: 'CUDA · experimental', note: 'Linux / WSL2', href: '/zinc/docs/hardware-requirements/', link: 'Requirements' },
 ];
-const description = 'Run GGUF language models on your own GPU with ZINC. Start with browser chat, use the command line, or connect an app through the OpenAI-compatible API.';
+const description = 'Run GGUF language models with native HIP / ROCm on AMD RDNA or Vulkan on Intel. Use the command line, browser chat or an OpenAI-compatible local API.';
 ---
 
 <BaseLayout
@@ -69,7 +69,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="use-cases" aria-label="Ways to use ZINC">
       <a href="/zinc/docs/getting-started/#start-the-chat-ui">
         <span class="number" aria-hidden="true">01</span>
-        <div><h2>Chat in your browser</h2><p>Local conversations in Vulkan and Metal builds.</p></div>
+        <div><h2>Chat in your browser</h2><p>Vulkan and Metal, plus current HIP source builds.</p></div>
         <span aria-hidden="true">↗</span>
       </a>
       <a href="/zinc/docs/running-zinc/">
@@ -89,7 +89,7 @@ const description = 'Run GGUF language models on your own GPU with ZINC. Start w
     <div class="section-copy">
       <p class="eyebrow">Get running</p>
       <h2 id="start-heading">Start with one model.</h2>
-      <p><a href="/zinc/docs/getting-started/">Install Linux {STABLE_RELEASE}</a>, then download a model and open a chat. Published Vulkan and ROCm archives include the executable and its runtime assets.</p>
+      <p><a href="/zinc/docs/getting-started/">Install Linux {STABLE_RELEASE}</a>, then download a model and start the API. Published HIP / ROCm and Vulkan archives include the executable and its runtime assets.</p>
       <p>Install your GPU driver/runtime first. You can run the release without Zig or a source checkout. Apple Silicon is an unsigned preview; see the <a href="/zinc/docs/getting-started/#build-from-source">source-build instructions</a> for development and experimental backends.</p>
       <p class="setup-note">For AMD RDNA, start with <a href="/zinc/docs/rocm/">native HIP / ROCm</a> and its runtime prerequisites. Intel Arc uses Vulkan; AMD Vulkan is an alternative and needs <code>RADV_PERFTEST=coop_matrix</code> on RDNA4.</p>
     </div>

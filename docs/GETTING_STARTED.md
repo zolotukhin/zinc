@@ -61,8 +61,9 @@ file integrity, architecture and runtime compatibility before activating the
 installation. The version output identifies the selected backend.
 
 Use the explicit backend above with the published 0.1.1 installer. The current
-source installer selects HIP on AMD-only Linux machines, Vulkan on Intel or
-GPU-less hosts, and requires a choice on mixed-vendor machines. Rollback uses
+source installer selects HIP on AMD-only Linux machines and checks its
+runtime-compilation headers before downloading. It selects Vulkan on Intel or
+GPU-less hosts and requires a choice on mixed-vendor machines. Rollback uses
 the saved installation receipt. This selection does not install drivers or
 qualify additional GPU models.
 

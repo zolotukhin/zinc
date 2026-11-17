@@ -100,3 +100,55 @@ test('explicit backend selection and rollback bypass mixed-GPU auto-detection', 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('automatic HIP selection checks its headers before downloading and explains the alternative', () => {
+  const root = mkdtempSync(join(tmpdir(), 'zinc-hip-prerequisites-'));
+  try {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'uname'),
+      '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n',
+      { mode: 0o755 },
+    );
+    const device = join(root, 'drm/card0/device');
+    mkdirSync(device, { recursive: true });
+    writeFileSync(join(device, 'vendor'), '0x1002\n');
+    const env = {
+      ...process.env,
+      PATH: bin + ':' + process.env.PATH,
+      ZINC_BACKEND: '',
+      ZINC_DRM_SYSFS_ROOT: join(root, 'drm'),
+      ROCM_PATH: join(root, 'toolkit'),
+      ZINC_INSTALL_DIR: join(root, 'install'),
+      ZINC_BIN_DIR: join(root, 'commands'),
+      ZINC_VERSION: 'invalid',
+    };
+    const invoke = () =>
+      spawnSync('bash', [join(import.meta.dir, '../scripts/install.sh')], {
+        env,
+        encoding: 'utf8',
+      });
+    const missing = invoke();
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain('runtime-compilation headers are missing');
+    expect(missing.stderr).toContain('https://zolotukhin.ai/zinc/docs/rocm/');
+    expect(missing.stderr).toContain('ZINC_BACKEND=vulkan');
+    for (const header of [
+      'hip/hip_runtime_api.h',
+      'hip/hiprtc.h',
+      'hipblas/hipblas.h',
+      'rocwmma/rocwmma.hpp',
+    ]) {
+      const path = join(root, 'toolkit/include', header);
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, '// fixture\n');
+    }
+    const present = invoke();
+    expect(present.status).not.toBe(0);
+    expect(present.stderr).toContain('invalid release version');
+    expect(present.stderr).not.toContain('headers are missing');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

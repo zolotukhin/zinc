@@ -104,6 +104,8 @@ test "help describes each backend without promising another backend's features" 
     inline for (.{ Backend.vulkan, Backend.metal, Backend.rocm, Backend.cuda }) |backend| {
         inline for (.{ false, true }) |full| {
             const text = render(backend, full);
+            if (backend != .cuda) try std.testing.expect(std.mem.indexOf(u8, text, "Start the built-in browser chat") != null);
+            if (backend == .rocm or backend == .cuda) try std.testing.expect(std.mem.indexOf(u8, text, "single-slot MTP needs --parallel 1\n  chat") != null);
             if (backend == .rocm or backend == .cuda) {
                 try std.testing.expectEqual(backend == .cuda, std.mem.indexOf(u8, text, "no built-in browser UI") != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "default: 2048") != null);

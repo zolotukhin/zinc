@@ -52,6 +52,12 @@ linux_backend() {
   fi
   if [ "$amd" = 1 ]; then printf '%s\n' rocm; else printf '%s\n' vulkan; fi
 }
+check_hip_headers() {
+  local include="${ROCM_PATH:-/opt/rocm}/include" header
+  for header in hip/hip_runtime_api.h hip/hiprtc.h hipblas/hipblas.h rocwmma/rocwmma.hpp; do
+    [ -r "$include/$header" ] || fail "HIP/ROCm selected for AMD, but runtime-compilation headers are missing. Install the matching HIP/hipRTC/hipBLAS and rocWMMA development files: https://zolotukhin.ai/zinc/docs/rocm/ . For the Vulkan alternative, explicitly set ZINC_BACKEND=vulkan."
+  done
+}
 operation=install
 if [ "$#" -gt 0 ]; then
   [ "$#" -eq 1 ] && [ "$1" = --rollback ] || fail "usage: install.sh [--rollback]"
@@ -63,10 +69,12 @@ case "$os-$arch" in
   Linux-x86_64)
     platform=linux-x86_64
     backend="${ZINC_BACKEND:-}"
-    if [ -z "$backend" ]; then
-      # Rollback restores its verified receipt, regardless of current GPU choice.
-      if [ "$operation" = rollback ]; then backend=vulkan
-      else backend="$(linux_backend)" || fail "select a backend explicitly for this machine"; fi
+    if [ -z "$backend" ] && [ "$operation" = install ]; then
+      backend="$(linux_backend)" || fail "select a backend explicitly for this machine"
+      if [ "$backend" = rocm ]; then
+        log "AMD detected: selecting native HIP/ROCm; checking runtime-compilation headers"
+        check_hip_headers
+      fi
     fi
     ;;
   Darwin-arm64) platform=macos-aarch64; backend="${ZINC_BACKEND:-metal}" ;;
@@ -77,10 +85,14 @@ case "$os-$arch" in
     fail "Intel Macs do not have a supported binary release" ;;
   *) fail "no binary release for $os/$arch" ;;
 esac
-case "$platform-$backend" in
-  macos-aarch64-metal|linux-x86_64-vulkan|linux-x86_64-rocm) ;;
-  *) fail "unsupported backend '$backend' for $platform" ;;
-esac
+# Rollback validates the saved receipt in verify_tree; a current backend
+# override, missing HIP headers or changed GPU inventory cannot select it.
+if [ "$operation" = install ]; then
+  case "$platform-$backend" in
+    macos-aarch64-metal|linux-x86_64-vulkan|linux-x86_64-rocm) ;;
+    *) fail "unsupported backend '$backend' for $platform" ;;
+  esac
+fi
 target="$platform-$backend"
 install_root="${ZINC_INSTALL_DIR:-$HOME/.local/share/zinc}"
 bin_dir="${ZINC_BIN_DIR:-$HOME/.local/bin}"

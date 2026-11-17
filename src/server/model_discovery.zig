@@ -77,6 +77,14 @@ test "native browser discovery identifies only the loaded model and its real con
     try std.testing.expect(model.get("active").?.bool and model.get("installed").?.bool);
     try std.testing.expect(!model.get("managed").?.bool);
     try std.testing.expect(model.get("supports_thinking_toggle").?.bool);
+    const legacy_bytes = try serializeModels(std.testing.allocator, "/fixtures/private/Qwen\"27B.gguf", 65536);
+    defer std.testing.allocator.free(legacy_bytes);
+    const legacy = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, legacy_bytes, .{});
+    defer legacy.deinit();
+    const original = legacy.value.object.get("data").?.array.items[0].object;
+    // Browser additions preserve every pre-existing OpenAI discovery field.
+    inline for (.{ "id", "object", "owned_by" }) |key| try std.testing.expectEqualStrings(original.get(key).?.string, model.get(key).?.string);
+    inline for (.{ "created", "context_length" }) |key| try std.testing.expectEqual(original.get(key).?.integer, model.get(key).?.integer);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "private") == null);
     try std.testing.expectError(error.InvalidUtf8, serializeChatModel(std.testing.allocator, "bad\xff.gguf", 65536, .{}));
 

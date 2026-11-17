@@ -71,7 +71,7 @@ pub fn writeHealth(value: Info, writer: *std.Io.Writer) !void {
         .backend = value.backend,
         // The shared chat UI reads this legacy display-name key. Native IDs
         // remain the GGUF basename and never expose the parent directory.
-        .model = value.active_model,
+        .model = value.active_model orelse "",
         .active_model = value.active_model,
         .context_length = value.context_length,
         .capabilities = value.capabilities,
@@ -144,4 +144,11 @@ test "native health and discovery share identity without leaking parent paths" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "private") == null);
     try std.testing.expectError(error.InvalidUtf8, nativeInfo(.rocm, "/fixtures/bad\xff.gguf", 2048));
     try std.testing.expect((try nativeInfo(.cuda, null, 2048)).active_model == null);
+
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeHealth(try nativeInfo(.rocm, null, 2048), &writer);
+    const empty = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer empty.deinit();
+    try std.testing.expectEqualStrings("", empty.value.object.get("model").?.string);
+    try std.testing.expect(empty.value.object.get("active_model").? == .null);
 }
