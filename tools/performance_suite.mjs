@@ -184,7 +184,8 @@ export function parseArgs(argv) {
     rdnaBuild: false,
     rdnaStartLlama: false,
     rdnaNode: process.env.ZINC_RDNA_NODE ?? process.env.ZINC_NODE ?? null,
-    rdnaBackend: process.env.ZINC_RDNA_BACKEND ?? 'vulkan',
+    // Match AMD installation/onboarding; portable Vulkan comparisons are explicit.
+    rdnaBackend: process.env.ZINC_RDNA_BACKEND ?? 'rocm',
     rdnaContext: null,
     rdnaVkDevice:
       process.env.ZINC_RDNA_VK_DEVICE != null
@@ -456,7 +457,7 @@ function usage() {
   --rdna-build                Build ReleaseFast on the RDNA node before running
   --rdna-start-llama          Start llama-server on the RDNA node before baseline runs
   --rdna-node <name>          Select node-specific env keys, e.g. rdna2 -> ZINC_RDNA2_HOST/PORT/USER
-  --rdna-backend <backend>    ZINC backend to build on RDNA: auto, vulkan, rocm, zinc_rt (default: vulkan)
+  --rdna-backend <backend>    ZINC backend to build on RDNA: auto, vulkan, rocm, zinc_rt (default: rocm/HIP)
   --intel-sync                Rsync current repo to the Intel node before running
   --intel-build               Build ReleaseFast on the Intel node before running
   --intel-start-llama         Stop stale llama-server processes on the Intel node before baseline runs
