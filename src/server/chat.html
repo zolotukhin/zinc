@@ -3738,6 +3738,7 @@
         let displayStopped = false;
         const requestMtpSetting = mtpRequestSetting();
         let sawFinishReason = false;
+        let receivedStreamData = false;
         let stallTimer = null;
         function clearStallTimer() {
           if (stallTimer !== null) {
@@ -3747,12 +3748,15 @@
         }
         function armStallTimer() {
           clearStallTimer();
-          stallTimer = setTimeout(() => {
-            if (!activeController || stopRequested || errorMessage) return;
-            errorMessage =
-              'Response timed out — the server is still processing a long prompt. Try a shorter message or wait and retry.';
-            activeController.abort();
-          }, 120000);
+          stallTimer = setTimeout(
+            () => {
+              if (!activeController || stopRequested || errorMessage) return;
+              errorMessage =
+                'Response timed out while waiting for the server. Try a shorter message or retry.';
+              activeController.abort();
+            },
+            receivedStreamData ? 120000 : 600000,
+          );
         }
         activeController = new AbortController();
         stopRequested = false;
@@ -3765,6 +3769,9 @@
           let maxTokens = chatMaxTokens(enableThinking);
           thinking = enableThinking;
           requestMessages = requestMessagesFromHistory(supportsThinkingForHistory);
+          // A large GPU prefill can take several minutes before the first byte.
+          // Stop remains available throughout; streaming gets a shorter idle limit.
+          armStallTimer();
           let r = await fetch(base + '/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3792,6 +3799,7 @@
           stream: while (true) {
             let { done, value } = await rd.read();
             if (done) break;
+            if (value.byteLength > 0) receivedStreamData = true;
             armStallTimer();
             buf += dc.decode(value, { stream: true });
             let ls = buf.split('\n');
@@ -3976,6 +3984,7 @@
             // Recovery is still part of this turn: keep the composer/model controls
             // locked until it completes, and keep Stop/Escape connected to its fetch.
             activeController = new AbortController();
+            receivedStreamData = false;
             SS.textContent = 'recovering final answer...';
             const status = document.getElementById('composer-status');
             if (status) status.textContent = 'Preparing the final answer. Press Escape to stop.';

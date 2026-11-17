@@ -112,6 +112,7 @@ function harness(
     return elements.get(id)!;
   };
   const timers = new Map<number, () => void>();
+  const timerDelays = new Map<number, number>();
   const frames = new Map<number, () => void>();
   let nextTimer = 1;
   let writes = 0;
@@ -134,12 +135,16 @@ function harness(
     { origin: 'http://localhost:8080' },
     { getItem: () => null, setItem: () => writes++ },
     { addEventListener() {}, crypto: { randomUUID: () => 'chat-test' } },
-    (fn: () => void) => {
+    (fn: () => void, delay: number) => {
       const id = nextTimer++;
       timers.set(id, fn);
+      timerDelays.set(id, delay);
       return id;
     },
-    (id: number) => timers.delete(id),
+    (id: number) => {
+      timers.delete(id);
+      timerDelays.delete(id);
+    },
     (fn: () => void) => {
       const id = nextTimer++;
       frames.set(id, fn);
@@ -148,7 +153,7 @@ function harness(
     (id: number) => frames.delete(id),
     fetchMock,
   );
-  return { api, getElement, timers, frames, writes: () => writes };
+  return { api, getElement, timers, timerDelays, frames, writes: () => writes };
 }
 
 test('Enter preserves the next draft during generation and ignores IME composition', () => {
@@ -486,4 +491,40 @@ test('new chat clears locally and only resets a server that advertises session r
   expect(requests).toHaveLength(1);
   expect(requests[0].url).toEndWith('/v1/chat/reset');
   expect(requests[0].body.session_id.length).toBeGreaterThan(0);
+});
+
+test('long prefill gets an initial deadline, streamed output gets a shorter idle limit, and Stop cancels both', async () => {
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  let signal!: AbortSignal;
+  const { api, getElement, timerDelays } = harness(async (_url, options) => {
+    signal = options.signal;
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          stream = controller;
+          signal.addEventListener('abort', () =>
+            controller.error(new DOMException('Stopped', 'AbortError')),
+          );
+        },
+      }),
+    );
+  });
+  api.setModels([{ id: 'native-model', active: true }]);
+  getElement('i').value = 'A long prompt';
+  const turn = api.send();
+  await Promise.resolve();
+  expect([...timerDelays.values()]).toContain(600000);
+  expect(api.generating()).toBe(true);
+  stream.enqueue(
+    new TextEncoder().encode('data: {"choices":[{"delta":{"content":"First token"}}]}\n\n'),
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  expect([...timerDelays.values()]).toContain(120000);
+  api.stopGeneration();
+  await turn;
+  expect(signal.aborted).toBe(true);
+  expect(api.generating()).toBe(false);
+  expect([...timerDelays.values()]).not.toContain(600000);
+  expect([...timerDelays.values()]).not.toContain(120000);
 });
