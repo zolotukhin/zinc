@@ -22,12 +22,19 @@ pub const ProcessLock = struct {
         return self.file != null;
     }
 
-    /// Release the held lockfile handle, if any.
-    pub fn deinit(self: *ProcessLock) void {
+    /// Close this process's OS file reservation. There are no thread waiters:
+    /// acquire() opens a separate handle with lock_nonblocking=true. Releasing
+    /// permits another process (or a later model activation) to acquire anew.
+    pub fn release(self: *ProcessLock) void {
         if (self.file) |file| {
             file.close(host_io.io);
             self.file = null;
         }
+    }
+
+    /// Scope cleanup uses the same idempotent file release as model unload.
+    pub fn deinit(self: *ProcessLock) void {
+        self.release();
     }
 };
 
@@ -94,7 +101,9 @@ test "GPU reservation rejects a second handle and releases on close" {
     var first = try acquire(.vulkan, index);
     defer first.deinit();
     try std.testing.expectError(error.GpuAlreadyReserved, acquire(.vulkan, index));
-    first.deinit();
+    first.release();
+    first.release();
+    try std.testing.expect(!first.isHeld());
     var replacement = try acquire(.vulkan, index);
     defer replacement.deinit();
     try std.testing.expect(replacement.isHeld());

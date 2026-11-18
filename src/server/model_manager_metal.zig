@@ -249,7 +249,7 @@ pub const ModelManager = struct {
         self.current = null;
         current.deinit(self.allocator);
         self.allocator.destroy(current);
-        self.gpu_process_lock.deinit();
+        self.gpu_process_lock.release();
         return true;
     }
 

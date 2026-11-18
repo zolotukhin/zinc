@@ -950,7 +950,7 @@ fn unloadModel(manager: anytype, server_state: *ServerState, expected_id: []cons
 
 fn handleUnloadModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
+    manager: *runtime.model_manager_mod.ModelManager,
     server_state: *ServerState,
     body: []const u8,
     allocator: std.mem.Allocator,
