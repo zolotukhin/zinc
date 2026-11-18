@@ -436,7 +436,10 @@ def finalize(args):
     require(validation.get("status") == "passed" and validation.get("manifest_sha256") == sha256(directory / "release-manifest.json"), "candidate is not validated")
     shutil.copyfile(ROOT / "scripts/install.sh", directory / "install.sh")
     shutil.copyfile(ROOT / "config/release/targets.json", directory / "release-policy.json")
-    backends = [target(a["target"])["backend"].capitalize() if target(a["target"])["backend"] != "rocm" else "ROCm" for a in data["artifacts"]]
+    # Present AMD's preferred native backend first without changing the frozen
+    # manifest or the archive identities that hardware qualification tested.
+    downloads = sorted(data["artifacts"], key=lambda a: {"rocm": 0, "vulkan": 1, "metal": 2}[target(a["target"])["backend"]])
+    backends = [target(a["target"])["backend"].capitalize() if target(a["target"])["backend"] != "rocm" else "ROCm" for a in downloads]
     label = " and ".join(backends)
     metal = any(a["target"] == "macos-aarch64-metal" for a in data["artifacts"])
     notes = [f"# ZINC v{data['version']}", "", label + " binaries built from [" + data["commit"] + "](https://github.com/zolotukhin/zinc/commit/" + data["commit"] + ").", "",
@@ -445,7 +448,7 @@ def finalize(args):
     if changes:
         notes.extend(["## Changes in this version", "", changes, ""])
     notes.extend(["## Downloads", "", "| Archive | Runtime |", "| --- | --- |"])
-    for artifact in data["artifacts"]:
+    for artifact in downloads:
         url = "https://github.com/zolotukhin/zinc/releases/download/v" + data["version"] + "/" + artifact["filename"]
         notes.append(f"| [{artifact['filename']}]({url}) | {target(artifact['target'])['runtime']} |")
     notes.extend(["", "Verify archive hashes with `SHA256SUMS.txt`. The signed provenance in `provenance.jsonl` covers the archives, installer and validation report.", "",

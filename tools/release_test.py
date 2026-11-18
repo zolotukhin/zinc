@@ -1771,6 +1771,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("qwen35-9b-q4k-m --chat", notes)
         self.assertLess(notes.index('ZINC_BACKEND=rocm'), notes.index('ZINC_BACKEND=vulkan'))
         self.assertIn('prefer native HIP / ROCm', notes)
+        self.assertIn('ROCm and Vulkan binaries', notes)
+        self.assertLess(notes.index('zinc-v9.8.7-linux-x86_64-rocm.tar.gz'),
+                        notes.index('zinc-v9.8.7-linux-x86_64-vulkan.tar.gz'))
         self.assertIn('capabilities.browser_ui', notes)
         # Public notes are generated independently of the preparation brief;
         # keep its known limitation and source-frozen evidence visible there.
@@ -1927,7 +1930,7 @@ class ReleaseTest(unittest.TestCase):
                 self.assertIn("--deny-self-hosted-runners", call.args[0])
                 self.assertIn("--source-digest", call.args[0])
         notes = (directory / "release-notes.md").read_text()
-        self.assertIn("Vulkan and ROCm binaries", notes)
+        self.assertIn("ROCm and Vulkan binaries", notes)
         self.assertIn("Metal remains an unsigned preview", notes)
         self.assertNotIn("Metal, Vulkan and ROCm binaries", notes)
         validation = read_json(directory / "validation.json")
