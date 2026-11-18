@@ -129,6 +129,13 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 soak.read_metrics(7, proc)
 
+    def test_kernel_memory_units_include_unitless_zero_bytes_and_mebibytes(self):
+        for text, expected in [('0', 0), ('1234', 1234), ('2 MiB', 2 * soak.MIB), ('3 KiB', 3072), ('3 kB', 3072)]:
+            self.assertEqual(soak.memory_bytes(text), expected)
+        for text in ['-1', 'NaN', '1.5 KiB', '2 MB', 'unknown']:
+            with self.assertRaises(ValueError):
+                soak.memory_bytes(text)
+
     def test_client_enforces_stream_terminal_marker_and_deadline(self):
         client = soak.Client(1, time.monotonic() + 5)
         for payload, valid in [(b'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n', True),

@@ -30,10 +30,13 @@ def limits(cycles=8, warmup=2, deadline_seconds=1800, rss_mib=128, vram_mib=64, 
                                 gpu_host_bytes=rss_mib * MIB, fds=fd_growth))
 
 
-def memory_kib(value):
-    match = re.fullmatch(r"(\d+)\s+(?:kB|KiB)", value.strip())
+def memory_bytes(value):
+    # DRM defaults to bytes and optionally emits KiB/MiB; /proc/status uses
+    # kB for kibibytes. Zero-valued DRM regions commonly omit the unit.
+    # https://docs.kernel.org/gpu/drm-usage-stats.html#memory
+    match = re.fullmatch(r"(\d+)(?:\s+(kB|KiB|MiB))?", value.strip())
     require(match is not None, "invalid process memory telemetry")
-    return int(match[1]) * 1024
+    return int(match[1]) * {None: 1, 'kB': 1024, 'KiB': 1024, 'MiB': MIB}[match[2]]
 
 
 def read_metrics(pid, proc=Path('/proc')):
@@ -57,11 +60,11 @@ def read_metrics(pid, proc=Path('/proc')):
         require(names, "GPU process does not expose DRM memory telemetry")
         # Include GTT/system allocations: watching dedicated VRAM alone would
         # miss a leak that the driver silently spills to host-visible memory.
-        resident = (sum(memory_kib(fields[name]) for name in names if name.endswith('-vram')),
-                    sum(memory_kib(fields[name]) for name in names if not name.endswith('-vram')))
+        resident = (sum(memory_bytes(fields[name]) for name in names if name.endswith(('-vram', '-local'))),
+                    sum(memory_bytes(fields[name]) for name in names if not name.endswith(('-vram', '-local'))))
         clients[key] = tuple(max(a, b) for a, b in zip(clients.get(key, (0, 0)), resident))
     require(clients, "GPU process DRM memory telemetry is unavailable")
-    return dict(rss_bytes=memory_kib(status['VmRSS']), vram_bytes=sum(value[0] for value in clients.values()),
+    return dict(rss_bytes=memory_bytes(status['VmRSS']), vram_bytes=sum(value[0] for value in clients.values()),
                 gpu_host_bytes=sum(value[1] for value in clients.values()), fds=len(descriptors))
 
 
@@ -183,7 +186,7 @@ def exercise_model(client, identifier, backend):
             'unload removed cached model installation')
 
 
-def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: time.sleep(.5)):
+def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: time.sleep(.5), progress=None):
     require(identifiers and len(identifiers) == len(set(identifiers)) and all(ID.fullmatch(x) for x in identifiers),
             'soak requires unique advertised catalog identifiers')
     require(backend in ('rocm', 'vulkan'), 'soak requires a Linux release backend')
@@ -213,6 +216,8 @@ def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: tim
                 report['samples'].append(sample)
             if cycle >= settings['warmup']:
                 report['completed_cycles'] += 1
+            if progress:
+                progress(cycle + 1, settings['warmup'] + settings['cycles'], report['operations'])
         report['failure_stage'] = 'memory_plateau'
         baseline = report['samples'][0]
         growth = {key: max(0, max(s[key] for s in report['samples'][1:]) - baseline[key]) for key in baseline}

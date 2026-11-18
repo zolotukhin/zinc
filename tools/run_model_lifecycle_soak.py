@@ -63,7 +63,9 @@ def run_owned(binary, models, backend, device, context, work, env, settings):
         require(status == 200 and all(any(entry.get('id') == identifier and entry.get('size_bytes') == snapshots[identifier][0]
                                          for entry in catalog.get('data', [])) for identifier in models),
                 'advertised model inventory differs from the selected files')
-        report = run_soak(client, list(models), backend, metrics, settings)
+        report = run_soak(client, list(models), backend, metrics, settings,
+                          progress=lambda current, total, operations: print(
+                              f'Lifecycle round {current}/{total}: {operations} model operations complete', flush=True))
     require(sha256(binary) == identity, 'installed binary changed during the soak')
     require(all((Path(path).stat().st_size, Path(path).stat().st_mtime_ns) == snapshots[identifier]
                 for identifier, path in models.items()), 'model files changed during the soak')
