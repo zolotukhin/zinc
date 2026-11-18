@@ -149,6 +149,10 @@ class LifecycleTests(unittest.TestCase):
             metrics = soak.read_metrics(7, proc)
             self.assertEqual(metrics, dict(rss_bytes=4 * soak.MIB, vram_bytes=soak.MIB, gpu_host_bytes=2 * soak.MIB, fds=2))
             self.assertNotIn('private-device', json.dumps(metrics))
+            (folder / 'status').write_text('Name: fixture\n')
+            with self.assertRaisesRegex(ValueError, 'RSS telemetry'):
+                soak.read_metrics(7, proc)
+            (folder / 'status').write_text('VmRSS: 4096 kB\n')
             for descriptor in ['3', '4']:
                 (folder / 'fdinfo' / descriptor).write_text('pos: 0\n')
             with self.assertRaises(ValueError):
@@ -174,6 +178,19 @@ class LifecycleTests(unittest.TestCase):
         client.deadline = time.monotonic() - 1
         with self.assertRaises(ValueError):
             client.remaining()
+
+    def test_sse_event_limit_accepts_the_boundary_and_rejects_oversized_lines(self):
+        client = soak.Client(1, time.monotonic() + 5)
+        skeleton = b'data: {"choices":[{"delta":{"content":""}}]}\n'
+        for size in (65536, 65537, 2 * soak.MIB):
+            event = skeleton.replace(b'"content":""', b'"content":"' + b'x' * (size - len(skeleton)) + b'"')
+            self.assertEqual(len(event), size)
+            with patch.object(soak.urllib.request, 'urlopen', return_value=io.BytesIO(event + b'\ndata: [DONE]\n')):
+                if size == 65536:
+                    client.stream({})
+                else:
+                    with self.assertRaisesRegex(ValueError, 'bounded budget'):
+                        client.stream({})
 
     def test_workstation_guard_precedes_any_server_start(self):
         from run_model_lifecycle_soak import run_owned

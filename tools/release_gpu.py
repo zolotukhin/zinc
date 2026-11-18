@@ -829,6 +829,8 @@ def main():
                 from run_model_lifecycle_soak import run_owned
                 print("Running packaged model lifecycle and memory plateau checks", flush=True)
                 soak_work = work / "lifecycle"
+                # Every invocation owns a fresh TemporaryDirectory. Refuse
+                # stale state rather than reusing an earlier cache or report.
                 soak_work.mkdir()
                 def repeated_reference(client, identifier):
                     reference_http_parity(int(client.root.rsplit(":", 1)[1]), {"model": identifier, "temperature": 0},

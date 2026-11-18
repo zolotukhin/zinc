@@ -43,6 +43,7 @@ def read_metrics(pid, proc=Path('/proc')):
     """Deduplicate DRM descriptors by client/device, retaining only byte totals."""
     folder = proc / str(pid)
     status = dict(line.split(':', 1) for line in (folder / 'status').read_text().splitlines() if ':' in line)
+    require('VmRSS' in status, "process RSS telemetry is unavailable")
     clients = {}
     descriptors = list((folder / 'fd').iterdir())
     for entry in (folder / 'fdinfo').iterdir():
@@ -102,6 +103,8 @@ class Client:
         with urllib.request.urlopen(req, timeout=self.remaining()) as response:
             while True:
                 self.remaining()
+                # Read one byte beyond the per-event limit so oversized lines
+                # fail without an unbounded allocation or accepting fragments.
                 line = response.readline(65537)
                 if not line:
                     break
