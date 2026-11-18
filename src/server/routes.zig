@@ -382,7 +382,7 @@ pub fn handleConnection(
 
     // Route dispatch
     if (request.method == .GET and std.mem.eql(u8, request.path, "/health")) {
-        try handleHealth(conn, manager, server_state);
+        try handleHealth(conn, manager, server_state, allocator);
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/models")) {
         try handleModels(conn, manager, server_state, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/activate")) {
@@ -400,6 +400,12 @@ pub fn handleConnection(
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/remove")) {
         if (comptime runtime.supports_model_management) {
             try handleRemoveModel(conn, manager, server_state, request.body, allocator);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
+    } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/unload")) {
+        if (comptime runtime.supports_model_management) {
+            try handleUnloadModel(conn, manager, server_state, request.body, allocator);
         } else {
             try sendUnsupportedModelManagement(conn);
         }
@@ -463,9 +469,11 @@ fn buildHealthJson(
     const active_context_tokens = memory_usage.activeContextTokens(snapshot.active_context_tokens);
     const active_context_bytes = memory_usage.activeContextBytes(active_context_tokens);
     return std.fmt.bufPrint(buf,
-        \\{{"status":"ok","model":"{s}","active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
+        \\{{"status":"ok","model":"{s}","supports_model_management":true,"supports_model_unload":true,"supports_model_pull":true,"supports_mtp":{s},"mtp_default_enabled":false,"mtp_request_control":false,"mtp_unavailable_reason":"{s}","active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
     , .{
         model_name,
+        if (runtime.supports_mtp) "true" else "false",
+        runtime.mtp_unavailable_reason,
         snapshot.active_requests,
         snapshot.queued_requests,
         snapshot.uptime_seconds,
@@ -480,9 +488,11 @@ fn buildHealthJson(
     });
 }
 
-fn handleHealth(conn: *http.Connection, manager: *model_manager_mod.ModelManager, server_state: *const ServerState) !void {
+fn handleHealth(conn: *http.Connection, manager: *model_manager_mod.ModelManager, server_state: *const ServerState, allocator: std.mem.Allocator) !void {
     var buf: [1024]u8 = undefined;
-    const body = buildHealthJson(server_state, manager.activeDisplayName(), manager.currentMemoryUsage(), &buf) catch return error.BufferTooSmall;
+    const model_name = try manager.activeDisplayNameAlloc(allocator);
+    defer allocator.free(model_name);
+    const body = buildHealthJson(server_state, model_name, manager.currentMemoryUsage(), &buf) catch return error.BufferTooSmall;
     try conn.sendJson(200, body);
 }
 
@@ -503,7 +513,7 @@ fn handleModels(
     defer body.deinit(allocator);
 
     try body.writer(allocator).print(
-        "{{\"object\":\"list\",\"profile\":\"{s}\",\"active_memory_used_bytes\":{d},\"active_memory_budget_bytes\":{d},\"active_memory_weights_bytes\":{d},\"active_memory_runtime_bytes\":{d},\"active_context_reserved_bytes\":{d},\"active_context_active_bytes\":{d},\"active_context_tokens\":{d},\"active_context_capacity_tokens\":{d},\"data\":[",
+        "{{\"object\":\"list\",\"supports_model_management\":true,\"supports_model_unload\":true,\"supports_model_pull\":true,\"profile\":\"{s}\",\"active_memory_used_bytes\":{d},\"active_memory_budget_bytes\":{d},\"active_memory_weights_bytes\":{d},\"active_memory_runtime_bytes\":{d},\"active_context_reserved_bytes\":{d},\"active_context_active_bytes\":{d},\"active_context_tokens\":{d},\"active_context_capacity_tokens\":{d},\"data\":[",
         .{
             view.profile,
             memory_usage.device_local_bytes,
@@ -526,7 +536,7 @@ fn handleModels(
         const download_error = if (is_download_target) download.errorMessage() else "";
         const entry_context_length: u32 = if (entry.active) memory_usage.context_capacity_tokens else 0;
         try body.writer(allocator).print(
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","context_length":{d},"display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"required_vram_with_offload_bytes":{d},"requires_offload_to_fit":{s},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","context_length":{d},"display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"required_vram_with_offload_bytes":{d},"requires_offload_to_fit":{s},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"supports_mtp":{s},"mtp_default_enabled":false,"mtp_request_control":false,"mtp_unavailable_reason":"{s}","downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
         , .{
             entry.id,
             ts,
@@ -548,6 +558,8 @@ fn handleModels(
             fit_source,
             entry.status_label,
             if (entry.supports_thinking_toggle) "true" else "false",
+            if (runtime.supports_mtp) "true" else "false",
+            runtime.mtp_unavailable_reason,
             if (downloading) "true" else "false",
             download_phase,
             if (is_download_target) download.downloaded_bytes else 0,
@@ -668,6 +680,47 @@ fn handleRemoveModel(
         if (result.removed.removed_dir) "true" else "false",
     }) catch return error.BufferTooSmall;
     try conn.sendJson(200, response);
+}
+
+const UnloadModelBody = struct {
+    model: []const u8 = "",
+};
+
+/// The generation lock outlives all resource reads during inference. Unloading
+/// takes the same lock, then drops prompt reuse before another request can run.
+fn unloadModel(manager: anytype, server_state: *ServerState, expected_id: []const u8) !bool {
+    server_state.generation_mutex.lock();
+    defer server_state.generation_mutex.unlock();
+    const unloaded = try manager.unloadActiveModel(expected_id);
+    server_state.clearChatReuseCache();
+    server_state.clearActiveContext();
+    return unloaded;
+}
+
+fn handleUnloadModel(
+    conn: *http.Connection,
+    manager: *model_manager_mod.ModelManager,
+    server_state: *ServerState,
+    body: []const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    const parsed = std.json.parseFromSlice(UnloadModelBody, allocator, if (body.len == 0) "{}" else body, .{ .ignore_unknown_fields = true }) catch {
+        try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
+        return;
+    };
+    defer parsed.deinit();
+    const unloaded = unloadModel(manager, server_state, parsed.value.model) catch |err| {
+        if (err == error.ActiveModelChanged) {
+            try conn.sendError(409, "model_changed", "The active model changed. Refresh model status and try again.");
+        } else {
+            try conn.sendError(500, "server_error", "Model unload failed");
+        }
+        return;
+    };
+    try conn.sendJson(200, if (unloaded)
+        "{\"object\":\"model.unload\",\"unloaded_from_gpu\":true,\"active\":false,\"deleted_model\":false}"
+    else
+        "{\"object\":\"model.unload\",\"unloaded_from_gpu\":false,\"active\":false,\"deleted_model\":false}");
 }
 
 const NullLogWriter = struct {
@@ -1044,6 +1097,7 @@ fn freeStopSequences(allocator: std.mem.Allocator, stop: []const []const u8) voi
 fn firstUnsupportedChatParam(body: ChatRequestBody) ?[]const u8 {
     if (body.n != 1) return "Field 'n' must be 1: only a single completion choice is generated";
     if (logprobsRequested(body.logprobs)) return "Field 'logprobs' is not supported: token log-probabilities are not computed";
+    if (runtime.mtpRequestError(body.enable_mtp)) |message| return message;
     return null;
 }
 
@@ -1163,6 +1217,7 @@ const ChatRequestBody = struct {
     temperature: f32 = 0.0,
     top_p: f32 = 1.0,
     enable_thinking: ?bool = null,
+    enable_mtp: ?bool = null,
     tools: []const RequestTool = &.{},
     tool_choice: ?std.json.Value = null,
     stop: ?std.json.Value = null,
@@ -2947,6 +3002,11 @@ fn handleCompletions(
     };
     defer parsed.deinit();
 
+    if (runtime.mtpRequestError(parsed.enable_mtp)) |message| {
+        try conn.sendError(400, "invalid_request_error", message);
+        return;
+    }
+
     if (parsed.prompt.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'prompt' is required");
         return;
@@ -3167,6 +3227,7 @@ const RawRequestBody = struct {
     max_tokens: u32 = 256,
     stream: bool = false,
     temperature: f32 = 1.0,
+    enable_mtp: ?bool = null,
 };
 
 const JsonMessage = struct {
@@ -3181,6 +3242,7 @@ const ParsedRequest = struct {
     max_tokens: u32 = 256,
     stream: bool = false,
     temperature: f32 = 1.0,
+    enable_mtp: ?bool = null,
     allocator: std.mem.Allocator,
 
     fn deinit(self: *ParsedRequest) void {
@@ -3212,6 +3274,7 @@ fn parseRequestBody(body: []const u8, allocator: std.mem.Allocator) !ParsedReque
     result.max_tokens = parsed.value.max_tokens;
     result.stream = parsed.value.stream;
     result.temperature = parsed.value.temperature;
+    result.enable_mtp = parsed.value.enable_mtp;
     result.prompt = try decodeJsonText(allocator, parsed.value.prompt);
 
     if (parsed.value.messages) |messages| {
@@ -3603,7 +3666,7 @@ fn forcedToolArgumentsJsonAlloc(allocator: std.mem.Allocator, first_arg_name: ?[
 
 // ── Built-in Chat UI ─────────────────────────────────────────
 
-fn serveChatUi(conn: *http.Connection) !void {
+pub fn serveChatUi(conn: *http.Connection) !void {
     const html = @embedFile("chat.html");
     var buf: [256]u8 = undefined;
     const header = std.fmt.bufPrint(&buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{html.len}) catch return error.HeaderTooLarge;
@@ -3797,6 +3860,32 @@ test "combinedStopStrings: appends client stops after the built-in list" {
 test "firstUnsupportedChatParam: defaults are accepted" {
     const body = ChatRequestBody{};
     try std.testing.expectEqual(@as(?[]const u8, null), firstUnsupportedChatParam(body));
+}
+
+test "MTP chat requests reject unsupported opt-in and accept disabled defaults" {
+    for ([_][]const u8{
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"enable_mtp\":false}",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"enable_mtp\":null}",
+    }) |body| {
+        var parsed = try parseChatRequest(std.testing.allocator, body);
+        defer parsed.deinit();
+        try std.testing.expect(firstUnsupportedChatParam(parsed.parsed.value) == null);
+    }
+    var enabled = try parseChatRequest(std.testing.allocator, "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"enable_mtp\":true}");
+    defer enabled.deinit();
+    try std.testing.expect(!runtime.supports_mtp);
+    try std.testing.expectEqualStrings(runtime.mtp_unavailable_reason, firstUnsupportedChatParam(enabled.parsed.value).?);
+}
+
+test "MTP raw requests preserve opt-in for explicit capability validation" {
+    var enabled = try parseRequestBody("{\"prompt\":\"hello\",\"enable_mtp\":true}", std.testing.allocator);
+    defer enabled.deinit();
+    try std.testing.expectEqual(@as(?bool, true), enabled.enable_mtp);
+    try std.testing.expectEqualStrings(runtime.mtp_unavailable_reason, runtime.mtpRequestError(enabled.enable_mtp).?);
+    var disabled = try parseRequestBody("{\"prompt\":\"hello\",\"enable_mtp\":false}", std.testing.allocator);
+    defer disabled.deinit();
+    try std.testing.expect(runtime.mtpRequestError(disabled.enable_mtp) == null);
 }
 
 test "firstUnsupportedChatParam: only n=1 is accepted" {
@@ -4507,7 +4596,7 @@ test "formatStreamingToolCallChunk emits valid JSON" {
         0,
         "call_0",
         "tree",
-        "{\"path\":\"/home/f44/dev/stuff/pwmedia\",\"depth\":3}",
+        "{\"path\":\"/fixtures/project\",\"depth\":3}",
     );
     defer std.testing.allocator.free(chunk);
 
@@ -4533,7 +4622,7 @@ test "formatStreamingToolCallChunk emits valid JSON" {
     try std.testing.expect(function == .object);
     const arguments = function.object.get("arguments") orelse return error.TestUnexpectedResult;
     try std.testing.expect(arguments == .string);
-    try std.testing.expectEqualStrings("{\"path\":\"/home/f44/dev/stuff/pwmedia\",\"depth\":3}", arguments.string);
+    try std.testing.expectEqualStrings("{\"path\":\"/fixtures/project\",\"depth\":3}", arguments.string);
 }
 
 test "parseChatRequest preserves full message history" {
@@ -5084,6 +5173,15 @@ test "buildHealthJson includes request counts and uptime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_active_bytes\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_tokens\":1024") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_capacity_tokens\":4096") != null);
+    var json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer json.deinit();
+    try std.testing.expect(json.value.object.get("supports_model_management").?.bool);
+    try std.testing.expect(json.value.object.get("supports_model_unload").?.bool);
+    try std.testing.expect(json.value.object.get("supports_model_pull").?.bool);
+    try std.testing.expect(!json.value.object.get("supports_mtp").?.bool);
+    try std.testing.expect(!json.value.object.get("mtp_default_enabled").?.bool);
+    try std.testing.expect(!json.value.object.get("mtp_request_control").?.bool);
+    try std.testing.expectEqualStrings(runtime.mtp_unavailable_reason, json.value.object.get("mtp_unavailable_reason").?.string);
 }
 test "findFirstStop picks earliest chat control marker" {
     const text = "Hello<|im_start|>assistant<|im_end|>";
@@ -5115,4 +5213,41 @@ test "startsWithLeakedReasoning detects meta-commentary at start" {
     try std.testing.expect(startsWithLeakedReasoning("  Let me think about this carefully."));
     try std.testing.expect(!startsWithLeakedReasoning("Zig is a modern systems programming language."));
     try std.testing.expect(!startsWithLeakedReasoning("C types include int, float, and char."));
+}
+
+test "model unload holds generation ownership and clears reusable context" {
+    const FakeManager = struct {
+        state: *ServerState,
+        pub fn unloadActiveModel(self: *@This(), expected_id: []const u8) !bool {
+            try std.testing.expectEqualStrings("current-model", expected_id);
+            const unlocked = self.state.generation_mutex.tryLock();
+            if (unlocked) self.state.generation_mutex.unlock();
+            try std.testing.expect(!unlocked);
+            return true;
+        }
+    };
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.setActiveContextTokens(2048);
+    var manager = FakeManager{ .state = &state };
+    try std.testing.expect(try unloadModel(&manager, &state, "current-model"));
+    try std.testing.expectEqual(@as(u32, 0), state.active_context_tokens.load(.monotonic));
+    try std.testing.expect(state.generation_mutex.tryLock());
+    state.generation_mutex.unlock();
+}
+
+test "rejected model unload preserves context and releases generation ownership" {
+    const FakeManager = struct {
+        pub fn unloadActiveModel(_: *@This(), _: []const u8) !bool {
+            return error.ActiveModelChanged;
+        }
+    };
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.setActiveContextTokens(2048);
+    var manager = FakeManager{};
+    try std.testing.expectError(error.ActiveModelChanged, unloadModel(&manager, &state, "previous-model"));
+    try std.testing.expectEqual(@as(u32, 2048), state.active_context_tokens.load(.monotonic));
+    try std.testing.expect(state.generation_mutex.tryLock());
+    state.generation_mutex.unlock();
 }

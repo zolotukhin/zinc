@@ -213,8 +213,18 @@ At the execution-model level, that means ZINC handles:
 
 GGUFs may append NextN/MTP draft blocks to `block_count`. ZINC retains those
 tensors when loading the model but excludes the declared
-`nextn_predict_layers` from ordinary autoregressive inference; speculative MTP
-decoding is not enabled yet.
+`nextn_predict_layers` from ordinary autoregressive inference. CUDA/ROCm CLI
+and single-slot HTTP serving can use one compatible appended NextN block on a
+dense model. ROCm defaults on; CUDA defaults off and can opt in through
+`ZINC_MTP=1` or a supported per-request `enable_mtp: true` option. Explicit
+`ZINC_MTP=0` disables the path. Multi-slot serving continues to use batched
+decoding; Vulkan/Metal do not currently implement model-native MTP.
+
+The initialized serving runtime reports capability, default mode, request-level
+control, and any unavailability reason. Each completion separately reports its
+requested/effective mode and actual draft/accept/cycle counters, including a
+fallback reason if MTP could not run. Missing metadata from older deployed
+builds leaves the status unknown.
 
 The architecture-normalization layer is in `src/model/architecture.zig` and `src/model/config.zig`.
 

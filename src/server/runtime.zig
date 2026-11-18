@@ -14,6 +14,19 @@ pub const supports_model_management = gpu.is_vulkan or gpu.is_metal;
 pub const supports_sampling_controls = gpu.is_vulkan or gpu.is_metal;
 /// Whether the backend supports GPU kernel profiling during inference.
 pub const supports_runtime_profiling = gpu.is_vulkan or gpu.is_metal;
+/// Model-native MTP needs a verifier and rollback path in the serving loop.
+/// Retaining NextN weights alone does not make the HTTP runtime capable of MTP.
+pub const supports_mtp = false;
+pub const mtp_unavailable_reason = if (gpu.is_vulkan)
+    "Model-native MTP is not implemented by the Vulkan chat runtime."
+else if (gpu.is_metal)
+    "Model-native MTP is not implemented by the Metal chat runtime."
+else
+    "Model-native MTP is not implemented by this HTTP runtime.";
+
+pub fn mtpRequestError(enabled: ?bool) ?[]const u8 {
+    return if ((enabled orelse false) and !supports_mtp) mtp_unavailable_reason else null;
+}
 
 /// Tokenizer module (shared across all backends).
 pub const tokenizer_mod = @import("../model/tokenizer.zig");

@@ -52,6 +52,8 @@ const forward_cuda_gemma_mod = if (gpu.is_cuda) @import("compute/forward_cuda_ge
 // Effort 28 (inc 3 / 3b): CUDA multi-tenant serving engine (gemma dense). Only
 // referenced on the CUDA backend; the struct{} stub keeps other backends clean.
 const cuda_serve_mod = if (gpu.is_cuda) @import("server/cuda_serve.zig") else struct {};
+const accelerator_catalog = @import("server/accelerator_model_catalog.zig");
+const model_replacement = @import("server/model_replacement.zig");
 const http_mod = @import("server/http.zig");
 const model_manager_mod = @import("server/model_manager_runtime.zig");
 const routes_mod = @import("server/routes.zig");
@@ -151,6 +153,11 @@ comptime {
     _ = @import("regression_tests.zig");
     _ = @import("server/http.zig");
     _ = @import("server/runtime.zig");
+    if (builtin.is_test) {
+        _ = @import("server/mtp_policy_test.zig");
+        _ = accelerator_catalog;
+        _ = model_replacement;
+    }
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
@@ -1780,8 +1787,8 @@ fn writeDecodeGraphArtifacts(
 // Accelerator prompt/server entrypoint shared by the CUDA and ROCm backends.
 // Only referenced (and therefore only analyzed) for those backends. Does a real greedy decode:
 // load → forward init → tokenize → prefill (one decodeStep per prompt token) →
-// greedy generate (feed argmax back) → detokenize → print. Server mode is not
-// yet supported on CUDA.
+// greedy generate (feed argmax back) → detokenize → print, or start the
+// accelerator HTTP server with model lifecycle management.
 fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     const model_path = config.model_path orelse {
         // model_id resolution flows through resolveStartupModel in main(); on
@@ -1801,6 +1808,11 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
         });
     }
 
+    // The server owns its model resources so unload and activation can replace
+    // them while retaining the same selected device and HTTP listener.
+    const max_ctx: u32 = config.context_length orelse 2048;
+    if (config.prompt == null) return runCudaServe(&device, model_path, config, max_ctx, allocator);
+
     // Load the model onto the GPU (weights uploaded verbatim-quantized).
     var model = loader_cuda_mod.Model.load(allocator, device.ctx, model_path) catch |err| {
         log.err("Failed to load model: {s}", .{@errorName(err)});
@@ -1812,13 +1824,11 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     // gemma4 dense forward AND the qwen35/36 hybrid-SSM+MoE forward expose the
     // batched serving path (decodeBatch + slot state); the server dispatches by
     // architecture via cuda_serve.Forward. Prompt mode (single-sequence) unchanged.
-    const server_mode = config.prompt == null;
 
     // Build the forward state. max_ctx must cover prompt + generated tokens.
     // gemma4 and Muse Glimmer use the dense transformer forward path
     // (forward_cuda_gemma.zig); the
     // qwen35/qwen36 hybrid-SSM family uses forward_cuda.zig.
-    const max_ctx: u32 = if (config.context_length) |c| c else 2048;
     if (model.config.architecture == .gemma or model.config.architecture == .muse_glimmer) {
         var fwd = forward_cuda_gemma_mod.ForwardGemma.init(allocator, &model, max_ctx) catch |err| {
             log.err("Failed to init {s} forward pass: {s}", .{ accelerator_name, @errorName(err) });
@@ -1828,7 +1838,6 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
         log.info("{s} {s} forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
             accelerator_name, @tagName(model.config.architecture), fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
         });
-        if (server_mode) return runCudaServe(.{ .gemma = &fwd }, &model, config, max_ctx, allocator);
         return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
     }
 
@@ -1840,7 +1849,6 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     log.info("{s} forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
         accelerator_name, fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
     });
-    if (server_mode) return runCudaServe(.{ .qwen = &fwd }, &model, config, max_ctx, allocator);
     return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
 }
 
@@ -2061,70 +2069,171 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
 // the batched `decodeBatch` proven token-identical to N isolated single-sequence
 // runs in increments 1+2; the production single-sequence prompt path is untouched.
 
-/// Per-connection handler context, heap-allocated and handed to a detached thread.
+/// A loaded accelerator model owns every object used by its worker. Heap
+/// addresses stay stable while handler leases protect them from replacement.
+const AcceleratorResources = struct {
+    allocator: std.mem.Allocator,
+    entry: *const accelerator_catalog.Entry,
+    model: ?*loader_cuda_mod.Model = null,
+    fwd: ?cuda_serve_mod.Forward = null,
+    tokenizer: ?*tokenizer_mod.Tokenizer = null,
+    engine: ?*cuda_serve_mod.ServeEngine = null,
+    debug_ids: bool,
+    slot_ctx: u32,
+
+    fn load(allocator: std.mem.Allocator, device: *cuda_device_mod.CudaDevice, entry: *const accelerator_catalog.Entry, config: Config, max_ctx: u32) !*AcceleratorResources {
+        const self = try allocator.create(AcceleratorResources);
+        self.* = .{ .allocator = allocator, .entry = entry, .debug_ids = envIsOn("ZINC_SERVE_DEBUG_IDS"), .slot_ctx = max_ctx };
+        errdefer self.destroy(device);
+        const model = try allocator.create(loader_cuda_mod.Model);
+        model.* = loader_cuda_mod.Model.load(allocator, device.ctx, entry.path) catch |err| {
+            allocator.destroy(model);
+            return err;
+        };
+        self.model = model;
+        if (model.config.architecture == .gemma or model.config.architecture == .muse_glimmer) {
+            const fwd = try allocator.create(forward_cuda_gemma_mod.ForwardGemma);
+            fwd.* = forward_cuda_gemma_mod.ForwardGemma.init(allocator, model, max_ctx) catch |err| {
+                allocator.destroy(fwd);
+                return err;
+            };
+            self.fwd = .{ .gemma = fwd };
+        } else {
+            const fwd = try allocator.create(forward_cuda_mod.ForwardCuda);
+            fwd.* = forward_cuda_mod.ForwardCuda.init(allocator, model, max_ctx) catch |err| {
+                allocator.destroy(fwd);
+                return err;
+            };
+            self.fwd = .{ .qwen = fwd };
+        }
+        const tokenizer = try allocator.create(tokenizer_mod.Tokenizer);
+        tokenizer.* = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
+            allocator.destroy(tokenizer);
+            return err;
+        };
+        self.tokenizer = tokenizer;
+        var eos = tokenizer.eosId();
+        if (std.posix.getenv("ZINC_SCHED_EOS")) |v| eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
+        const eot = if (!self.debug_ids and tokenizer.detectTemplateKind() == .atem) tokenizer.eot_id else null;
+        const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
+        const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
+        if (gemma_moe and config.max_parallel != 1) log.warn("Gemma MoE serving currently uses one request slot; ignoring --parallel {d}", .{config.max_parallel});
+        const engine = try allocator.create(cuda_serve_mod.ServeEngine);
+        engine.* = cuda_serve_mod.ServeEngine.init(allocator, self.fwd.?, nslots, max_ctx, eos, eot) catch |err| {
+            allocator.destroy(engine);
+            return err;
+        };
+        self.engine = engine;
+        try engine.start();
+        return self;
+    }
+
+    fn destroy(self: *AcceleratorResources, device: *cuda_device_mod.CudaDevice) void {
+        // CUDA contexts are thread-local. The existing memory query selects this
+        // retained context before releasing buffers from a handler thread.
+        _ = device.freeMemory();
+        if (self.engine) |engine| {
+            engine.shutdown();
+            engine.deinit();
+            self.allocator.destroy(engine);
+        }
+        if (self.tokenizer) |tokenizer| {
+            tokenizer.deinit();
+            self.allocator.destroy(tokenizer);
+        }
+        if (self.fwd) |fwd| switch (fwd) {
+            .gemma => |ptr| {
+                ptr.deinit();
+                self.allocator.destroy(ptr);
+            },
+            .qwen => |ptr| {
+                ptr.deinit();
+                self.allocator.destroy(ptr);
+            },
+        };
+        if (self.model) |model| {
+            model.deinit();
+            self.allocator.destroy(model);
+        }
+        self.allocator.destroy(self);
+    }
+};
+
+const AcceleratorManager = struct {
+    allocator: std.mem.Allocator,
+    device: *cuda_device_mod.CudaDevice,
+    config: Config,
+    max_ctx: u32,
+    inventory: accelerator_catalog.Inventory,
+    current: ?*AcceleratorResources = null,
+    /// Every generation holds a shared lease until its channel has drained.
+    /// Exclusive lifecycle operations therefore never release in-use weights.
+    lifecycle: std.Thread.RwLock = .{},
+
+    fn deinit(self: *AcceleratorManager) void {
+        if (self.current) |current| current.destroy(self.device);
+        self.inventory.deinit();
+    }
+
+    fn capability(self: *const AcceleratorManager) cuda_serve_mod.MtpCapability {
+        return if (self.current) |current| current.engine.?.mtpCapability() else .{ .unavailable_reason = "No model is loaded." };
+    }
+
+    pub fn unload(self: *AcceleratorManager) void {
+        if (self.current) |current| current.destroy(self.device);
+        self.current = null;
+    }
+
+    pub fn load(self: *AcceleratorManager, entry: *const accelerator_catalog.Entry) !*AcceleratorResources {
+        return AcceleratorResources.load(self.allocator, self.device, entry, self.config, self.max_ctx);
+    }
+
+    fn activate(self: *AcceleratorManager, entry: *const accelerator_catalog.Entry) !void {
+        return model_replacement.activate(self, entry);
+    }
+};
+
+/// Per-connection context contains only stable manager state. A handler obtains
+/// its current model pointers after acquiring a lifecycle lease.
 const ServeConnCtx = struct {
-    engine: *cuda_serve_mod.ServeEngine,
-    tokenizer: *tokenizer_mod.Tokenizer,
+    manager: *AcceleratorManager,
     conn: http_mod.Connection,
     allocator: std.mem.Allocator,
-    /// Gate mode: prompts are comma-separated raw token ids and the SSE payload is
-    /// the decimal token id (exact token-level comparison, no tokenizer/detok).
+};
+
+const ServeGenerateCtx = struct {
+    engine: *cuda_serve_mod.ServeEngine,
+    tokenizer: *tokenizer_mod.Tokenizer,
+    allocator: std.mem.Allocator,
     debug_ids: bool,
     default_max: u32,
     slot_ctx: u32,
+    model_path: ?[]const u8,
 };
 
-/// Stand up the CUDA serving path: build the tokenizer, spawn the GPU worker via
-/// `ServeEngine`, then accept connections and hand each to a detached handler.
-/// `fwd` is a `cuda_serve.Forward` so the server drives EITHER the gemma4 dense or
-/// the qwen35/36 hybrid-SSM+MoE forward (Effort 28 increment 4 — qwen serving).
 fn cudaServeSlotCount(requested: u32, gemma_moe: bool) u32 {
     const clamped = std.math.clamp(requested, 1, 64);
     return if (gemma_moe) 1 else clamped;
 }
 
-fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, config: Config, max_ctx: u32, allocator: std.mem.Allocator) !void {
-    var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
-        log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
-        return err;
+fn runCudaServe(device: *cuda_device_mod.CudaDevice, initial_path: []const u8, config: Config, max_ctx: u32, allocator: std.mem.Allocator) !void {
+    var manager = AcceleratorManager{
+        .allocator = allocator,
+        .device = device,
+        .config = config,
+        .max_ctx = max_ctx,
+        .inventory = try accelerator_catalog.Inventory.init(allocator, initial_path, device.totalMemory()),
     };
-    defer tokenizer.deinit();
-
-    // Gate / EOS plumbing. ZINC_SERVE_DEBUG_IDS=1 → raw-token-id contract for the
-    // exact concurrency gate. ZINC_SCHED_EOS overrides the stop token so the HTTP
-    // gate and the `dbg_cuda serve` reference stop identically.
-    const debug_ids = envIsOn("ZINC_SERVE_DEBUG_IDS");
-    var eos = tokenizer.eosId();
-    if (std.posix.getenv("ZINC_SCHED_EOS")) |v| {
-        eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
-    }
-    const eot = if (!debug_ids and tokenizer.detectTemplateKind() == .atem) tokenizer.eot_id else null;
-
-    const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
-    const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
-    if (gemma_moe and config.max_parallel != 1) {
-        log.warn("Gemma MoE serving currently uses one request slot; ignoring --parallel {d}", .{config.max_parallel});
-    }
-    const slot_ctx = max_ctx;
-
-    var engine = cuda_serve_mod.ServeEngine.init(allocator, fwd, nslots, slot_ctx, eos, eot) catch |err| {
-        log.err("Failed to init {s} serve engine: {s}", .{ accelerator_name, @errorName(err) });
-        return err;
-    };
-    defer engine.deinit();
-    try engine.start();
-    defer engine.shutdown();
+    defer manager.deinit();
+    const initial_entry = manager.inventory.find(manager.inventory.initial_model_id) orelse return error.InitialModelMissing;
+    try manager.activate(initial_entry);
 
     var server = http_mod.Server.init(allocator, config.port) catch |err| {
         log.err("Failed to bind HTTP server on port {d}: {s}", .{ config.port, @errorName(err) });
         return err;
     };
     defer server.deinit();
-
-    log.info("ZINC {s} server listening on :{d} (slots={d}, ctx={d}, eos={d}, debug_ids={})", .{
-        accelerator_name, config.port, nslots, slot_ctx, eos, debug_ids,
-    });
-
+    log.info("ZINC {s} server listening on :{d} (ctx={d}, model lifecycle enabled)", .{ accelerator_name, config.port, max_ctx });
     while (true) {
         const conn = server.accept() catch |err| {
             log.warn("accept failed: {s}", .{@errorName(err)});
@@ -2135,15 +2244,7 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
             c.close();
             continue;
         };
-        ctx.* = .{
-            .engine = &engine,
-            .tokenizer = &tokenizer,
-            .conn = conn,
-            .allocator = allocator,
-            .debug_ids = debug_ids,
-            .default_max = config.max_tokens,
-            .slot_ctx = slot_ctx,
-        };
+        ctx.* = .{ .manager = &manager, .conn = conn, .allocator = allocator };
         const t = std.Thread.spawn(.{}, handleServeConn, .{ctx}) catch {
             ctx.conn.close();
             allocator.destroy(ctx);
@@ -2165,47 +2266,570 @@ const ServeReqBody = struct {
     /// Expose model reasoning in a `<think>` envelope when the template has a
     /// structured internal channel (including Muse Glimmer's ATEM protocol).
     enable_thinking: ?bool = null,
+    enable_mtp: ?bool = null,
+    model: ?[]const u8 = null,
 };
+
+/// Capability validation is separate from request policy: false and null are
+/// always valid, while an explicit true needs this model/runtime to be ready.
+fn serveMtpRequestError(enabled: ?bool, capability: anytype) ?[]const u8 {
+    if ((enabled orelse false) and !capability.supports_mtp) return capability.unavailable_reason;
+    return null;
+}
+
+fn buildCudaServeHealthJson(allocator: std.mem.Allocator, model_path: ?[]const u8, context_length: u32, capability: anytype) ![]u8 {
+    const backend: []const u8 = if (gpu.is_rocm) "rocm" else "cuda";
+    const name = if (model_path) |path| std.fs.path.basename(path) else "zinc";
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .status = "ok",
+        .backend = backend,
+        .model = if (model_path == null) "" else name,
+        .context_length = context_length,
+        .supports_model_management = true,
+        .supports_model_unload = true,
+        .supports_model_pull = false,
+        .supports_mtp = capability.supports_mtp,
+        .mtp_default_enabled = capability.default_enabled,
+        .mtp_request_control = true,
+        .mtp_unavailable_reason = capability.unavailable_reason,
+    }, .{});
+}
+
+fn buildCudaServeModelsJson(allocator: std.mem.Allocator, model_path: ?[]const u8, context_length: u32, supports_thinking: bool, capability: anytype) ![]u8 {
+    const path = model_path orelse "zinc";
+    const name = std.fs.path.basename(path);
+    const catalog_entry = catalog_mod.findForLoadedModel(null, path, "");
+    const entry = accelerator_catalog.Entry{
+        .id = if (catalog_entry) |item| item.id else name,
+        .display_name = if (catalog_entry) |item| item.display_name else name,
+        .homepage_url = if (catalog_entry) |item| item.homepage_url else "",
+    };
+    return buildAcceleratorModelsJson(allocator, &.{entry}, entry.id, context_length, supports_thinking, capability);
+}
+
+/// Build discovery from the installed inventory, including unloaded candidates.
+/// Paths remain internal; only an advertised opaque or catalog ID can activate.
+fn buildAcceleratorModelsJson(allocator: std.mem.Allocator, entries: []const accelerator_catalog.Entry, active_id: ?[]const u8, context_length: u32, supports_thinking: bool, capability: anytype) ![]u8 {
+    const Info = struct {
+        id: []const u8,
+        object: []const u8 = "model",
+        display_name: []const u8,
+        homepage_url: []const u8,
+        family: []const u8,
+        quantization: []const u8,
+        size_bytes: u64,
+        fit_source: []const u8,
+        required_vram_bytes: u64,
+        context_length: u32,
+        installed: bool,
+        active: bool,
+        managed: bool,
+        can_activate: bool,
+        supported_on_current_gpu: bool,
+        fits_current_gpu: bool,
+        supports_thinking_toggle: bool,
+        supports_mtp: bool,
+        mtp_default_enabled: bool,
+        mtp_request_control: bool = true,
+        mtp_unavailable_reason: []const u8,
+    };
+    const data = try allocator.alloc(Info, entries.len);
+    defer allocator.free(data);
+    for (entries, data) |entry, *info| {
+        const active = if (active_id) |id| std.mem.eql(u8, id, entry.id) else false;
+        info.* = .{
+            .id = entry.id,
+            .display_name = entry.display_name,
+            .homepage_url = entry.homepage_url,
+            .family = entry.family,
+            .quantization = entry.quantization,
+            .size_bytes = entry.size_bytes,
+            .required_vram_bytes = entry.required_vram_bytes,
+            .fit_source = entry.fit_source,
+            .context_length = if (active) context_length else 0,
+            .installed = entry.installed,
+            .active = active,
+            .managed = entry.managed,
+            .can_activate = entry.can_activate,
+            .supported_on_current_gpu = entry.supported_on_current_gpu,
+            .fits_current_gpu = active or entry.fits_current_gpu,
+            .supports_thinking_toggle = active and supports_thinking,
+            .supports_mtp = active and capability.supports_mtp,
+            .mtp_default_enabled = active and capability.default_enabled,
+            .mtp_unavailable_reason = if (active) capability.unavailable_reason else "Load this model to check MTP support.",
+        };
+    }
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .object = "list",
+        .supports_model_management = true,
+        .supports_model_unload = true,
+        .supports_model_pull = false,
+        .data = data,
+    }, .{});
+}
+
+const ServeUsage = struct {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+};
+
+const ServeTimings = struct {
+    prompt_n: usize,
+    prompt_ms: f64,
+    prompt_per_second: f64,
+    predicted_n: usize,
+    predicted_ms: f64,
+    predicted_per_second: f64,
+};
+
+fn cudaServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u64, decode_ns: u64) ServeTimings {
+    return .{
+        .prompt_n = prompt_tokens,
+        .prompt_ms = @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0,
+        .prompt_per_second = if (prefill_ns == 0) 0 else @as(f64, @floatFromInt(prompt_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns)),
+        .predicted_n = generated_tokens,
+        .predicted_ms = @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0,
+        .predicted_per_second = if (decode_ns == 0) 0 else @as(f64, @floatFromInt(generated_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns)),
+    };
+}
+
+fn cudaServeFinishReason(generated_tokens: usize, max_tokens: u32, last_token: ?u32, eos: u32, eot: ?u32) []const u8 {
+    if (last_token) |token| {
+        if (token == eos or (eot != null and token == eot.?)) return "stop";
+    }
+    return if (generated_tokens >= @as(usize, max_tokens)) "length" else "stop";
+}
+
+fn buildCudaServeFinishJson(allocator: std.mem.Allocator, is_chat: bool, finish_reason: []const u8, mtp: anytype, usage: ServeUsage, timings: ServeTimings) ![]u8 {
+    if (is_chat) {
+        const Choice = struct { index: u32 = 0, delta: struct {} = .{}, finish_reason: []const u8 };
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .object = "chat.completion.chunk",
+            .choices = [_]Choice{.{ .finish_reason = finish_reason }},
+            .mtp = mtp,
+            .usage = usage,
+            .timings = timings,
+        }, .{});
+    }
+    const Choice = struct { index: u32 = 0, text: []const u8 = "", finish_reason: []const u8 };
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .object = "text_completion",
+        .choices = [_]Choice{.{ .finish_reason = finish_reason }},
+        .mtp = mtp,
+        .usage = usage,
+        .timings = timings,
+    }, .{});
+}
+
+fn buildCudaServeResponseJson(allocator: std.mem.Allocator, is_chat: bool, content: []const u8, finish_reason: []const u8, mtp: anytype, usage: ServeUsage, timings: ServeTimings) ![]u8 {
+    if (is_chat) {
+        const Message = struct { role: []const u8 = "assistant", content: []const u8 };
+        const Choice = struct { index: u32 = 0, message: Message, finish_reason: []const u8 };
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .id = "chatcmpl-zinc",
+            .object = "chat.completion",
+            .choices = [_]Choice{.{ .message = .{ .content = content }, .finish_reason = finish_reason }},
+            .usage = usage,
+            .mtp = mtp,
+            .timings = timings,
+        }, .{});
+    }
+    const Choice = struct { index: u32 = 0, text: []const u8, finish_reason: []const u8 };
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .id = "cmpl-zinc",
+        .object = "text_completion",
+        .choices = [_]Choice{.{ .text = content, .finish_reason = finish_reason }},
+        .usage = usage,
+        .mtp = mtp,
+        .timings = timings,
+    }, .{});
+}
+
+fn buildCudaServeErrorJson(allocator: std.mem.Allocator, message: []const u8, mtp: anytype) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .@"error" = .{ .type = "server_error", .message = message },
+        .mtp = mtp,
+    }, .{});
+}
+
+const TestServeMtpCapability = struct {
+    supports_mtp: bool,
+    default_enabled: bool,
+    unavailable_reason: []const u8,
+};
+
+test "MTP serving request validates explicit opt-in without disabling defaults" {
+    const unsupported = TestServeMtpCapability{ .supports_mtp = false, .default_enabled = false, .unavailable_reason = "This model has no NextN weights" };
+    try std.testing.expect(serveMtpRequestError(null, unsupported) == null);
+    try std.testing.expect(serveMtpRequestError(false, unsupported) == null);
+    const parsed = try std.json.parseFromSlice(ServeReqBody, std.testing.allocator, "{\"prompt\":\"hello\",\"enable_mtp\":true}", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(unsupported.unavailable_reason, serveMtpRequestError(parsed.value.enable_mtp, unsupported).?);
+    const supported = TestServeMtpCapability{ .supports_mtp = true, .default_enabled = true, .unavailable_reason = "" };
+    try std.testing.expect(serveMtpRequestError(true, supported) == null);
+    for ([_][]const u8{ "{\"prompt\":\"hello\"}", "{\"prompt\":\"hello\",\"enable_mtp\":null}" }) |body| {
+        const request = try std.json.parseFromSlice(ServeReqBody, std.testing.allocator, body, .{});
+        defer request.deinit();
+        try std.testing.expect(request.value.enable_mtp == null);
+    }
+}
+
+test "MTP serving health and model discovery report the same runtime capability" {
+    const allocator = std.testing.allocator;
+    for ([_]TestServeMtpCapability{
+        .{ .supports_mtp = true, .default_enabled = true, .unavailable_reason = "" },
+        .{ .supports_mtp = true, .default_enabled = false, .unavailable_reason = "" },
+        .{ .supports_mtp = false, .default_enabled = false, .unavailable_reason = "MTP requires one request slot" },
+    }) |capability| {
+        const health = try buildCudaServeHealthJson(allocator, "/fixtures/Qwen3.8-27B-Q4_K_M.gguf", 8192, capability);
+        defer allocator.free(health);
+        const models = try buildCudaServeModelsJson(allocator, "/fixtures/Qwen3.8-27B-Q4_K_M.gguf", 8192, true, capability);
+        defer allocator.free(models);
+        var parsed_health = try std.json.parseFromSlice(std.json.Value, allocator, health, .{});
+        defer parsed_health.deinit();
+        var parsed_models = try std.json.parseFromSlice(std.json.Value, allocator, models, .{});
+        defer parsed_models.deinit();
+        const model = parsed_models.value.object.get("data").?.array.items[0];
+        inline for (.{ "supports_mtp", "mtp_default_enabled", "mtp_request_control" }) |field| {
+            try std.testing.expectEqual(parsed_health.value.object.get(field).?.bool, model.object.get(field).?.bool);
+        }
+        try std.testing.expectEqual(capability.supports_mtp, model.object.get("supports_mtp").?.bool);
+        try std.testing.expectEqual(capability.default_enabled, model.object.get("mtp_default_enabled").?.bool);
+        try std.testing.expectEqualStrings(capability.unavailable_reason, model.object.get("mtp_unavailable_reason").?.string);
+        try std.testing.expect(model.object.get("active").?.bool);
+        try std.testing.expect(model.object.get("supports_thinking_toggle").?.bool);
+    }
+}
+
+test "accelerator model discovery preserves reload candidates after unload and refreshes MTP after switching" {
+    const allocator = std.testing.allocator;
+    const entries = [_]accelerator_catalog.Entry{
+        .{ .id = "first", .display_name = "First model" },
+        .{ .id = "second", .display_name = "Second model" },
+    };
+    const capability = TestServeMtpCapability{ .supports_mtp = true, .default_enabled = true, .unavailable_reason = "" };
+    for ([_]?[]const u8{ "first", null, "second" }) |active_id| {
+        const json = try buildAcceleratorModelsJson(allocator, &entries, active_id, 4096, true, capability);
+        defer allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        try std.testing.expect(object.get("supports_model_management").?.bool);
+        try std.testing.expect(object.get("supports_model_unload").?.bool);
+        try std.testing.expect(!object.get("supports_model_pull").?.bool);
+        const data = object.get("data").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), data.len);
+        for (data) |item| {
+            const model = item.object;
+            const active = if (active_id) |id| std.mem.eql(u8, id, model.get("id").?.string) else false;
+            try std.testing.expectEqual(active, model.get("active").?.bool);
+            try std.testing.expectEqual(active, model.get("supports_mtp").?.bool);
+            try std.testing.expectEqual(active, model.get("mtp_default_enabled").?.bool);
+            try std.testing.expect(model.get("installed").?.bool);
+            try std.testing.expect(model.get("can_activate").?.bool);
+            try std.testing.expect(model.get("path") == null);
+        }
+    }
+    const idle = try buildCudaServeHealthJson(allocator, null, 0, TestServeMtpCapability{ .supports_mtp = false, .default_enabled = false, .unavailable_reason = "No model is loaded." });
+    defer allocator.free(idle);
+    var parsed_idle = try std.json.parseFromSlice(std.json.Value, allocator, idle, .{});
+    defer parsed_idle.deinit();
+    try std.testing.expectEqualStrings("", parsed_idle.value.object.get("model").?.string);
+    try std.testing.expect(!parsed_idle.value.object.get("supports_mtp").?.bool);
+}
+
+test "accelerator model requests reject stale selection after a switch" {
+    try std.testing.expect(acceleratorModelRequestError(null, "active-id", "/fixtures/current.gguf") == null);
+    try std.testing.expect(acceleratorModelRequestError("active-id", "active-id", "/fixtures/current.gguf") == null);
+    try std.testing.expect(acceleratorModelRequestError("current.gguf", "active-id", "/fixtures/current.gguf") == null);
+    try std.testing.expect(acceleratorModelRequestError("q", "active-id", "/fixtures/current.gguf") == null);
+    try std.testing.expect(acceleratorModelRequestError("zinc", "active-id", "/fixtures/current.gguf") == null);
+    try std.testing.expect(acceleratorModelRequestError("previous-id", "active-id", "/fixtures/current.gguf") != null);
+    try std.testing.expect(acceleratorModelRequestError("../current.gguf", "active-id", "/fixtures/current.gguf") != null);
+    try std.testing.expect(acceleratorModelRequestError("active-id", null, null) != null);
+}
+
+test "MTP terminal stream metadata preserves effective mode and actual fallback" {
+    const allocator = std.testing.allocator;
+    const result = .{ .requested = @as(?bool, null), .enabled = true, .used = false, .drafted = @as(u64, 0), .accepted = @as(u64, 0), .cycles = @as(u64, 0), .fallback_reason = @as(?[]const u8, "NextN priming failed") };
+    for ([_]bool{ true, false }) |is_chat| {
+        const usage = ServeUsage{ .prompt_tokens = 3, .completion_tokens = 2, .total_tokens = 5 };
+        const json = try buildCudaServeFinishJson(allocator, is_chat, "stop", result, usage, cudaServeTimings(3, 2, 30_000_000, 20_000_000));
+        defer allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        const mtp = parsed.value.object.get("mtp").?.object;
+        try std.testing.expect(mtp.get("requested").? == .null);
+        try std.testing.expect(mtp.get("enabled").?.bool);
+        try std.testing.expect(!mtp.get("used").?.bool);
+        try std.testing.expectEqualStrings("NextN priming failed", mtp.get("fallback_reason").?.string);
+        const choice = parsed.value.object.get("choices").?.array.items[0];
+        try std.testing.expectEqualStrings("stop", choice.object.get("finish_reason").?.string);
+        try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("usage").?.object.get("completion_tokens").?.integer);
+        const rate = parsed.value.object.get("timings").?.object.get("predicted_per_second").?;
+        try std.testing.expectApproxEqAbs(@as(f64, 100), switch (rate) {
+            .float => |value| value,
+            .integer => |value| @as(f64, @floatFromInt(value)),
+            else => return error.InvalidTimingNumber,
+        }, 0.001);
+    }
+}
+
+test "MTP serving response metadata describes emitted tokens and exact content" {
+    const allocator = std.testing.allocator;
+    const content = "Zig \"code\"\nline\t<&>";
+    const result = .{ .requested = @as(?bool, false), .enabled = false, .used = false, .drafted = @as(u64, 0), .accepted = @as(u64, 0), .cycles = @as(u64, 0), .fallback_reason = @as(?[]const u8, null) };
+    const usage = ServeUsage{ .prompt_tokens = 3, .completion_tokens = 2, .total_tokens = 5 };
+    for ([_]bool{ true, false }) |is_chat| {
+        const json = try buildCudaServeResponseJson(allocator, is_chat, content, "length", result, usage, cudaServeTimings(3, 2, 0, 0));
+        defer allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        const choice = parsed.value.object.get("choices").?.array.items[0].object;
+        const actual = if (is_chat) choice.get("message").?.object.get("content").?.string else choice.get("text").?.string;
+        try std.testing.expectEqualStrings(content, actual);
+        try std.testing.expect(!parsed.value.object.get("mtp").?.object.get("enabled").?.bool);
+        try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("usage").?.object.get("completion_tokens").?.integer);
+        const timings = parsed.value.object.get("timings").?.object;
+        try std.testing.expectEqual(@as(i64, 2), timings.get("predicted_n").?.integer);
+        const rate = timings.get("predicted_per_second").?;
+        try std.testing.expectEqual(@as(f64, 0), switch (rate) {
+            .float => |value| value,
+            .integer => |value| @as(f64, @floatFromInt(value)),
+            else => return error.InvalidTimingNumber,
+        });
+    }
+}
+
+test "MTP serving errors preserve execution status and explain fallback" {
+    const allocator = std.testing.allocator;
+    const result = .{ .requested = @as(?bool, true), .enabled = true, .used = false, .drafted = @as(u64, 0), .accepted = @as(u64, 0), .cycles = @as(u64, 0), .fallback_reason = @as(?[]const u8, "GPU execution failed") };
+    const json = try buildCudaServeErrorJson(allocator, "GPU generation failed", result);
+    defer allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("GPU generation failed", parsed.value.object.get("error").?.object.get("message").?.string);
+    try std.testing.expect(!parsed.value.object.get("mtp").?.object.get("used").?.bool);
+    try std.testing.expectEqualStrings("GPU execution failed", parsed.value.object.get("mtp").?.object.get("fallback_reason").?.string);
+}
+
+test "MTP serving stop tokens take precedence over an exact output budget" {
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(1, 1, 2, 2, null));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(4, 4, 10, 2, 10));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(5, 5, 2, 2, 10));
+    try std.testing.expectEqualStrings("length", cudaServeFinishReason(1, 1, 7, 2, 10));
+    try std.testing.expectEqualStrings("length", cudaServeFinishReason(4, 4, 7, 2, null));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(3, 4, 7, 2, null));
+    try std.testing.expectEqualStrings("stop", cudaServeFinishReason(0, 1, null, 2, null));
+}
+
+const AcceleratorActionBody = struct {
+    model: ?[]const u8 = null,
+    model_id: ?[]const u8 = null,
+};
+
+fn tryBeginAcceleratorChange(lifecycle: *std.Thread.RwLock) error{ModelBusy}!void {
+    if (!lifecycle.tryLock()) return error.ModelBusy;
+}
+
+test "accelerator lifecycle refuses model changes while a request owns a lease" {
+    var lifecycle: std.Thread.RwLock = .{};
+    lifecycle.lockShared();
+    try std.testing.expectError(error.ModelBusy, tryBeginAcceleratorChange(&lifecycle));
+    lifecycle.unlockShared();
+    try tryBeginAcceleratorChange(&lifecycle);
+    // No new generation may enter while model resources are being replaced.
+    try std.testing.expect(!lifecycle.tryLockShared());
+    lifecycle.unlock();
+    lifecycle.lockShared();
+    lifecycle.unlockShared();
+}
+
+fn acceleratorModelRequestError(requested: ?[]const u8, active_id: ?[]const u8, active_path: ?[]const u8) ?[]const u8 {
+    const id = requested orelse return null;
+    if (id.len == 0) return null;
+    // Existing benchmark/OpenAI clients use these aliases for the active model.
+    // Explicit advertised IDs still reject stale selections after a switch.
+    if (active_id != null and (std.mem.eql(u8, id, "q") or std.mem.eql(u8, id, "zinc"))) return null;
+    if (active_id) |current| if (std.mem.eql(u8, id, current)) return null;
+    if (active_path) |path| if (std.mem.eql(u8, id, std.fs.path.basename(path))) return null;
+    return "The requested model is not active. Refresh the model list and load it before generating.";
+}
+
+fn acceleratorUnloadTargetMatches(requested: ?[]const u8, active_id: ?[]const u8) bool {
+    // Repeated unload is safe even if the original target is no longer loaded.
+    const current = active_id orelse return true;
+    const target = requested orelse return true;
+    return target.len == 0 or std.mem.eql(u8, target, current);
+}
+
+fn buildAcceleratorUnloadJson(allocator: std.mem.Allocator, unloaded: bool) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{ .object = "model.unload", .unloaded_from_gpu = unloaded, .active = false, .deleted_model = false }, .{});
+}
+
+test "accelerator unload is idempotent and rejects only a different active target" {
+    try std.testing.expect(acceleratorUnloadTargetMatches("previous", null));
+    try std.testing.expect(acceleratorUnloadTargetMatches(null, null));
+    try std.testing.expect(acceleratorUnloadTargetMatches(null, "current"));
+    try std.testing.expect(acceleratorUnloadTargetMatches("", "current"));
+    try std.testing.expect(acceleratorUnloadTargetMatches("current", "current"));
+    try std.testing.expect(!acceleratorUnloadTargetMatches("previous", "current"));
+    for ([_]bool{ true, false }) |unloaded| {
+        const json = try buildAcceleratorUnloadJson(std.testing.allocator, unloaded);
+        defer std.testing.allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+        defer parsed.deinit();
+        const result = parsed.value.object;
+        try std.testing.expectEqualStrings("model.unload", result.get("object").?.string);
+        try std.testing.expectEqual(unloaded, result.get("unloaded_from_gpu").?.bool);
+        try std.testing.expect(!result.get("active").?.bool);
+        try std.testing.expect(!result.get("deleted_model").?.bool);
+        try std.testing.expect(result.get("unloaded") == null);
+    }
+}
+
+fn handleAcceleratorAction(manager: *AcceleratorManager, conn: *http_mod.Connection, body: []const u8, activate: bool, allocator: std.mem.Allocator) !void {
+    const action_body = if (std.mem.trim(u8, body, " \r\n\t").len == 0) "{}" else body;
+    const parsed = std.json.parseFromSlice(AcceleratorActionBody, allocator, action_body, .{ .ignore_unknown_fields = true }) catch {
+        try conn.sendError(400, "invalid_request_error", "Invalid JSON in model action");
+        return;
+    };
+    defer parsed.deinit();
+    tryBeginAcceleratorChange(&manager.lifecycle) catch {
+        try conn.sendError(409, "model_busy", "The model is in use. Wait for the current replies to finish.");
+        return;
+    };
+    defer manager.lifecycle.unlock();
+    const requested = parsed.value.model orelse parsed.value.model_id;
+    if (activate) {
+        const id = requested orelse {
+            try conn.sendError(400, "invalid_request_error", "A model id is required");
+            return;
+        };
+        const entry = manager.inventory.find(id) orelse {
+            try conn.sendError(400, "invalid_request_error", "Unknown installed model id");
+            return;
+        };
+        if (!entry.can_activate or !entry.supported_on_current_gpu or !entry.fits_current_gpu) {
+            try conn.sendError(400, "invalid_request_error", "This model is not supported or does not fit the current GPU");
+            return;
+        }
+        manager.activate(entry) catch |err| {
+            log.warn("Model activation failed: {s}", .{@errorName(err)});
+            try conn.sendError(500, "model_load_error", if (manager.current != null) "Could not load the model. The previous model was restored." else "Could not load the model. No model is loaded; select an installed model to try again.");
+            return;
+        };
+        const response = try std.json.Stringify.valueAlloc(allocator, .{ .object = "model.activation", .id = entry.id, .active = true }, .{});
+        defer allocator.free(response);
+        try conn.sendJson(200, response);
+    } else {
+        if (!acceleratorUnloadTargetMatches(requested, if (manager.current) |current| current.entry.id else null)) {
+            try conn.sendError(409, "model_changed", "The active model changed. Refresh before unloading.");
+            return;
+        }
+        const unloaded = manager.current != null;
+        manager.unload();
+        const response = try buildAcceleratorUnloadJson(allocator, unloaded);
+        defer allocator.free(response);
+        try conn.sendJson(200, response);
+    }
+}
 
 fn handleServeConn(ctx: *ServeConnCtx) void {
     defer ctx.allocator.destroy(ctx);
     var conn = ctx.conn;
     defer conn.close();
-
     const req = conn.readRequest() catch return;
-
+    const manager = ctx.manager;
     if (req.method == .OPTIONS) {
         conn.sendJson(200, "{}") catch {};
         return;
     }
-    if (req.method == .GET and std.mem.eql(u8, req.path, "/health")) {
-        conn.sendJson(200, if (gpu.is_rocm)
-            "{\"status\":\"ok\",\"backend\":\"rocm\"}"
-        else
-            "{\"status\":\"ok\",\"backend\":\"cuda\"}") catch {};
+    if (req.method == .GET and (std.mem.eql(u8, req.path, "/") or std.mem.eql(u8, req.path, "/chat"))) {
+        routes_mod.serveChatUi(&conn) catch {};
         return;
     }
-    // 3c throughput gate: cumulative decode/prefill counters. Diff two snapshots
-    // around a B-concurrent phase → aggregate decode tok/s + mean batch occupancy.
+    if (req.method == .POST and (std.mem.eql(u8, req.path, "/v1/models/activate") or std.mem.eql(u8, req.path, "/v1/models/unload"))) {
+        handleAcceleratorAction(manager, &conn, req.body, std.mem.eql(u8, req.path, "/v1/models/activate"), ctx.allocator) catch |err| log.warn("Model action response failed: {s}", .{@errorName(err)});
+        return;
+    }
+    if (req.method == .POST and std.mem.eql(u8, req.path, "/v1/chat/reset")) {
+        const parsed = std.json.parseFromSlice(struct { session_id: []const u8 = "" }, ctx.allocator, req.body, .{ .ignore_unknown_fields = true }) catch {
+            conn.sendError(400, "invalid_request_error", "Invalid chat reset request") catch {};
+            return;
+        };
+        defer parsed.deinit();
+        tryBeginAcceleratorChange(&manager.lifecycle) catch {
+            conn.sendError(409, "model_busy", "Wait for the current replies to finish before resetting chat") catch {};
+            return;
+        };
+        defer manager.lifecycle.unlock();
+        // Accelerator serving resets KV/SSM at every request boundary and has no
+        // cross-request prompt reuse. No live buffers need mutating here.
+        conn.sendJson(200, "{\"object\":\"chat.reset\",\"reset\":true}") catch {};
+        return;
+    }
+    manager.lifecycle.lockShared();
+    defer manager.lifecycle.unlockShared();
+    const current = manager.current;
+    const capability = manager.capability();
+    if (req.method == .GET and std.mem.eql(u8, req.path, "/health")) {
+        const body = buildCudaServeHealthJson(ctx.allocator, if (current) |r| r.entry.path else null, if (current != null) manager.max_ctx else 0, capability) catch {
+            conn.sendError(500, "server_error", "Failed to describe runtime capability") catch {};
+            return;
+        };
+        defer ctx.allocator.free(body);
+        conn.sendJson(200, body) catch {};
+        return;
+    }
+    if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/models")) {
+        const body = buildAcceleratorModelsJson(ctx.allocator, manager.inventory.entries.items, if (current) |r| r.entry.id else null, manager.max_ctx, if (current) |r| r.tokenizer.?.supportsThinkingToggle() else false, capability) catch {
+            conn.sendError(500, "server_error", "Failed to describe installed models") catch {};
+            return;
+        };
+        defer ctx.allocator.free(body);
+        conn.sendJson(200, body) catch {};
+        return;
+    }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/stats")) {
         var sbuf: [256]u8 = undefined;
-        const js = ctx.engine.statsJson(&sbuf) catch "{}";
+        const js = if (current) |r| r.engine.?.statsJson(&sbuf) catch "{}" else "{}";
         conn.sendJson(200, js) catch {};
         return;
     }
-    const is_gen = req.method == .POST and (std.mem.eql(u8, req.path, "/v1/completions") or
-        std.mem.eql(u8, req.path, "/v1/chat/completions") or std.mem.eql(u8, req.path, "/generate"));
+    const is_gen = req.method == .POST and (std.mem.eql(u8, req.path, "/v1/completions") or std.mem.eql(u8, req.path, "/v1/chat/completions") or std.mem.eql(u8, req.path, "/generate"));
     if (!is_gen) {
         conn.sendError(404, "not_found", "unknown route") catch {};
         return;
     }
-    const is_chat = std.mem.eql(u8, req.path, "/v1/chat/completions");
-    handleServeGenerate(ctx, &conn, req.body, is_chat) catch |err| {
-        log.warn("serve request failed: {s}", .{@errorName(err)});
+    const resource = current orelse {
+        conn.sendError(503, "model_not_loaded", "No model is loaded. Select an installed model first.") catch {};
+        return;
     };
+    const parsed_model = std.json.parseFromSlice(struct { model: ?[]const u8 = null }, ctx.allocator, req.body, .{ .ignore_unknown_fields = true }) catch {
+        conn.sendError(400, "invalid_request_error", "Invalid JSON request") catch {};
+        return;
+    };
+    defer parsed_model.deinit();
+    if (acceleratorModelRequestError(parsed_model.value.model, resource.entry.id, resource.entry.path)) |message| {
+        conn.sendError(409, "model_changed", message) catch {};
+        return;
+    }
+    var active = ServeGenerateCtx{
+        .engine = resource.engine.?,
+        .tokenizer = resource.tokenizer.?,
+        .allocator = ctx.allocator,
+        .debug_ids = resource.debug_ids,
+        .default_max = manager.config.max_tokens,
+        .slot_ctx = resource.slot_ctx,
+        .model_path = resource.entry.path,
+    };
+    const is_chat = std.mem.eql(u8, req.path, "/v1/chat/completions");
+    handleServeGenerate(&active, &conn, req.body, is_chat) catch |err| log.warn("serve request failed: {s}", .{@errorName(err)});
 }
 
-fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []const u8, is_chat: bool) !void {
+fn handleServeGenerate(ctx: *ServeGenerateCtx, conn: *http_mod.Connection, body: []const u8, is_chat: bool) !void {
     const allocator = ctx.allocator;
 
     // ── Build the prompt token ids ───────────────────────────────────────────
@@ -2214,6 +2838,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var owns_tokens = false;
     var stream_response = true;
     var enable_thinking: ?bool = null;
+    var enable_mtp: ?bool = null;
 
     if (ctx.debug_ids) {
         // Gate contract: body is JSON {"prompt":"t0,t1,...","max_tokens":N}; the
@@ -2224,9 +2849,14 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             return;
         };
         defer parsed.deinit();
+        if (serveMtpRequestError(parsed.value.enable_mtp, ctx.engine.mtpCapability())) |message| {
+            try conn.sendError(400, "invalid_request_error", message);
+            return;
+        }
         if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
         stream_response = parsed.value.stream orelse true;
         enable_thinking = parsed.value.enable_thinking;
+        enable_mtp = parsed.value.enable_mtp;
         const ptxt = parsed.value.prompt orelse {
             try conn.sendError(400, "invalid_request_error", "missing prompt");
             return;
@@ -2239,9 +2869,14 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             return;
         };
         defer parsed.deinit();
+        if (serveMtpRequestError(parsed.value.enable_mtp, ctx.engine.mtpCapability())) |message| {
+            try conn.sendError(400, "invalid_request_error", message);
+            return;
+        }
         if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
         stream_response = parsed.value.stream orelse true;
         enable_thinking = parsed.value.enable_thinking;
+        enable_mtp = parsed.value.enable_mtp;
 
         var prompt_text: []const u8 = "";
         var chat_buf: ?[]u8 = null;
@@ -2298,15 +2933,28 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     const room: u32 = ctx.slot_ctx - @as(u32, @intCast(prompt_tokens.len));
     if (max_tokens == 0 or max_tokens > room) max_tokens = room;
 
+    const structured_capacity = @max(@as(usize, 64 * 1024), @as(usize, ctx.slot_ctx) * 32 + 256);
+    const structured_buf: ?[]u8 = if (structured_chat) try allocator.alloc(u8, structured_capacity) else null;
+    defer if (structured_buf) |buf_to_free| allocator.free(buf_to_free);
+
     // ── Submit + stream ──────────────────────────────────────────────────────
     var chan = cuda_serve_mod.ReqChannel{};
-    const id = ctx.engine.submit(prompt_tokens, max_tokens, &chan) catch {
+    const id = ctx.engine.submitWithOptions(prompt_tokens, max_tokens, &chan, .{ .enable_mtp = enable_mtp }) catch |err| {
+        if (err == error.MtpUnavailable) {
+            try conn.sendError(400, "invalid_request_error", ctx.engine.mtpCapability().unavailable_reason);
+            return;
+        }
         try conn.sendError(500, "server_error", "enqueue failed");
         return;
     };
     // From here the worker borrows `prompt_tokens` + `chan`; do not return without
     // draining to `finished` (so the worker is done touching them) then `finish`.
-    defer ctx.engine.finish(id, &chan);
+    defer {
+        // Also covers any future allocation/write error added below: never
+        // release a lifecycle lease while the worker still borrows this stack.
+        drainQuietly(ctx.engine, &chan);
+        ctx.engine.finish(id, &chan);
+    }
 
     if (stream_response) {
         conn.sendSseStart() catch {
@@ -2321,14 +2969,13 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var json_buf: [1024]u8 = undefined;
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(allocator);
-    const structured_capacity = @max(@as(usize, 64 * 1024), @as(usize, ctx.slot_ctx) * 32 + 256);
-    const structured_buf: ?[]u8 = if (structured_chat) try allocator.alloc(u8, structured_capacity) else null;
-    defer if (structured_buf) |buf_to_free| allocator.free(buf_to_free);
     var sent_structured_len: usize = 0;
     var write_failed = false;
     var generation_failed = false;
+    var last_generated_token: ?u32 = null;
     while (true) {
         const ch = ctx.engine.nextChunk(&chan, &buf);
+        if (ch.n > 0) last_generated_token = buf[ch.n - 1];
         generation_failed = generation_failed or ch.failed;
         var i: usize = 0;
         while (i < ch.n) : (i += 1) {
@@ -2383,28 +3030,43 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 };
             }
         }
+        if (write_failed) ctx.engine.cancel(&chan);
         if (ch.finished) break;
     }
     const generated_tokens = chan.consumed;
+    const finish_reason = cudaServeFinishReason(generated_tokens, max_tokens, last_generated_token, ctx.engine.eos, ctx.engine.eot);
+    const usage = ServeUsage{ .prompt_tokens = prompt_tokens.len, .completion_tokens = generated_tokens, .total_tokens = prompt_tokens.len + generated_tokens };
+    const timings = cudaServeTimings(prompt_tokens.len, generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
     logServeTimings(prompt_tokens.len, generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
     if (generation_failed) {
         log.warn("request {d} failed during GPU generation", .{id});
+        const metadata = try buildCudaServeErrorJson(allocator, "GPU generation failed", chan.mtp);
+        defer allocator.free(metadata);
         if (stream_response) {
             if (!write_failed) {
-                conn.writeSseEvent("{\"error\":{\"type\":\"server_error\",\"message\":\"GPU generation failed\"}}") catch {};
+                conn.writeSseEvent(metadata) catch {};
                 conn.writeSseDone() catch {};
             }
         } else {
-            try conn.sendError(500, "server_error", "GPU generation failed");
+            try conn.sendJson(500, metadata);
         }
         return;
     }
     if (stream_response) {
-        if (!write_failed) conn.writeSseDone() catch {};
+        if (!write_failed) {
+            if (!ctx.debug_ids) {
+                const metadata = try buildCudaServeFinishJson(allocator, is_chat, finish_reason, chan.mtp, usage, timings);
+                defer allocator.free(metadata);
+                try conn.writeSseEvent(metadata);
+            }
+            conn.writeSseDone() catch {};
+        }
         return;
     }
     if (write_failed) {
-        try conn.sendError(500, "server_error", "response buffering failed");
+        const metadata = try buildCudaServeErrorJson(allocator, "response buffering failed", chan.mtp);
+        defer allocator.free(metadata);
+        try conn.sendJson(500, metadata);
         return;
     }
 
@@ -2412,23 +3074,9 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         routes_mod.normalizeStructuredAssistantOutput(ctx.tokenizer, output.items, thinking_enabled, structured_buf.?) catch ""
     else
         output.items;
-    const escaped = try jsonEscapeAlloc(allocator, response_output);
-    defer allocator.free(escaped);
-    var response: std.ArrayList(u8) = .{};
-    defer response.deinit(allocator);
-    const finish_reason: []const u8 = if (generated_tokens >= @as(usize, max_tokens)) "length" else "stop";
-    if (is_chat) {
-        try response.writer(allocator).print(
-            "{{\"id\":\"chatcmpl-zinc\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{s}\"}},\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}",
-            .{ escaped, finish_reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens },
-        );
-    } else {
-        try response.writer(allocator).print(
-            "{{\"id\":\"cmpl-zinc\",\"object\":\"text_completion\",\"choices\":[{{\"index\":0,\"text\":\"{s}\",\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}",
-            .{ escaped, finish_reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens },
-        );
-    }
-    try conn.sendJson(200, response.items);
+    const response = try buildCudaServeResponseJson(allocator, is_chat, response_output, finish_reason, chan.mtp, usage, timings);
+    defer allocator.free(response);
+    try conn.sendJson(200, response);
 }
 
 fn logServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u64, decode_ns: u64) void {
@@ -2444,6 +3092,7 @@ fn logServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u6
 /// Drain a request's stream without writing (client disconnected) so the worker
 /// runs it to completion and frees the slot.
 fn drainQuietly(engine: *cuda_serve_mod.ServeEngine, chan: *cuda_serve_mod.ReqChannel) void {
+    engine.cancel(chan);
     var buf: [32]u32 = undefined;
     while (true) {
         const ch = engine.nextChunk(chan, &buf);

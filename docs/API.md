@@ -22,6 +22,13 @@ Before you integrate, know these limits up front. Each is a deliberate state of 
 - **`/v1/completions` is non-streaming and ignores sampling controls.** Use `/v1/chat/completions` for anything that needs streaming, `temperature`, `top_p`, or `enable_thinking`.
 - **Client-supplied `stop` sequences are not honored.** Chat generation stops on the model/template end markers (`<|im_end|>`, etc.) only.
 - **No `/v1/audio/*`, no image inputs, no fine-tuning endpoints, no batch API.** These are out of scope; if you need them, ZINC is not the right engine.
+- **MTP depends on the loaded model and serving configuration.** CUDA/ROCm
+  single-slot serving can use a compatible dense model's appended NextN block.
+  `/health` and `/v1/models` report `supports_mtp`, `mtp_default_enabled`,
+  `mtp_request_control`, and `mtp_unavailable_reason` from the initialized runtime.
+  Multi-slot serving, unsupported models/backends, explicit `ZINC_MTP=0`, and
+  setup failures report the reason instead of claiming acceleration. Missing
+  fields from an older server leave the status unknown.
 
 Everything else listed in the endpoint table below works as documented.
 
@@ -53,6 +60,7 @@ ZINC is still a local single-process engine:
 | GET | `/v1/models` | Managed catalog, install state, active model, memory status |
 | POST | `/v1/models/pull` | Download an installed-compatible managed model asynchronously |
 | POST | `/v1/models/activate` | Activate an installed managed model |
+| POST | `/v1/models/unload` | Release the loaded model from GPU memory while keeping cached files |
 | POST | `/v1/models/remove` | Remove a cached managed model, optionally unloading it first |
 | GET | `/health` | Health, queue counters, uptime, GPU memory/context status |
 | GET | `/` or `/chat` | Built-in chat UI |
@@ -90,6 +98,7 @@ Generate a chat completion from a message list.
 | `temperature` | float | 0.0 | Sampling temperature. `0` uses greedy decoding. Values are clamped to `0..2`. |
 | `top_p` | float | 1.0 | Nucleus sampling threshold, clamped to `0..1`. |
 | `enable_thinking` | boolean | model default | For templates that support it, request an open thinking block. Catalog entries with unstable thinking can force this off. |
+| `enable_mtp` | boolean or null | server default | `true` requests model-native MTP; unsupported configurations return 400 before queueing. `false` uses ordinary decoding for this request. Omission or `null` preserves `mtp_default_enabled`. Only offer a request toggle when `mtp_request_control` is true. |
 | `stream` | boolean | false | Enable Server-Sent Events streaming. |
 | `tools` | array | empty | OpenAI function-tool definitions. Rendered for ChatML/Qwen-style templates when tool calling is enabled. |
 | `tool_choice` | string or object | `auto` | `"none"` suppresses tool injection. `"auto"` and forced function-object choices are currently treated as automatic tool choice. |
@@ -246,6 +255,35 @@ curl -N http://localhost:8080/v1/chat/completions \
 
 ---
 
+### MTP capability and execution status
+
+Capability describes the initialized model/runtime, not a claim that a reply
+used MTP. The chat UI uses `mtp_default_enabled` until the user chooses a mode;
+unsupported or unreported capability never silently becomes an opt-in.
+
+The final SSE chunk (before `[DONE]`) and non-streaming completion contain an
+`mtp` object:
+
+```json
+{
+  "mtp": {
+    "requested": null,
+    "enabled": true,
+    "used": true,
+    "drafted": 24,
+    "accepted": 18,
+    "cycles": 12,
+    "fallback_reason": null
+  }
+}
+```
+
+`requested` preserves the nullable request option; `enabled` is the resolved
+policy. `used` and the counters describe execution, so enabling MTP does not by
+itself justify showing it as active. A request that falls back to ordinary
+decoding reports `used: false` and a `fallback_reason`. No speedup is implied by
+support, activation, or draft acceptance alone.
+
 ## POST /v1/completions
 
 Generate from a raw text prompt without applying a chat template.
@@ -299,11 +337,21 @@ List the managed catalog for the server's current GPU profile, including install
 state, active model, fit decisions, download progress, and active GPU memory
 usage. ZINC loads one model into memory at a time.
 
+The top-level `supports_model_management`, `supports_model_unload`, and
+`supports_model_pull` flags describe the available controls. The built-in UI
+uses these capabilities rather than assuming every server can download or swap
+models. CUDA/ROCm serving lists its startup model and installed catalog models;
+it can load or unload them, while `supports_model_pull: false` means downloads
+must be installed with the model CLI first.
+
 ### Response
 
 ```json
 {
   "object": "list",
+  "supports_model_management": true,
+  "supports_model_unload": true,
+  "supports_model_pull": true,
   "profile": "amd-rdna4-32gb",
   "active_memory_used_bytes": 22300000000,
   "active_memory_budget_bytes": 34359738368,
@@ -416,6 +464,43 @@ the local managed cache and fit the current GPU budget.
 
 ---
 
+## POST /v1/models/unload
+
+Release the current model, tokenizer, and inference buffers from GPU memory.
+Downloaded model files and the persisted active selection remain available.
+This operation is separate from removing a model from the cache.
+
+### Request
+
+```json
+{
+  "model": "qwen35-9b-q4k-m"
+}
+```
+
+The optional `model` identifies the model the caller expects to be active.
+If another client activated a different model, the server returns
+`409 Conflict` and leaves that model loaded. An empty request object unloads
+the current model. Repeating an unload while idle succeeds.
+
+### Response
+
+```json
+{
+  "object": "model.unload",
+  "unloaded_from_gpu": true,
+  "active": false,
+  "deleted_model": false
+}
+```
+
+Prompt-reuse state and active-context counters are cleared. Generation returns
+`503` until a model is activated again. Vulkan/Metal unload waits for generation
+to finish; CUDA/ROCm returns `409` while requests are active or queued so a
+model change cannot interrupt their use of GPU resources.
+
+---
+
 ## POST /v1/models/remove
 
 Remove an installed managed model from the local cache. If the target model is
@@ -463,6 +548,9 @@ Server health check for monitoring and local UI state.
 {
   "status": "ok",
   "model": "Qwen 3.5 9B Q4_K_M",
+  "supports_model_management": true,
+  "supports_model_unload": true,
+  "supports_model_pull": true,
   "active_requests": 1,
   "queued_requests": 0,
   "uptime_seconds": 3600,
@@ -502,6 +590,7 @@ Errors use an OpenAI-style envelope:
 | 404 | `model_not_found` | Generation requested an unknown or not-installed managed model. |
 | 404 | `not_found` | Unknown endpoint. |
 | 409 | `invalid_request_error` | GPU already reserved, another model download is in progress, or removing the loaded model without `force: true`. |
+| 409 | `model_changed` or `model_busy` | Unload targeted a model that is no longer active, or CUDA/ROCm model management was requested with generation active or queued. |
 | 501 | `unsupported_operation` | Model-management endpoint used on a build/backend without management support. |
 | 503 | `service_unavailable` | Generation requested while no model is loaded. |
 | 500 | `internal_error` | Tokenization, GPU, inference, or response-size failure. |

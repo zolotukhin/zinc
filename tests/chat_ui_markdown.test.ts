@@ -339,13 +339,13 @@ test("splitDisplayContent treats plain Thinking Process output as reasoning whil
   expect(view.isThinking).toBe(true);
 });
 
-test("splitDisplayContent falls back to the full answer when plain reasoning has no final boundary", () => {
+test("splitDisplayContent retains plain reasoning alongside its full-answer fallback", () => {
   const { splitDisplayContent } = loadChatUiApi();
   const raw = "Thinking Process:\n\n1. First\n2. Second";
   const view = splitDisplayContent(raw, false);
 
-  expect(view.showReasoning).toBe(false);
-  expect(view.reasoning).toBe("");
+  expect(view.showReasoning).toBe(true);
+  expect(view.reasoning).toBe(raw);
   expect(view.answer).toBe(raw);
   expect(view.isThinking).toBe(false);
 });
@@ -396,7 +396,7 @@ test("splitDisplayContent strips restarted answer duplicates", () => {
   ].join("\n"));
 });
 
-test("splitDisplayContent strips leaked planning suffix before repeated answer restart", () => {
+test("splitDisplayContent cleans planning and repeated restarts from a plain answer without reasoning tags", () => {
   const { splitDisplayContent } = loadChatUiApi();
   const raw = [
     "Kernel development requires:",
@@ -407,7 +407,6 @@ test("splitDisplayContent strips leaked planning suffix before repeated answer r
     "Here is the response:",
     "Kernel development requires:",
     "- No standard library",
-    "</think>",
     "",
     "Kernel development requires:",
     "- No standard library",
@@ -417,6 +416,25 @@ test("splitDisplayContent strips leaked planning suffix before repeated answer r
   expect(view.showReasoning).toBe(false);
   expect(view.reasoning).toBe("");
   expect(view.answer).toBe("Kernel development requires:\n- No standard library\n- Direct hardware access");
+});
+
+test("an explicit closing think tag preserves its full reasoning prefix before a repeated answer", () => {
+  const { splitDisplayContent } = loadChatUiApi();
+  const reasoning = [
+    "Kernel development requires:",
+    "- No standard library",
+    "- Direct hardware access",
+    "",
+    "The user is asking about writing kernel programs in Zig.",
+    "Here is the response:",
+    "Kernel development requires:",
+    "- No standard library",
+  ].join("\n");
+  const answer = "Kernel development requires:\n- No standard library";
+  const view = splitDisplayContent(reasoning + "\n</think>\n\n" + answer, false);
+  expect(view.showReasoning).toBe(true);
+  expect(view.reasoning).toBe(reasoning);
+  expect(view.answer).toBe(answer);
 });
 
 test("stripInlineTransportArtifacts preserves real text while removing chat transport markers", () => {
@@ -488,7 +506,7 @@ test("reasoningDuplicatesAnswer flags repeated answer content", () => {
   expect(reasoningDuplicatesAnswer(text, "Completely different content")).toBe(false);
 });
 
-test("normalizeDisplayView hides trivial reasoning stubs but keeps the answer", () => {
+test("normalizeDisplayView keeps short reasoning inspectable with the answer", () => {
   const { normalizeDisplayView } = loadChatUiApi();
   const view = normalizeDisplayView({
     reasoning: "I need to complete the response.",
@@ -497,12 +515,13 @@ test("normalizeDisplayView hides trivial reasoning stubs but keeps the answer", 
     isThinking: false,
   });
 
-  expect(view.showReasoning).toBe(false);
+  expect(view.showReasoning).toBe(true);
+  expect(view.reasoning).toBe("I need to complete the response.");
   expect(view.answer).toBe("Kernel programming in Zig is possible.");
-  expect(view.suppressedReasoning).toBe(true);
+  expect(view.suppressedReasoning).not.toBe(true);
 });
 
-test("normalizeDisplayView promotes reasoning to answer when it duplicates", () => {
+test("normalizeDisplayView keeps duplicate reasoning in its disclosure", () => {
   const { normalizeDisplayView } = loadChatUiApi();
   const text = "Whether Zig is better than C depends on your priorities. Here is a comparison of memory safety, tooling, and portability.";
   const view = normalizeDisplayView({
@@ -512,9 +531,9 @@ test("normalizeDisplayView promotes reasoning to answer when it duplicates", () 
     isThinking: false,
   });
 
-  expect(view.showReasoning).toBe(false);
+  expect(view.showReasoning).toBe(true);
+  expect(view.reasoning).toBe(text);
   expect(view.answer).toBe(text);
-  expect(view.promotedReasoning).toBe(true);
 });
 
 test("normalizeDisplayView hides empty completed reasoning blocks", () => {
@@ -531,7 +550,7 @@ test("normalizeDisplayView hides empty completed reasoning blocks", () => {
   expect(view.suppressedReasoning).toBe(true);
 });
 
-test("normalizeDisplayView suppresses trivial live reasoning while thinking is active", () => {
+test("normalizeDisplayView keeps short live reasoning visible while thinking is active", () => {
   const { normalizeDisplayView } = loadChatUiApi();
   const view = normalizeDisplayView({
     reasoning: "I need to complete the response.",
@@ -541,9 +560,8 @@ test("normalizeDisplayView suppresses trivial live reasoning while thinking is a
   });
 
   expect(view.showReasoning).toBe(true);
-  expect(view.reasoning).toBe("");
-  expect(view.deferredReasoning).toBe(true);
-  expect(view.suppressedReasoning).toBe(true);
+  expect(view.reasoning).toBe("I need to complete the response.");
+  expect(view.suppressedReasoning).not.toBe(true);
 });
 
 test("normalizeDisplayView keeps substantive live reasoning visible", () => {
@@ -560,7 +578,7 @@ test("normalizeDisplayView keeps substantive live reasoning visible", () => {
   expect(view.suppressedReasoning).toBeUndefined();
 });
 
-test("normalizeDisplayView defers answer-like live thinking prose", () => {
+test("normalizeDisplayView keeps answer-like live thinking prose visible", () => {
   const { normalizeDisplayView, assistantHtmlFromRaw } = loadChatUiApi();
   const raw = "<think>Zig is a modern systems programming language known for its simplicity, safety, and performance. It has gained attention for low-level systems work, including kernel development. However, there are several tradeoffs to consider before using it for production kernels.";
   const view = normalizeDisplayView({
@@ -572,13 +590,12 @@ test("normalizeDisplayView defers answer-like live thinking prose", () => {
   const rendered = assistantHtmlFromRaw(raw, true);
 
   expect(view.showReasoning).toBe(true);
-  expect(view.reasoning).toBe("");
-  expect(view.deferredReasoning).toBe(true);
-  expect(rendered.html).toContain("Thinking...");
-  expect(rendered.html).not.toContain("Zig is a modern systems programming language");
+  expect(view.reasoning).toContain("Zig is a modern systems programming language");
+  expect(rendered.html).toContain("reasoning-block");
+  expect(rendered.html).toContain("Zig is a modern systems programming language");
 });
 
-test("normalizeDisplayView promotes answer-like reasoning when a final answer exists", () => {
+test("normalizeDisplayView preserves the final answer separately from answer-like reasoning", () => {
   const { normalizeDisplayView } = loadChatUiApi();
   const view = normalizeDisplayView({
     reasoning: "Zig is a modern systems programming language known for its simplicity, safety, and performance. It has gained attention for low-level systems work, including kernel development. However, there are several tradeoffs to consider before using it for production kernels.",
@@ -587,43 +604,50 @@ test("normalizeDisplayView promotes answer-like reasoning when a final answer ex
     isThinking: false,
   });
 
-  // Reasoning looks like an answer, so it's promoted — reasoning wrapper evaporated
-  expect(view.showReasoning).toBe(false);
-  expect(view.promotedReasoning).toBe(true);
-  // The reasoning is promoted to become the answer
-  expect(view.answer).toContain("simplicity, safety, and performance");
+  expect(view.showReasoning).toBe(true);
+  expect(view.reasoning).toContain("simplicity, safety, and performance");
+  expect(view.answer).toBe("Zig is increasingly being considered for kernel programming, but it is not yet as mature or widely adopted as C.");
 });
 
-test("assistantHtmlFromRaw does not leak suppressed live reasoning into the answer bubble", () => {
+test("assistantHtmlFromRaw retains short live reasoning inside its disclosure", () => {
   const { assistantHtmlFromRaw } = loadChatUiApi();
   const rendered = assistantHtmlFromRaw("<think>I need to complete the response.", true);
 
-  expect(rendered.view.suppressedReasoning).toBe(true);
-  expect(rendered.html).toContain("Thinking...");
-  expect(rendered.html).not.toContain("I need to complete the response.");
+  expect(rendered.view.showReasoning).toBe(true);
+  expect(rendered.html).toContain("reasoning-block");
+  expect(rendered.html).toContain("I need to complete the response.");
 });
 
-test("assistantLiveHtmlFromRaw keeps streaming markdown as stable escaped text", () => {
+test("assistantLiveHtmlFromRaw formats lists and incomplete code fences while streaming", () => {
   const { assistantLiveHtmlFromRaw } = loadChatUiApi();
   const rendered = assistantLiveHtmlFromRaw("1. **Fast**\n```zig\nconst x = 1;", false);
 
-  expect(rendered.html).toContain('class="stream-text"');
-  expect(rendered.html).toContain("1. **Fast**");
-  expect(rendered.html).toContain("```zig");
-  expect(rendered.html).not.toContain("<strong>");
-  expect(rendered.html).not.toContain("code-block");
+  expect(rendered.html).toContain('class="stream-markdown"');
+  expect(rendered.html).toContain("<ol><li><strong>Fast</strong></li></ol>");
+  expect(rendered.html).toContain('class="code-block"');
+  expect(rendered.html).toContain('<code class="language-zig">const x = 1;</code>');
+  expect(rendered.html).not.toContain("```zig");
 });
 
-test("assistantLiveHtmlFromRaw keeps live reasoning in a stable plain-text block", () => {
+test("assistantLiveHtmlFromRaw formats live reasoning inside its disclosure", () => {
   const { assistantLiveHtmlFromRaw } = loadChatUiApi();
   const rendered = assistantLiveHtmlFromRaw("<think>1. **Analyze**\n- item", true);
 
   expect(rendered.html).toContain('class="reasoning-block"');
-  expect(rendered.html).toContain('class="stream-text"');
-  expect(rendered.html).toContain("1. **Analyze**");
-  expect(rendered.html).toContain("- item");
-  expect(rendered.html).not.toContain("<strong>");
-  expect(rendered.html).not.toContain("<ul>");
+  expect(rendered.html).toContain('class="stream-markdown"');
+  expect(rendered.html).toContain("<strong>Analyze</strong>");
+  expect(rendered.html).toContain("<ul><li>item</li></ul>");
+});
+
+test("assistantLiveHtmlFromRaw formats the screenshot's heading and emphasis before completion", () => {
+  const { assistantLiveHtmlFromRaw } = loadChatUiApi();
+  const rendered = assistantLiveHtmlFromRaw("<think>Consider the language features.</think>\n# Zig Programming Language\n\nZig is designed to be **simple, fast, safe**, and **zero-cost**.\n\n## Core Philosophy\n\n- **Simplicity** — no hidden control flow.", false);
+  expect(rendered.html).toContain("<h1>Zig Programming Language</h1>");
+  expect(rendered.html).toContain("<strong>simple, fast, safe</strong>");
+  expect(rendered.html).toContain("<h2>Core Philosophy</h2>");
+  expect(rendered.html).toContain("<li><strong>Simplicity</strong> — no hidden control flow.</li>");
+  expect(rendered.html).not.toContain("# Zig Programming Language");
+  expect(rendered.html).not.toContain("**simple, fast, safe**");
 });
 
 test("completionNotice surfaces token-limit hits clearly", () => {
@@ -851,19 +875,17 @@ test("reasoningDuplicatesAnswer detects streaming prefix duplicates early", () =
   expect(reasoningDuplicatesAnswer(reasoning, "Python is a great language for data science and ML work.")).toBe(false);
 });
 
-test("assistantHtmlFromRaw promotes reasoning to answer when answer duplicates it", () => {
+test("assistantHtmlFromRaw keeps reasoning when the answer begins with the same words", () => {
   const { assistantHtmlFromRaw } = loadChatUiApi();
 
   // Simulate streaming state: reasoning visible, answer starts matching
   const raw = "<think>\nZig is a modern systems programming language known for its simplicity, safety, and performance.\n</think>\nZig is a modern systems programming language known for its simplicity";
   const result = assistantHtmlFromRaw(raw, false);
 
-  // Reasoning is promoted to answer — no reasoning wrapper
-  expect(result.view.showReasoning).toBe(false);
-  expect(result.view.promotedReasoning).toBe(true);
+  expect(result.view.showReasoning).toBe(true);
+  expect(result.view.reasoning).toContain("simplicity, safety, and performance");
   expect(result.view.answer.length).toBeGreaterThan(0);
-  // No reasoning block in output
-  expect(result.html).not.toContain("reasoning-block");
+  expect(result.html).toContain("reasoning-block");
 });
 
 test("assistantHtmlFromRaw promotes reasoning to answer when model puts everything in think tags", () => {
@@ -873,10 +895,66 @@ test("assistantHtmlFromRaw promotes reasoning to answer when model puts everythi
   const raw = "<think>\nZig is a modern systems programming language known for its simplicity, safety, and performance. It has gained attention for kernel development due to its low-level control.\n</think>\n";
   const result = assistantHtmlFromRaw(raw, false);
 
-  // Should promote reasoning to answer — no "No final answer" scenario
+  // Keep a usable answer fallback without discarding the reasoning disclosure.
   expect(result.view.answer.length).toBeGreaterThan(0);
   expect(result.view.answer).toContain("Zig is a modern");
-  expect(result.view.showReasoning).toBe(false);
+  expect(result.view.showReasoning).toBe(true);
+  expect(result.html).toContain("reasoning-block");
+});
+
+test("reasoning remains inspectable from live tokens through the completed answer", () => {
+  const { assistantLiveHtmlFromRaw, assistantHtmlFromRaw } = loadChatUiApi();
+  const cases = [
+    { reasoning: "Let me think.", answer: "The answer is 408." },
+    { reasoning: "The answer is 408.", answer: "The answer is 408." },
+    { reasoning: "1. Multiply 17 by 20.\n2. Multiply 17 by 4.\n3. Add both results.", answer: "408" },
+    {
+      reasoning: "Zig is a modern systems programming language with explicit allocation and compile-time execution. It supports low-level code with predictable control over memory and runtime behavior.",
+      answer: "Use Zig when explicit control is useful.",
+    },
+  ];
+  for (const { reasoning, answer } of cases) {
+    const live = assistantLiveHtmlFromRaw("<think>" + reasoning, true);
+    expect(live.view.showReasoning).toBe(true);
+    expect(live.view.reasoning).toBe(reasoning);
+    const complete = assistantHtmlFromRaw("<think>" + reasoning + "</think>\n" + answer, false);
+    expect(complete.view.showReasoning).toBe(true);
+    expect(complete.view.reasoning).toBe(reasoning);
+    expect(complete.view.answer).toBe(answer);
+    expect(complete.html).toContain('class="reasoning-block"');
+  }
+});
+
+test("implicit closing-tag reasoning survives normalization at completion", () => {
+  const { assistantHtmlFromRaw } = loadChatUiApi();
+  const reasoning = "I need to compare the values before giving the result.";
+  const result = assistantHtmlFromRaw(reasoning + "</think>\nThe result is 408.", false);
+  expect(result.view.reasoning).toBe(reasoning);
+  expect(result.view.showReasoning).toBe(true);
+  expect(result.view.answer).toBe("The result is 408.");
+  expect(result.html).toContain('class="reasoning-block"');
+});
+
+test("answer cleanup does not truncate planning paragraphs inside completed reasoning", () => {
+  const { assistantLiveHtmlFromRaw, assistantHtmlFromRaw } = loadChatUiApi();
+  const reasoning = "Check the allocation sizes and compare each pointer offset against the required alignment before deciding.\n\nThe user is asking whether the memory layout is safe.\n\nI need to verify the final offset and then explain the result.";
+  const live = assistantLiveHtmlFromRaw("<think>" + reasoning, true);
+  expect(live.view.reasoning).toBe(reasoning);
+  const completed = assistantHtmlFromRaw("<think>" + reasoning + "</think>\nThe allocation layout is aligned correctly.", false);
+  expect(completed.view.showReasoning).toBe(true);
+  expect(completed.view.reasoning).toBe(reasoning);
+  expect(completed.view.answer).toBe("The allocation layout is aligned correctly.");
+  expect(completed.html).toContain("The user is asking whether the memory layout is safe.");
+  expect(completed.html).toContain("I need to verify the final offset");
+});
+
+test("answer cleanup preserves implicit closing-tag reasoning that begins with planning", () => {
+  const { assistantHtmlFromRaw } = loadChatUiApi();
+  const result = assistantHtmlFromRaw("I need to answer directly.\n</think>\n408", false);
+  expect(result.view.showReasoning).toBe(true);
+  expect(result.view.reasoning).toBe("I need to answer directly.");
+  expect(result.view.answer).toBe("408");
+  expect(result.html).toContain("I need to answer directly.");
 });
 
 test("hasRepeatedPhraseLoop detects sentence-level repetition", () => {
@@ -890,4 +968,69 @@ test("startsWithLeakedReasoning detects meta-commentary", () => {
   expect(startsWithLeakedReasoning("The user is asking about C types.")).toBe(true);
   expect(startsWithLeakedReasoning("I need to provide a clear explanation.")).toBe(true);
   expect(startsWithLeakedReasoning("Zig is a modern systems programming language.")).toBe(false);
+});
+
+test("chat UI markdown formats the screenshot's heading, bold prose, and bullets", () => {
+  const { md } = loadChatUiApi();
+  const html = md("# Zig Programming Language\n\nZig is designed to be **simple, fast, safe**, and **zero-cost**.\n\n## Core Philosophy\n\n- **Simplicity** — no hidden control flow.\n- **Composable** — cross-compilation support.");
+  expect(html).toContain("<h1>Zig Programming Language</h1>");
+  expect(html).toContain("<strong>simple, fast, safe</strong>");
+  expect(html).toContain("<h2>Core Philosophy</h2>");
+  expect(html).toContain("<li><strong>Simplicity</strong> — no hidden control flow.</li>");
+});
+
+test("chat UI markdown renders all heading levels, rules, and blockquotes", () => {
+  const { md } = loadChatUiApi();
+  const html = md("##### Small heading\n###### Smallest heading\n\n---\n\n> **A useful note**\n> With a second line.");
+  expect(html).toContain("<h5>Small heading</h5>");
+  expect(html).toContain("<h6>Smallest heading</h6>");
+  expect(html).toContain("<hr>");
+  expect(html).toContain("<blockquote><p><strong>A useful note</strong><br>With a second line.</p></blockquote>");
+});
+
+test("chat UI markdown renders aligned tables with inline code and escaped pipes", () => {
+  const { md } = loadChatUiApi();
+  const html = md("| Model | Speed | Note |\n| :--- | ---: | :---: |\n| **ZINC** | 12 | `a|b` |\n| Other | 3 | a\\|b |");
+  expect(html).toContain('<div class="table-scroll"><table><thead>');
+  expect(html).toContain('<th style="text-align:left">Model</th>');
+  expect(html).toContain('<th style="text-align:right">Speed</th>');
+  expect(html).toContain('<td style="text-align:center"><code>a|b</code></td>');
+  expect(html).toContain('<td style="text-align:center">a|b</td>');
+  expect(html).toContain("<strong>ZINC</strong>");
+});
+
+test("chat UI markdown keeps code fences outside paragraphs and recognizes language names", () => {
+  const { md } = loadChatUiApi();
+  const html = md("Before\n```c++\n#include <vector>\n// **literal**\n```\nAfter\n\n~~~objective-c\n[object call];\n~~~");
+  expect(html).toContain('<p>Before</p><div class="code-block">');
+  expect(html).toContain('<code class="language-c++">#include &lt;vector&gt;\n// **literal**\n</code>');
+  expect(html).toContain('</div><p>After</p>');
+  expect(html).toContain('<code class="language-objective-c">');
+  expect(html).not.toContain("<strong>literal</strong>");
+});
+
+test("chat UI markdown safely handles incomplete and unsafe fence info", () => {
+  const { md } = loadChatUiApi();
+  const html = md('```js"onload="alert(1)\n<img src=x>');
+  expect(html).toContain('class="language-plaintext"');
+  expect(html).toContain('&lt;img src=x&gt;');
+  expect(html).not.toContain('class="language-js"onload=');
+  expect(html).not.toContain('class="copy-btn"');
+});
+
+test("chat UI markdown protects code, escape sequences, and link targets from emphasis", () => {
+  const { md } = loadChatUiApi();
+  const html = md('`**literal**` and \\*literal\\* plus [`api_name`](https://example.test/api_name) and ~~old~~.');
+  expect(html).toContain('<code>**literal**</code>');
+  expect(html).toContain('and *literal* plus');
+  expect(html).toContain('<a href="https://example.test/api_name" target="_blank" rel="noopener noreferrer"><code>api_name</code></a>');
+  expect(html).toContain('<del>old</del>');
+});
+
+test("chat UI markdown escapes quoted link targets and leaves unsafe schemes inert", () => {
+  const { md } = loadChatUiApi();
+  const html = md('[safe](https://example.test/"onmouseover="bad) [unsafe](javascript:alert)');
+  expect(html).toContain('href="https://example.test/&quot;onmouseover=&quot;bad"');
+  expect(html).not.toContain('href="javascript:');
+  expect(html).not.toContain('"onmouseover="bad');
 });
