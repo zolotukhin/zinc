@@ -30,6 +30,23 @@ test "Vulkan KV allocation and budgeting share actual Gemma projection widths" {
     try expectContains(src, "kv_dtype.rowBytes(dim)");
 }
 
+test "Vulkan unload releases lazily allocated chat checkpoint and MTP capture ownership" {
+    const src = @embedFile("compute/forward.zig");
+    const start = std.mem.indexOf(u8, src, "pub fn deinit(self: *InferenceEngine) void {") orelse return error.TestExpectedEqual;
+    const teardown = src[start..];
+    // The live Linux lifecycle soak checks resident bytes. Keep this CPU guard
+    // too: init-only cleanup lists previously omitted these request allocations.
+    try expectContains(teardown, "if (self.ssm_checkpoint) |*b| b.deinit();");
+    try expectContains(teardown, "self.allocator.free(self.ssm_checkpoint_offsets);");
+    try expectContains(teardown, "self.allocator.free(self.ssm_checkpoint_pending_h);");
+    try expectContains(teardown, "if (self.mtp_prefill_capture) |*b| b.deinit();");
+    const allocation = std.mem.indexOf(u8, src, "pub fn ssmCheckpointTake(") orelse return error.TestExpectedEqual;
+    const publication = std.mem.indexOfPos(u8, src, allocation, "self.ssm_checkpoint = checkpoint;") orelse return error.TestExpectedEqual;
+    try expectContains(src[allocation..publication], "errdefer checkpoint.deinit();");
+    try expectContains(src[allocation..publication], "errdefer self.allocator.free(offsets);");
+    try expectContains(src[allocation..publication], "const pending_h = try self.allocator.alloc");
+}
+
 test "decode loop keeps deinterleave split for packed Q and gate" {
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.");

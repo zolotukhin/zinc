@@ -150,9 +150,23 @@ def generation(client, identifier, mtp=None, check_mtp=False):
             data.get('usage', {}).get('completion_tokens', 0) > 0, 'generation did not complete after a lifecycle change')
     if check_mtp:
         require(data.get('mtp', {}).get('requested') is mtp, 'queued MTP choices crossed request boundaries')
+    return data
 
 
-def exercise_model(client, identifier, backend):
+def unload(client, identifier):
+    # Generation can release its lease just after its last response byte.
+    end = time.monotonic() + min(30, client.remaining())
+    while True:
+        code, data = client.request('/v1/models/unload', {'model': identifier})
+        if code == 200:
+            break
+        require(code == 409 and time.monotonic() < end, 'unload did not recover after cancellation')
+        time.sleep(.05)
+    require(data.get('deleted_model') is False, 'unload did not confirm cached file preservation')
+    active(client, None)
+
+
+def exercise_model(client, identifier, backend, reference_check=None):
     expect(client, '/v1/models/activate', {'model': identifier})
     entry = active(client, identifier)
     controllable = entry.get('supports_mtp') is True and entry.get('mtp_request_control') is True
@@ -169,29 +183,29 @@ def exercise_model(client, identifier, backend):
     client.stream({**body, 'messages': [dict(role='user', content='Count upward from 1 to 1000, one number per line.')],
                    'max_tokens': 1024}, cancel=True, on_content=busy)
     generation(client, identifier)
+    if reference_check:
+        reference_check(client, identifier)
     expect(client, '/v1/models/activate', {'model': 'zinc-soak-unknown'}, status=400)
     active(client, identifier)
-    # Native generation releases its lease after draining the channel, which
-    # can finish just after the last response byte reaches the client.
-    end = time.monotonic() + min(30, client.remaining())
-    while True:
-        code, data = client.request('/v1/models/unload', {'model': identifier})
-        if code == 200:
-            break
-        require(code == 409 and time.monotonic() < end, 'unload did not recover after cancellation')
-        time.sleep(.05)
-    require(data.get('deleted_model') is False, 'unload did not confirm cached file preservation')
-    active(client, None)
+    unload(client, identifier)
     require(any(m.get('id') == identifier and m.get('installed') is True for m in expect(client, '/v1/models')['data']),
             'unload removed cached model installation')
+    expect(client, '/v1/models/activate', {'model': identifier})
+    restored = active(client, identifier)
+    require(all(restored.get(key) == entry.get(key) for key in ('supports_mtp', 'mtp_default_enabled', 'mtp_request_control')),
+            'reload changed the active MTP capability or policy')
+    generation(client, identifier)
+    # Leave this model resident. The next activation must exercise replacement
+    # of live weights, rather than only loading into an already empty device.
 
 
-def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: time.sleep(.5), progress=None):
+def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: time.sleep(.5), progress=None, reference_check=None):
     require(identifiers and len(identifiers) == len(set(identifiers)) and all(ID.fullmatch(x) for x in identifiers),
             'soak requires unique advertised catalog identifiers')
     require(backend in ('rocm', 'vulkan'), 'soak requires a Linux release backend')
     report = dict(schema_version=1, status='failed', backend=backend, models=list(identifiers),
-                  options=settings, samples=[], completed_cycles=0, operations=0, failure_stage='discovery')
+                  options=settings, samples=[], completed_cycles=0, operations=0, direct_switches=0,
+                  reference_cases=0, failure_stage='discovery')
     try:
         health = expect(client, '/health')
         require(health.get('backend') == backend and health.get('supports_model_management') is True and
@@ -202,11 +216,21 @@ def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: tim
                         m.get('supported_on_current_gpu') is not False and m.get('fits_current_gpu') is not False for m in entries),
                     'a required installed model is not an activation candidate')
         for cycle in range(settings['warmup'] + settings['cycles']):
-            for identifier in identifiers:
+            for index, identifier in enumerate(identifiers):
                 report['failure_stage'] = 'model_lifecycle'
-                exercise_model(client, identifier, backend)
+                report['failure_model'] = identifier
+                def check_reference(current, model):
+                    cases = reference_check(current, model)
+                    require(type(cases) is int and cases > 0, 'missing repeated native reference cases')
+                    report['reference_cases'] += cases
+                exercise_model(client, identifier, backend, check_reference if reference_check else None)
                 report['operations'] += 1
+                if index:
+                    report['direct_switches'] += 1
+            report['failure_stage'] = 'round_unload'
+            unload(client, identifiers[-1])
             report['failure_stage'] = 'telemetry'
+            report['failure_model'] = None
             settle()
             client.remaining()
             sample = metrics()
@@ -223,7 +247,7 @@ def run_soak(client, identifiers, backend, metrics, settings, settle=lambda: tim
         growth = {key: max(0, max(s[key] for s in report['samples'][1:]) - baseline[key]) for key in baseline}
         report['max_growth'] = growth
         require(all(growth[key] <= settings['max_growth'][key] for key in growth), 'unloaded process exceeded its post-warmup memory/handle growth budget')
-        report.update(status='passed', failure_stage=None)
+        report.update(status='passed', failure_stage=None, failure_model=None)
     except Exception as error:
         # Exception text, generated content and HTTP bodies may contain local
         # details. Only the category and completed bounded checks are public.
@@ -239,7 +263,7 @@ def policy_settings(spec):
                   spec['max_vram_growth_mib'], spec['max_fd_growth'])
 
 
-def verify_report(report, identifiers, backend, spec, binary_sha256, expected_sizes=None):
+def verify_report(report, identifiers, backend, spec, binary_sha256, expected_sizes=None, reference_cases_per_model=0):
     settings = policy_settings(spec)
     require(isinstance(report, dict) and report.get('schema_version') == 1 and report.get('status') == 'passed' and
             report.get('failure_stage') is None and report.get('backend') == backend and
@@ -255,6 +279,10 @@ def verify_report(report, identifiers, backend, spec, binary_sha256, expected_si
     require(type(report.get('completed_cycles')) is int and report['completed_cycles'] == settings['cycles'] and
             type(report.get('operations')) is int and report['operations'] == (settings['cycles'] + settings['warmup']) * len(models),
             'lifecycle soak did not complete the required rounds')
+    require(type(report.get('direct_switches')) is int and report['direct_switches'] ==
+            (settings['cycles'] + settings['warmup']) * (len(models) - 1), 'lifecycle soak omitted resident model replacement')
+    require(type(report.get('reference_cases')) is int and report['reference_cases'] ==
+            report['operations'] * reference_cases_per_model, 'lifecycle soak omitted repeated native reference checks')
     samples = report.get('samples')
     require(isinstance(samples, list) and len(samples) == settings['cycles'] + 1 and
             all(isinstance(s, dict) and set(s) == set(settings['max_growth']) and
@@ -262,3 +290,37 @@ def verify_report(report, identifiers, backend, spec, binary_sha256, expected_si
     growth = {key: max(0, max(s[key] for s in samples[1:]) - samples[0][key]) for key in settings['max_growth']}
     require(report.get('max_growth') == growth and all(growth[key] <= settings['max_growth'][key] for key in growth),
             'lifecycle telemetry exceeded its frozen growth budget')
+
+
+def allocation_failure_probe(client, initial, replacement, context):
+    """The profile chooses a valid model/context that cannot allocate on its GPU.
+
+    HTTP 400 is insufficient: the probe must reach the actual load, fail with
+    HTTP 500, restore the original model and reproduce its greedy continuation.
+    """
+    report = dict(status='failed', initial_model=initial, replacement_model=replacement, context=context)
+    try:
+        active(client, initial)
+        before = generation(client, initial)
+        status, response = client.request('/v1/models/activate', {'model': replacement})
+        report['response_status'] = status
+        require(status == 500 and response.get('error', {}).get('type') == 'model_load_error',
+                'allocation probe did not exercise a failed model load')
+        active(client, initial)
+        after = generation(client, initial)
+        require(before['choices'][0]['message']['content'] == after['choices'][0]['message']['content'],
+                'restored model continuation changed after allocation failure')
+        report.update(status='passed', restored=True, continuation_matches=True)
+    except Exception as error:
+        report['error_category'] = type(error).__name__
+    return report
+
+
+def verify_allocation_failures(reports, specs, binary_sha256):
+    require(isinstance(reports, list) and len(reports) == len(specs), 'missing allocation failure recovery evidence')
+    for report, spec in zip(reports, specs):
+        require(isinstance(report, dict) and report.get('status') == 'passed' and report.get('restored') is True and
+                report.get('continuation_matches') is True and report.get('response_status') == 500 and
+                report.get('binary_sha256') == binary_sha256 and report.get('cleanup') is True and
+                all(report.get(key) == spec[key] for key in ('initial_model', 'replacement_model', 'context')),
+                'failed or mismatched allocation failure recovery evidence')

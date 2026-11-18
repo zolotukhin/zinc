@@ -15,6 +15,7 @@ class FakeClient:
         self.faults = faults
         self.calls = []
         self.busy = False
+        self.oom_seen = False
 
     def remaining(self):
         return 5
@@ -30,6 +31,13 @@ class FakeClient:
         if path.endswith('/activate'):
             if body['model'] == 'zinc-soak-unknown':
                 return (200 if self.faults.get('accept_unknown') else 400), {}
+            if self.faults.get('oom') and body['model'] == 'beta':
+                self.oom_seen = True
+                if self.faults.get('restore_failed'):
+                    self.loaded = None
+                return 500, dict(error=dict(type='model_load_error'))
+            if self.faults.get('reject_swap') and self.loaded and self.loaded != body['model']:
+                return 500, {}
             self.loaded = 'wrong' if self.faults.get('wrong_model') else body['model']
             return 200, {}
         if path.endswith('/unload'):
@@ -39,7 +47,8 @@ class FakeClient:
                 self.loaded = None
             return 200, dict(deleted_model=False)
         if path.endswith('/completions'):
-            return 200, dict(choices=[dict(message=dict(content='' if self.faults.get('empty') else 'READY'))],
+            content = '' if self.faults.get('empty') else 'CHANGED' if self.oom_seen and self.faults.get('drift') else 'READY'
+            return 200, dict(choices=[dict(message=dict(content=content))],
                              usage=dict(completion_tokens=1), mtp=dict(requested=True if self.faults.get('mtp_bleed') else body.get('enable_mtp')))
         raise AssertionError(path)
 
@@ -70,6 +79,7 @@ class LifecycleTests(unittest.TestCase):
         report = run(client)
         self.assertEqual(report['status'], 'passed')
         self.assertEqual(report['operations'], 6)
+        self.assertEqual(report['direct_switches'], 3)
         self.assertEqual(report['completed_cycles'], 2)
         self.assertEqual(len(report['samples']), 3)
         self.assertIsNone(client.loaded)
@@ -77,12 +87,27 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(any('pull' in path or 'remove' in path for path, _ in client.calls))
 
     def test_generation_identity_cancellation_and_installation_regressions_fail(self):
-        for fault in ['accept_unknown', 'wrong_model', 'retain_loaded', 'empty', 'mtp_bleed', 'broken_stream', 'deleted', 'busy_unload']:
+        for fault in ['accept_unknown', 'wrong_model', 'retain_loaded', 'empty', 'mtp_bleed', 'broken_stream', 'deleted', 'busy_unload', 'reject_swap']:
             with self.subTest(fault=fault):
                 report = run(FakeClient(**{fault: True}))
                 self.assertEqual(report['status'], 'failed')
                 self.assertNotIn('DO_NOT_PUBLISH', json.dumps(report))
                 self.assertNotIn('/fixtures/', json.dumps(report))
+
+    def test_repeated_reference_runs_while_each_model_is_resident_and_failure_blocks_the_round(self):
+        client = FakeClient()
+        def reference(current, identifier):
+            self.assertEqual(current.loaded, identifier)
+            return 3
+        report = soak.run_soak(client, ['alpha', 'beta'], 'rocm', sample, soak.limits(1, 1, 60),
+                                settle=lambda: None, reference_check=reference)
+        self.assertEqual(report['status'], 'passed')
+        self.assertEqual(report['reference_cases'], 12)
+        def corrupted(current, identifier):
+            raise ValueError('native continuation changed')
+        report = soak.run_soak(FakeClient(), ['alpha'], 'rocm', sample, soak.limits(1, 1, 60),
+                                settle=lambda: None, reference_check=corrupted)
+        self.assertEqual(report['status'], 'failed')
 
     def test_each_memory_domain_and_file_descriptors_is_gated_after_warmup(self):
         for key, delta in [('rss_bytes', 128 * soak.MIB + 1), ('vram_bytes', 64 * soak.MIB + 1),
@@ -174,6 +199,20 @@ class LifecycleTests(unittest.TestCase):
         report['samples'][-1]['fds'] += 1
         with self.assertRaises(ValueError):
             soak.verify_report(report, ['alpha', 'beta'], 'rocm', spec, 'a' * 64)
+
+    def test_allocation_probe_requires_actual_load_failure_and_correct_restoration(self):
+        report = soak.allocation_failure_probe(FakeClient(oom=True), 'alpha', 'beta', 65536)
+        self.assertEqual(report['status'], 'passed')
+        report.update(binary_sha256='a' * 64, cleanup=True)
+        spec = dict(initial_model='alpha', replacement_model='beta', context=65536)
+        soak.verify_allocation_failures([report], [spec], 'a' * 64)
+        for client in [FakeClient(), FakeClient(oom=True, restore_failed=True), FakeClient(oom=True, drift=True)]:
+            failed = soak.allocation_failure_probe(client, 'alpha', 'beta', 65536)
+            self.assertEqual(failed['status'], 'failed')
+            with self.assertRaises(ValueError):
+                soak.verify_allocation_failures([failed], [spec], 'a' * 64)
+        with self.assertRaises(ValueError):
+            soak.verify_allocation_failures([], [spec], 'a' * 64)
 
 
 if __name__ == '__main__':

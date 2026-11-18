@@ -32054,9 +32054,17 @@ pub const InferenceEngine = struct {
             self.ssm_checkpoint_state_size = self.gpu_ssm_states[0].size;
             self.ssm_checkpoint_layer_stride = self.ssm_checkpoint_conv_size + self.ssm_checkpoint_state_size;
             const total = self.ssm_checkpoint_layer_stride * @as(vk.c.VkDeviceSize, n_layers);
-            self.ssm_checkpoint = try Buffer.initDeviceLocal(self.instance, total, vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-            self.ssm_checkpoint_offsets = try self.allocator.alloc(u32, n_layers);
-            self.ssm_checkpoint_pending_h = try self.allocator.alloc(f32, self.model.config.hidden_dim);
+            // Publish only a complete checkpoint. An allocation failure must
+            // leave the next request free to retry, with no live GPU buffer or
+            // partially allocated host state hidden behind a non-null marker.
+            var checkpoint = try Buffer.initDeviceLocal(self.instance, total, vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            errdefer checkpoint.deinit();
+            const offsets = try self.allocator.alloc(u32, n_layers);
+            errdefer self.allocator.free(offsets);
+            const pending_h = try self.allocator.alloc(f32, self.model.config.hidden_dim);
+            self.ssm_checkpoint = checkpoint;
+            self.ssm_checkpoint_offsets = offsets;
+            self.ssm_checkpoint_pending_h = pending_h;
             log.info("Chat reuse: recurrent-state checkpoint buffer {d} MB", .{total / (1024 * 1024)});
         }
         const ckpt = &self.ssm_checkpoint.?;
@@ -32839,6 +32847,13 @@ pub const InferenceEngine = struct {
     /// Release GPU buffers, graphs, command objects, and dispatch helpers owned by the engine.
     pub fn deinit(self: *InferenceEngine) void {
         self.chainDrain() catch {};
+        // These buffers are allocated lazily by chat/MTP requests, rather
+        // than engine init. They still belong to this model: retaining them
+        // leaked device memory on every unload or resident-model replacement.
+        if (self.ssm_checkpoint) |*b| b.deinit();
+        self.allocator.free(self.ssm_checkpoint_offsets);
+        self.allocator.free(self.ssm_checkpoint_pending_h);
+        if (self.mtp_prefill_capture) |*b| b.deinit();
         if (self.chain_token_staging) |*b| b.deinit();
         if (self.chain_embed_buf) |*b| b.deinit();
         if (self.timestamp_query_pool != null) vk.c.vkDestroyQueryPool(self.instance.device, self.timestamp_query_pool, null);

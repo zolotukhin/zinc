@@ -352,7 +352,13 @@ def aggregate(args):
             require(checks.get("lifecycle_soak") is True, "missing packaged lifecycle soak checks")
             verify_report(report.get("lifecycle_soak"), profile["models"], spec["target"].rsplit("-", 1)[1],
                           soak_spec, artifact["binary_sha256"],
-                          {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]})
+                          {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]},
+                          policy()["reference"]["agreement"]["cases"])
+        failure_specs = policy().get("allocation_failure_probes", {}).get(identifier, [])
+        if failure_specs:
+            from model_lifecycle_soak import verify_allocation_failures
+            require(checks.get("allocation_failure_recovery") is True, "missing allocation failure recovery checks")
+            verify_allocation_failures(report.get("allocation_failures"), failure_specs, artifact["binary_sha256"])
         reference = report.get("reference", {})
         require(reference.get("commit") == policy()["reference"]["commit"] and all(re.fullmatch(r"[0-9a-f]{64}", reference.get(key, "")) for key in ("server_sha256", "tokenizer_sha256")),
                 "missing pinned reference evidence")

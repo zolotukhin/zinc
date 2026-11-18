@@ -1285,8 +1285,15 @@ class ReleaseTest(unittest.TestCase):
                     telemetry="drm-process-resident", model_sizes={m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]},
                     completed_cycles=settings["cycles"],
                     operations=(settings["cycles"] + settings["warmup"]) * len(profile["models"]),
+                    direct_switches=(settings["cycles"] + settings["warmup"]) * (len(profile["models"]) - 1),
+                    reference_cases=(settings["cycles"] + settings["warmup"]) * len(profile["models"]) * policy()["reference"]["agreement"]["cases"],
                     samples=[dict(rss_bytes=0, vram_bytes=0, gpu_host_bytes=0, fds=4) for _ in range(settings["cycles"] + 1)],
                     max_growth=dict(rss_bytes=0, vram_bytes=0, gpu_host_bytes=0, fds=0))
+            failure_specs = policy().get("allocation_failure_probes", {}).get(profile["id"], [])
+            if failure_specs:
+                report["checks"]["allocation_failure_recovery"] = True
+                report["allocation_failures"] = [dict(status="passed", **case, response_status=500, restored=True,
+                    continuation_matches=True, cleanup=True, binary_sha256=artifact["binary_sha256"]) for case in failure_specs]
             write_json(reports / (profile["id"] + ".json"), report)
         return directory, reports
 
@@ -1299,7 +1306,7 @@ class ReleaseTest(unittest.TestCase):
         self.aggregate(directory, reports)
         path = reports / "rocm-rdna4.json"
         original = read_json(path)
-        for fault in ["missing", "failed", "partial", "memory", "handles", "wrong_model", "wrong_binary", "changed_settings"]:
+        for fault in ["missing", "failed", "partial", "memory", "handles", "wrong_model", "wrong_binary", "changed_settings", "no_swap", "no_reference"]:
             report = json.loads(json.dumps(original))
             if fault == "missing": report.pop("lifecycle_soak")
             elif fault == "failed": report["checks"]["lifecycle_soak"] = False
@@ -1309,6 +1316,34 @@ class ReleaseTest(unittest.TestCase):
             elif fault == "wrong_model": report["lifecycle_soak"]["model_sizes"][report["lifecycle_soak"]["models"][0]] = 1
             elif fault == "wrong_binary": report["lifecycle_soak"]["binary_sha256"] = "f" * 64
             elif fault == "changed_settings": report["lifecycle_soak"]["options"]["warmup"] = 0
+            elif fault == "no_swap": report["lifecycle_soak"]["direct_switches"] = 0
+            elif fault == "no_reference": report["lifecycle_soak"]["reference_cases"] = 0
+            write_json(path, report)
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
+        write_json(path, original)
+
+    def test_allocation_failure_recovery_is_bound_to_the_frozen_candidate(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        path = reports / "rocm-rdna4.json"
+        original = read_json(path)
+        for fault in ["missing", "unchecked", "partial", "failed", "not_restored", "changed_continuation",
+                      "precheck_only", "wrong_model", "wrong_context", "wrong_binary", "not_cleaned"]:
+            report = json.loads(json.dumps(original))
+            if fault == "missing": report.pop("allocation_failures")
+            elif fault == "unchecked": report["checks"]["allocation_failure_recovery"] = False
+            elif fault == "partial": report["allocation_failures"].pop()
+            else:
+                probe = report["allocation_failures"][0]
+                if fault == "failed": probe["status"] = "failed"
+                elif fault == "not_restored": probe["restored"] = False
+                elif fault == "changed_continuation": probe["continuation_matches"] = False
+                elif fault == "precheck_only": probe["response_status"] = 400
+                elif fault == "wrong_model": probe["replacement_model"] = probe["initial_model"]
+                elif fault == "wrong_context": probe["context"] = 4096
+                elif fault == "wrong_binary": probe["binary_sha256"] = "f" * 64
+                elif fault == "not_cleaned": probe["cleanup"] = False
             write_json(path, report)
             with self.subTest(fault=fault), self.assertRaises(ValueError):
                 self.aggregate(directory, reports)

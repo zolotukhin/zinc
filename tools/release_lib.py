@@ -241,6 +241,17 @@ def policy(path=None):
         require((window is None and not model["id"].startswith("gemma4-")) or
                 (type(window) is int and 0 < window and window + 256 <= model["context"]),
                 "Gemma policy requires a sliding-window boundary reference")
+    probes = data.get("allocation_failure_probes", {})
+    require(isinstance(probes, dict), "invalid allocation failure policy")
+    for identifier, cases in probes.items():
+        profile = next((p for p in profiles if p["id"] == identifier), None)
+        require(profile is not None and profile["target"].endswith("rocm") and isinstance(cases, list) and cases,
+                "allocation failure probes require a native Linux profile")
+        for case in cases:
+            require(isinstance(case, dict) and set(case) == {"initial_model", "replacement_model", "context"} and
+                    case["initial_model"] in profile["models"] and case["replacement_model"] in profile["models"] and
+                    case["initial_model"] != case["replacement_model"] and type(case["context"]) is int and
+                    2048 <= case["context"] <= 262144, "invalid allocation failure probe")
     require(all(p.get("models") and set(p["models"]).issubset(model_ids) and len(set(p["models"])) == len(p["models"]) for p in profiles),
             "GPU profile is missing its required model matrix")
     source_sha(data["reference"]["commit"])

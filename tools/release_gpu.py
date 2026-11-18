@@ -782,6 +782,7 @@ def main():
                 print("Running 305 packaged ROCm partial-tile/reference cases", flush=True)
                 rocm_kernels = rocm_kernel_reference(tree, reference, checkout, device, work, env)
             models = []
+            reference_samples_by_model = {}
             for identifier in profile["models"]:
                 print(identifier + ": verifying pinned bytes and starting packaged tests", flush=True)
                 expected = next(m for m in policy()["models"] if m["id"] == identifier)
@@ -794,6 +795,7 @@ def main():
                 tokenizer_parity(tree, reference, model, work, env)
                 print(identifier + ": tokenizer matched; checking reference continuations", flush=True)
                 samples = inference_parity(tree, reference, model, expected["context"], device, llama_args, work, env)
+                reference_samples_by_model[identifier] = samples
                 agreement = reference_agreement([sample["comparison"] for _, sample in samples])
                 sliding = None
                 if expected.get("sliding_window"):
@@ -828,8 +830,27 @@ def main():
                 print("Running packaged model lifecycle and memory plateau checks", flush=True)
                 soak_work = work / "lifecycle"
                 soak_work.mkdir()
+                def repeated_reference(client, identifier):
+                    reference_http_parity(int(client.root.rsplit(":", 1)[1]), {"model": identifier, "temperature": 0},
+                                          reference_samples_by_model[identifier])
+                    return len(reference_samples_by_model[identifier])
                 lifecycle = run_owned(tree / "bin/zinc", {identifier: config["models"][identifier] for identifier in profile["models"]},
-                                      backend, device, soak_spec["context"], soak_work, env, policy_settings(soak_spec))
+                                      backend, device, soak_spec["context"], soak_work, env, policy_settings(soak_spec), reference_check=repeated_reference)
+            failure_specs = policy().get("allocation_failure_probes", {}).get(profile["id"], [])
+            failure_reports = []
+            if failure_specs and lifecycle is not None and lifecycle.get("status") == "passed":
+                from model_lifecycle_soak import allocation_failure_probe, limits
+                from run_model_lifecycle_soak import run_owned
+                for index, failure_spec in enumerate(failure_specs):
+                    print("Checking native allocation failure recovery", flush=True)
+                    probe_work = work / ("allocation-failure-" + str(index))
+                    probe_work.mkdir()
+                    first = failure_spec["initial_model"]
+                    cohort = {first: config["models"][first], **{m: config["models"][m] for m in profile["models"] if m != first}}
+                    def exercise(client):
+                        return allocation_failure_probe(client, first, failure_spec["replacement_model"], failure_spec["context"])
+                    failure_reports.append(run_owned(tree / "bin/zinc", cohort, backend, device, failure_spec["context"],
+                                                     probe_work, env, limits(1, 1, 300), exercise=exercise))
             require(reference_artifacts(reference) == reference_snapshot, "reference artifacts changed during GPU validation")
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
@@ -848,16 +869,25 @@ def main():
                 report["q8_decode_reference"] = q8_decode
             if gemma_geglu is not None:
                 report["gemma_geglu_reference"] = gemma_geglu
+            if failure_specs:
+                report["allocation_failures"] = failure_reports
+                report["checks"]["allocation_failure_recovery"] = len(failure_reports) == len(failure_specs) and all(r.get("status") == "passed" for r in failure_reports)
             if lifecycle is not None:
                 report["lifecycle_soak"] = lifecycle
                 report["checks"]["lifecycle_soak"] = lifecycle.get("status") == "passed"
     # Release the reservation before recording successful cleanup.
     # Reports contain no machine identifiers, private paths, ports or URLs.
+    # Preserve failed evidence too; checks are false and aggregation independently
+    # recomputes every gate. Writing a report never certifies it as successful.
     write_json(args.output, report)
     if lifecycle is not None:
         from model_lifecycle_soak import verify_report
         verify_report(lifecycle, profile["models"], backend, soak_spec, report["binary_sha256"],
-                      {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]})
+                      {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]},
+                      policy()["reference"]["agreement"]["cases"])
+    if failure_specs:
+        from model_lifecycle_soak import verify_allocation_failures
+        verify_allocation_failures(failure_reports, failure_specs, report["binary_sha256"])
 
 
 if __name__ == "__main__":
