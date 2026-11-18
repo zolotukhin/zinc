@@ -79,6 +79,28 @@ pub const Mutex = struct {
     }
 };
 
+/// Reader leases keep model resources alive until every handler finishes.
+/// A lifecycle change uses tryLock so a busy model returns a retryable error.
+pub const RwLock = struct {
+    value: std.Io.RwLock = .init,
+
+    pub fn lockShared(self: *RwLock) void {
+        self.value.lockSharedUncancelable(io);
+    }
+    pub fn unlockShared(self: *RwLock) void {
+        self.value.unlockShared(io);
+    }
+    pub fn tryLockShared(self: *RwLock) bool {
+        return self.value.tryLockShared(io);
+    }
+    pub fn tryLock(self: *RwLock) bool {
+        return self.value.tryLock(io);
+    }
+    pub fn unlock(self: *RwLock) void {
+        self.value.unlock(io);
+    }
+};
+
 pub const Condition = struct {
     value: std.Io.Condition = .init,
 

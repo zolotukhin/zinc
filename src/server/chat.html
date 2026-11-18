@@ -185,6 +185,7 @@
       .model-controls {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 8px;
         min-width: 0;
       }
@@ -699,17 +700,20 @@
         color: #808d77;
       }
       .reasoning-block {
-        margin-bottom: 18px;
-        border: 1px solid #30352d;
-        border-radius: 10px;
-        background: #191c18;
-        overflow: hidden;
+        margin: 0 0 18px;
+        border-left: 1px solid #343b32;
+        color: #8f998b;
       }
       .reasoning-block summary {
-        padding: 9px 12px;
+        padding: 5px 10px;
         cursor: pointer;
         list-style: none;
         user-select: none;
+        border-radius: 5px;
+        transition: background 0.12s ease;
+      }
+      .reasoning-block summary:hover {
+        background: #ffffff04;
       }
       .reasoning-block summary::-webkit-details-marker {
         display: none;
@@ -722,20 +726,28 @@
       }
       .reasoning-summary::before {
         content: '›';
-        font-size: 16px;
-        color: var(--muted);
-        transition: transform 0.15s;
+        font-size: 15px;
+        color: #778471;
+        transition: transform 0.12s ease;
       }
       .reasoning-block[open] .reasoning-summary::before {
         transform: rotate(90deg);
       }
       .reasoning-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
         font-size: 11px;
         font-weight: 500;
-        color: var(--muted);
+        color: #929e8c;
       }
-      .reasoning-state.live {
-        color: var(--accent);
+      .reasoning-state.live::after {
+        content: '';
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: #9eac94;
+        animation: pulse 1.4s ease-in-out infinite;
       }
       .reasoning-preview {
         font-size: 11px;
@@ -744,14 +756,49 @@
         text-overflow: ellipsis;
         overflow: hidden;
       }
-      .reasoning-body {
-        max-height: min(45vh, 420px);
+      .msg.a .bbl .reasoning-body {
+        max-height: min(38vh, 340px);
         overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: #414b3b transparent;
         font-size: 12px;
-        line-height: 1.75;
-        padding: 12px 14px;
-        border-top: 1px solid #2b3126;
-        color: #a6b09d;
+        line-height: 1.7;
+        padding: 7px 12px 3px;
+        color: #8f998b;
+      }
+      .msg.a .bbl .reasoning-body p,
+      .msg.a .bbl .reasoning-body ol,
+      .msg.a .bbl .reasoning-body ul,
+      .reasoning-body .markdown-committed {
+        margin-bottom: 10px;
+      }
+      .msg.a .bbl .reasoning-body :is(h1, h2, h3, h4, h5, h6) {
+        margin: 12px 0 7px;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #a8b3a0;
+        font-weight: 500;
+      }
+      .msg.a .bbl .reasoning-body :is(strong, em) {
+        color: #a5afa0;
+      }
+      .msg.a .bbl .reasoning-body strong {
+        font-weight: 500;
+      }
+      .msg.a .bbl .reasoning-body :is(code, pre code, .table-scroll table) {
+        font-size: 11px;
+      }
+      .msg.a .bbl .reasoning-body .code-block {
+        margin: 10px 0;
+      }
+      .msg.a .bbl .reasoning-body pre {
+        padding: 11px;
+      }
+      .model-hint {
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--muted);
       }
       .assistant-note {
         margin-top: 16px;
@@ -1250,25 +1297,33 @@
           id="cb"
           class="btn-clear"
           type="button"
-          title="Start a new conversation"
-          aria-label="New chat"
+          title="Clear this conversation and start fresh"
+          aria-label="Clear chat"
         >
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <path
-              d="M10 4v12M4 10h12"
+              d="M5 6h10M8 6V4h4v2M6 6l1 10h6l1-10M9 9v4m2-4v4"
               stroke="currentColor"
               stroke-width="1.5"
               stroke-linecap="round"
+              stroke-linejoin="round"
             /></svg
-          >New chat
+          >Clear chat
         </button>
       </div>
       <div class="model-bar">
         <div class="model-controls">
           <label for="ms" class="model-label">Model</label
-          ><select id="ms" class="model-select" aria-label="Choose a model" title="Choose a model">
+          ><select
+            id="ms"
+            class="model-select"
+            aria-label="Choose a model"
+            title="Choose a model"
+            aria-describedby="model-hint"
+          >
             <option>Loading models…</option></select
-          ><button id="mbtn" class="model-action" type="button" hidden>Load</button>
+          ><button id="mbtn" class="model-action" type="button" hidden>Load</button
+          ><span id="model-hint" class="model-hint" role="status"></span>
         </div>
         <details class="runtime-details">
           <summary>Engine details <span aria-hidden="true">⌄</span></summary>
@@ -1404,6 +1459,69 @@
       let modelsReady = false,
         modelActionPending = false,
         modelConnectionFailed = false;
+      let modelCapabilities = {},
+        modelActionKind = '',
+        modelStateVersion = 0;
+      function setModelCapabilities(info) {
+        for (const key of [
+          'supports_model_management',
+          'supports_model_unload',
+          'supports_model_pull',
+        ]) {
+          if (typeof info?.[key] === 'boolean') modelCapabilities[key] = info[key];
+        }
+        if (typeof info?.supports_model_management !== 'boolean') {
+          const switching = info?.capabilities?.model_switching;
+          const management = info?.capabilities?.model_management;
+          if (typeof switching === 'boolean')
+            modelCapabilities.supports_model_management = switching;
+          else if (typeof management === 'boolean')
+            modelCapabilities.supports_model_management = management;
+        }
+      }
+      function modelCanLoad(model) {
+        return (
+          !!model &&
+          model.can_activate !== false &&
+          model.supported_on_current_gpu !== false &&
+          model.fits_current_gpu !== false &&
+          (modelCapabilities.supports_model_management === true ||
+            (modelCapabilities.supports_model_management !== false && model.managed))
+        );
+      }
+      function modelCanPull(model) {
+        return (
+          modelCanLoad(model) && model.managed && modelCapabilities.supports_model_pull !== false
+        );
+      }
+      function modelCanUnload() {
+        return modelCapabilities.supports_model_unload === true && !!activeModel();
+      }
+      function updateModelSelect() {
+        MS.disabled =
+          isGenerating ||
+          modelActionPending ||
+          models.length <= 1 ||
+          modelCapabilities.supports_model_management === false;
+        let reason =
+          modelCapabilities.supports_model_management === false
+            ? 'Model switching needs a server update'
+            : modelsReady && models.length <= 1
+              ? 'Only one model is available'
+              : '';
+        MS.title =
+          reason ||
+          (isGenerating
+            ? 'Wait for the current reply to finish'
+            : modelActionPending
+              ? modelActionKind
+              : 'Choose a model');
+        const hint = document.getElementById('model-hint');
+        if (hint) {
+          hint.textContent = reason;
+          hint.hidden = !reason;
+        }
+      }
       function showUiNotice(message, isError) {
         let notice = document.getElementById('ui-notice');
         if (!notice) return;
@@ -1414,7 +1532,10 @@
 
       async function performModelAction(model) {
         if (!model || modelActionPending || isGenerating || hasActiveDownload()) return;
+        if (model.active || !(model.installed ? modelCanLoad(model) : modelCanPull(model))) return;
         modelActionPending = true;
+        modelStateVersion++;
+        modelActionKind = model.installed ? 'Loading model…' : 'Starting download…';
         MS.disabled = true;
         CB.disabled = true;
         showUiNotice('');
@@ -1436,16 +1557,22 @@
             let error = await response.json().catch(() => ({}));
             throw new Error(error.error?.message || response.statusText || 'Please try again.');
           }
+          modelStateVersion++;
           if (!(await refreshModels())) {
             SS.textContent = 'Waiting for model status';
             return;
           }
-          if (model.installed) {
+          if (model.installed && activeModel()?.id === model.id) {
             resetConversation();
             SS.textContent = 'Model ready';
             I.focus();
+          } else if (model.installed) {
+            SS.textContent = 'Model was not activated';
+            showUiNotice('The selected model is not loaded. Choose it and try again.', true);
           } else SS.textContent = 'Download started';
         } catch (error) {
+          modelStateVersion++;
+          await refreshModels();
           SS.textContent = 'Model action failed';
           showUiNotice(
             (model.installed ? 'Could not load model. ' : 'Could not start download. ') +
@@ -1454,7 +1581,8 @@
           );
         } finally {
           modelActionPending = false;
-          MS.disabled = isGenerating || models.length <= 1;
+          modelActionKind = '';
+          updateModelSelect();
           CB.disabled = isGenerating;
           updateModelAction();
           updateComposerState();
@@ -1470,8 +1598,55 @@
         return model.recommended_for_chat === false ? ' \u00b7 Chat not recommended' : '';
       }
 
+      async function unloadModel() {
+        const model = activeModel();
+        if (
+          !model ||
+          !modelCanUnload() ||
+          modelActionPending ||
+          isGenerating ||
+          hasActiveDownload()
+        )
+          return;
+        modelActionPending = true;
+        modelActionKind = 'Unloading model…';
+        modelStateVersion++;
+        showUiNotice('');
+        setGenerating(false);
+        SS.textContent = modelActionKind;
+        try {
+          const response = await fetch(base + '/models/unload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: model.id }),
+          });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error?.message || response.statusText || 'Please try again.');
+          }
+          modelStateVersion++;
+          // The server confirmed eviction. Keep conversation/draft available while
+          // preventing another send from silently loading the evicted model.
+          models = models.map((item) => ({ ...item, active: false }));
+          runtimeMtpCapability = null;
+          setCurrentModel(null);
+          await refreshModels();
+          SS.textContent = 'Model unloaded · files kept';
+        } catch (error) {
+          modelStateVersion++;
+          await refreshModels();
+          SS.textContent = 'Could not unload model';
+          showUiNotice('Could not unload model. ' + (error.message || String(error)), true);
+        } finally {
+          modelActionPending = false;
+          modelActionKind = '';
+          setGenerating(false);
+          updateEmptyState();
+        }
+      }
+
       function renderModelPicker() {
-        let available = models.filter((m) => m.managed && m.supported_on_current_gpu);
+        let available = models.filter((m) => modelCanLoad(m) && (m.installed || modelCanPull(m)));
         let heading = modelsReady ? 'Choose your model' : 'Connecting to ZINC';
         let subtitle = modelsReady
           ? 'Your next idea starts here. Pick a model to get going.'
@@ -1498,7 +1673,7 @@
             badge = 'Verifying…';
             badgeClass = 'downloading';
             clickable = false;
-          } else if (!m.fits_current_gpu) {
+          } else if (m.fits_current_gpu === false) {
             badge = 'Needs more GPU memory';
             badgeClass = 'too-large';
             clickable = false;
@@ -1541,8 +1716,7 @@
             '<span class="card-badge ' + badgeClass + '">' + badge + '</span></span></button>';
         }
         if (modelsReady && !available.length)
-          html +=
-            '<p class="picker-sub">No compatible managed models are available for this device.</p>';
+          html += '<p class="picker-sub">No compatible models are available for this device.</p>';
         html += '</div></div>';
         if (renderModelPicker.lastHtml === html && M.querySelector('.model-picker')) return;
         M.innerHTML = html;
@@ -1673,6 +1847,8 @@
         if (noticeMessage) cleaned.notice_message = noticeMessage;
         const mtp = normalizeMtpResult(msg.mtp);
         if (msg.role === 'assistant' && mtp) cleaned.mtp = mtp;
+        if (msg.role === 'assistant' && typeof msg.reasoning_open === 'boolean')
+          cleaned.reasoning_open = msg.reasoning_open;
         return cleaned;
       }
 
@@ -1773,7 +1949,7 @@
       }
 
       function activeModel() {
-        return models.find((m) => m.active) || models[0] || null;
+        return models.find((m) => m.active) || null;
       }
 
       function activeModelSupportsThinking() {
@@ -2050,7 +2226,8 @@
             bbl.appendChild(details);
           }
           const body = nodes.reasoningBody;
-          const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+          const pinned =
+            nodes.reasoning.open && body.scrollHeight - body.scrollTop - body.clientHeight < 60;
           nodes.reasoningState.className = view.isThinking
             ? 'reasoning-state live'
             : 'reasoning-state';
@@ -2082,10 +2259,46 @@
       }
 
       function completeAssistantHtml(bbl, html, reasoningOpen) {
-        bbl.innerHTML = html;
-        const reasoning = bbl.querySelector('.reasoning-block');
-        if (reasoning && typeof reasoningOpen === 'boolean') reasoning.open = reasoningOpen;
+        const existing = bbl.querySelector('.reasoning-block');
+        const wasOpen = existing ? existing.open : reasoningOpen;
+        const body = existing?.querySelector('.reasoning-body');
+        const scroll = body?.scrollTop || 0;
+        const completed = existing ? document.createElement('div') : null;
+        if (completed) completed.innerHTML = html;
+        const placeholder = completed?.querySelector('.reasoning-block');
+        if (existing && placeholder) {
+          // Keep the live disclosure in place, including its selected text and scroll.
+          placeholder.remove();
+          for (const child of Array.from(bbl.children)) if (child !== existing) child.remove();
+          const state = existing.querySelector('.reasoning-state');
+          if (state) {
+            state.className = 'reasoning-state';
+            state.textContent = 'Reasoning';
+          }
+          completed.className = 'assistant-completed';
+          bbl.appendChild(completed);
+          existing.open = wasOpen;
+          if (body) body.scrollTop = scroll;
+        } else {
+          bbl.innerHTML = html;
+          const reasoning = bbl.querySelector('.reasoning-block');
+          if (reasoning && typeof wasOpen === 'boolean') reasoning.open = wasOpen;
+        }
+        liveAssistantNodes.delete(bbl);
         autoScroll();
+      }
+
+      const reasoningStateBindings = new WeakSet();
+      function bindReasoningState(bbl, message) {
+        const details = bbl.querySelector('.reasoning-block');
+        if (!details) return;
+        if (typeof message.reasoning_open === 'boolean') details.open = message.reasoning_open;
+        if (reasoningStateBindings.has(details)) return;
+        reasoningStateBindings.add(details);
+        details.addEventListener('toggle', () => {
+          message.reasoning_open = details.open;
+          scheduleChatStateSave();
+        });
       }
 
       function renderAssistantNotice(kind, title, message) {
@@ -2208,6 +2421,7 @@
         } else {
           bbl.innerHTML = message.content ? md(message.content) : '';
         }
+        bindReasoningState(bbl, message);
         if (message.notice_message) {
           bbl.insertAdjacentHTML(
             'beforeend',
@@ -2364,7 +2578,7 @@
 
       function updateModelAction() {
         let m = selectedModel();
-        MB.hidden = !m || !!m.active;
+        MB.hidden = !m || (!!m.active && !modelCanUnload());
         if (!m) {
           MB.textContent = 'Model';
           MB.disabled = true;
@@ -2373,13 +2587,16 @@
         MB.className = 'model-action';
         MB.disabled = modelActionPending || isGenerating || hasActiveDownload();
         if (modelActionPending) {
-          MB.textContent = 'Please wait…';
+          MB.textContent = modelActionKind || 'Please wait…';
           return;
         }
-        if (!m.managed) {
-          MB.textContent = 'Manual';
+        if (m.active) {
+          MB.textContent = 'Unload model';
+          return;
+        }
+        if (!(m.installed ? modelCanLoad(m) : modelCanPull(m))) {
+          MB.textContent = m.installed ? 'Unavailable' : 'Not installed';
           MB.disabled = true;
-          MB.classList.add('active');
           return;
         }
         if (m.download_phase === 'failed') {
@@ -2395,13 +2612,7 @@
           MB.textContent = 'Verifying';
           return;
         }
-        if (m.active) {
-          MB.textContent = 'Ready';
-          MB.disabled = true;
-          MB.classList.add('active');
-          return;
-        }
-        if (!m.fits_current_gpu) {
+        if (m.fits_current_gpu === false) {
           MB.textContent = 'Too large';
           MB.disabled = true;
           return;
@@ -2428,6 +2639,13 @@
       }
       function currentMtpCapability() {
         const model = activeModel();
+        if (modelsReady && !model)
+          return {
+            supports_mtp: false,
+            mtp_default_enabled: false,
+            mtp_request_control: false,
+            mtp_unavailable_reason: 'Load a model to use MTP.',
+          };
         return runtimeMtpCapability ? { ...model, ...runtimeMtpCapability } : model || {};
       }
       function activeModelSupportsMtp() {
@@ -2561,10 +2779,13 @@
       }
 
       async function refreshModels() {
+        const version = modelStateVersion;
         try {
           let response = await fetch(base + '/models');
           if (!response.ok) throw new Error('Model catalog is unavailable');
           let data = await response.json();
+          if (version !== modelStateVersion) return false;
+          setModelCapabilities(data);
           const previousActiveId = models.find((model) => model.active)?.id;
           models = Array.isArray(data.data) ? data.data : [];
           const nextActive = models.find((model) => model.active);
@@ -2584,7 +2805,7 @@
           let options = models.map((m) => {
             let label = m.display_name || m.id;
             if (m.active) label += ' · ready';
-            else if (!m.managed) label += ' · manual';
+            else if (!m.managed && !m.installed) label += ' · manual';
             else if (m.downloading) label += ' · downloading';
             else if (m.download_phase === 'verifying') label += ' · verifying';
             else if (m.installed) label += ' · installed';
@@ -2611,10 +2832,12 @@
           updateModelAction();
           updateThinkingUi();
           updateMtpUi();
-          MS.disabled = isGenerating || modelActionPending || models.length <= 1;
+          updateModelSelect();
+          updateComposerState();
           updateEmptyState();
           return true;
         } catch (error) {
+          if (version !== modelStateVersion) return false;
           modelConnectionFailed = true;
           showUiNotice(
             'Could not reach ZINC. Check that the server is running. Reconnecting…',
@@ -2631,22 +2854,29 @@
       }
 
       async function refreshHealth() {
+        const version = modelStateVersion;
         try {
           let response = await fetch(base.replace('/v1', '/health'));
           if (!response.ok) throw new Error('Health unavailable');
           let data = await response.json();
+          if (version !== modelStateVersion) return;
           if (data.status !== 'ok') throw new Error('Health unavailable');
           supportsChatSessionReset = data.capabilities?.chat_session_reuse === true;
+          setModelCapabilities(data);
           ST.textContent = 'Connected';
           ST.className = 'badge ok';
           setModelTag(data.model);
           setGpuMemory(data);
           setRuntimeMtpCapability(data);
           updateMtpUi();
+          updateModelAction();
+          updateModelSelect();
         } catch (error) {
-          supportsChatSessionReset = false;
-          ST.textContent = 'Reconnecting';
-          ST.className = 'badge';
+          if (version === modelStateVersion) {
+            supportsChatSessionReset = false;
+            ST.textContent = 'Reconnecting';
+            ST.className = 'badge';
+          }
         } finally {
           scheduleHealthRefresh(2000);
         }
@@ -2664,7 +2894,8 @@
       }
 
       function updateComposerState() {
-        B.disabled = !isGenerating && (!I.value.trim() || modelActionPending);
+        const needsModel = modelsReady && !activeModel();
+        B.disabled = !isGenerating && (!I.value.trim() || modelActionPending || needsModel);
         const status = document.getElementById('composer-status');
         if (status)
           status.textContent = isGenerating ? 'Generating a response. Press Escape to stop.' : '';
@@ -2672,7 +2903,9 @@
         if (hint)
           hint.textContent = isGenerating
             ? 'Esc to stop · Keep typing your next message'
-            : 'Enter to send · Shift+Enter for a new line';
+            : needsModel
+              ? 'Load a model to continue chatting'
+              : 'Enter to send · Shift+Enter for a new line';
       }
       function setGenerating(v) {
         isGenerating = v;
@@ -2682,7 +2915,7 @@
           : '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>';
         B.title = v ? 'Stop generating' : 'Send message';
         B.ariaLabel = B.title;
-        MS.disabled = v || modelActionPending || models.length <= 1;
+        updateModelSelect();
         CB.disabled = v || modelActionPending;
         updateModelAction();
         updateThinkingUi();
@@ -3157,20 +3390,8 @@
             ? md(liveText)
             : '<p><em>Thinking...</em></p>'
           : md(liveText);
-        let preview = isThinking
-          ? liveText
-            ? structured
-              ? ''
-              : reasoningPreview(liveText)
-            : 'Live reasoning stream'
-          : structured
-            ? ''
-            : reasoningPreview(thinkText);
         let stateClass = isThinking ? 'reasoning-state live' : 'reasoning-state';
         let stateText = isThinking ? 'Thinking' : 'Reasoning';
-        let previewHtml = preview
-          ? '<span class="reasoning-preview">' + esc(preview) + '</span>'
-          : '';
         return (
           '<details' +
           open +
@@ -3178,9 +3399,7 @@
           stateClass +
           '">' +
           stateText +
-          '</span>' +
-          previewHtml +
-          '</span></summary><div class="reasoning-body">' +
+          '</span></span></summary><div class="reasoning-body">' +
           body +
           '</div></details>'
         );
@@ -3514,95 +3733,29 @@
       }
 
       function normalizeDisplayView(view) {
-        if (!view) return view;
-        if (view.showReasoning && !view.isThinking && !(view.reasoning || '').trim()) {
-          return {
-            reasoning: '',
-            answer: view.answer,
-            showReasoning: false,
-            isThinking: false,
-            suppressedReasoning: true,
-          };
-        }
-        // When reasoning IS the answer, promote it — evaporate the thinking wrapper.
-        // (a) No separate answer, reasoning has substantial content, and it's not genuine meta-reasoning.
-        // (b) Answer duplicates reasoning: promote.
-        // (c) Reasoning looks like an answer and is longer than actual answer: promote.
+        if (!view || !view.showReasoning) return view;
+        const reasoning = (view.reasoning || '').trim();
+        if (!reasoning && !view.isThinking)
+          return { ...view, reasoning: '', showReasoning: false, suppressedReasoning: true };
+        // Model-provided reasoning remains available throughout the response. Never
+        // replace a separate answer based on the length or wording of its reasoning.
         if (
-          view.showReasoning &&
+          reasoning &&
           !view.isThinking &&
-          (view.reasoning || '').trim().length >= 80 &&
           !view.answer &&
-          !reasoningIsLowSignal(view.reasoning) &&
-          !looksLikeGenuineReasoning(view.reasoning)
+          reasoning.length >= 80 &&
+          !reasoningIsLowSignal(reasoning) &&
+          !looksLikeGenuineReasoning(reasoning)
         ) {
-          return {
-            reasoning: '',
-            answer: view.reasoning,
-            showReasoning: false,
-            isThinking: false,
-            promotedReasoning: true,
-          };
+          return { ...view, answer: reasoning, promotedReasoning: true };
         }
-        if (view.showReasoning && !view.isThinking && reasoningLooksLikeAnswer(view.reasoning)) {
-          let best =
-            !view.answer || view.reasoning.length >= view.answer.length
-              ? view.reasoning
-              : view.answer;
-          return {
-            reasoning: '',
-            answer: best,
-            showReasoning: false,
-            isThinking: false,
-            promotedReasoning: true,
-          };
-        }
-        if (reasoningDuplicatesAnswer(view.reasoning, view.answer)) {
-          return {
-            reasoning: '',
-            answer: view.answer,
-            showReasoning: false,
-            isThinking: false,
-            promotedReasoning: true,
-          };
-        }
-        if (
-          view.showReasoning &&
-          view.isThinking &&
-          !view.answer &&
-          reasoningLooksLikeAnswer(view.reasoning)
-        ) {
-          return {
-            reasoning: '',
-            answer: '',
-            showReasoning: true,
-            isThinking: true,
-            deferredReasoning: true,
-          };
-        }
-        if (!view.showReasoning || !reasoningIsLowSignal(view.reasoning)) return view;
-        if (view.isThinking) {
-          return {
-            reasoning: '',
-            answer: view.answer,
-            showReasoning: true,
-            isThinking: true,
-            deferredReasoning: true,
-            suppressedReasoning: true,
-          };
-        }
-        return {
-          reasoning: '',
-          answer: view.answer,
-          showReasoning: false,
-          isThinking: view.isThinking,
-          suppressedReasoning: true,
-        };
+        return view;
       }
 
       function splitDisplayContent(raw, isThinking) {
         let text = raw || '';
-        if (!isThinking) text = trimLeakedNoThinkingOutput(text);
+        // Extract the model's reasoning before cleaning the answer. Applying the
+        // answer-only planning filter to this envelope can erase reasoning mid-turn.
         let thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/);
         let thinkPartial = !thinkMatch && text.match(/<think>([\s\S]*)$/);
         let implicitThinkClose =
@@ -3634,10 +3787,11 @@
         if (looksLikePlainReasoning(trimmed)) {
           if (!isThinking) {
             return {
-              reasoning: '',
+              reasoning: trimmed,
               answer: trimmed,
-              showReasoning: false,
+              showReasoning: true,
               isThinking: false,
+              promotedReasoning: true,
             };
           }
           return {
@@ -3704,7 +3858,7 @@
           stopGeneration();
           return;
         }
-        if (modelActionPending) return;
+        if (modelActionPending || (modelsReady && !activeModel())) return;
         let t = I.value.trim();
         if (!t) return;
         I.value = '';
@@ -3964,7 +4118,7 @@
         }
         clearStallTimer();
         flushPendingRender();
-        const liveReasoningOpen = bbl.querySelector('.reasoning-block')?.open;
+        let liveReasoningOpen = bbl.querySelector('.reasoning-block')?.open;
         if (cur.parentNode) cur.remove();
         bbl.classList.remove('streaming');
         highlightAll();
@@ -4014,6 +4168,7 @@
           }
           clearStallTimer();
         }
+        liveReasoningOpen = bbl.querySelector('.reasoning-block')?.open ?? liveReasoningOpen;
         activeController = null;
         stopRequested = false;
         setGenerating(false);
@@ -4033,6 +4188,7 @@
         let incomplete = stopped || !!notice;
         if (draftEntry) {
           if (mtpResult) draftEntry.mtp = mtpResult;
+          if (typeof liveReasoningOpen === 'boolean') draftEntry.reasoning_open = liveReasoningOpen;
           if (cleanAnswer) {
             draftEntry.content = cleanAnswer;
             draftEntry.transport = historyTransportContent(
@@ -4074,10 +4230,15 @@
             );
             highlightAll();
           } else {
-            bbl.innerHTML = renderAssistantNotice(
-              'warn',
-              'Generation stopped',
-              'Stopped before any final answer was returned.',
+            completeAssistantHtml(
+              bbl,
+              finalRendered.html +
+                renderAssistantNotice(
+                  'warn',
+                  'Generation stopped',
+                  'Stopped before any final answer was returned.',
+                ),
+              liveReasoningOpen,
             );
           }
           let el = (performance.now() - t0) / 1000;
@@ -4089,6 +4250,7 @@
             liveMeta.textContent = 'stopped \u00b7 ' + el.toFixed(1) + 's';
           }
           showMtpResult(mtpResult, liveMeta);
+          if (draftEntry) bindReasoningState(bbl, draftEntry);
           return;
         }
         if (!cleanAnswer && notice) {
@@ -4149,6 +4311,7 @@
           liveMeta.textContent = fallbackNotice.title.toLowerCase();
         }
         showMtpResult(mtpResult, liveMeta);
+        if (draftEntry) bindReasoningState(bbl, draftEntry);
         saveChatState();
       }
 
@@ -4277,6 +4440,8 @@
       MS.addEventListener('change', () => {
         updateDownloadUi();
         updateModelAction();
+        const model = selectedModel();
+        if (model?.installed && !model.active && modelCanLoad(model)) performModelAction(model);
       });
       CB.addEventListener('click', clearConversation);
       // Another tab changed the shared chat state (e.g. cleared it): adopt it, so this tab's
@@ -4311,13 +4476,11 @@
       });
       MB.addEventListener('click', () => {
         let model = selectedModel();
-        if (
-          model &&
-          model.managed &&
-          !model.active &&
-          !model.downloading &&
-          model.download_phase !== 'verifying'
-        )
+        if (model?.active) {
+          unloadModel();
+          return;
+        }
+        if (model && !model.downloading && model.download_phase !== 'verifying')
           performModelAction(model);
       });
       function resizeComposer() {

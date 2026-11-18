@@ -61,10 +61,12 @@ pub const ModelSummary = struct {
 pub const ModelCatalogView = struct {
     profile: []const u8,
     data: []ModelSummary,
+    owned_active_name: ?[]u8 = null,
 
     /// Free the owned catalog summary slice.
     pub fn deinit(self: *ModelCatalogView, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
+        if (self.owned_active_name) |name| allocator.free(name);
         self.* = undefined;
     }
 };
@@ -222,6 +224,33 @@ pub const ModelManager = struct {
         return if (self.current) |current| current.display_name else "none";
     }
 
+    /// Copy the active name for readers that outlive the state lock.
+    pub fn activeDisplayNameAlloc(self: *ModelManager, allocator: std.mem.Allocator) ![]u8 {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return allocator.dupe(u8, if (self.current) |current| current.display_name else "none");
+    }
+
+    /// Release model GPU resources while preserving cached weights and the
+    /// persisted selection. An optional expected id prevents a stale UI from
+    /// unloading a model that another client just activated.
+    /// @note Caller must hold the shared generation lock.
+    pub fn unloadActiveModel(self: *ModelManager, expected_id: []const u8) !bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        const current = self.current orelse return false;
+        if (expected_id.len > 0) {
+            const entry = catalog_mod.findForLoadedModel(current.managed_id, current.model_path, current.display_name);
+            const active_id = if (entry) |matched| matched.id else current.display_name;
+            if (!std.mem.eql(u8, expected_id, active_id)) return error.ActiveModelChanged;
+        }
+        self.current = null;
+        current.deinit(self.allocator);
+        self.allocator.destroy(current);
+        self.gpu_process_lock.deinit();
+        return true;
+    }
+
     /// Return the catalog profile string used for the active Metal device.
     pub fn catalogProfile(self: *const ModelManager) []const u8 {
         return self.profile;
@@ -276,6 +305,8 @@ pub const ModelManager = struct {
 
         var list: std.ArrayList(ModelSummary) = .empty;
         defer list.deinit(allocator);
+        var owned_active_name: ?[]u8 = null;
+        errdefer if (owned_active_name) |name| allocator.free(name);
 
         for (catalog_mod.entries) |entry| {
             const tested_profile_match = catalog_mod.supportsProfileForBackend(entry, self.profile, managed_mod.catalog_backend);
@@ -327,9 +358,10 @@ pub const ModelManager = struct {
         }
 
         if (self.current != null and active_catalog_id == null) {
+            owned_active_name = try allocator.dupe(u8, active_display_name);
             try list.append(allocator, .{
-                .id = active_display_name,
-                .display_name = active_display_name,
+                .id = owned_active_name.?,
+                .display_name = owned_active_name.?,
                 .release_date = "",
                 .homepage_url = "",
                 .family = "",
@@ -352,6 +384,7 @@ pub const ModelManager = struct {
         return .{
             .profile = self.profile,
             .data = try list.toOwnedSlice(allocator),
+            .owned_active_name = owned_active_name,
         };
     }
 
@@ -780,4 +813,61 @@ test "discovery snapshots preserve idle state and a raw model's public ID" {
     // The snapshot remains valid if the loaded resource's name changes.
     resources.display_name[0] = 'x';
     try std.testing.expectEqualStrings("local-model.gguf", loaded.display_name);
+}
+
+test "unloadActiveModel is idempotent when no model is loaded" {
+    var fake: ModelManager = undefined;
+    fake.state_mutex = .{};
+    fake.current = null;
+    try std.testing.expect(!try fake.unloadActiveModel(""));
+    try std.testing.expect(!try fake.unloadActiveModel("previous-model"));
+    try std.testing.expect(fake.current == null);
+}
+
+test "unloadActiveModel rejects a stale model id before touching GPU resources" {
+    var fake: ModelManager = undefined;
+    fake.state_mutex = .{};
+    var current: LoadedResources = undefined;
+    current.managed_id = null;
+    current.model_path = try std.testing.allocator.dupe(u8, "/fixtures/custom-local-model.gguf");
+    defer std.testing.allocator.free(current.model_path);
+    current.display_name = try std.testing.allocator.dupe(u8, "custom-local-model");
+    defer std.testing.allocator.free(current.display_name);
+    fake.current = &current;
+    try std.testing.expectError(error.ActiveModelChanged, fake.unloadActiveModel("different-model"));
+    try std.testing.expect(fake.current == &current);
+    const copied = try fake.activeDisplayNameAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(copied);
+    current.display_name[0] = 'X';
+    try std.testing.expectEqualStrings("custom-local-model", copied);
+}
+
+test "raw model catalog snapshot owns the name across unload or replacement" {
+    var fake: ModelManager = undefined;
+    fake.allocator = std.testing.allocator;
+    fake.state_mutex = .{};
+    fake.vram_budget_bytes = 0;
+    fake.profile = "test-empty";
+    var current: LoadedResources = undefined;
+    current.managed_id = null;
+    current.tokenizer = undefined;
+    current.tokenizer.chat_template = null;
+    current.model_path = try std.testing.allocator.dupe(u8, "/fixtures/custom-local-model.gguf");
+    defer std.testing.allocator.free(current.model_path);
+    current.display_name = try std.testing.allocator.dupe(u8, "custom-local-model");
+    defer std.testing.allocator.free(current.display_name);
+    fake.current = &current;
+    var view = try fake.collectCatalogView(std.testing.allocator, false);
+    defer view.deinit(std.testing.allocator);
+    fake.current = null;
+    @memset(current.display_name, 'X');
+    var found = false;
+    for (view.data) |entry| {
+        if (!entry.managed) {
+            found = true;
+            try std.testing.expectEqualStrings("custom-local-model", entry.id);
+            try std.testing.expectEqualStrings("custom-local-model", entry.display_name);
+        }
+    }
+    try std.testing.expect(found);
 }
