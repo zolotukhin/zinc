@@ -165,6 +165,27 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 soak.memory_bytes(text)
 
+    def test_intel_xe_numbered_vram_regions_keep_the_dedicated_memory_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            folder = proc / '9'
+            (folder / 'fd').mkdir(parents=True)
+            (folder / 'fdinfo').mkdir()
+            (folder / 'status').write_text('VmRSS: 4096 kB\n')
+            # Follow the kernel's documented Xe format. Total/shared/active and
+            # amdgpu compatibility aliases must not double-count residency.
+            fields = ('drm-driver: xe\ndrm-client-id: 3\ndrm-pdev: fixture-device\n'
+                      'drm-resident-vram0: 1 MiB\ndrm-resident-vram1: 2048 KiB\n'
+                      'drm-resident-system: 0\ndrm-resident-gtt: 512 KiB\ndrm-resident-stolen: 0\n'
+                      'drm-total-vram0: 1024 MiB\ndrm-shared-vram0: 16 MiB\ndrm-active-vram0: 1 MiB\n'
+                      'drm-memory-vram: 100 MiB\n')
+            for descriptor in ['3', '4']:
+                (folder / 'fd' / descriptor).touch()
+                (folder / 'fdinfo' / descriptor).write_text(fields)
+            self.assertEqual(soak.read_metrics(9, proc),
+                             dict(rss_bytes=4 * soak.MIB, vram_bytes=3 * soak.MIB,
+                                  gpu_host_bytes=512 * 1024, fds=2))
+
     def test_client_enforces_stream_terminal_marker_and_deadline(self):
         client = soak.Client(1, time.monotonic() + 5)
         for payload, valid in [(b'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n', True),

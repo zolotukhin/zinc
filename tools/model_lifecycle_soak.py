@@ -61,8 +61,12 @@ def read_metrics(pid, proc=Path('/proc')):
         require(names, "GPU process does not expose DRM memory telemetry")
         # Include GTT/system allocations: watching dedicated VRAM alone would
         # miss a leak that the driver silently spills to host-visible memory.
-        resident = (sum(memory_bytes(fields[name]) for name in names if name.endswith(('-vram', '-local'))),
-                    sum(memory_bytes(fields[name]) for name in names if not name.endswith(('-vram', '-local'))))
+        # Xe numbers its dedicated regions (vram0, vram1); treating those as
+        # host memory would apply the wrong release budget on Intel.
+        # https://docs.kernel.org/gpu/xe/xe-drm-usage-stats.html
+        local = {name for name in names if re.fullmatch(r'drm-(?:resident|memory)-(?:vram|local)\d*', name)}
+        resident = (sum(memory_bytes(fields[name]) for name in names if name in local),
+                    sum(memory_bytes(fields[name]) for name in names if name not in local))
         clients[key] = tuple(max(a, b) for a, b in zip(clients.get(key, (0, 0)), resident))
     require(clients, "GPU process DRM memory telemetry is unavailable")
     return dict(rss_bytes=memory_bytes(status['VmRSS']), vram_bytes=sum(value[0] for value in clients.values()),
