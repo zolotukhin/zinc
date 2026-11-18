@@ -162,6 +162,7 @@ comptime {
     _ = @import("gpu/attention_window.zig");
     _ = @import("gpu/upload_plan.zig");
     _ = @import("gpu/native_memory_estimate.zig");
+    _ = @import("compute/native_init_guard.zig");
     _ = diagnostic_report;
     _ = capabilities_mod;
     _ = @import("gpu/prefill_policy.zig");
