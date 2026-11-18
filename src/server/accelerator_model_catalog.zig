@@ -43,15 +43,46 @@ pub const Inventory = struct {
     /// `include_managed` permits hermetic filesystem tests without inspecting
     /// the user's cache. Production calls `init` and includes installed models.
     pub fn collect(allocator: std.mem.Allocator, initial_path: []const u8, budget_bytes: u64, include_managed: bool) !Inventory {
+        var paths: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (paths.items) |path| allocator.free(path);
+            paths.deinit(allocator);
+        }
+        if (include_managed) {
+            for (catalog.entries) |entry| {
+                const path = managed.resolveInstalledModelPath(entry.id, allocator) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => continue,
+                };
+                paths.append(allocator, path) catch |err| {
+                    allocator.free(path);
+                    return err;
+                };
+            }
+        }
+        return collectPaths(allocator, initial_path, budget_bytes, paths.items);
+    }
+
+    fn collectPaths(allocator: std.mem.Allocator, initial_path: []const u8, budget_bytes: u64, managed_paths: []const []const u8) !Inventory {
         var self = Inventory{ .allocator = allocator };
         errdefer self.deinit();
         const absolute = try std.Io.Dir.cwd().realPathFileAlloc(host_io.io, initial_path, allocator);
         defer allocator.free(absolute);
-        // The explicitly supplied startup path is authorized by the operator.
-        // Canonicalize it first, then admit only the resulting regular file.
-        try self.addFile(absolute, budget_bytes, false, true);
+        // Resolve directory traversal from the canonical target while retaining
+        // the operator path long enough to recognize a managed catalog ID.
+        try self.addFile(initial_path, budget_bytes, false, true);
         if (self.entries.items.len == 0) return error.InvalidInitialModel;
         self.initial_model_id = self.entries.items[0].id;
+
+        // Explicit startup selection wins. For every other ID, an installed
+        // managed model wins over a same-named file discovered beside it.
+        // This keeps stale copies from shadowing release-pinned cache entries.
+        for (managed_paths) |path| {
+            self.addFile(path, budget_bytes, true, false) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => continue,
+            };
+        }
 
         const parent = std.fs.path.dirname(absolute) orelse return error.InvalidInitialModel;
         var dir = try std.Io.Dir.openDirAbsolute(host_io.io, parent, .{ .iterate = true });
@@ -62,19 +93,6 @@ pub const Inventory = struct {
             const path = try std.fs.path.join(allocator, &.{ parent, item.name });
             defer allocator.free(path);
             try self.addFile(path, budget_bytes, false, false);
-        }
-        if (include_managed) {
-            for (catalog.entries) |entry| {
-                const path = managed.resolveInstalledModelPath(entry.id, allocator) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
-                    else => continue,
-                };
-                defer allocator.free(path);
-                self.addFile(path, budget_bytes, true, false) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
-                    else => continue,
-                };
-            }
         }
         return self;
     }
@@ -97,11 +115,14 @@ pub const Inventory = struct {
         // additional files depends on the suffix; metadata validation still
         // decides whether the startup file is a supported GGUF.
         if (!is_initial and !isGguf(std.fs.path.basename(path))) return;
-        const size = regularFileSize(path) catch return;
         const canonical = try std.Io.Dir.cwd().realPathFileAlloc(host_io.io, path, self.allocator);
         defer self.allocator.free(canonical);
+        // Curated cache links and explicit startup links are operator-selected.
+        // Arbitrary symlink siblings remain excluded by directory iteration and
+        // the no-follow regular-file check.
+        const size = regularFileSize(if (is_initial or is_managed) canonical else path) catch return;
         for (self.entries.items) |entry| if (std.mem.eql(u8, entry.path, canonical)) return;
-        const known = catalog.findForLoadedModel(null, canonical, "");
+        const known = catalog.findForLoadedModel(null, path, "") orelse catalog.findForLoadedModel(null, canonical, "");
         var entry = Entry{};
         errdefer entry.deinit(self.allocator);
         entry.id = if (known) |model| try self.allocator.dupe(u8, model.id) else blk: {
@@ -109,8 +130,8 @@ pub const Inventory = struct {
             std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
             break :blk try std.fmt.allocPrint(self.allocator, "local-{s}", .{std.fmt.bytesToHex(digest[0..12], .lower)});
         };
-        // A curated file in the startup directory takes precedence over another
-        // copy in the cache. Either ID always resolves to one recorded path.
+        // Keep the explicit startup entry or earlier managed selection. Either
+        // ID always resolves to one immutable, recorded canonical path.
         if (self.find(entry.id) != null) {
             entry.deinit(self.allocator);
             return;
@@ -125,7 +146,8 @@ pub const Inventory = struct {
         entry.fits_current_gpu = budget_bytes == 0 or entry.required_vram_bytes <= budget_bytes;
         entry.fit_source = if (known != null) "catalog" else "estimate";
         // An unrecognized sibling is not implicitly validated merely because
-        // its extension is GGUF. The startup file already loaded successfully.
+        // its extension is GGUF. The explicit startup selection is validated
+        // before any resources are loaded.
         entry.supported_on_current_gpu = is_initial or (if (known) |model| backendMatches(model.*) else false);
         entry.can_activate = entry.supported_on_current_gpu;
         entry.managed = is_managed;
@@ -261,4 +283,51 @@ test "accelerator inventory cleans partial allocations and duplicate catalog ids
     const path = try tmp.dir.realPathFileAlloc(host_io.io, known.file_name, allocator);
     defer allocator.free(path);
     try std.testing.checkAllAllocationFailures(allocator, allocationFixture, .{path});
+}
+
+test "managed cache links take precedence over stale discovered siblings" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const start = catalog.find("qwen38-27b-q4k-m").?;
+    const other = catalog.find("gemma4-31b-q4k-m").?;
+    try tmp.dir.writeFile(host_io.io, .{ .sub_path = start.file_name, .data = "startup" });
+    try tmp.dir.writeFile(host_io.io, .{ .sub_path = other.file_name, .data = "stale" });
+    try tmp.dir.writeFile(host_io.io, .{ .sub_path = "pinned-blob", .data = "current-pinned-bytes" });
+    try tmp.dir.createDir(host_io.io, other.id, .default_dir);
+    const link = try std.fs.path.join(allocator, &.{ other.id, "model.gguf" });
+    defer allocator.free(link);
+    try tmp.dir.symLink(host_io.io, "../pinned-blob", link, .{});
+    const initial = try tmp.dir.realPathFileAlloc(host_io.io, start.file_name, allocator);
+    defer allocator.free(initial);
+    const parent = std.fs.path.dirname(initial).?;
+    const managed_path = try std.fs.path.join(allocator, &.{ parent, link });
+    defer allocator.free(managed_path);
+    var inventory = try Inventory.collectPaths(allocator, initial, 0, &.{managed_path});
+    defer inventory.deinit();
+    const selected = inventory.find(other.id).?;
+    try std.testing.expect(selected.managed);
+    try std.testing.expectEqual(@as(u64, "current-pinned-bytes".len), selected.size_bytes);
+    try std.testing.expectEqualStrings("pinned-blob", std.fs.path.basename(selected.path));
+    try std.testing.expectEqualStrings(start.id, inventory.initial_model_id);
+}
+
+test "explicit managed startup keeps its catalog id when the cache link targets a blob" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const known = catalog.find("qwen38-27b-q4k-m").?;
+    try tmp.dir.writeFile(host_io.io, .{ .sub_path = "pinned-blob", .data = "fixture" });
+    try tmp.dir.createDir(host_io.io, known.id, .default_dir);
+    const link = try std.fs.path.join(allocator, &.{ known.id, "model.gguf" });
+    defer allocator.free(link);
+    try tmp.dir.symLink(host_io.io, "../pinned-blob", link, .{});
+    const blob = try tmp.dir.realPathFileAlloc(host_io.io, "pinned-blob", allocator);
+    defer allocator.free(blob);
+    const path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(blob).?, link });
+    defer allocator.free(path);
+    var inventory = try Inventory.collectPaths(allocator, path, 0, &.{});
+    defer inventory.deinit();
+    try std.testing.expectEqualStrings(known.id, inventory.initial_model_id);
+    try std.testing.expectEqualStrings(blob, inventory.find(known.id).?.path);
 }

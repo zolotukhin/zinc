@@ -346,6 +346,19 @@ def aggregate(args):
                 prefill = model.get("prefill_cancellation") or {}
                 require(prefill.get("passed") is True and type(prefill.get("recovery_ms")) is int and
                         0 <= prefill["recovery_ms"] < 10000, "missing or failed active-prefill cancellation evidence")
+        soak_spec = policy().get("lifecycle_soak")
+        if soak_spec and spec["target"].endswith(("vulkan", "rocm")):
+            from model_lifecycle_soak import verify_report
+            require(checks.get("lifecycle_soak") is True, "missing packaged lifecycle soak checks")
+            verify_report(report.get("lifecycle_soak"), profile["models"], spec["target"].rsplit("-", 1)[1],
+                          soak_spec, artifact["binary_sha256"],
+                          {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]},
+                          policy()["reference"]["agreement"]["cases"])
+        failure_specs = policy().get("allocation_failure_probes", {}).get(identifier, [])
+        if failure_specs:
+            from model_lifecycle_soak import verify_allocation_failures
+            require(checks.get("allocation_failure_recovery") is True, "missing allocation failure recovery checks")
+            verify_allocation_failures(report.get("allocation_failures"), failure_specs, artifact["binary_sha256"])
         reference = report.get("reference", {})
         require(reference.get("commit") == policy()["reference"]["commit"] and all(re.fullmatch(r"[0-9a-f]{64}", reference.get(key, "")) for key in ("server_sha256", "tokenizer_sha256")),
                 "missing pinned reference evidence")
@@ -402,6 +415,20 @@ def release_changes(release_version, directory=None):
     return path.read_text().strip() if path.is_file() else ""
 
 
+def model_lifecycle_notes(validation):
+    # Historical releases have no lifecycle certificate. Describe the new
+    # controls only when every Linux profile qualified them on its archive.
+    linux = [p for p in validation.get("profiles", []) if p.get("target", "").startswith("linux-")]
+    qualified = linux and all(p.get("checks", {}).get("lifecycle_soak") is True and
+                              p.get("lifecycle_soak", {}).get("status") == "passed" for p in linux)
+    if qualified:
+        return ("Linux archives support installed-model switching and unload/reload without deleting cached weights. "
+                "Model discovery advertises the available controls; native model downloads/removal still use the model CLI. "
+                "Browser availability and per-model MTP controls are reported by capability discovery.")
+    return ("Vulkan includes browser chat and model management. HIP exposes CLI/HTTP chat and completion routes for the startup model; "
+            "hot model switching remains unavailable. Browser availability is version-specific and reported by capability discovery.")
+
+
 def finalize(args):
     directory = Path(args.directory)
     data = verify_candidate(directory)
@@ -409,7 +436,10 @@ def finalize(args):
     require(validation.get("status") == "passed" and validation.get("manifest_sha256") == sha256(directory / "release-manifest.json"), "candidate is not validated")
     shutil.copyfile(ROOT / "scripts/install.sh", directory / "install.sh")
     shutil.copyfile(ROOT / "config/release/targets.json", directory / "release-policy.json")
-    backends = [target(a["target"])["backend"].capitalize() if target(a["target"])["backend"] != "rocm" else "ROCm" for a in data["artifacts"]]
+    # Present AMD's preferred native backend first without changing the frozen
+    # manifest or the archive identities that hardware qualification tested.
+    downloads = sorted(data["artifacts"], key=lambda a: {"rocm": 0, "vulkan": 1, "metal": 2}[target(a["target"])["backend"]])
+    backends = [target(a["target"])["backend"].capitalize() if target(a["target"])["backend"] != "rocm" else "ROCm" for a in downloads]
     label = " and ".join(backends)
     metal = any(a["target"] == "macos-aarch64-metal" for a in data["artifacts"])
     notes = [f"# ZINC v{data['version']}", "", label + " binaries built from [" + data["commit"] + "](https://github.com/zolotukhin/zinc/commit/" + data["commit"] + ").", "",
@@ -418,7 +448,7 @@ def finalize(args):
     if changes:
         notes.extend(["## Changes in this version", "", changes, ""])
     notes.extend(["## Downloads", "", "| Archive | Runtime |", "| --- | --- |"])
-    for artifact in data["artifacts"]:
+    for artifact in downloads:
         url = "https://github.com/zolotukhin/zinc/releases/download/v" + data["version"] + "/" + artifact["filename"]
         notes.append(f"| [{artifact['filename']}]({url}) | {target(artifact['target'])['runtime']} |")
     notes.extend(["", "Verify archive hashes with `SHA256SUMS.txt`. The signed provenance in `provenance.jsonl` covers the archives, installer and validation report.", "",
@@ -436,7 +466,7 @@ def finalize(args):
         models = ", ".join("`" + m["id"] + "` (" + str(m["context"]) + ")" for m in report["models"])
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
     notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU memory. Intel Macs, musl, Linux ARM64 and native Windows have no archive in this release.", "",
-                  "Vulkan includes browser chat and model management. HIP exposes CLI/HTTP chat and completion routes for the startup model; hot model switching remains unavailable. Browser availability is version-specific and reported by capability discovery.", "",
+                  model_lifecycle_notes(validation), "",
                   "Release checks use greedy decoding, one slot and each backend's default KV/MTP settings. The pinned native reference uses F32 K/V. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
                   "## Known performance limits", "",
                   "Earlier Intel GPU diagnostics show slower decode than llama.cpp on all seven models and mixed prefill results. Loading-time and temporary-memory improvements do not establish inference-throughput parity. These source-specific measurements are separate from this candidate's correctness certification. See the [Intel performance report](https://github.com/zolotukhin/zinc/blob/" + data["commit"] + "/docs/INTEL_PERFORMANCE.md) for the tested archive, settings and remaining gaps.", "",

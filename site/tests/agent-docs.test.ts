@@ -83,3 +83,18 @@ test('release notices distinguish stable installation, mixed guides and current 
   }
   expect(docsReleaseStatus('zig-api/compute-forward').channel).toBe('development');
 });
+
+test('both agent indexes scope native lifecycle controls by release and live discovery', () => {
+  for (const render of [renderLlmsTxt, renderLlmsFullTxt]) {
+    const text = render(index, [], 'https://example.test/');
+    expect(text).toContain(
+      'Stable 0.1.1 HIP provides CLI/HTTP chat without browser UI or model switching',
+    );
+    expect(text).toContain('Current HIP source adds browser chat');
+    expect(text).toContain(
+      'current HIP/CUDA source advertises installed-model switching and unload',
+    );
+    expect(text).toContain('Enable controls through live capability discovery');
+    expect(text).not.toContain('native HIP/CUDA do not offer hot model management');
+  }
+});

@@ -220,6 +220,10 @@ def write_json(path, value):
 def policy(path=None):
     data = read_json(path or ROOT / "config/release/targets.json")
     require(data.get("schema_version") == 1, "unsupported release policy")
+    soak_spec = data.get("lifecycle_soak")
+    if soak_spec is not None:
+        from model_lifecycle_soak import policy_settings
+        policy_settings(soak_spec)
     ids = [t["id"] for t in data["targets"]]
     require(len(ids) == len(set(ids)) == 3, "release requires three unique targets")
     require({t["backend"] for t in data["targets"]} == {"vulkan", "metal", "rocm"}, "unexpected release backends")
@@ -237,6 +241,17 @@ def policy(path=None):
         require((window is None and not model["id"].startswith("gemma4-")) or
                 (type(window) is int and 0 < window and window + 256 <= model["context"]),
                 "Gemma policy requires a sliding-window boundary reference")
+    probes = data.get("allocation_failure_probes", {})
+    require(isinstance(probes, dict), "invalid allocation failure policy")
+    for identifier, cases in probes.items():
+        profile = next((p for p in profiles if p["id"] == identifier), None)
+        require(profile is not None and profile["target"].endswith("rocm") and isinstance(cases, list) and cases,
+                "allocation failure probes require a native Linux profile")
+        for case in cases:
+            require(isinstance(case, dict) and set(case) == {"initial_model", "replacement_model", "context"} and
+                    case["initial_model"] in profile["models"] and case["replacement_model"] in profile["models"] and
+                    case["initial_model"] != case["replacement_model"] and type(case["context"]) is int and
+                    2048 <= case["context"] <= 262144, "invalid allocation failure probe")
     require(all(p.get("models") and set(p["models"]).issubset(model_ids) and len(set(p["models"])) == len(p["models"]) for p in profiles),
             "GPU profile is missing its required model matrix")
     source_sha(data["reference"]["commit"])

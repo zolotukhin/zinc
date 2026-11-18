@@ -84,6 +84,7 @@ function clientGuidance(base: string): string[] {
     '4. Use the standalone helper linked from the client guide. Run its setup and check commands before a task; verify the outcome independently.',
     '',
     'Structured discovery (0.1.1+): zinc serve, --no-browser, --version --json, --check --json and GET /v1/capabilities are released features. Check zinc --help for the installed version. Discovery includes build identity, backend, active_model, context_length and capabilities. On older servers, use /health and /v1/models; absent capabilities are unknown.',
+    'Stable 0.1.1 HIP provides CLI/HTTP chat without browser UI or model switching. Current HIP source adds browser chat; current HIP/CUDA source advertises installed-model switching and unload. Enable controls through live capability discovery.',
     'Memory fit and protocol capabilities do not prove task quality. Never assume context size, model switching, tools or sampling support from a backend name alone.',
     '',
   ];
@@ -125,7 +126,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     '',
     '## Guidance',
     '- Use the Zig API for internal implementation details, symbols, signatures, and module relationships.',
-    '- Use the Serving HTTP API page and its backend coverage matrix for client-facing contracts. HIP browser chat is a development feature, absent from stable 0.1.1; native HIP/CUDA do not offer hot model management.',
+    '- Use the Serving HTTP API page and its backend coverage matrix for client-facing contracts.',
     '- For code analysis, use the Zig API JSON export. For a running server, use health, models and capability discovery.',
     '',
   ].join('\n');

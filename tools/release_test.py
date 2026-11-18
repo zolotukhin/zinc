@@ -1274,12 +1274,80 @@ class ReleaseTest(unittest.TestCase):
                 report["rocm_kernel_reference"] = {"passed": True, "cases": 305,
                     "kernel_source_sha256": sha256(ROOT / "src/shaders/cuda/kernels.cu"),
                     "validator_source_sha256": sha256(ROOT / "tools/validate_rocm_partial_tiles.c")}
+            if profile["target"].endswith(("rocm", "vulkan")):
+                from model_lifecycle_soak import policy_settings
+                spec = policy()["lifecycle_soak"]
+                settings = policy_settings(spec)
+                report["checks"]["lifecycle_soak"] = True
+                report["lifecycle_soak"] = dict(schema_version=1, status="passed", failure_stage=None,
+                    backend=target(profile["target"])["backend"], binary_sha256=artifact["binary_sha256"],
+                    models=profile["models"], options=settings, context=spec["context"], cleanup=True,
+                    telemetry="drm-process-resident", model_sizes={m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]},
+                    completed_cycles=settings["cycles"],
+                    operations=(settings["cycles"] + settings["warmup"]) * len(profile["models"]),
+                    direct_switches=(settings["cycles"] + settings["warmup"]) * (len(profile["models"]) - 1),
+                    reference_cases=(settings["cycles"] + settings["warmup"]) * len(profile["models"]) * policy()["reference"]["agreement"]["cases"],
+                    samples=[dict(rss_bytes=0, vram_bytes=0, gpu_host_bytes=0, fds=4) for _ in range(settings["cycles"] + 1)],
+                    max_growth=dict(rss_bytes=0, vram_bytes=0, gpu_host_bytes=0, fds=0))
+            failure_specs = policy().get("allocation_failure_probes", {}).get(profile["id"], [])
+            if failure_specs:
+                report["checks"]["allocation_failure_recovery"] = True
+                report["allocation_failures"] = [dict(status="passed", **case, response_status=500, restored=True,
+                    continuation_matches=True, cleanup=True, binary_sha256=artifact["binary_sha256"]) for case in failure_specs]
             write_json(reports / (profile["id"] + ".json"), report)
         return directory, reports
 
     def aggregate(self, directory, reports, release_version="9.8.7"):
         with contextlib.redirect_stdout(io.StringIO()):
             release.aggregate(SimpleNamespace(directory=directory, results=reports, version=release_version, commit=COMMIT))
+
+    def test_lifecycle_evidence_is_required_and_recomputed_during_certification(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        path = reports / "rocm-rdna4.json"
+        original = read_json(path)
+        for fault in ["missing", "failed", "partial", "memory", "handles", "wrong_model", "wrong_binary", "changed_settings", "no_swap", "no_reference"]:
+            report = json.loads(json.dumps(original))
+            if fault == "missing": report.pop("lifecycle_soak")
+            elif fault == "failed": report["checks"]["lifecycle_soak"] = False
+            elif fault == "partial": report["lifecycle_soak"]["operations"] -= 1
+            elif fault == "memory": report["lifecycle_soak"]["samples"][-1]["vram_bytes"] += 65 * 1024 * 1024
+            elif fault == "handles": report["lifecycle_soak"]["samples"][-1]["fds"] += 1
+            elif fault == "wrong_model": report["lifecycle_soak"]["model_sizes"][report["lifecycle_soak"]["models"][0]] = 1
+            elif fault == "wrong_binary": report["lifecycle_soak"]["binary_sha256"] = "f" * 64
+            elif fault == "changed_settings": report["lifecycle_soak"]["options"]["warmup"] = 0
+            elif fault == "no_swap": report["lifecycle_soak"]["direct_switches"] = 0
+            elif fault == "no_reference": report["lifecycle_soak"]["reference_cases"] = 0
+            write_json(path, report)
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
+        write_json(path, original)
+
+    def test_allocation_failure_recovery_is_bound_to_the_frozen_candidate(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        path = reports / "rocm-rdna4.json"
+        original = read_json(path)
+        for fault in ["missing", "unchecked", "partial", "failed", "not_restored", "changed_continuation",
+                      "precheck_only", "wrong_model", "wrong_context", "wrong_binary", "not_cleaned"]:
+            report = json.loads(json.dumps(original))
+            if fault == "missing": report.pop("allocation_failures")
+            elif fault == "unchecked": report["checks"]["allocation_failure_recovery"] = False
+            elif fault == "partial": report["allocation_failures"].pop()
+            else:
+                probe = report["allocation_failures"][0]
+                if fault == "failed": probe["status"] = "failed"
+                elif fault == "not_restored": probe["restored"] = False
+                elif fault == "changed_continuation": probe["continuation_matches"] = False
+                elif fault == "precheck_only": probe["response_status"] = 400
+                elif fault == "wrong_model": probe["replacement_model"] = probe["initial_model"]
+                elif fault == "wrong_context": probe["context"] = 4096
+                elif fault == "wrong_binary": probe["binary_sha256"] = "f" * 64
+                elif fault == "not_cleaned": probe["cleanup"] = False
+            write_json(path, report)
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
+        write_json(path, original)
 
     def test_every_policy_model_is_pinned_in_the_managed_catalog(self):
         catalog = (ROOT / "src/model/catalog.zig").read_text()
@@ -1703,6 +1771,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("qwen35-9b-q4k-m --chat", notes)
         self.assertLess(notes.index('ZINC_BACKEND=rocm'), notes.index('ZINC_BACKEND=vulkan'))
         self.assertIn('prefer native HIP / ROCm', notes)
+        self.assertIn('ROCm and Vulkan binaries', notes)
+        self.assertLess(notes.index('zinc-v9.8.7-linux-x86_64-rocm.tar.gz'),
+                        notes.index('zinc-v9.8.7-linux-x86_64-vulkan.tar.gz'))
         self.assertIn('capabilities.browser_ui', notes)
         # Public notes are generated independently of the preparation brief;
         # keep its known limitation and source-frozen evidence visible there.
@@ -1735,6 +1806,36 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("zinc-v0.1.1-linux-x86_64-rocm.tar.gz", notes)
         self.assertIn("## Validated hardware and models", notes)
         self.assertNotIn("native Windows have no 0.1.0 archive", notes)
+
+    def test_0_1_2_release_material_matches_qualified_lifecycle_support(self):
+        directory, reports = self.candidate(release_version="0.1.2")
+        self.aggregate(directory, reports, release_version="0.1.2")
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.finalize(SimpleNamespace(directory=directory))
+        notes = (directory / "release-notes.md").read_text()
+        self.assertIn("Linux archives support installed-model switching and unload/reload", notes)
+        self.assertNotIn("hot model switching remains unavailable", notes)
+        self.assertNotIn("Candidate scope", notes)
+        self.assertNotIn("0.1.1 remains the current stable release", notes)
+        self.assertEqual(notes.count("# ZINC v0.1.2"), 1)
+        self.assertNotIn("# ZINC 0.1.2 changes", notes)
+        readme = (ROOT / "docs/releases/BINARY_README.md").read_text()
+        self.assertIn("capabilities.browser_ui", readme)
+        self.assertIn("/v1/capabilities", readme)
+        self.assertIn("older 0.1.0/0.1.1 HIP archives", readme)
+        self.assertNotIn("ROCm provides CLI/HTTP chat without the built-in browser UI", readme)
+
+    def test_lifecycle_release_description_requires_all_linux_profile_evidence(self):
+        good = dict(target="linux-x86_64-rocm", checks=dict(lifecycle_soak=True), lifecycle_soak=dict(status="passed"))
+        self.assertIn("support installed-model switching", release.model_lifecycle_notes(dict(profiles=[good])))
+        for other in [{}, dict(target="linux-x86_64-vulkan"),
+                      {**good, "checks": {"lifecycle_soak": False}},
+                      {**good, "lifecycle_soak": {"status": "failed"}}]:
+            with self.subTest(other=other):
+                profiles = [] if not other else [good, other]
+                notes = release.model_lifecycle_notes(dict(profiles=profiles))
+                self.assertIn("hot model switching remains unavailable", notes)
+                self.assertNotIn("Linux archives support", notes)
 
     def test_release_changes_reject_symlinks_outside_the_reviewed_directory(self):
         directory = self.root / "reviewed-changes"
@@ -1829,7 +1930,7 @@ class ReleaseTest(unittest.TestCase):
                 self.assertIn("--deny-self-hosted-runners", call.args[0])
                 self.assertIn("--source-digest", call.args[0])
         notes = (directory / "release-notes.md").read_text()
-        self.assertIn("Vulkan and ROCm binaries", notes)
+        self.assertIn("ROCm and Vulkan binaries", notes)
         self.assertIn("Metal remains an unsigned preview", notes)
         self.assertNotIn("Metal, Vulkan and ROCm binaries", notes)
         validation = read_json(directory / "validation.json")

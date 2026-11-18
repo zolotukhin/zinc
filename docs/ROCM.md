@@ -71,8 +71,9 @@ After a [ROCm source build](#build-from-source), start the loaded model with:
 zinc chat --model-id qwen38-27b-q4k-m -c 65536 --parallel 1
 ```
 
-This interface chats with the startup model. Restart the server to change it;
-hot model switching and sampling controls remain unavailable on HIP.
+This interface supports installed-model switching and unload/reload when the
+server advertises them. Install weights with the model CLI first. Thinking and
+MTP controls follow the active model's capabilities; sampling remains greedy.
 Use `--no-browser` over SSH and forward the server port to your computer.
 This feature is not in the published 0.1.1 archive. A remote preview may serve
 an updated UI separately while using the same native HIP API.

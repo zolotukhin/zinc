@@ -320,3 +320,19 @@ match the certified files. The [public installation rehearsal](/zinc/validation/
 passed 12 controls across the two backends, including upgrade from 0.1.0,
 rollback, reinstall, command-link repair and default stable selection, with
 cache sentinels preserved. The current stable release is 0.1.1.
+
+## Model lifecycle qualification
+
+Linux candidates now require the lifecycle soak frozen in
+`config/release/targets.json`, in addition to the numerical, tokenizer, native
+continuation and API checks. Each hardware profile uses the final installed
+archive and all its pinned models in one owned server. Warm up every model
+before sampling repeated unloaded states; compare process RSS, GPU resident
+VRAM/host memory and open descriptors with the frozen budgets. Missing or
+partial evidence blocks certification. See the
+[0.1.2 plan](releases/0.1.2-plan.md) for the scope and longer development run.
+
+The soak creates a private managed-cache namespace linked to verified model
+files. Managed selections take precedence over stale same-named siblings;
+explicit startup selections retain their identity. The source weights and
+user's cache remain unchanged. Only sanitized JSON reports are public.
