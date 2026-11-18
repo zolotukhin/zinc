@@ -59,7 +59,7 @@
         "cli": true,
         "http": true,
         "streaming_chat": true,
-        "browser_chat": false
+        "browser_chat": true
       }
     }
   ],
@@ -259,5 +259,14 @@
       "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/409c16be502e39fe70dd6fe2d9ad4842ef2c9a53",
       "sha256": "dc96688e8cf01f2f0a8f31a41fa76a7f8d1e27f022e31bbd3a59ff40a24da9d6"
     }
+  },
+  "lifecycle_soak": {
+    "cycles": 3,
+    "warmup": 1,
+    "deadline_seconds": 1800,
+    "context": 4096,
+    "max_rss_growth_mib": 128,
+    "max_vram_growth_mib": 64,
+    "max_fd_growth": 0
   }
 }

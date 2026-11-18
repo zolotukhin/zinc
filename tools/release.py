@@ -346,6 +346,13 @@ def aggregate(args):
                 prefill = model.get("prefill_cancellation") or {}
                 require(prefill.get("passed") is True and type(prefill.get("recovery_ms")) is int and
                         0 <= prefill["recovery_ms"] < 10000, "missing or failed active-prefill cancellation evidence")
+        soak_spec = policy().get("lifecycle_soak")
+        if soak_spec and spec["target"].endswith(("vulkan", "rocm")):
+            from model_lifecycle_soak import verify_report
+            require(checks.get("lifecycle_soak") is True, "missing packaged lifecycle soak checks")
+            verify_report(report.get("lifecycle_soak"), profile["models"], spec["target"].rsplit("-", 1)[1],
+                          soak_spec, artifact["binary_sha256"],
+                          {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]})
         reference = report.get("reference", {})
         require(reference.get("commit") == policy()["reference"]["commit"] and all(re.fullmatch(r"[0-9a-f]{64}", reference.get(key, "")) for key in ("server_sha256", "tokenizer_sha256")),
                 "missing pinned reference evidence")

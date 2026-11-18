@@ -1274,12 +1274,45 @@ class ReleaseTest(unittest.TestCase):
                 report["rocm_kernel_reference"] = {"passed": True, "cases": 305,
                     "kernel_source_sha256": sha256(ROOT / "src/shaders/cuda/kernels.cu"),
                     "validator_source_sha256": sha256(ROOT / "tools/validate_rocm_partial_tiles.c")}
+            if profile["target"].endswith(("rocm", "vulkan")):
+                from model_lifecycle_soak import policy_settings
+                spec = policy()["lifecycle_soak"]
+                settings = policy_settings(spec)
+                report["checks"]["lifecycle_soak"] = True
+                report["lifecycle_soak"] = dict(schema_version=1, status="passed", failure_stage=None,
+                    backend=target(profile["target"])["backend"], binary_sha256=artifact["binary_sha256"],
+                    models=profile["models"], options=settings, context=spec["context"], cleanup=True,
+                    telemetry="drm-process-resident", model_sizes={m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]},
+                    completed_cycles=settings["cycles"],
+                    operations=(settings["cycles"] + settings["warmup"]) * len(profile["models"]),
+                    samples=[dict(rss_bytes=0, vram_bytes=0, gpu_host_bytes=0, fds=4) for _ in range(settings["cycles"] + 1)],
+                    max_growth=dict(rss_bytes=0, vram_bytes=0, gpu_host_bytes=0, fds=0))
             write_json(reports / (profile["id"] + ".json"), report)
         return directory, reports
 
     def aggregate(self, directory, reports, release_version="9.8.7"):
         with contextlib.redirect_stdout(io.StringIO()):
             release.aggregate(SimpleNamespace(directory=directory, results=reports, version=release_version, commit=COMMIT))
+
+    def test_lifecycle_evidence_is_required_and_recomputed_during_certification(self):
+        directory, reports = self.candidate()
+        self.aggregate(directory, reports)
+        path = reports / "rocm-rdna4.json"
+        original = read_json(path)
+        for fault in ["missing", "failed", "partial", "memory", "handles", "wrong_model", "wrong_binary", "changed_settings"]:
+            report = json.loads(json.dumps(original))
+            if fault == "missing": report.pop("lifecycle_soak")
+            elif fault == "failed": report["checks"]["lifecycle_soak"] = False
+            elif fault == "partial": report["lifecycle_soak"]["operations"] -= 1
+            elif fault == "memory": report["lifecycle_soak"]["samples"][-1]["vram_bytes"] += 65 * 1024 * 1024
+            elif fault == "handles": report["lifecycle_soak"]["samples"][-1]["fds"] += 1
+            elif fault == "wrong_model": report["lifecycle_soak"]["model_sizes"][report["lifecycle_soak"]["models"][0]] = 1
+            elif fault == "wrong_binary": report["lifecycle_soak"]["binary_sha256"] = "f" * 64
+            elif fault == "changed_settings": report["lifecycle_soak"]["options"]["warmup"] = 0
+            write_json(path, report)
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.aggregate(directory, reports)
+        write_json(path, original)
 
     def test_every_policy_model_is_pinned_in_the_managed_catalog(self):
         catalog = (ROOT / "src/model/catalog.zig").read_text()

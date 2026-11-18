@@ -820,6 +820,16 @@ def main():
                     require(prefill and prefill.get("passed") is True, "prefill cancellation evidence is missing")
                     models[-1]["prefill_cancellation"] = prefill
                 print(identifier + ": packaged tokenizer, reference continuation and HTTP checks passed", flush=True)
+            lifecycle = None
+            soak_spec = policy().get("lifecycle_soak")
+            if soak_spec and backend in ("rocm", "vulkan"):
+                from model_lifecycle_soak import policy_settings
+                from run_model_lifecycle_soak import run_owned
+                print("Running packaged model lifecycle and memory plateau checks", flush=True)
+                soak_work = work / "lifecycle"
+                soak_work.mkdir()
+                lifecycle = run_owned(tree / "bin/zinc", {identifier: config["models"][identifier] for identifier in profile["models"]},
+                                      backend, device, soak_spec["context"], soak_work, env, policy_settings(soak_spec))
             require(reference_artifacts(reference) == reference_snapshot, "reference artifacts changed during GPU validation")
             report = {"schema_version": 1, "profile": profile["id"], "target": profile["target"], "family": profile["family"],
                       **{key: data[key] for key in ("version", "commit", "policy_sha256")},
@@ -838,9 +848,16 @@ def main():
                 report["q8_decode_reference"] = q8_decode
             if gemma_geglu is not None:
                 report["gemma_geglu_reference"] = gemma_geglu
+            if lifecycle is not None:
+                report["lifecycle_soak"] = lifecycle
+                report["checks"]["lifecycle_soak"] = lifecycle.get("status") == "passed"
     # Release the reservation before recording successful cleanup.
     # Reports contain no machine identifiers, private paths, ports or URLs.
     write_json(args.output, report)
+    if lifecycle is not None:
+        from model_lifecycle_soak import verify_report
+        verify_report(lifecycle, profile["models"], backend, soak_spec, report["binary_sha256"],
+                      {m["id"]: m["size_bytes"] for m in policy()["models"] if m["id"] in profile["models"]})
 
 
 if __name__ == "__main__":

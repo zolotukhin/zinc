@@ -6,7 +6,7 @@ This is a lightweight public roadmap for contributors. It is not a guarantee of 
 
 Current priorities:
 
-- prepare and qualify the [Linux 0.1.1 candidate](releases/0.1.1-plan.md), including exact-archive model/client checks and upgrade/rollback coverage; [0.1.0 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.0), and Metal remains an unsigned preview
+- qualify the [Linux 0.1.2 candidate](releases/0.1.2-plan.md), including repeated model lifecycle/memory checks, exact-archive model/client coverage and upgrade/rollback; [0.1.1 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1), and Metal remains an unsigned preview
 - make the core Linux AMD path more stable on real hardware
 - keep source builds and packages reliable across the documented Linux and macOS targets
 - harden the OpenAI-compatible server path

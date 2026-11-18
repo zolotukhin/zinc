@@ -220,6 +220,10 @@ def write_json(path, value):
 def policy(path=None):
     data = read_json(path or ROOT / "config/release/targets.json")
     require(data.get("schema_version") == 1, "unsupported release policy")
+    soak_spec = data.get("lifecycle_soak")
+    if soak_spec is not None:
+        from model_lifecycle_soak import policy_settings
+        policy_settings(soak_spec)
     ids = [t["id"] for t in data["targets"]]
     require(len(ids) == len(set(ids)) == 3, "release requires three unique targets")
     require({t["backend"] for t in data["targets"]} == {"vulkan", "metal", "rocm"}, "unexpected release backends")
