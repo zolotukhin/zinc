@@ -252,6 +252,32 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             soak.verify_allocation_failures([], [spec], 'a' * 64)
 
+    def test_development_evidence_retains_the_failure_and_cannot_certify_an_archive(self):
+        from release_lib import policy
+        root = Path(__file__).resolve().parent.parent
+        data = json.loads((root / 'site/public/zinc/validation/model-lifecycle-development-2026-11-18.json').read_text())
+        frozen = policy()
+        self.assertIs(data['candidate_certified'], False)
+        self.assertEqual(data['model_sha256'], {m['id']: m['sha256'] for m in frozen['models']})
+        before, after, native = data['attempts']
+        self.assertEqual(before['report']['status'], 'failed')
+        self.assertGreater(before['report']['max_growth']['vram_bytes'],
+                           frozen['lifecycle_soak']['max_vram_growth_mib'] * soak.MIB)
+        for attempt, identifier in [(after, 'vulkan-rdna4'), (native, 'rocm-rdna4')]:
+            report = attempt['report']
+            profile = next(p for p in frozen['gpu_profiles'] if p['id'] == identifier)
+            sizes = {m['id']: m['size_bytes'] for m in frozen['models'] if m['id'] in profile['models']}
+            spec = {**frozen['lifecycle_soak'], 'cycles': report['options']['cycles'],
+                    'warmup': report['options']['warmup']}
+            soak.verify_report(report, profile['models'], report['backend'], spec, report['binary_sha256'], sizes)
+            # Development behavior/memory checks omit the candidate's oracle
+            # replays. Even a passed development report cannot replace those.
+            with self.assertRaisesRegex(ValueError, 'reference checks'):
+                soak.verify_report(report, profile['models'], report['backend'], spec,
+                                   report['binary_sha256'], sizes, frozen['reference']['agreement']['cases'])
+        soak.verify_allocation_failures(native['allocation_failures'],
+                                        frozen['allocation_failure_probes']['rocm-rdna4'], native['report']['binary_sha256'])
+
 
 if __name__ == '__main__':
     unittest.main()

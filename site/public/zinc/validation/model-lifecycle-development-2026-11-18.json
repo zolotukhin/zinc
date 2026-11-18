@@ -1,0 +1,367 @@
+{
+  "schema_version": 1,
+  "recorded_date_utc": "2026-11-18",
+  "hardware": "AMD Radeon AI PRO R9700 32 GB",
+  "scope": "Development lifecycle stability; final-version archive qualification remains required on all three release profiles.",
+  "candidate_certified": false,
+  "caveats": [
+    "These standalone development runs contain zero repeated frozen-reference cases. The candidate gate additionally requires those cases.",
+    "Allocation-failure contexts are controls on this 32 GB device, not expanded context-support claims.",
+    "The Vulkan builds use the same driver and shaders. The fixed build also uses the baseline CPU target and a glibc 2.39 floor; these are not performance comparisons."
+  ],
+  "model_sha256": {
+    "qwen3-0.6b-q8-0": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+    "qwen38-27b-q4k-m": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+    "qwen36-35b-a3b-q4k-xl": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+    "qwen36-27b-q4k-m": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+    "qwen35-9b-q4k-m": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+    "gemma4-31b-q4k-m": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+    "gemma4-26b-a4b-q4k-m": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c"
+  },
+  "attempts": [
+    {
+      "id": "vulkan-before-cleanup-fix",
+      "engine_source_commit": "67b9af7cb876fb6af78c9b5ee5b3347d9101e226",
+      "exercise": "resident-replacement-and-unload",
+      "report": {
+        "schema_version": 1,
+        "status": "failed",
+        "backend": "vulkan",
+        "models": [
+          "qwen3-0.6b-q8-0",
+          "qwen36-35b-a3b-q4k-xl",
+          "qwen36-27b-q4k-m",
+          "qwen35-9b-q4k-m",
+          "gemma4-31b-q4k-m",
+          "gemma4-26b-a4b-q4k-m",
+          "qwen38-27b-q4k-m"
+        ],
+        "options": {
+          "cycles": 8,
+          "warmup": 1,
+          "deadline_seconds": 1800,
+          "max_growth": {
+            "rss_bytes": 134217728,
+            "vram_bytes": 67108864,
+            "gpu_host_bytes": 134217728,
+            "fds": 0
+          }
+        },
+        "samples": [
+          {
+            "rss_bytes": 468271104,
+            "vram_bytes": 174174208,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 661110784,
+            "vram_bytes": 341921792,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 761978880,
+            "vram_bytes": 509632512,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 629432320,
+            "vram_bytes": 677437440,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 628310016,
+            "vram_bytes": 845189120,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 669896704,
+            "vram_bytes": 1012973568,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 628301824,
+            "vram_bytes": 1180725248,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 628072448,
+            "vram_bytes": 1348501504,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 628039680,
+            "vram_bytes": 1516253184,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          }
+        ],
+        "completed_cycles": 8,
+        "operations": 63,
+        "direct_switches": 54,
+        "reference_cases": 0,
+        "failure_stage": "memory_plateau",
+        "failure_model": "qwen38-27b-q4k-m",
+        "max_growth": {
+          "rss_bytes": 293707776,
+          "vram_bytes": 1342078976,
+          "gpu_host_bytes": 0,
+          "fds": 0
+        },
+        "error_category": "ValueError",
+        "binary_sha256": "1e31b9e3745abd1c2ce099d7560840637bb2ac27fd7e290a840b0a402d08f1e7",
+        "context": 4096,
+        "cleanup": true,
+        "telemetry": "drm-process-resident",
+        "model_sizes": {
+          "qwen3-0.6b-q8-0": 639446688,
+          "qwen36-35b-a3b-q4k-xl": 22360456160,
+          "qwen36-27b-q4k-m": 16817244384,
+          "qwen35-9b-q4k-m": 5680522464,
+          "gemma4-31b-q4k-m": 18323733440,
+          "gemma4-26b-a4b-q4k-m": 16868236288,
+          "qwen38-27b-q4k-m": 17106775008
+        }
+      }
+    },
+    {
+      "id": "vulkan-after-cleanup-fix",
+      "engine_source_commit": "f2aa831881c17560105b2571c4bf27c594b76f6c",
+      "exercise": "resident-replacement-and-unload",
+      "report": {
+        "schema_version": 1,
+        "status": "passed",
+        "backend": "vulkan",
+        "models": [
+          "qwen3-0.6b-q8-0",
+          "qwen36-35b-a3b-q4k-xl",
+          "qwen36-27b-q4k-m",
+          "qwen35-9b-q4k-m",
+          "gemma4-31b-q4k-m",
+          "gemma4-26b-a4b-q4k-m",
+          "qwen38-27b-q4k-m"
+        ],
+        "options": {
+          "cycles": 8,
+          "warmup": 1,
+          "deadline_seconds": 1800,
+          "max_growth": {
+            "rss_bytes": 134217728,
+            "vram_bytes": 67108864,
+            "gpu_host_bytes": 134217728,
+            "fds": 0
+          }
+        },
+        "samples": [
+          {
+            "rss_bytes": 455999488,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 459354112,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 455065600,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 455667712,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 460865536,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 455602176,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 433524736,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 520040448,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          },
+          {
+            "rss_bytes": 479498240,
+            "vram_bytes": 6389760,
+            "gpu_host_bytes": 4198400,
+            "fds": 13
+          }
+        ],
+        "completed_cycles": 8,
+        "operations": 63,
+        "direct_switches": 54,
+        "reference_cases": 0,
+        "failure_stage": null,
+        "failure_model": null,
+        "max_growth": {
+          "rss_bytes": 64040960,
+          "vram_bytes": 0,
+          "gpu_host_bytes": 0,
+          "fds": 0
+        },
+        "binary_sha256": "94e091e6596cbe10cf4d3421c2193d439d2a66888934ed4222334bef1c758c7f",
+        "context": 4096,
+        "cleanup": true,
+        "telemetry": "drm-process-resident",
+        "model_sizes": {
+          "qwen3-0.6b-q8-0": 639446688,
+          "qwen36-35b-a3b-q4k-xl": 22360456160,
+          "qwen36-27b-q4k-m": 16817244384,
+          "qwen35-9b-q4k-m": 5680522464,
+          "gemma4-31b-q4k-m": 18323733440,
+          "gemma4-26b-a4b-q4k-m": 16868236288,
+          "qwen38-27b-q4k-m": 17106775008
+        }
+      }
+    },
+    {
+      "id": "rocm-resident-and-failed-load-recovery",
+      "engine_source_commit": "67b9af7cb876fb6af78c9b5ee5b3347d9101e226",
+      "exercise": "resident-replacement-and-unload",
+      "report": {
+        "schema_version": 1,
+        "status": "passed",
+        "backend": "rocm",
+        "models": [
+          "qwen38-27b-q4k-m",
+          "qwen36-35b-a3b-q4k-xl",
+          "qwen36-27b-q4k-m",
+          "qwen35-9b-q4k-m",
+          "gemma4-31b-q4k-m",
+          "gemma4-26b-a4b-q4k-m"
+        ],
+        "options": {
+          "cycles": 3,
+          "warmup": 1,
+          "deadline_seconds": 1800,
+          "max_growth": {
+            "rss_bytes": 134217728,
+            "vram_bytes": 67108864,
+            "gpu_host_bytes": 134217728,
+            "fds": 0
+          }
+        },
+        "samples": [
+          {
+            "rss_bytes": 942043136,
+            "vram_bytes": 276283392,
+            "gpu_host_bytes": 163749888,
+            "fds": 12
+          },
+          {
+            "rss_bytes": 833531904,
+            "vram_bytes": 277749760,
+            "gpu_host_bytes": 163749888,
+            "fds": 12
+          },
+          {
+            "rss_bytes": 815587328,
+            "vram_bytes": 276430848,
+            "gpu_host_bytes": 163749888,
+            "fds": 12
+          },
+          {
+            "rss_bytes": 812265472,
+            "vram_bytes": 277082112,
+            "gpu_host_bytes": 163749888,
+            "fds": 12
+          }
+        ],
+        "completed_cycles": 3,
+        "operations": 24,
+        "direct_switches": 20,
+        "reference_cases": 0,
+        "failure_stage": null,
+        "failure_model": null,
+        "max_growth": {
+          "rss_bytes": 0,
+          "vram_bytes": 1466368,
+          "gpu_host_bytes": 0,
+          "fds": 0
+        },
+        "binary_sha256": "6d81b2f7f2a91eaaa2e34b9357abe58fc21c46e1de187b1f0dfc88bbdbdee201",
+        "context": 4096,
+        "cleanup": true,
+        "telemetry": "drm-process-resident",
+        "model_sizes": {
+          "qwen38-27b-q4k-m": 17106775008,
+          "qwen36-35b-a3b-q4k-xl": 22360456160,
+          "qwen36-27b-q4k-m": 16817244384,
+          "qwen35-9b-q4k-m": 5680522464,
+          "gemma4-31b-q4k-m": 18323733440,
+          "gemma4-26b-a4b-q4k-m": 16868236288
+        }
+      },
+      "allocation_failures": [
+        {
+          "status": "passed",
+          "initial_model": "qwen38-27b-q4k-m",
+          "replacement_model": "gemma4-31b-q4k-m",
+          "context": 65536,
+          "response_status": 500,
+          "restored": true,
+          "continuation_matches": true,
+          "binary_sha256": "6d81b2f7f2a91eaaa2e34b9357abe58fc21c46e1de187b1f0dfc88bbdbdee201",
+          "cleanup": true,
+          "telemetry": "drm-process-resident",
+          "model_sizes": {
+            "qwen38-27b-q4k-m": 17106775008,
+            "qwen36-35b-a3b-q4k-xl": 22360456160,
+            "qwen36-27b-q4k-m": 16817244384,
+            "qwen35-9b-q4k-m": 5680522464,
+            "gemma4-31b-q4k-m": 18323733440,
+            "gemma4-26b-a4b-q4k-m": 16868236288
+          }
+        },
+        {
+          "status": "passed",
+          "initial_model": "qwen35-9b-q4k-m",
+          "replacement_model": "qwen38-27b-q4k-m",
+          "context": 262144,
+          "response_status": 500,
+          "restored": true,
+          "continuation_matches": true,
+          "binary_sha256": "6d81b2f7f2a91eaaa2e34b9357abe58fc21c46e1de187b1f0dfc88bbdbdee201",
+          "cleanup": true,
+          "telemetry": "drm-process-resident",
+          "model_sizes": {
+            "qwen35-9b-q4k-m": 5680522464,
+            "qwen38-27b-q4k-m": 17106775008,
+            "qwen36-35b-a3b-q4k-xl": 22360456160,
+            "qwen36-27b-q4k-m": 16817244384,
+            "gemma4-31b-q4k-m": 18323733440,
+            "gemma4-26b-a4b-q4k-m": 16868236288
+          }
+        }
+      ]
+    }
+  ]
+}
