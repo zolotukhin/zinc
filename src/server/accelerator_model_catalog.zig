@@ -92,7 +92,11 @@ pub const Inventory = struct {
     }
 
     fn addFile(self: *Inventory, path: []const u8, budget_bytes: u64, is_managed: bool, is_initial: bool) !void {
-        if (!isGguf(std.fs.path.basename(path))) return;
+        // The operator's explicit startup path may be an extensionless cache
+        // blob (including the target of a .gguf symlink). Only discovery of
+        // additional files depends on the suffix; metadata validation still
+        // decides whether the startup file is a supported GGUF.
+        if (!is_initial and !isGguf(std.fs.path.basename(path))) return;
         const size = regularFileSize(path) catch return;
         const canonical = try std.Io.Dir.cwd().realPathFileAlloc(host_io.io, path, self.allocator);
         defer self.allocator.free(canonical);
@@ -219,6 +223,25 @@ test "accelerator inventory does not discover models recursively" {
     var inventory = try Inventory.collect(allocator, path, 0, false);
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 1), inventory.entries.items.len);
+}
+
+test "explicit startup symlink may resolve to an extensionless model blob" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(host_io.io, .{ .sub_path = "model-blob", .data = "fixture" });
+    try tmp.dir.writeFile(host_io.io, .{ .sub_path = "unselected-blob", .data = "ignore" });
+    try tmp.dir.symLink(host_io.io, "model-blob", "selected.gguf", .{});
+    const parent = try tmp.dir.realPathFileAlloc(host_io.io, ".", allocator);
+    defer allocator.free(parent);
+    const selected = try std.fs.path.join(allocator, &.{ parent, "selected.gguf" });
+    defer allocator.free(selected);
+    var inventory = try Inventory.collect(allocator, selected, 0, false);
+    defer inventory.deinit();
+    try std.testing.expectEqual(@as(usize, 1), inventory.entries.items.len);
+    const initial = inventory.find(inventory.initial_model_id).?;
+    try std.testing.expectEqualStrings("model-blob", std.fs.path.basename(initial.path));
+    try std.testing.expect(initial.can_activate);
 }
 
 fn allocationFixture(allocator: std.mem.Allocator, path: []const u8) !void {
