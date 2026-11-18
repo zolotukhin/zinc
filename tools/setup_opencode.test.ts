@@ -48,12 +48,41 @@ describe('portable OpenCode setup', () => {
     expect(
       buildConfig({ context: 8192 }).provider.zinc.models['qwen38-27b-q4k-m'].limit.output,
     ).toBe(2048);
-    expect(config.compaction.reserved).toBe(8192);
-    expect(buildConfig({ context: 8192 }).compaction.reserved).toBe(4096);
+    expect(config.compaction.reserved).toBeGreaterThanOrEqual(
+      config.provider.zinc.models['qwen38-27b-q4k-m'].limit.output,
+    );
     expect(config.compaction.reserved).toBeLessThan(
       config.provider.zinc.models['qwen38-27b-q4k-m'].limit.context,
     );
     expect(JSON.stringify(config)).not.toContain(process.cwd());
+  });
+  test('8K coding keeps inspected files available before reserving the next reply', () => {
+    const config = buildConfig({ context: 8192, output: 2048 });
+    const limit = config.provider.zinc.models['qwen38-27b-q4k-m'].limit;
+    // The failed Gemma Python trial repeatedly compacted at 4K after its two
+    // reads. Its measured request plus a bounded new tool result must still
+    // fit before compaction, with the complete next reply left available.
+    const measuredInput = 3330;
+    const measuredReply = 33;
+    const newToolResult = 1900;
+    const promptBudget = limit.context - config.compaction.reserved;
+    expect(measuredInput + measuredReply + newToolResult).toBeLessThan(promptBudget);
+    expect(promptBudget + limit.output).toBeLessThan(limit.context);
+    expect(config.compaction.auto).toBe(true);
+    expect(config.compaction.prune).toBe(true);
+  });
+  test('compaction preserves the configured reply at small and large contexts', () => {
+    for (const [context, output] of [
+      [8192, 512],
+      [8192, 2048],
+      [8192, 4095],
+      [16384, 4096],
+      [262144, 10000],
+    ]) {
+      const config = buildConfig({ context, output });
+      expect(config.compaction.reserved).toBeGreaterThanOrEqual(output);
+      expect(config.compaction.reserved).toBeLessThanOrEqual(context / 2);
+    }
   });
   test('bounds real reader arguments without changing paths or requested offsets', async () => {
     const hooks = await contextPlugin();

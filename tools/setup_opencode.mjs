@@ -339,11 +339,15 @@ export function buildConfig(opts = {}) {
     formatter: false,
     lsp: false,
     plugin: [`./${CONTEXT_PLUGIN_PATH}`],
-    // Leave room for new tool results as well as the next generated response.
+    // OpenCode 2 migrates reserved to its compaction buffer, which already
+    // includes the next reply. Reserving another quarter-window made the 8K
+    // Gemma preset compact after two reads, discarding the inspected source
+    // before it could edit. Keep the configured reply plus a small count margin.
+    // https://github.com/anomalyco/opencode/blob/v2.0.21/packages/core/src/session/compaction.ts
     compaction: {
       auto: true,
       prune: true,
-      reserved: Math.min(Math.floor(context / 2), output + Math.floor(context / 4)),
+      reserved: Math.min(Math.floor(context / 2), output + 256),
     },
     provider: {
       zinc: {
