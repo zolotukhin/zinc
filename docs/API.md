@@ -122,7 +122,8 @@ as unknown. See [Run models and connect apps](RUNNING_ZINC.md) for the complete 
 | GET    | `/v1/models`           | All four backends; different detail     |
 | GET    | `/health`              | All four backends; different detail     |
 | POST   | `/v1/models/pull`      | Vulkan / Metal                          |
-| POST   | `/v1/models/activate`  | Vulkan / Metal                          |
+| POST   | `/v1/models/activate`  | Vulkan / Metal; current HIP/CUDA source |
+| POST   | `/v1/models/unload`    | Current source; all four backends       |
 | POST   | `/v1/models/remove`    | Vulkan / Metal                          |
 | GET    | `/` or `/chat`         | Vulkan / Metal                          |
 | GET    | `/stats`               | ROCm / CUDA                             |
@@ -133,20 +134,29 @@ completion routes. The coverage matrix above describes their response defaults.
 
 ## Development: HIP browser chat
 
-Current HIP source builds also serve the shared interface at `GET /` and
-`GET /chat`, and advertise `capabilities.browser_ui: true`. They add the
-legacy `model` display key to native health. Their single `/v1/models` row
-keeps the GGUF basename as its ID and adds `active`, `installed`, `managed`,
-`display_name`, `homepage_url` and `supports_thinking_toggle` for the UI.
-The row is always active and `managed` is false: it describes the loaded
-startup model, rather than offering a downloadable/hot-switchable catalog.
-`created` remains the legacy value `0`; the local GGUF does not supply a
-creation timestamp. `active_model: null` is the canonical no-model state;
-the legacy display-only `model` alias is an empty string in that case.
-CUDA and the published 0.1.1 HIP archive retain their existing endpoint coverage.
-HIP sampling remains greedy and model-management routes remain unavailable.
+Current HIP source builds serve the shared interface at `GET /` and `GET /chat`.
+Current HIP/CUDA source also supports switching among installed models from the
+startup model's directory and managed cache. It never accepts an arbitrary path
+from an HTTP client. Known files use catalog IDs; generation also accepts the
+previous GGUF-basename alias. Unknown siblings remain unavailable for activation.
 
----
+`/health` and `/v1/capabilities` preserve the versioned discovery schema and
+advertise model switching/unload. `/v1/models` retains `created: 0` and `owned_by`
+and lists installed candidates, with context/thinking/MTP details for the active
+model only. When unloaded, `active_model` and `context_length` are null and the
+legacy `model` alias is empty. Generation then returns 503 until a model is loaded.
+
+A switch releases the old model before allocating its replacement. Invalid
+metadata, incompatible cache settings and conservative context/slot memory bounds
+are checked first. Load failures attempt to restore the previous model; a failed
+restore leaves the server unloaded. Active/queued generation holds a lifecycle
+lease, so conflicting native management requests return 409 instead of freeing
+in-use resources. The built-in UI keeps a draft across unload/reload and offers
+these operations only when the running server advertises them.
+
+HIP sampling remains greedy. Native model downloads/removal and the published
+0.1.1 HIP/CUDA archives retain their existing coverage. These lifecycle changes
+are source development functionality, not a new release qualification.
 
 ## POST /v1/chat/completions
 
@@ -491,11 +501,21 @@ List the managed catalog for the server's current GPU profile, including install
 state, active model, fit decisions, download progress, and active GPU memory
 usage. ZINC loads one model into memory at a time.
 
+The top-level `supports_model_management`, `supports_model_unload`, and
+`supports_model_pull` flags describe the available controls. The built-in UI
+uses these capabilities rather than assuming every server can download or swap
+models. CUDA/ROCm serving lists its startup model and installed catalog models;
+it can load or unload them, while `supports_model_pull: false` means downloads
+must be installed with the model CLI first.
+
 ### Response
 
 ```json
 {
   "object": "list",
+  "supports_model_management": true,
+  "supports_model_unload": true,
+  "supports_model_pull": true,
   "profile": "amd-rdna4-32gb",
   "active_memory_used_bytes": 22300000000,
   "active_memory_budget_bytes": 34359738368,
@@ -608,6 +628,43 @@ the local managed cache and fit the current GPU budget.
 
 ---
 
+## POST /v1/models/unload
+
+Release the current model, tokenizer, and inference buffers from GPU memory.
+Downloaded model files and the persisted active selection remain available.
+This operation is separate from removing a model from the cache.
+
+### Request
+
+```json
+{
+  "model": "qwen35-9b-q4k-m"
+}
+```
+
+The optional `model` identifies the model the caller expects to be active.
+If another client activated a different model, the server returns
+`409 Conflict` and leaves that model loaded. An empty request object unloads
+the current model. Repeating an unload while idle succeeds.
+
+### Response
+
+```json
+{
+  "object": "model.unload",
+  "unloaded_from_gpu": true,
+  "active": false,
+  "deleted_model": false
+}
+```
+
+Prompt-reuse state and active-context counters are cleared. Generation returns
+`503` until a model is activated again. Vulkan/Metal unload waits for generation
+to finish; CUDA/ROCm returns `409` while requests are active or queued so a
+model change cannot interrupt their use of GPU resources.
+
+---
+
 ## POST /v1/models/remove
 
 Remove an installed managed model from the local cache. If the target model is
@@ -655,6 +712,9 @@ Server health check for monitoring and local UI state.
 {
   "status": "ok",
   "model": "Qwen 3.5 9B Q4_K_M",
+  "supports_model_management": true,
+  "supports_model_unload": true,
+  "supports_model_pull": true,
   "active_requests": 1,
   "queued_requests": 0,
   "uptime_seconds": 3600,
@@ -687,16 +747,17 @@ Errors use an OpenAI-style envelope:
 }
 ```
 
-| Status | Type                      | When                                                                                                                                                  |
-| ------ | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 400    | `invalid_request_error`   | Malformed JSON, missing required fields, invalid parameters, unknown model id for management operations, unsupported or non-fitting model activation. |
-| 400    | `context_length_exceeded` | Prompt exceeds the active model context capacity.                                                                                                     |
-| 404    | `model_not_found`         | Generation requested an unknown or not-installed managed model.                                                                                       |
-| 404    | `not_found`               | Unknown endpoint.                                                                                                                                     |
-| 409    | `invalid_request_error`   | GPU already reserved, another model download is in progress, or removing the loaded model without `force: true`.                                      |
-| 501    | `unsupported_operation`   | Model-management endpoint used on a build/backend without management support.                                                                         |
-| 503    | `service_unavailable`     | Generation requested while no model is loaded.                                                                                                        |
-| 500    | `internal_error`          | Tokenization, GPU, inference, or response-size failure.                                                                                               |
+| Status | Type                            | When                                                                                                                                                  |
+| ------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalid_request_error`         | Malformed JSON, missing required fields, invalid parameters, unknown model id for management operations, unsupported or non-fitting model activation. |
+| 400    | `context_length_exceeded`       | Prompt exceeds the active model context capacity.                                                                                                     |
+| 404    | `model_not_found`               | Generation requested an unknown or not-installed managed model.                                                                                       |
+| 404    | `not_found`                     | Unknown endpoint.                                                                                                                                     |
+| 409    | `invalid_request_error`         | GPU already reserved, another model download is in progress, or removing the loaded model without `force: true`.                                      |
+| 409    | `model_changed` or `model_busy` | Unload targeted a model that is no longer active, or CUDA/ROCm model management was requested with generation active or queued.                       |
+| 501    | `unsupported_operation`         | Model-management endpoint used on a build/backend without management support.                                                                         |
+| 503    | `service_unavailable`           | Generation requested while no model is loaded.                                                                                                        |
+| 500    | `internal_error`                | Tokenization, GPU, inference, or response-size failure.                                                                                               |
 
 ## CORS And Connection Handling
 

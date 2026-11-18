@@ -1093,6 +1093,8 @@ pub const ForwardCuda = struct {
     /// zero the KV cache and SSM state.
     pub fn init(allocator: std.mem.Allocator, model: *loader.Model, max_ctx: u32) !ForwardCuda {
         const ctx = model.ctx;
+        var init_guard = @import("native_init_guard.zig").Native.init(allocator, ctx);
+        defer init_guard.deinit();
         // The CUDA forward implements the qwen35/qwen36 hybrid-SSM family (dense +
         // qwen2_moe). Reject other architectures (e.g. gemma4) cleanly here rather
         // than dividing by zero on the absent SSM dims downstream.
@@ -1122,175 +1124,175 @@ pub const ForwardCuda = struct {
         defer allocator.free(src);
 
         var pipes: Pipelines = undefined;
-        pipes.rms_norm = try pipeline.createPipeline(ctx, src.ptr, "rms_norm");
-        pipes.rms_norm_quant_q8 = try pipeline.createPipeline(ctx, src.ptr, "rms_norm_quant_q8_0");
-        pipes.dmmv[0] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k");
-        pipes.dmmv[1] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k");
-        pipes.dmmv[2] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k");
-        pipes.dmmv[3] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0");
-        pipes.dmmv[4] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32");
+        pipes.rms_norm = try init_guard.createPipeline(src.ptr, "rms_norm");
+        pipes.rms_norm_quant_q8 = try init_guard.createPipeline(src.ptr, "rms_norm_quant_q8_0");
+        pipes.dmmv[0] = try init_guard.createPipeline(src.ptr, "dmmv_q4k");
+        pipes.dmmv[1] = try init_guard.createPipeline(src.ptr, "dmmv_q5k");
+        pipes.dmmv[2] = try init_guard.createPipeline(src.ptr, "dmmv_q6k");
+        pipes.dmmv[3] = try init_guard.createPipeline(src.ptr, "dmmv_q8_0");
+        pipes.dmmv[4] = try init_guard.createPipeline(src.ptr, "dmmv_f32");
         // Fast single-row matvec variants (84-90% bandwidth peak vs ~12-15% base);
         // same DmmvPush ABI + [weight, x, y] buffer order, dispatched at block=64.
-        pipes.dmmv_fast[0] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_fast");
-        pipes.dmmv_fast[1] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_fast");
-        pipes.dmmv_fast[2] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_fast");
-        pipes.dmmv_fast[3] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_fast");
-        pipes.dmmv_q4k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, if (q8_decode_v2_q4) "dmmv_q4k_q8_btok1_v2" else "dmmv_q4k_q8_fast");
-        pipes.dmmv_q5k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, if (q8_decode_v2_q5) "dmmv_q5k_q8_btok1_v2" else "dmmv_q5k_q8_fast");
-        pipes.dmmv_q4k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok2");
-        pipes.dmmv_q4k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok3");
-        pipes.dmmv_q5k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok2");
-        pipes.dmmv_q5k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok3");
-        pipes.dmmv_q5k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok4");
-        pipes.dmmv_q4k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok4");
-        pipes.dmmv_q6k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok2");
-        pipes.dmmv_q6k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok3");
-        pipes.dmmv_q6k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok4");
-        pipes.dmmv_q4k_gate_up_swiglu = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu");
-        pipes.dmmv_q4k_gate_up_swiglu_q8 = try pipeline.createPipeline(ctx, src.ptr, if (q8_decode_v2_q4) "dmmv_q4k_gate_up_swiglu_q8_btok1_v2" else "dmmv_q4k_gate_up_swiglu_q8");
-        pipes.dmmv_q4k_gate_up_swiglu_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok2");
-        pipes.dmmv_q4k_gate_up_swiglu_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok3");
-        pipes.dmmv_q4k_gate_up_swiglu_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok4");
-        pipes.dmmv_q4k_q8_btok2_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok2_v2");
-        pipes.dmmv_q4k_q8_btok3_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok3_v2");
-        pipes.dmmv_q4k_q8_btok4_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok4_v2");
-        pipes.dmmv_q4k_gate_up_swiglu_q8_btok2_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok2_v2");
-        pipes.dmmv_q4k_gate_up_swiglu_q8_btok3_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok3_v2");
-        pipes.dmmv_q4k_gate_up_swiglu_q8_btok4_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok4_v2");
-        pipes.dmmv_q4k_pair_q8_btok2_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok2_v2");
-        pipes.dmmv_q4k_pair_q8_btok3_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok3_v2");
-        pipes.dmmv_q4k_pair_q8_btok4_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok4_v2");
-        pipes.dmmv_q5k_q8_btok2_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok2_v2");
-        pipes.dmmv_q5k_q8_btok3_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok3_v2");
-        pipes.dmmv_q5k_q8_btok4_v2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_btok4_v2");
-        pipes.dmmv_q6k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_fast");
-        pipes.dmmv_f32_dual = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual");
-        pipes.dmmv_f32_dual_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok2");
-        pipes.dmmv_f32_dual_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok3");
-        pipes.dmmv_f32_dual_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok4");
-        pipes.dmmv_q4k_pair = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair");
-        pipes.dmmv_q4k_pair_q8 = try pipeline.createPipeline(ctx, src.ptr, if (q8_decode_v2_q4) "dmmv_q4k_pair_q8_btok1_v2" else "dmmv_q4k_pair_q8");
-        pipes.dmmv_q4k_pair_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok2");
-        pipes.dmmv_q4k_pair_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok3");
-        pipes.dmmv_q4k_pair_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok4");
-        pipes.rope = try pipeline.createPipeline(ctx, src.ptr, "rope");
-        pipes.kv_cache_write = try pipeline.createPipeline(ctx, src.ptr, if (kv_format == .q8) "kv_cache_write_q8" else "kv_cache_write");
-        pipes.naive_attention = try pipeline.createPipeline(ctx, src.ptr, "naive_attention");
-        pipes.attention_tiled = try pipeline.createPipeline(ctx, src.ptr, if (kv_format == .q8) "attention_tiled_q8" else "attention_tiled");
-        pipes.qwen_norm_rope_qkv_seq = try pipeline.createPipeline(ctx, src.ptr, "qwen_norm_rope_qkv_seq");
-        pipes.qwen_norm_rope_qkv = try pipeline.createPipeline(ctx, src.ptr, "qwen_norm_rope_qkv");
-        pipes.naive_attention_batched_seq = try pipeline.createPipeline(ctx, src.ptr, "naive_attention_batched_seq");
-        pipes.attention_batched_seq_tiled = try pipeline.createPipeline(ctx, src.ptr, "attention_batched_seq_tiled");
-        pipes.ssm_conv1d_seq = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_seq");
-        pipes.ssm_delta_net_seq = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_seq");
-        pipes.ssm_gated_norm_seq = try pipeline.createPipeline(ctx, src.ptr, "ssm_gated_norm_seq");
-        pipes.sigmoid_mul = try pipeline.createPipeline(ctx, src.ptr, "sigmoid_mul");
-        pipes.sigmoid_mul_quant_q8 = try pipeline.createPipeline(ctx, src.ptr, "sigmoid_mul_quant_q8_0");
-        pipes.deinterleave = try pipeline.createPipeline(ctx, src.ptr, "deinterleave_qgate");
-        pipes.ssm_conv1d = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d");
-        pipes.ssm_conv1d_prepare = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_prepare");
-        pipes.ssm_delta_net = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net");
-        pipes.ssm_delta_net_prepare = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_prepare");
-        pipes.ssm_delta_net_col_warp = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_col_warp");
-        pipes.ssm_delta_net_col_warp_history = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_col_warp_history");
-        pipes.ssm_delta_net_warp = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_warp");
-        pipes.ssm_delta_net_warp_history = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_warp_history");
-        pipes.ssm_delta_net_chunked = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_chunked");
+        pipes.dmmv_fast[0] = try init_guard.createPipeline(src.ptr, "dmmv_q4k_fast");
+        pipes.dmmv_fast[1] = try init_guard.createPipeline(src.ptr, "dmmv_q5k_fast");
+        pipes.dmmv_fast[2] = try init_guard.createPipeline(src.ptr, "dmmv_q6k_fast");
+        pipes.dmmv_fast[3] = try init_guard.createPipeline(src.ptr, "dmmv_q8_0_fast");
+        pipes.dmmv_q4k_q8_fast = try init_guard.createPipeline(src.ptr, if (q8_decode_v2_q4) "dmmv_q4k_q8_btok1_v2" else "dmmv_q4k_q8_fast");
+        pipes.dmmv_q5k_q8_fast = try init_guard.createPipeline(src.ptr, if (q8_decode_v2_q5) "dmmv_q5k_q8_btok1_v2" else "dmmv_q5k_q8_fast");
+        pipes.dmmv_q4k_q8_btok2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_q8_btok2");
+        pipes.dmmv_q4k_q8_btok3 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_q8_btok3");
+        pipes.dmmv_q5k_q8_btok2 = try init_guard.createPipeline(src.ptr, "dmmv_q5k_q8_btok2");
+        pipes.dmmv_q5k_q8_btok3 = try init_guard.createPipeline(src.ptr, "dmmv_q5k_q8_btok3");
+        pipes.dmmv_q5k_q8_btok4 = try init_guard.createPipeline(src.ptr, "dmmv_q5k_q8_btok4");
+        pipes.dmmv_q4k_q8_btok4 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_q8_btok4");
+        pipes.dmmv_q6k_q8_btok2 = try init_guard.createPipeline(src.ptr, "dmmv_q6k_q8_btok2");
+        pipes.dmmv_q6k_q8_btok3 = try init_guard.createPipeline(src.ptr, "dmmv_q6k_q8_btok3");
+        pipes.dmmv_q6k_q8_btok4 = try init_guard.createPipeline(src.ptr, "dmmv_q6k_q8_btok4");
+        pipes.dmmv_q4k_gate_up_swiglu = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu");
+        pipes.dmmv_q4k_gate_up_swiglu_q8 = try init_guard.createPipeline(src.ptr, if (q8_decode_v2_q4) "dmmv_q4k_gate_up_swiglu_q8_btok1_v2" else "dmmv_q4k_gate_up_swiglu_q8");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok2");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok3 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok3");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok4 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok4");
+        pipes.dmmv_q4k_q8_btok2_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_q8_btok2_v2");
+        pipes.dmmv_q4k_q8_btok3_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_q8_btok3_v2");
+        pipes.dmmv_q4k_q8_btok4_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_q8_btok4_v2");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok2_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok2_v2");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok3_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok3_v2");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok4_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok4_v2");
+        pipes.dmmv_q4k_pair_q8_btok2_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair_q8_btok2_v2");
+        pipes.dmmv_q4k_pair_q8_btok3_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair_q8_btok3_v2");
+        pipes.dmmv_q4k_pair_q8_btok4_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair_q8_btok4_v2");
+        pipes.dmmv_q5k_q8_btok2_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q5k_q8_btok2_v2");
+        pipes.dmmv_q5k_q8_btok3_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q5k_q8_btok3_v2");
+        pipes.dmmv_q5k_q8_btok4_v2 = try init_guard.createPipeline(src.ptr, "dmmv_q5k_q8_btok4_v2");
+        pipes.dmmv_q6k_q8_fast = try init_guard.createPipeline(src.ptr, "dmmv_q6k_q8_fast");
+        pipes.dmmv_f32_dual = try init_guard.createPipeline(src.ptr, "dmmv_f32_dual");
+        pipes.dmmv_f32_dual_btok2 = try init_guard.createPipeline(src.ptr, "dmmv_f32_dual_btok2");
+        pipes.dmmv_f32_dual_btok3 = try init_guard.createPipeline(src.ptr, "dmmv_f32_dual_btok3");
+        pipes.dmmv_f32_dual_btok4 = try init_guard.createPipeline(src.ptr, "dmmv_f32_dual_btok4");
+        pipes.dmmv_q4k_pair = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair");
+        pipes.dmmv_q4k_pair_q8 = try init_guard.createPipeline(src.ptr, if (q8_decode_v2_q4) "dmmv_q4k_pair_q8_btok1_v2" else "dmmv_q4k_pair_q8");
+        pipes.dmmv_q4k_pair_q8_btok2 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair_q8_btok2");
+        pipes.dmmv_q4k_pair_q8_btok3 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair_q8_btok3");
+        pipes.dmmv_q4k_pair_q8_btok4 = try init_guard.createPipeline(src.ptr, "dmmv_q4k_pair_q8_btok4");
+        pipes.rope = try init_guard.createPipeline(src.ptr, "rope");
+        pipes.kv_cache_write = try init_guard.createPipeline(src.ptr, if (kv_format == .q8) "kv_cache_write_q8" else "kv_cache_write");
+        pipes.naive_attention = try init_guard.createPipeline(src.ptr, "naive_attention");
+        pipes.attention_tiled = try init_guard.createPipeline(src.ptr, if (kv_format == .q8) "attention_tiled_q8" else "attention_tiled");
+        pipes.qwen_norm_rope_qkv_seq = try init_guard.createPipeline(src.ptr, "qwen_norm_rope_qkv_seq");
+        pipes.qwen_norm_rope_qkv = try init_guard.createPipeline(src.ptr, "qwen_norm_rope_qkv");
+        pipes.naive_attention_batched_seq = try init_guard.createPipeline(src.ptr, "naive_attention_batched_seq");
+        pipes.attention_batched_seq_tiled = try init_guard.createPipeline(src.ptr, "attention_batched_seq_tiled");
+        pipes.ssm_conv1d_seq = try init_guard.createPipeline(src.ptr, "ssm_conv1d_seq");
+        pipes.ssm_delta_net_seq = try init_guard.createPipeline(src.ptr, "ssm_delta_net_seq");
+        pipes.ssm_gated_norm_seq = try init_guard.createPipeline(src.ptr, "ssm_gated_norm_seq");
+        pipes.sigmoid_mul = try init_guard.createPipeline(src.ptr, "sigmoid_mul");
+        pipes.sigmoid_mul_quant_q8 = try init_guard.createPipeline(src.ptr, "sigmoid_mul_quant_q8_0");
+        pipes.deinterleave = try init_guard.createPipeline(src.ptr, "deinterleave_qgate");
+        pipes.ssm_conv1d = try init_guard.createPipeline(src.ptr, "ssm_conv1d");
+        pipes.ssm_conv1d_prepare = try init_guard.createPipeline(src.ptr, "ssm_conv1d_prepare");
+        pipes.ssm_delta_net = try init_guard.createPipeline(src.ptr, "ssm_delta_net");
+        pipes.ssm_delta_net_prepare = try init_guard.createPipeline(src.ptr, "ssm_delta_net_prepare");
+        pipes.ssm_delta_net_col_warp = try init_guard.createPipeline(src.ptr, "ssm_delta_net_col_warp");
+        pipes.ssm_delta_net_col_warp_history = try init_guard.createPipeline(src.ptr, "ssm_delta_net_col_warp_history");
+        pipes.ssm_delta_net_warp = try init_guard.createPipeline(src.ptr, "ssm_delta_net_warp");
+        pipes.ssm_delta_net_warp_history = try init_guard.createPipeline(src.ptr, "ssm_delta_net_warp_history");
+        pipes.ssm_delta_net_chunked = try init_guard.createPipeline(src.ptr, "ssm_delta_net_chunked");
         // Chunked kernel needs ~49KB shared memory (k_norm[32KB] + M[16KB] + misc)
         pipeline.setMaxDynamicShared(&pipes.ssm_delta_net_chunked, 64 * 128 * @sizeOf(f32) + 64 * 64 * @sizeOf(f32) + 2 * 64 * @sizeOf(f32));
-        pipes.ssm_gated_norm = try pipeline.createPipeline(ctx, src.ptr, "ssm_gated_norm");
-        pipes.ssm_gated_norm_quant_q8 = try pipeline.createPipeline(ctx, src.ptr, "ssm_gated_norm_quant_q8_0");
-        pipes.swiglu = try pipeline.createPipeline(ctx, src.ptr, "swiglu");
-        pipes.argmax = try pipeline.createPipeline(ctx, src.ptr, "argmax");
-        pipes.argmax_partials = try pipeline.createPipeline(ctx, src.ptr, "argmax_partials");
-        pipes.argmax_finalize = try pipeline.createPipeline(ctx, src.ptr, "argmax_finalize");
-        pipes.embed_q4k = try pipeline.createPipeline(ctx, src.ptr, "embed_lookup_q4k");
-        pipes.softmax_topk = try pipeline.createPipeline(ctx, src.ptr, "softmax_topk");
-        pipes.softmax_topk_batched = try pipeline.createPipeline(ctx, src.ptr, "softmax_topk_batched");
-        pipes.moe_weighted_acc = try pipeline.createPipeline(ctx, src.ptr, "moe_weighted_acc");
-        pipes.sigmoid_scale_acc = try pipeline.createPipeline(ctx, src.ptr, "sigmoid_scale_acc");
-        pipes.dmmv_q4k_experts = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_experts");
-        pipes.dmmv_q5k_experts = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_experts");
-        pipes.dmmv_q6k_experts = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_experts");
-        pipes.dmmv_q4k_experts_batched = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_experts_batched");
-        pipes.dmmv_q5k_experts_batched = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_experts_batched");
-        pipes.dmmv_q6k_experts_batched = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_experts_batched");
-        pipes.dmmv_f32_batched = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_batched");
-        pipes.moe_weighted_acc_batched = try pipeline.createPipeline(ctx, src.ptr, "moe_weighted_acc_batched");
-        pipes.sigmoid_scale_acc_batched = try pipeline.createPipeline(ctx, src.ptr, "sigmoid_scale_acc_batched");
+        pipes.ssm_gated_norm = try init_guard.createPipeline(src.ptr, "ssm_gated_norm");
+        pipes.ssm_gated_norm_quant_q8 = try init_guard.createPipeline(src.ptr, "ssm_gated_norm_quant_q8_0");
+        pipes.swiglu = try init_guard.createPipeline(src.ptr, "swiglu");
+        pipes.argmax = try init_guard.createPipeline(src.ptr, "argmax");
+        pipes.argmax_partials = try init_guard.createPipeline(src.ptr, "argmax_partials");
+        pipes.argmax_finalize = try init_guard.createPipeline(src.ptr, "argmax_finalize");
+        pipes.embed_q4k = try init_guard.createPipeline(src.ptr, "embed_lookup_q4k");
+        pipes.softmax_topk = try init_guard.createPipeline(src.ptr, "softmax_topk");
+        pipes.softmax_topk_batched = try init_guard.createPipeline(src.ptr, "softmax_topk_batched");
+        pipes.moe_weighted_acc = try init_guard.createPipeline(src.ptr, "moe_weighted_acc");
+        pipes.sigmoid_scale_acc = try init_guard.createPipeline(src.ptr, "sigmoid_scale_acc");
+        pipes.dmmv_q4k_experts = try init_guard.createPipeline(src.ptr, "dmmv_q4k_experts");
+        pipes.dmmv_q5k_experts = try init_guard.createPipeline(src.ptr, "dmmv_q5k_experts");
+        pipes.dmmv_q6k_experts = try init_guard.createPipeline(src.ptr, "dmmv_q6k_experts");
+        pipes.dmmv_q4k_experts_batched = try init_guard.createPipeline(src.ptr, "dmmv_q4k_experts_batched");
+        pipes.dmmv_q5k_experts_batched = try init_guard.createPipeline(src.ptr, "dmmv_q5k_experts_batched");
+        pipes.dmmv_q6k_experts_batched = try init_guard.createPipeline(src.ptr, "dmmv_q6k_experts_batched");
+        pipes.dmmv_f32_batched = try init_guard.createPipeline(src.ptr, "dmmv_f32_batched");
+        pipes.moe_weighted_acc_batched = try init_guard.createPipeline(src.ptr, "moe_weighted_acc_batched");
+        pipes.sigmoid_scale_acc_batched = try init_guard.createPipeline(src.ptr, "sigmoid_scale_acc_batched");
         // T2 (qwen MoE port): grouped Tensor-core routed gate/up experts.
-        pipes.build_expert_order_padded = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded");
-        pipes.build_expert_order_padded_16 = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded_16");
-        pipes.gemm_q4k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_tc");
-        pipes.gemm_q4k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8");
-        pipes.gemm_q4k_experts_grouped_i8_direct = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_direct");
-        pipes.gemm_q4k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16");
-        pipes.gemm_q4k_experts_grouped_i8_t16_direct = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16_direct");
-        pipes.gemm_q4k_experts_grouped_i8_t16_m64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16_m64");
-        pipes.gemm_q4k_experts_grouped_i8_t16_m32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16_m32");
-        pipes.gemm_q5k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_i8");
-        pipes.gemm_q5k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_i8_t16");
-        pipes.gemm_q5k_experts_grouped_i8_t16_m32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_i8_t16_m32");
-        pipes.gemm_q6k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_i8");
-        pipes.gemm_q6k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_i8_t16");
-        pipes.gemm_q6k_experts_grouped_i8_t16_m32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_i8_t16_m32");
-        pipes.gemm_q5k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_tc");
-        pipes.gemm_q6k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_tc");
+        pipes.build_expert_order_padded = try init_guard.createPipeline(src.ptr, "build_expert_order_padded");
+        pipes.build_expert_order_padded_16 = try init_guard.createPipeline(src.ptr, "build_expert_order_padded_16");
+        pipes.gemm_q4k_experts_grouped_tc = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_tc");
+        pipes.gemm_q4k_experts_grouped_i8 = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_i8");
+        pipes.gemm_q4k_experts_grouped_i8_direct = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_i8_direct");
+        pipes.gemm_q4k_experts_grouped_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_i8_t16");
+        pipes.gemm_q4k_experts_grouped_i8_t16_direct = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_i8_t16_direct");
+        pipes.gemm_q4k_experts_grouped_i8_t16_m64 = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_i8_t16_m64");
+        pipes.gemm_q4k_experts_grouped_i8_t16_m32 = try init_guard.createPipeline(src.ptr, "gemm_q4k_experts_grouped_i8_t16_m32");
+        pipes.gemm_q5k_experts_grouped_i8 = try init_guard.createPipeline(src.ptr, "gemm_q5k_experts_grouped_i8");
+        pipes.gemm_q5k_experts_grouped_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q5k_experts_grouped_i8_t16");
+        pipes.gemm_q5k_experts_grouped_i8_t16_m32 = try init_guard.createPipeline(src.ptr, "gemm_q5k_experts_grouped_i8_t16_m32");
+        pipes.gemm_q6k_experts_grouped_i8 = try init_guard.createPipeline(src.ptr, "gemm_q6k_experts_grouped_i8");
+        pipes.gemm_q6k_experts_grouped_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q6k_experts_grouped_i8_t16");
+        pipes.gemm_q6k_experts_grouped_i8_t16_m32 = try init_guard.createPipeline(src.ptr, "gemm_q6k_experts_grouped_i8_t16_m32");
+        pipes.gemm_q5k_experts_grouped_tc = try init_guard.createPipeline(src.ptr, "gemm_q5k_experts_grouped_tc");
+        pipes.gemm_q6k_experts_grouped_tc = try init_guard.createPipeline(src.ptr, "gemm_q6k_experts_grouped_tc");
         // Effort 26 T0: batched-prefill GEMM + SSM kernels.
-        pipes.dequant_q4k_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "dequant_q4k_to_f16");
-        pipes.dequant_q5k_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "dequant_q5k_to_f16");
-        pipes.dequant_q6k_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "dequant_q6k_to_f16");
-        pipes.dequant_q8_0_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "dequant_q8_0_to_f16");
-        pipes.f32_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "f32_to_f16");
-        pipes.add_inplace = try pipeline.createPipeline(ctx, src.ptr, "add_inplace");
-        pipes.copy_f32 = try pipeline.createPipeline(ctx, src.ptr, "copy_f32");
-        pipes.concat_rows = try pipeline.createPipeline(ctx, src.ptr, "concat_rows");
-        pipes.ssm_conv1d_batched = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_batched");
-        pipes.ssm_conv1d_batched_history = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_batched_history");
-        pipes.ssm_gated_norm_batched = try pipeline.createPipeline(ctx, src.ptr, "ssm_gated_norm_batched");
-        pipes.deinterleave_batched = try pipeline.createPipeline(ctx, src.ptr, "deinterleave_qgate_batched");
-        pipes.rope_batched = try pipeline.createPipeline(ctx, src.ptr, "rope_batched");
-        pipes.kv_cache_write_batched = try pipeline.createPipeline(ctx, src.ptr, if (kv_format == .q8) "kv_cache_write_batched_q8" else "kv_cache_write_batched");
-        pipes.attention_causal_batched = try pipeline.createPipeline(ctx, src.ptr, "attention_causal_batched");
-        pipes.attention_causal_v2 = try pipeline.createPipeline(ctx, src.ptr, "attention_causal_batched_v2");
-        pipes.attention_causal_tiled = try pipeline.createPipeline(ctx, src.ptr, if (kv_format == .q8) "attention_causal_tiled_q8" else "attention_causal_tiled");
-        pipes.attention_causal_q8_prefill = try pipeline.createPipeline(ctx, src.ptr, "attention_causal_q8_prefill");
-        pipes.attention_causal_q8_prefill32 = try pipeline.createPipeline(ctx, src.ptr, "attention_causal_q8_prefill32");
-        pipes.q8_attention_prepare_q = try pipeline.createPipeline(ctx, src.ptr, if (q8_attention_half) "q8_attention_prepare_q_f16" else "q8_attention_prepare_q");
-        pipes.q8_attention_prepare_kv = try pipeline.createPipeline(ctx, src.ptr, if (q8_attention_half) "q8_attention_prepare_kv_f16" else "q8_attention_prepare_kv");
-        pipes.q8_attention_softmax = try pipeline.createPipeline(ctx, src.ptr, if (q8_attention_half) "q8_attention_softmax_f16" else "q8_attention_softmax");
-        pipes.q8_attention_finish = try pipeline.createPipeline(ctx, src.ptr, "q8_attention_finish");
+        pipes.dequant_q4k_to_f16 = try init_guard.createPipeline(src.ptr, "dequant_q4k_to_f16");
+        pipes.dequant_q5k_to_f16 = try init_guard.createPipeline(src.ptr, "dequant_q5k_to_f16");
+        pipes.dequant_q6k_to_f16 = try init_guard.createPipeline(src.ptr, "dequant_q6k_to_f16");
+        pipes.dequant_q8_0_to_f16 = try init_guard.createPipeline(src.ptr, "dequant_q8_0_to_f16");
+        pipes.f32_to_f16 = try init_guard.createPipeline(src.ptr, "f32_to_f16");
+        pipes.add_inplace = try init_guard.createPipeline(src.ptr, "add_inplace");
+        pipes.copy_f32 = try init_guard.createPipeline(src.ptr, "copy_f32");
+        pipes.concat_rows = try init_guard.createPipeline(src.ptr, "concat_rows");
+        pipes.ssm_conv1d_batched = try init_guard.createPipeline(src.ptr, "ssm_conv1d_batched");
+        pipes.ssm_conv1d_batched_history = try init_guard.createPipeline(src.ptr, "ssm_conv1d_batched_history");
+        pipes.ssm_gated_norm_batched = try init_guard.createPipeline(src.ptr, "ssm_gated_norm_batched");
+        pipes.deinterleave_batched = try init_guard.createPipeline(src.ptr, "deinterleave_qgate_batched");
+        pipes.rope_batched = try init_guard.createPipeline(src.ptr, "rope_batched");
+        pipes.kv_cache_write_batched = try init_guard.createPipeline(src.ptr, if (kv_format == .q8) "kv_cache_write_batched_q8" else "kv_cache_write_batched");
+        pipes.attention_causal_batched = try init_guard.createPipeline(src.ptr, "attention_causal_batched");
+        pipes.attention_causal_v2 = try init_guard.createPipeline(src.ptr, "attention_causal_batched_v2");
+        pipes.attention_causal_tiled = try init_guard.createPipeline(src.ptr, if (kv_format == .q8) "attention_causal_tiled_q8" else "attention_causal_tiled");
+        pipes.attention_causal_q8_prefill = try init_guard.createPipeline(src.ptr, "attention_causal_q8_prefill");
+        pipes.attention_causal_q8_prefill32 = try init_guard.createPipeline(src.ptr, "attention_causal_q8_prefill32");
+        pipes.q8_attention_prepare_q = try init_guard.createPipeline(src.ptr, if (q8_attention_half) "q8_attention_prepare_q_f16" else "q8_attention_prepare_q");
+        pipes.q8_attention_prepare_kv = try init_guard.createPipeline(src.ptr, if (q8_attention_half) "q8_attention_prepare_kv_f16" else "q8_attention_prepare_kv");
+        pipes.q8_attention_softmax = try init_guard.createPipeline(src.ptr, if (q8_attention_half) "q8_attention_softmax_f16" else "q8_attention_softmax");
+        pipes.q8_attention_finish = try init_guard.createPipeline(src.ptr, "q8_attention_finish");
         // Effort 28 4c: batched-decode GEMMs (weights read once over B rows).
-        pipes.gemm[0] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tiled_v2");
-        pipes.gemm[1] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_tiled_v2");
-        pipes.gemm[2] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_tiled_v2");
-        pipes.gemm[3] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_tiled_v2");
-        pipes.gemm_f32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_f32_tiled_v2");
-        pipes.gemm_q4k_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tc");
-        pipes.gemm_q4k_dp4a = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_dp4a");
-        pipes.gemm_q4k_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8");
-        pipes.gemm_q5k_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8");
-        pipes.gemm_q6k_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8");
-        pipes.gemm_q4k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t48");
-        pipes.gemm_q4k_wmma_i8_t48_direct = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t48_direct");
-        pipes.gemm_q5k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t48");
-        pipes.gemm_q6k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t48");
-        pipes.gemm_q4k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t64");
-        pipes.gemm_q5k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t64");
-        pipes.gemm_q6k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t64");
-        pipes.gemm_q4k_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t80");
-        pipes.gemm_q5k_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t80");
-        pipes.gemm_q6k_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t80");
-        pipes.gemm_q8_0_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8");
-        pipes.gemm_q8_0_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t48");
-        pipes.gemm_q8_0_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t64");
-        pipes.gemm_q8_0_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t80");
-        pipes.gemm_q8_0_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t16");
-        pipes.gemm_q4k_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t16");
-        pipes.gemm_q5k_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t16");
-        pipes.gemm_q6k_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t16");
-        pipes.gemm_f16_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_f16_tc");
-        pipes.gemm_q4k_tc_lowsmem = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tc_lowsmem");
+        pipes.gemm[0] = try init_guard.createPipeline(src.ptr, "gemm_q4k_tiled_v2");
+        pipes.gemm[1] = try init_guard.createPipeline(src.ptr, "gemm_q5k_tiled_v2");
+        pipes.gemm[2] = try init_guard.createPipeline(src.ptr, "gemm_q6k_tiled_v2");
+        pipes.gemm[3] = try init_guard.createPipeline(src.ptr, "gemm_q8_0_tiled_v2");
+        pipes.gemm_f32 = try init_guard.createPipeline(src.ptr, "gemm_f32_tiled_v2");
+        pipes.gemm_q4k_tc = try init_guard.createPipeline(src.ptr, "gemm_q4k_tc");
+        pipes.gemm_q4k_dp4a = try init_guard.createPipeline(src.ptr, "gemm_q4k_dp4a");
+        pipes.gemm_q4k_wmma_i8 = try init_guard.createPipeline(src.ptr, "gemm_q4k_wmma_i8");
+        pipes.gemm_q5k_wmma_i8 = try init_guard.createPipeline(src.ptr, "gemm_q5k_wmma_i8");
+        pipes.gemm_q6k_wmma_i8 = try init_guard.createPipeline(src.ptr, "gemm_q6k_wmma_i8");
+        pipes.gemm_q4k_wmma_i8_t48 = try init_guard.createPipeline(src.ptr, "gemm_q4k_wmma_i8_t48");
+        pipes.gemm_q4k_wmma_i8_t48_direct = try init_guard.createPipeline(src.ptr, "gemm_q4k_wmma_i8_t48_direct");
+        pipes.gemm_q5k_wmma_i8_t48 = try init_guard.createPipeline(src.ptr, "gemm_q5k_wmma_i8_t48");
+        pipes.gemm_q6k_wmma_i8_t48 = try init_guard.createPipeline(src.ptr, "gemm_q6k_wmma_i8_t48");
+        pipes.gemm_q4k_wmma_i8_t64 = try init_guard.createPipeline(src.ptr, "gemm_q4k_wmma_i8_t64");
+        pipes.gemm_q5k_wmma_i8_t64 = try init_guard.createPipeline(src.ptr, "gemm_q5k_wmma_i8_t64");
+        pipes.gemm_q6k_wmma_i8_t64 = try init_guard.createPipeline(src.ptr, "gemm_q6k_wmma_i8_t64");
+        pipes.gemm_q4k_wmma_i8_t80 = try init_guard.createPipeline(src.ptr, "gemm_q4k_wmma_i8_t80");
+        pipes.gemm_q5k_wmma_i8_t80 = try init_guard.createPipeline(src.ptr, "gemm_q5k_wmma_i8_t80");
+        pipes.gemm_q6k_wmma_i8_t80 = try init_guard.createPipeline(src.ptr, "gemm_q6k_wmma_i8_t80");
+        pipes.gemm_q8_0_wmma_i8 = try init_guard.createPipeline(src.ptr, "gemm_q8_0_wmma_i8");
+        pipes.gemm_q8_0_wmma_i8_t48 = try init_guard.createPipeline(src.ptr, "gemm_q8_0_wmma_i8_t48");
+        pipes.gemm_q8_0_wmma_i8_t64 = try init_guard.createPipeline(src.ptr, "gemm_q8_0_wmma_i8_t64");
+        pipes.gemm_q8_0_wmma_i8_t80 = try init_guard.createPipeline(src.ptr, "gemm_q8_0_wmma_i8_t80");
+        pipes.gemm_q8_0_wmma_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q8_0_wmma_i8_t16");
+        pipes.gemm_q4k_wmma_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q4k_wmma_i8_t16");
+        pipes.gemm_q5k_wmma_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q5k_wmma_i8_t16");
+        pipes.gemm_q6k_wmma_i8_t16 = try init_guard.createPipeline(src.ptr, "gemm_q6k_wmma_i8_t16");
+        pipes.gemm_f16_tc = try init_guard.createPipeline(src.ptr, "gemm_f16_tc");
+        pipes.gemm_q4k_tc_lowsmem = try init_guard.createPipeline(src.ptr, "gemm_q4k_tc_lowsmem");
         // mma.sync kernel: use nvcc-compiled cubin (NVRTC generates wrong SASS for mma.sync)
         pipes.gemm_q4k_mma_lowsmem = blk: {
             const cc = shim.cuda_compute_capability(ctx);
@@ -1298,7 +1300,7 @@ pub const ForwardCuda = struct {
             if (cc >= 89) {
                 const cubin_data = if (cc >= 100) @embedFile("../cuda/cubins/mma_kernel.sm120.fatbin") else @embedFile("../cuda/cubins/mma_kernel.sm89.fatbin");
                 log.info("mma.sync cubin: {d} bytes embedded", .{cubin_data.len});
-                if (pipeline.createPipelineFromImage(ctx, cubin_data.ptr, cubin_data.len, "gemm_q4k_mma_lowsmem")) |pipe| {
+                if (init_guard.createPipelineFromImage(cubin_data.ptr, cubin_data.len, "gemm_q4k_mma_lowsmem")) |pipe| {
                     log.info("mma.sync: nvcc cubin loaded OK", .{});
                     break :blk pipe;
                 } else |err| {
@@ -1307,25 +1309,25 @@ pub const ForwardCuda = struct {
             } else {
                 log.info("mma.sync: cc<89, using NVRTC", .{});
             }
-            break :blk pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_mma_lowsmem") catch
-                try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tc_lowsmem");
+            break :blk init_guard.createPipeline(src.ptr, "gemm_q4k_mma_lowsmem") catch
+                try init_guard.createPipeline(src.ptr, "gemm_q4k_tc_lowsmem");
         };
-        pipes.gemm_q4k_gate_up_swiglu = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_gate_up_swiglu_lowsmem");
-        pipes.gemm_q8_0_tc_lowsmem = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_tc_lowsmem");
-        pipes.gemm_q6k_tc_lowsmem = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_tc_lowsmem");
-        pipes.gemm_q5k_tc_lowsmem = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_tc_lowsmem");
-        pipes.quantize_act_q8 = try pipeline.createPipeline(ctx, src.ptr, "quantize_act_q8_0");
-        pipes.gemm_q4k_q8_dp4a = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_q8_dp4a");
+        pipes.gemm_q4k_gate_up_swiglu = try init_guard.createPipeline(src.ptr, "gemm_q4k_gate_up_swiglu_lowsmem");
+        pipes.gemm_q8_0_tc_lowsmem = try init_guard.createPipeline(src.ptr, "gemm_q8_0_tc_lowsmem");
+        pipes.gemm_q6k_tc_lowsmem = try init_guard.createPipeline(src.ptr, "gemm_q6k_tc_lowsmem");
+        pipes.gemm_q5k_tc_lowsmem = try init_guard.createPipeline(src.ptr, "gemm_q5k_tc_lowsmem");
+        pipes.quantize_act_q8 = try init_guard.createPipeline(src.ptr, "quantize_act_q8_0");
+        pipes.gemm_q4k_q8_dp4a = try init_guard.createPipeline(src.ptr, "gemm_q4k_q8_dp4a");
         // Effort 28: token-batch matvecs B=2..16 (idx B-2) for every common decode
         // quant — Q4_K covers most proj/gate/up; Q6_K/Q5_K/Q8_0 cover the residual
         // O-proj/FFN-down/SSM-out on mixed-quant layers. B=9..16 extends btok past
         // the old 8-cap into the higher-concurrency serving regime (btok stays
         // bandwidth-bound to the ~B≈27 roofline crossover vs the padded tile GEMM).
         inline for ([_][]const u8{ "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27" }, 0..) |suf, i| {
-            pipes.dmmv_q4k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_btok" ++ suf);
-            pipes.dmmv_q6k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_btok" ++ suf);
-            pipes.dmmv_q5k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_btok" ++ suf);
-            pipes.dmmv_q8_0_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_btok" ++ suf);
+            pipes.dmmv_q4k_btok[i] = try init_guard.createPipeline(src.ptr, "dmmv_q4k_btok" ++ suf);
+            pipes.dmmv_q6k_btok[i] = try init_guard.createPipeline(src.ptr, "dmmv_q6k_btok" ++ suf);
+            pipes.dmmv_q5k_btok[i] = try init_guard.createPipeline(src.ptr, "dmmv_q5k_btok" ++ suf);
+            pipes.dmmv_q8_0_btok[i] = try init_guard.createPipeline(src.ptr, "dmmv_q8_0_btok" ++ suf);
         }
         log.info("nvrtc: compiled {d} kernel pipelines", .{193});
 
@@ -1351,38 +1353,38 @@ pub const ForwardCuda = struct {
             .q8_decode_v2_q4 = q8_decode_v2_q4,
             .q8_decode_v2_q5 = q8_decode_v2_q5,
             .pipes = pipes,
-            .hidden = try buffer.createBuffer(ctx, d.n_embd * f4),
-            .norm_buf = try buffer.createBuffer(ctx, d.n_embd * f4),
-            .qfull_buf = try buffer.createBuffer(ctx, 2 * d.q_dim * f4),
-            .q_buf = try buffer.createBuffer(ctx, d.q_dim * f4),
-            .k_buf = try buffer.createBuffer(ctx, d.kv_dim * f4),
-            .v_buf = try buffer.createBuffer(ctx, d.kv_dim * f4),
-            .gate_buf = try buffer.createBuffer(ctx, moe_act * f4),
-            .attn_out_buf = try buffer.createBuffer(ctx, d.conv_channels * f4),
-            .ffn_norm_buf = try buffer.createBuffer(ctx, d.n_embd * f4),
-            .up_buf = try buffer.createBuffer(ctx, moe_act * f4),
-            .swiglu_buf = try buffer.createBuffer(ctx, moe_act * f4),
-            .router_buf = try buffer.createBuffer(ctx, 64 * f4),
-            .down_buf = try buffer.createBuffer(ctx, down_elems * f4),
-            .logits_buf = try buffer.createBuffer(ctx, d.vocab * f4),
-            .argmax_buf = try buffer.createBuffer(ctx, @sizeOf(u32)),
-            .argmax_partial_buf = try buffer.createBuffer(ctx, 128 * (@sizeOf(f32) + @sizeOf(u32))),
-            .tok_in_buf = try buffer.createBuffer(ctx, @sizeOf(u32)),
-            .router_logits_buf = try buffer.createBuffer(ctx, router_logits_elems * f4),
-            .router_out_buf = try buffer.createBuffer(ctx, router_out_elems * @sizeOf(u32)),
-            .gate_scalar_buf = try buffer.createBuffer(ctx, f4),
+            .hidden = try init_guard.createBuffer(d.n_embd * f4),
+            .norm_buf = try init_guard.createBuffer(d.n_embd * f4),
+            .qfull_buf = try init_guard.createBuffer(2 * d.q_dim * f4),
+            .q_buf = try init_guard.createBuffer(d.q_dim * f4),
+            .k_buf = try init_guard.createBuffer(d.kv_dim * f4),
+            .v_buf = try init_guard.createBuffer(d.kv_dim * f4),
+            .gate_buf = try init_guard.createBuffer(moe_act * f4),
+            .attn_out_buf = try init_guard.createBuffer(d.conv_channels * f4),
+            .ffn_norm_buf = try init_guard.createBuffer(d.n_embd * f4),
+            .up_buf = try init_guard.createBuffer(moe_act * f4),
+            .swiglu_buf = try init_guard.createBuffer(moe_act * f4),
+            .router_buf = try init_guard.createBuffer(64 * f4),
+            .down_buf = try init_guard.createBuffer(down_elems * f4),
+            .logits_buf = try init_guard.createBuffer(d.vocab * f4),
+            .argmax_buf = try init_guard.createBuffer(@sizeOf(u32)),
+            .argmax_partial_buf = try init_guard.createBuffer(128 * (@sizeOf(f32) + @sizeOf(u32))),
+            .tok_in_buf = try init_guard.createBuffer(@sizeOf(u32)),
+            .router_logits_buf = try init_guard.createBuffer(router_logits_elems * f4),
+            .router_out_buf = try init_guard.createBuffer(router_out_elems * @sizeOf(u32)),
+            .gate_scalar_buf = try init_guard.createBuffer(f4),
             .host_embed = try buffer.allocHost(f32, d.n_embd),
             .host_tok = try buffer.allocHost(u32, 1),
             .host_tok_in = try buffer.allocHost(u32, 1),
-            .host_router_ids = try allocator.alloc(u32, @max(@as(u32, 1), d.n_experts_used)),
-            .inv_freq = try buffer.createBuffer(ctx, (d.rope_dim / 2) * f4),
-            .sinks = try buffer.createBuffer(ctx, state_layers * d.n_head * f4),
-            .kv_k = try allocator.alloc(CudaBuffer, state_layers),
-            .kv_v = try allocator.alloc(CudaBuffer, state_layers),
-            .ssm_conv_state = try allocator.alloc(CudaBuffer, state_layers),
-            .ssm_state = try allocator.alloc(CudaBuffer, state_layers),
-            .conv_off = try allocator.alloc(u32, state_layers),
-            .layer_is_attn = try allocator.alloc(bool, state_layers),
+            .host_router_ids = try init_guard.alloc(u32, @max(@as(u32, 1), d.n_experts_used)),
+            .inv_freq = try init_guard.createBuffer((d.rope_dim / 2) * f4),
+            .sinks = try init_guard.createBuffer(state_layers * d.n_head * f4),
+            .kv_k = try init_guard.alloc(CudaBuffer, state_layers),
+            .kv_v = try init_guard.alloc(CudaBuffer, state_layers),
+            .ssm_conv_state = try init_guard.alloc(CudaBuffer, state_layers),
+            .ssm_state = try init_guard.alloc(CudaBuffer, state_layers),
+            .conv_off = try init_guard.alloc(u32, state_layers),
+            .layer_is_attn = try init_guard.alloc(bool, state_layers),
         };
 
         if (comptime is_rocm) {
@@ -1504,15 +1506,15 @@ pub const ForwardCuda = struct {
                 if (model.getLayer(L, "ffn_gate_inp.weight")) |w| log.info("  ffn_gate_inp: type={} dims={any}", .{ w.info.type_, w.info.dims[0..@min(w.info.n_dims, 3)] });
             }
             if (self.layer_is_attn[li]) {
-                self.kv_k[li] = try buffer.createBuffer(ctx, kv_bytes);
-                self.kv_v[li] = try buffer.createBuffer(ctx, kv_bytes);
-                self.ssm_conv_state[li] = try buffer.createBuffer(ctx, f4);
-                self.ssm_state[li] = try buffer.createBuffer(ctx, f4);
+                self.kv_k[li] = try init_guard.createBuffer(kv_bytes);
+                self.kv_v[li] = try init_guard.createBuffer(kv_bytes);
+                self.ssm_conv_state[li] = try init_guard.createBuffer(f4);
+                self.ssm_state[li] = try init_guard.createBuffer(f4);
             } else {
-                self.kv_k[li] = try buffer.createBuffer(ctx, f4);
-                self.kv_v[li] = try buffer.createBuffer(ctx, f4);
-                self.ssm_conv_state[li] = try buffer.createBuffer(ctx, d.conv_state_len * f4);
-                self.ssm_state[li] = try buffer.createBuffer(ctx, d.ssm_state_len * f4);
+                self.kv_k[li] = try init_guard.createBuffer(f4);
+                self.kv_v[li] = try init_guard.createBuffer(f4);
+                self.ssm_conv_state[li] = try init_guard.createBuffer(d.conv_state_len * f4);
+                self.ssm_state[li] = try init_guard.createBuffer(d.ssm_state_len * f4);
                 // zero-init the SSM state
                 try zeroBuffer(allocator, ctx, &self.ssm_conv_state[li], d.conv_state_len);
                 try zeroBuffer(allocator, ctx, &self.ssm_state[li], d.ssm_state_len);
@@ -1652,6 +1654,7 @@ pub const ForwardCuda = struct {
             log.info("persistent fp16 prefill weight cache enabled (cap {d} MiB)", .{self.w_f16_cache_cap / (1024 * 1024)});
         }
 
+        init_guard.commit();
         return self;
     }
 

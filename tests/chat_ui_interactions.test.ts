@@ -44,7 +44,13 @@ class Element {
     this.htmlWrites++;
     this.html = value;
     this.children = [];
-    if (value.includes('class="reasoning-summary"')) {
+    if (this.className !== 'reasoning-block' && value.includes('class="reasoning-block"')) {
+      const child = new Element();
+      child.className = 'reasoning-block';
+      child.open = /<details\b[^>]*\bopen\b/.test(value);
+      child.innerHTML = value.slice(value.indexOf('<summary>'), value.indexOf('</details>'));
+      this.appendChild(child);
+    } else if (value.includes('class="reasoning-summary"')) {
       for (const name of ['reasoning-state', 'reasoning-body', 'stream-markdown']) {
         const child = new Element();
         child.className = name;
@@ -75,6 +81,13 @@ class Element {
       this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
     this.parentNode = null;
   }
+  replaceWith(replacement: Element) {
+    const parent = this.parentNode;
+    if (parent) {
+      parent.insertBefore(replacement, this);
+      this.remove();
+    }
+  }
   querySelector(selector: string): Element | null {
     for (const child of this.children) {
       if (child.className.split(' ').includes(selector.slice(1))) return child;
@@ -102,6 +115,7 @@ function harness(
   fetchMock: (url: string, options?: any) => Promise<any> = async () => {
     throw new Error('offline');
   },
+  storage = new Map<string, string>(),
 ) {
   const source = readFileSync(resolve(import.meta.dir, '../src/server/chat.html'), 'utf8')
     .match(/<script>([\s\S]*)<\/script>\s*<\/body>/)![1]
@@ -127,13 +141,20 @@ function harness(
     'cancelAnimationFrame',
     'fetch',
     `${source}
-    return {md, send, clearConversation, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
+    return {md, send, clearConversation, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, completeAssistantHtml, assistantHtmlFromRaw, restoreChatState, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
       setResetSupport(value){supportsChatSessionReset=value}, replaceSend(fn){send=fn}, replaceStop(fn){stopGeneration=fn}, setHistory(value){H=value}, setModels(value){models=value}, generating(){return isGenerating}, history(){return H}};`,
   );
   const api = factory(
     { getElementById: getElement, createElement: () => new Element(), querySelectorAll: () => [] },
     { origin: 'http://localhost:8080' },
-    { getItem: () => null, setItem: () => writes++ },
+    {
+      getItem: (key: string) => storage.get(key) || null,
+      setItem: (key: string, value: string) => {
+        writes++;
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => storage.delete(key),
+    },
     { addEventListener() {}, crypto: { randomUUID: () => 'chat-test' } },
     (fn: () => void, delay: number) => {
       const id = nextTimer++;
@@ -153,7 +174,7 @@ function harness(
     (id: number) => frames.delete(id),
     fetchMock,
   );
-  return { api, getElement, timers, timerDelays, frames, writes: () => writes };
+  return { api, getElement, timers, timerDelays, frames, storage, writes: () => writes };
 }
 
 test('Enter preserves the next draft during generation and ignores IME composition', () => {
@@ -263,6 +284,214 @@ test("live Markdown retains containers and the reader's reasoning disclosure cho
   );
   expect(bubble.children.find((child) => child.className === 'stream-markdown')).toBe(answer);
   expect(bubble.htmlWrites).toBe(0);
+});
+
+test("finishing a reply retains the reasoning disclosure and the reader's scroll position", () => {
+  const { api } = harness();
+  const bubble = new Element();
+  const reasoning = 'I need to compare the first result and then verify the dimensions.';
+  api.updateLiveAssistant(bubble, '<think>' + reasoning, true);
+  const details = bubble.querySelector('.reasoning-block')!;
+  const body = details.querySelector('.reasoning-body')!;
+  details.open = false;
+  body.scrollHeight = 1000;
+  body.clientHeight = 100;
+  body.scrollTop = 120;
+  const raw = '<think>' + reasoning + '</think>\nThe dimensions match.';
+  api.updateLiveAssistant(bubble, raw, false);
+  expect(bubble.querySelector('.reasoning-block')).toBe(details);
+  expect(body.scrollTop).toBe(120);
+  api.completeAssistantHtml(bubble, api.assistantHtmlFromRaw(raw, false).html, false);
+  expect(bubble.querySelector('.reasoning-block')).toBe(details);
+  expect(details.open).toBe(false);
+  expect(details.querySelector('.reasoning-body')).toBe(body);
+  expect(body.scrollTop).toBe(120);
+  expect(bubble.htmlWrites).toBe(0);
+});
+
+test('the closing think token keeps all streamed planning paragraphs in the same disclosure', () => {
+  const { api } = harness();
+  const bubble = new Element();
+  const reasoning =
+    'Check the allocation sizes and compare each pointer offset against the required alignment before deciding.\n\nThe user is asking whether the memory layout is safe.\n\nI need to verify the final offset and explain the result.';
+  const live = api.updateLiveAssistant(bubble, '<think>' + reasoning, true);
+  const details = bubble.querySelector('.reasoning-block')!;
+  details.open = false;
+  expect(live.reasoning).toBe(reasoning);
+  const completed = api.updateLiveAssistant(
+    bubble,
+    '<think>' + reasoning + '</think>\nThe layout is aligned correctly.',
+    false,
+  );
+  expect(completed.reasoning).toBe(reasoning);
+  expect(completed.answer).toBe('The layout is aligned correctly.');
+  expect(bubble.querySelector('.reasoning-block')).toBe(details);
+  expect(details.open).toBe(false);
+});
+
+test('short reasoning survives reply completion, persisted history, and restore', async () => {
+  const reasoning = 'I need to answer directly.';
+  const raw = '<think>' + reasoning + '</think>\nThe result is 408.';
+  const storage = new Map<string, string>();
+  const ui = harness(
+    async () =>
+      new Response(
+        'data: ' +
+          JSON.stringify({ choices: [{ delta: { content: raw }, finish_reason: null }] }) +
+          '\n\n' +
+          'data: ' +
+          JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
+          '\n\ndata: [DONE]\n\n',
+      ),
+    storage,
+  );
+  ui.api.setModels([{ id: 'test-model', active: true, supports_thinking_toggle: true }]);
+  ui.getElement('i').value = 'Calculate the result';
+  await ui.api.send();
+  const assistant = ui.api.history().find((message: any) => message.role === 'assistant');
+  expect(assistant.content).toBe('The result is 408.');
+  expect(assistant.raw).toBe(raw);
+  const completedBubble = ui.getElement('messages').children[1].querySelector('.bbl')!;
+  const completedDetails = completedBubble.querySelector('.reasoning-block')!;
+  completedDetails.open = true;
+  completedDetails.dispatch('toggle');
+  ui.api.saveChatState();
+  expect(assistant.reasoning_open).toBe(true);
+  const stored = JSON.parse(storage.get('zinc.chat.state.v3')!);
+  expect(stored.messages.find((message: any) => message.role === 'assistant').raw).toBe(raw);
+  const restored = harness(undefined, storage);
+  restored.api.restoreChatState();
+  expect(restored.api.history().find((message: any) => message.role === 'assistant').raw).toBe(raw);
+  const rendered = restored
+    .getElement('messages')
+    .children.map((message) => message.querySelector('.bbl')?.innerHTML || '')
+    .join('');
+  expect(rendered).toContain('class="reasoning-block"');
+  expect(rendered).toContain(reasoning);
+  expect(rendered).toContain('The result is 408.');
+  const restoredBubble = restored.getElement('messages').children[1].querySelector('.bbl')!;
+  expect(restoredBubble.querySelector('.reasoning-block')!.open).toBe(true);
+});
+
+test("a reader's collapsed reasoning choice survives final rendering and restore", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const raw = '<think>Check the first value, then compare the dimensions.';
+  const storage = new Map<string, string>();
+  const ui = harness(
+    async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(value) {
+            controller = value;
+            value.enqueue(
+              new TextEncoder().encode(
+                'data: ' + JSON.stringify({ choices: [{ delta: { content: raw } }] }) + '\n\n',
+              ),
+            );
+          },
+        }),
+      ),
+    storage,
+  );
+  ui.api.setModels([{ id: 'test-model', active: true, supports_thinking_toggle: true }]);
+  ui.getElement('i').value = 'Compare the values';
+  const turn = ui.api.send();
+  for (let step = 0; step < 30 && ui.frames.size === 0; step++) await Promise.resolve();
+  expect(ui.frames.size).toBe(1);
+  ui.api.flushPendingRender();
+  const bubble = ui.getElement('messages').children[1].querySelector('.bbl')!;
+  const details = bubble.querySelector('.reasoning-block')!;
+  expect(details.open).toBe(true);
+  details.open = false;
+  details.dispatch('toggle');
+  controller.enqueue(
+    new TextEncoder().encode(
+      'data: ' +
+        JSON.stringify({
+          choices: [{ delta: { content: '</think>\nThe values match.' }, finish_reason: 'stop' }],
+        }) +
+        '\n\ndata: [DONE]\n\n',
+    ),
+  );
+  controller.close();
+  await turn;
+  expect(bubble.querySelector('.reasoning-block')).toBe(details);
+  expect(details.open).toBe(false);
+  expect(ui.api.history().find((message: any) => message.role === 'assistant').reasoning_open).toBe(
+    false,
+  );
+  const restored = harness(undefined, storage);
+  restored.api.restoreChatState();
+  const restoredBubble = restored.getElement('messages').children[1].querySelector('.bbl')!;
+  expect(restoredBubble.querySelector('.reasoning-block')!.open).toBe(false);
+});
+
+test('plain Thinking Process reasoning survives completion and restored history', async () => {
+  const raw = 'Thinking Process:\n\n1. Compare the first value.\n2. Verify the dimensions.';
+  const storage = new Map<string, string>();
+  const ui = harness(
+    async () =>
+      new Response(
+        'data: ' +
+          JSON.stringify({ choices: [{ delta: { content: raw }, finish_reason: null }] }) +
+          '\n\n' +
+          'data: ' +
+          JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
+          '\n\ndata: [DONE]\n\n',
+      ),
+    storage,
+  );
+  ui.api.setModels([{ id: 'test-model', active: true, supports_thinking_toggle: true }]);
+  ui.getElement('i').value = 'Compare these values';
+  await ui.api.send();
+  const assistant = ui.api.history().find((message: any) => message.role === 'assistant');
+  expect(assistant.raw).toBe(raw);
+  expect(assistant.content).toBe(raw);
+  const restored = harness(undefined, storage);
+  restored.api.restoreChatState();
+  const bubble = restored.getElement('messages').children[1].querySelector('.bbl')!;
+  expect(bubble.querySelector('.reasoning-block')).not.toBeNull();
+  expect(bubble.innerHTML).toContain('Compare the first value.');
+});
+
+test('stopping before the final answer leaves streamed reasoning inspectable', async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const reasoning = 'I need to inspect the dimensions before selecting the operation.';
+  const ui = harness(
+    async (_url, options) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(value) {
+            controller = value;
+            value.enqueue(
+              new TextEncoder().encode(
+                'data: ' +
+                  JSON.stringify({ choices: [{ delta: { content: '<think>' + reasoning } }] }) +
+                  '\n\n',
+              ),
+            );
+            options.signal.addEventListener('abort', () =>
+              controller.error(new DOMException('Stopped', 'AbortError')),
+            );
+          },
+        }),
+      ),
+  );
+  ui.api.setModels([{ id: 'test-model', active: true, supports_thinking_toggle: true }]);
+  ui.getElement('i').value = 'Compare the dimensions';
+  const turn = ui.api.send();
+  for (let step = 0; step < 30 && ui.frames.size === 0; step++) await Promise.resolve();
+  expect(ui.frames.size).toBe(1);
+  ui.api.flushPendingRender();
+  const bubble = ui.getElement('messages').children[1].querySelector('.bbl')!;
+  const details = bubble.querySelector('.reasoning-block')!;
+  ui.api.stopGeneration();
+  await turn;
+  expect(bubble.querySelector('.reasoning-block')).toBe(details);
+  expect(details.querySelector('.markdown-tail')!.innerHTML).toContain(reasoning);
+  const assistant = ui.api.history().find((message: any) => message.role === 'assistant');
+  expect(assistant.raw).toContain(reasoning);
+  expect(assistant.incomplete).toBe(true);
 });
 
 test('live Markdown formats headings and emphasis before completion', () => {
@@ -466,6 +695,10 @@ test('final answer recovery stays locked and can be stopped without losing the n
   expect(api.generating()).toBe(true);
   expect(getElement('b').ariaLabel).toBe('Stop generating');
   expect(getElement('cb').disabled).toBe(true);
+  const recoveryBubble = getElement('messages').children[1].querySelector('.bbl')!;
+  const recoveryReasoning = recoveryBubble.querySelector('.reasoning-block')!;
+  recoveryReasoning.open = false;
+  recoveryReasoning.dispatch('toggle');
   input.value = 'My next question';
   api.stopGeneration();
   await turn;
@@ -473,6 +706,11 @@ test('final answer recovery stays locked and can be stopped without losing the n
   expect(api.generating()).toBe(false);
   expect(input.value).toBe('My next question');
   expect(api.history().find((message: any) => message.role === 'assistant').incomplete).toBe(true);
+  expect(api.history().find((message: any) => message.role === 'assistant').reasoning_open).toBe(
+    false,
+  );
+  expect(recoveryBubble.querySelector('.reasoning-block')).toBe(recoveryReasoning);
+  expect(recoveryReasoning.open).toBe(false);
 });
 
 test('new chat clears locally and only resets a server that advertises session reuse', async () => {

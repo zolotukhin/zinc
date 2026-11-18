@@ -341,6 +341,15 @@ const TokenizeCache = struct {
         return null;
     }
 
+    /// Token IDs and template markers belong to one tokenizer. Dropping a model
+    /// must invalidate them before another vocabulary can reuse the session key.
+    fn clear(self: *TokenizeCache) void {
+        if (self.session_id.len > 0) alloc.free(self.session_id);
+        if (self.text.len > 0) alloc.free(self.text);
+        if (self.tokens.len > 0) alloc.free(self.tokens);
+        self.* = .{};
+    }
+
     fn store(self: *TokenizeCache, session_id: []const u8, text: []const u8, tokens: []const u32) void {
         const sid = alloc.dupe(u8, session_id) catch return;
         const txt = alloc.dupe(u8, text) catch {
@@ -384,6 +393,7 @@ pub const ServerState = struct {
     /// Release owned resources (chat reuse cache).
     pub fn deinit(self: *ServerState) void {
         self.chat_reuse_cache.deinit();
+        self.tokenize_cache.clear();
     }
 
     /// Return elapsed seconds since the server started.
@@ -419,12 +429,14 @@ pub const ServerState = struct {
     /// Evict all entries from the chat prompt-reuse cache.
     pub fn clearChatReuseCache(self: *ServerState) void {
         self.chat_reuse_cache.clear();
+        self.tokenize_cache.clear();
     }
 
     /// Remove a single session from the chat prompt-reuse cache.
     /// @param session_id Opaque session identifier matching the entry to evict.
     pub fn clearChatReuseSession(self: *ServerState, session_id: []const u8) void {
         self.chat_reuse_cache.removeSession(session_id);
+        if (std.mem.eql(u8, session_id, self.tokenize_cache.session_id)) self.tokenize_cache.clear();
     }
 };
 
@@ -615,6 +627,12 @@ pub fn handleConnection(
         } else {
             try sendUnsupportedModelManagement(conn);
         }
+    } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/unload")) {
+        if (comptime runtime.supports_model_management) {
+            try handleUnloadModel(conn, manager, server_state, request.body, allocator);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/completions")) {
         try handleChatCompletions(conn, manager, server_state, request.body, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/reset")) {
@@ -696,6 +714,9 @@ fn buildHealthJson(
         .context_length = discovery.context_length,
         .capabilities = discovery.capabilities,
         .mtp_request_control = false,
+        .supports_model_management = true,
+        .supports_model_unload = true,
+        .supports_model_pull = true,
         .active_requests = snapshot.active_requests,
         .queued_requests = snapshot.queued_requests,
         .uptime_seconds = snapshot.uptime_seconds,
@@ -743,7 +764,7 @@ fn handleModels(
 
     try body.print(
         allocator,
-        "{{\"object\":\"list\",\"profile\":\"{s}\",\"active_memory_used_bytes\":{d},\"active_memory_budget_bytes\":{d},\"active_memory_weights_bytes\":{d},\"active_memory_runtime_bytes\":{d},\"active_context_reserved_bytes\":{d},\"active_context_active_bytes\":{d},\"active_context_tokens\":{d},\"active_context_capacity_tokens\":{d},\"data\":[",
+        "{{\"object\":\"list\",\"supports_model_management\":true,\"supports_model_unload\":true,\"supports_model_pull\":true,\"profile\":\"{s}\",\"active_memory_used_bytes\":{d},\"active_memory_budget_bytes\":{d},\"active_memory_weights_bytes\":{d},\"active_memory_runtime_bytes\":{d},\"active_context_reserved_bytes\":{d},\"active_context_active_bytes\":{d},\"active_context_tokens\":{d},\"active_context_capacity_tokens\":{d},\"data\":[",
         .{
             view.profile,
             memory_usage.device_local_bytes,
@@ -910,6 +931,47 @@ fn handleRemoveModel(
         if (result.removed.removed_dir) "true" else "false",
     }) catch return error.BufferTooSmall;
     try conn.sendJson(200, response);
+}
+
+const UnloadModelBody = struct {
+    model: []const u8 = "",
+};
+
+/// The generation lock outlives all resource reads during inference. Unloading
+/// takes the same lock, then drops prompt reuse before another request can run.
+fn unloadModel(manager: anytype, server_state: *ServerState, expected_id: []const u8) !bool {
+    server_state.generation_mutex.lock();
+    defer server_state.generation_mutex.unlock();
+    const unloaded = try manager.unloadActiveModel(expected_id);
+    server_state.clearChatReuseCache();
+    server_state.clearActiveContext();
+    return unloaded;
+}
+
+fn handleUnloadModel(
+    conn: *http.Connection,
+    manager: *runtime.model_manager_mod.ModelManager,
+    server_state: *ServerState,
+    body: []const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    const parsed = std.json.parseFromSlice(UnloadModelBody, allocator, if (body.len == 0) "{}" else body, .{ .ignore_unknown_fields = true }) catch {
+        try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
+        return;
+    };
+    defer parsed.deinit();
+    const unloaded = unloadModel(manager, server_state, parsed.value.model) catch |err| {
+        if (err == error.ActiveModelChanged) {
+            try conn.sendError(409, "model_changed", "The active model changed. Refresh model status and try again.");
+        } else {
+            try conn.sendError(500, "server_error", "Model unload failed");
+        }
+        return;
+    };
+    try conn.sendJson(200, if (unloaded)
+        "{\"object\":\"model.unload\",\"unloaded_from_gpu\":true,\"active\":false,\"deleted_model\":false}"
+    else
+        "{\"object\":\"model.unload\",\"unloaded_from_gpu\":false,\"active\":false,\"deleted_model\":false}");
 }
 
 const NullLogWriter = struct {
@@ -6481,6 +6543,9 @@ test "buildHealthJson includes request counts and uptime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_capacity_tokens\":4096") != null);
     var json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
     defer json.deinit();
+    try std.testing.expect(json.value.object.get("supports_model_management").?.bool);
+    try std.testing.expect(json.value.object.get("supports_model_unload").?.bool);
+    try std.testing.expect(json.value.object.get("supports_model_pull").?.bool);
     // Shared serving keeps the Vulkan verifier and process policy unchanged.
     // Missing support/default metadata remains unknown, rather than false.
     try std.testing.expect(json.value.object.get("supports_mtp") == null);
@@ -6647,4 +6712,54 @@ test "Gemma tool prompts match the pinned checkpoint Jinja template" {
             return err;
         };
     }
+}
+
+test "model unload holds generation ownership and clears reusable context" {
+    const FakeManager = struct {
+        state: *ServerState,
+        pub fn unloadActiveModel(self: *@This(), expected_id: []const u8) !bool {
+            try std.testing.expectEqualStrings("current-model", expected_id);
+            const unlocked = self.state.generation_mutex.tryLock();
+            if (unlocked) self.state.generation_mutex.unlock();
+            try std.testing.expect(!unlocked);
+            return true;
+        }
+    };
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.setActiveContextTokens(2048);
+    var manager = FakeManager{ .state = &state };
+    try std.testing.expect(try unloadModel(&manager, &state, "current-model"));
+    try std.testing.expectEqual(@as(u32, 0), state.active_context_tokens.load(.monotonic));
+    try std.testing.expect(state.generation_mutex.tryLock());
+    state.generation_mutex.unlock();
+}
+
+test "rejected model unload preserves context and releases generation ownership" {
+    const FakeManager = struct {
+        pub fn unloadActiveModel(_: *@This(), _: []const u8) !bool {
+            return error.ActiveModelChanged;
+        }
+    };
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.setActiveContextTokens(2048);
+    var manager = FakeManager{};
+    try std.testing.expectError(error.ActiveModelChanged, unloadModel(&manager, &state, "previous-model"));
+    try std.testing.expectEqual(@as(u32, 2048), state.active_context_tokens.load(.monotonic));
+    try std.testing.expect(state.generation_mutex.tryLock());
+    state.generation_mutex.unlock();
+}
+
+test "model lifecycle invalidates cached tokens and template markers" {
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.tokenize_cache.store("conversation", "A cached prefix", &.{ 1, 2, 3 });
+    state.tokenize_cache.im_start_id = 42;
+    state.clearChatReuseSession("another-conversation");
+    try std.testing.expectEqual(@as(usize, 3), state.tokenize_cache.tokens.len);
+    state.clearChatReuseCache();
+    try std.testing.expectEqual(@as(usize, 0), state.tokenize_cache.tokens.len);
+    try std.testing.expectEqual(@as(usize, 0), state.tokenize_cache.text.len);
+    try std.testing.expect(state.tokenize_cache.im_start_id == null);
 }
