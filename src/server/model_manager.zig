@@ -227,7 +227,9 @@ pub const ModelManager = struct {
     /// Release model GPU resources while preserving cached weights and the
     /// persisted selection. An optional expected id prevents a stale UI from
     /// unloading a model that another client just activated.
-    /// @note Caller must hold the shared generation lock.
+    /// @note Caller holds generation_mutex before state_mutex; manager methods
+    /// never acquire generation_mutex. The GPU process lock below owns only a
+    /// nonblocking file reservation, not a thread mutex with local waiters.
     pub fn unloadActiveModel(self: *ModelManager, expected_id: []const u8) !bool {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();

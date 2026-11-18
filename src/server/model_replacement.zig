@@ -7,17 +7,20 @@ const std = @import("std");
 
 /// Context supplies `current`, `unload()`, and `load(entry)`. Resource entries
 /// remain owned by the immutable model inventory throughout replacement.
-/// Optional `validate(entry)` rejects metadata or budgets before unloading.
+/// Optional `validate(entry)` rejects metadata or impossible weights before unloading.
 pub fn activate(context: anytype, entry: anytype) !void {
     if (context.current) |current| {
         if (std.mem.eql(u8, current.entry.id, entry.id)) return;
     }
-    // Reject bad metadata/budgets while the current model is still resident.
+    // Reject bad metadata/impossible weights while the current model is resident.
     if (@hasDecl(@TypeOf(context.*), "validate")) try context.validate(entry);
     const previous = if (context.current) |current| current.entry else null;
     context.unload();
     context.current = context.load(entry) catch |err| {
-        if (previous) |old| context.current = context.load(old) catch null;
+        if (previous) |old| context.current = context.load(old) catch |restore_err| blk: {
+            std.log.scoped(.model_replacement).warn("Previous model restore failed: {s}", .{@errorName(restore_err)});
+            break :blk null;
+        };
         return err;
     };
 }

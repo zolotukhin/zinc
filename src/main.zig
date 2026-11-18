@@ -2149,8 +2149,7 @@ const AcceleratorManager = struct {
     }
 
     /// Metadata-only validation runs before replacement releases a working
-    /// model. The bound is conservative; allocation and inference still have
-    /// their own error handling and rollback.
+    /// model. Allocation and inference retain their own rollback handling.
     pub fn validate(self: *AcceleratorManager, entry: *const accelerator_catalog.Entry) !void {
         const inspection = loader_cuda_mod.inspectModel(entry.path, self.allocator) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -2165,7 +2164,7 @@ const AcceleratorManager = struct {
         const slots = cudaServeSlotCount(self.config.max_parallel, cfg.architecture == .gemma and cfg.n_experts > 0);
         if (format == .q8 and (!gpu.is_rocm or (cfg.architecture != .qwen35 and cfg.architecture != .qwen2_moe) or slots != 1)) return error.UnsupportedKvCacheConfiguration;
         const estimate = @import("gpu/native_memory_estimate.zig").estimate(cfg, inspection.weights_bytes, self.max_ctx, slots, format) catch return error.InvalidModel;
-        if (estimate.estimated_total_bytes > self.device.totalMemory()) return error.ModelDoesNotFit;
+        try validateAcceleratorMemoryBudget(estimate, self.device.totalMemory());
     }
 
     pub fn load(self: *AcceleratorManager, entry: *const accelerator_catalog.Entry) !*AcceleratorResources {
@@ -2176,6 +2175,30 @@ const AcceleratorManager = struct {
         return model_replacement.activate(self, entry);
     }
 };
+
+fn validateAcceleratorMemoryBudget(estimate: @import("gpu/native_memory_estimate.zig").Estimate, total_bytes: u64) !void {
+    // Tensor payloads are an exact lower bound; reject impossible uploads before
+    // evicting the resident model. KV/runtime estimates are advisory, as in
+    // --check: Gemma's metadata maxima can combine different layer geometries
+    // and exceed the card even when its actual allocations fit. The loader
+    // remains authoritative and replacement restores the old model on failure.
+    if (estimate.weights_bytes > total_bytes) return error.ModelDoesNotFit;
+}
+
+test "native replacement permits a conservative Gemma estimate while rejecting impossible weights" {
+    var cfg = std.mem.zeroes(@import("model/config.zig").ModelConfig);
+    cfg.architecture = .gemma;
+    cfg.n_layers = 60;
+    cfg.n_kv_heads = 16;
+    cfg.head_dim = 512;
+    const budget = 32 * 1024 * 1024 * 1024;
+    const estimate = try @import("gpu/native_memory_estimate.zig").estimate(cfg, 18_307_897_584, 4096, 1, .f32);
+    try std.testing.expect(estimate.estimated_total_bytes > budget);
+    try validateAcceleratorMemoryBudget(estimate, budget);
+    var impossible = estimate;
+    impossible.weights_bytes = budget + 1;
+    try std.testing.expectError(error.ModelDoesNotFit, validateAcceleratorMemoryBudget(impossible, budget));
+}
 
 /// Per-connection context contains only stable manager state. A handler obtains
 /// its current model pointers after acquiring a lifecycle lease.
@@ -2760,7 +2783,7 @@ fn handleAcceleratorAction(manager: *AcceleratorManager, conn: *http_mod.Connect
         manager.activate(entry) catch |err| {
             log.warn("Model activation failed: {s}", .{@errorName(err)});
             const invalid = err == error.InvalidModel or err == error.UnsupportedModelArchitecture or err == error.UnsupportedKvCacheConfiguration or err == error.ModelDoesNotFit;
-            try conn.sendError(if (invalid) 400 else 500, if (invalid) "invalid_request_error" else "model_load_error", if (err == error.ModelDoesNotFit) "The configured context/slot memory estimate exceeds the GPU budget. Use a smaller context or fewer slots." else if (invalid) "The model file or cache configuration is not supported by this backend." else if (manager.current != null) "Could not load the model. The previous model remains available." else "Could not load the model. No model is loaded; select an installed model to try again.");
+            try conn.sendError(if (invalid) 400 else 500, if (invalid) "invalid_request_error" else "model_load_error", if (err == error.ModelDoesNotFit) "The model weights exceed the GPU memory budget. Select a smaller model." else if (invalid) "The model file or cache configuration is not supported by this backend." else if (manager.current != null) "Could not load the model. The previous model remains available." else "Could not load the model. No model is loaded; select an installed model to try again.");
             return;
         };
         const response = try std.json.Stringify.valueAlloc(allocator, .{ .object = "model.activation", .id = entry.id, .active = true }, .{});
