@@ -21,6 +21,7 @@ From the extracted directory:
 
 ```bash
 ./bin/zinc --version
+./bin/zinc --version --json
 ./bin/zinc --help
 ./bin/zinc --check
 ./bin/zinc --check --json
@@ -40,22 +41,25 @@ for your backend in the release notes. Replace the path in this example:
 For an application or agent, start an explicit server without opening a browser:
 
 ```bash
-./bin/zinc serve --model-id qwen35-9b-q4k-m -c 4096 --parallel 1 --port 9090
+./bin/zinc serve --no-browser --model-id qwen35-9b-q4k-m -c 4096 --parallel 1 --port 9090
 ```
 
 Pull that managed model first with `./bin/zinc model pull qwen35-9b-q4k-m`.
 The server's `/v1/models` response advertises its current context and output
 limits. Use those limits when configuring a client. OpenCode and OpenClaw setup
-instructions are in the [agent and app guide](https://zolotukhin.ai/zinc/docs/agent-setup/).
+instructions are in [Run models and connect apps](https://zolotukhin.ai/zinc/docs/running-zinc/).
 
-Metal and Vulkan also provide browser chat:
+Builds advertising `capabilities.browser_ui` in `--version --json` or
+`/v1/capabilities` also provide browser chat:
 
 ```bash
 ./bin/zinc chat -m /path/to/model.gguf -c 2048
 ```
 
-ROCm provides CLI/HTTP chat without the built-in browser UI or hot model
-switching. See the [API coverage matrix](https://zolotukhin.ai/zinc/docs/api/#backend-coverage)
+HIP browser chat and installed-model switching/unload are included in 0.1.2;
+the older 0.1.0/0.1.1 HIP archives provide the API without those controls.
+Use the flags in `/v1/models` to enable model management; native model downloads
+and removal use the model CLI. See the [API coverage matrix](https://zolotukhin.ai/zinc/docs/api/#backend-coverage)
 and backend guide before selecting optional KV, MTP, or concurrent serving
 settings. Vulkan device indices and `RADV_PERFTEST` do not configure ROCm;
 use its native visibility setting if you need to restrict the GPU.

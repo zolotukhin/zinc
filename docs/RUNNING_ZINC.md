@@ -20,11 +20,11 @@ Stop this server before starting another ZINC command on the same GPU or port.
 
 ### Development: HIP browser chat
 
-Current HIP source builds serve the same browser interface for the loaded
-startup model. After [building ROCm](ROCM.md#build-from-source), use
+Current HIP source builds serve the shared browser interface with installed-model
+switching and unload/reload. After [building ROCm](ROCM.md#build-from-source), use
 `zinc chat --model-id qwen38-27b-q4k-m -c 65536 --parallel 1` on a card with
-enough memory. It supports streaming and the model's thinking toggle;
-model switching and sampling remain unavailable. This is not in the published
+enough memory. It supports streaming, the model's thinking toggle and advertised
+MTP controls. Sampling remains greedy. These features are not in the published
 0.1.1 archive. See [context and KV choices](ROCM.md#context-kv-cache-and-mtp)
 before increasing the window. Over SSH, use `--no-browser` and forward port 9090.
 
@@ -139,7 +139,9 @@ zinc model active
 
 `use` sets the default for future launches. It does not switch an already
 running native server. Vulkan/Metal support live model management through the
-[API](API.md#post-v1-models-activate); restart ROCm/CUDA to change models.
+[API](API.md#post-v1-models-activate). Stable 0.1.1 native builds require a restart;
+current HIP/CUDA source advertises installed-model activation and unload through
+capability discovery.
 
 For a GGUF you already have, replace `--model-id` with `-m`:
 
@@ -159,8 +161,9 @@ zinc model rm qwen35-9b-q4k-m
 
 Vulkan/Metal can refuse removal while a local server has the model loaded.
 `--force` requests that server unload it first; for a custom server port, use
-`zinc --port 9090 model rm --force <id>`. Native servers have no unload endpoint;
-stop them before removing their model.
+`zinc --port 9090 model rm --force <id>`. Current native source exposes
+`/v1/models/unload`, but HTTP removal remains unavailable; stop a native server
+before removing its cached model. Stable 0.1.1 native archives have no unload endpoint.
 
 ## Device, context and KV settings
 

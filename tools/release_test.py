@@ -1804,6 +1804,36 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("## Validated hardware and models", notes)
         self.assertNotIn("native Windows have no 0.1.0 archive", notes)
 
+    def test_0_1_2_release_material_matches_qualified_lifecycle_support(self):
+        directory, reports = self.candidate(release_version="0.1.2")
+        self.aggregate(directory, reports, release_version="0.1.2")
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.finalize(SimpleNamespace(directory=directory))
+        notes = (directory / "release-notes.md").read_text()
+        self.assertIn("Linux archives support installed-model switching and unload/reload", notes)
+        self.assertNotIn("hot model switching remains unavailable", notes)
+        self.assertNotIn("Candidate scope", notes)
+        self.assertNotIn("0.1.1 remains the current stable release", notes)
+        self.assertEqual(notes.count("# ZINC v0.1.2"), 1)
+        self.assertNotIn("# ZINC 0.1.2 changes", notes)
+        readme = (ROOT / "docs/releases/BINARY_README.md").read_text()
+        self.assertIn("capabilities.browser_ui", readme)
+        self.assertIn("/v1/capabilities", readme)
+        self.assertIn("older 0.1.0/0.1.1 HIP archives", readme)
+        self.assertNotIn("ROCm provides CLI/HTTP chat without the built-in browser UI", readme)
+
+    def test_lifecycle_release_description_requires_all_linux_profile_evidence(self):
+        good = dict(target="linux-x86_64-rocm", checks=dict(lifecycle_soak=True), lifecycle_soak=dict(status="passed"))
+        self.assertIn("support installed-model switching", release.model_lifecycle_notes(dict(profiles=[good])))
+        for other in [{}, dict(target="linux-x86_64-vulkan"),
+                      {**good, "checks": {"lifecycle_soak": False}},
+                      {**good, "lifecycle_soak": {"status": "failed"}}]:
+            with self.subTest(other=other):
+                profiles = [] if not other else [good, other]
+                notes = release.model_lifecycle_notes(dict(profiles=profiles))
+                self.assertIn("hot model switching remains unavailable", notes)
+                self.assertNotIn("Linux archives support", notes)
+
     def test_release_changes_reject_symlinks_outside_the_reviewed_directory(self):
         directory = self.root / "reviewed-changes"
         directory.mkdir()

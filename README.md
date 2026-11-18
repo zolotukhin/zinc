@@ -85,7 +85,7 @@ validated cards, operating systems, drivers, and current limitations.
 ## Use it your way
 
 **Browser chat** starts the UI and local API together. Current HIP source builds
-support the loaded startup model; published 0.1.1 includes this UI on Vulkan,
+include installed-model switching and unload/reload; published 0.1.1 includes the UI on Vulkan,
 and Metal provides it as a preview. See the [version-specific guide](docs/RUNNING_ZINC.md#browser-chat).
 
 ```bash

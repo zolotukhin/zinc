@@ -415,6 +415,20 @@ def release_changes(release_version, directory=None):
     return path.read_text().strip() if path.is_file() else ""
 
 
+def model_lifecycle_notes(validation):
+    # Historical releases have no lifecycle certificate. Describe the new
+    # controls only when every Linux profile qualified them on its archive.
+    linux = [p for p in validation.get("profiles", []) if p.get("target", "").startswith("linux-")]
+    qualified = linux and all(p.get("checks", {}).get("lifecycle_soak") is True and
+                              p.get("lifecycle_soak", {}).get("status") == "passed" for p in linux)
+    if qualified:
+        return ("Linux archives support installed-model switching and unload/reload without deleting cached weights. "
+                "Model discovery advertises the available controls; native model downloads/removal still use the model CLI. "
+                "Browser availability and per-model MTP controls are reported by capability discovery.")
+    return ("Vulkan includes browser chat and model management. HIP exposes CLI/HTTP chat and completion routes for the startup model; "
+            "hot model switching remains unavailable. Browser availability is version-specific and reported by capability discovery.")
+
+
 def finalize(args):
     directory = Path(args.directory)
     data = verify_candidate(directory)
@@ -449,7 +463,7 @@ def finalize(args):
         models = ", ".join("`" + m["id"] + "` (" + str(m["context"]) + ")" for m in report["models"])
         notes.append(f"| {report['profile']} | {report['hardware']['gpu']} | {models} |")
     notes.extend(["", "Only the combinations in `validation.json` are certified. The small Qwen3 starter is scoped to Vulkan; ROCm starts with Qwen3.5 9B. Larger models require sufficient GPU memory. Intel Macs, musl, Linux ARM64 and native Windows have no archive in this release.", "",
-                  "Vulkan includes browser chat and model management. HIP exposes CLI/HTTP chat and completion routes for the startup model; hot model switching remains unavailable. Browser availability is version-specific and reported by capability discovery.", "",
+                  model_lifecycle_notes(validation), "",
                   "Release checks use greedy decoding, one slot and each backend's default KV/MTP settings. The pinned native reference uses F32 K/V. Reference choice measurements are listed per model in `validation.json`: at least 97.5% exact, with at most one qualified top-two near tie per case within 0.05 log probability. Every suffix after that choice and the complete detokenized text must match. Performance and optional MTP/context/concurrency configurations require their own measurements.", "",
                   "## Known performance limits", "",
                   "Earlier Intel GPU diagnostics show slower decode than llama.cpp on all seven models and mixed prefill results. Loading-time and temporary-memory improvements do not establish inference-throughput parity. These source-specific measurements are separate from this candidate's correctness certification. See the [Intel performance report](https://github.com/zolotukhin/zinc/blob/" + data["commit"] + "/docs/INTEL_PERFORMANCE.md) for the tested archive, settings and remaining gaps.", "",
