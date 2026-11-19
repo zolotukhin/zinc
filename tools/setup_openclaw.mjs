@@ -824,7 +824,11 @@ async function preparationProjectFingerprint(project, shouldStop) {
     if (metadata.isSymbolicLink()) throw new Error('linked project');
     hash.update(JSON.stringify([relative, metadata.mode]));
     if (metadata.isDirectory()) {
-      for (const name of (await readdir(filename)).sort()) await visit(path.join(relative, name));
+      const names = (await readdir(filename)).sort();
+      // Every listed child needs at least one entry. Reject a known oversized
+      // project before opening and hashing thousands of files unnecessarily.
+      if (entries + names.length > 4096) throw new Error('snapshot limit');
+      for (const name of names) await visit(path.join(relative, name));
     } else if (metadata.isFile()) {
       bytes += metadata.size;
       if (bytes > 16 * 1024 * 1024) throw new Error('snapshot limit');

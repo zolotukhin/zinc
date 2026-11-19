@@ -591,8 +591,9 @@ const reader=response.body.getReader();await reader.read();await reader.cancel()
     expect(starts).toBe(1);
   });
 
-  test('file changes and projects that cannot be fully checked prevent preparation retry', async () => {
-    for (const mode of ['write', 'delete', 'symlink', 'oversize', 'entries']) {
+  test.each(['write', 'delete', 'symlink', 'oversize', 'entries'])(
+    '%s changes or incomplete project checks prevent preparation retry',
+    async (mode) => {
       const f =
         await fakeClient(`${mode === 'write' ? "import {writeFileSync} from 'node:fs';writeFileSync('effect.txt','changed');" : mode === 'delete' ? "import {unlinkSync} from 'node:fs';unlinkSync('protected.txt');" : ''}
 console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`);
@@ -620,8 +621,8 @@ console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify
       expect(starts).toBe(1);
       if (mode === 'write')
         expect(await readFile(path.join(f.project, 'effect.txt'), 'utf8')).toBe('changed');
-    }
-  });
+    },
+  );
 
   test('interruption while fingerprinting stops before starting a client and removes listeners', async () => {
     const f = await fakeClient('console.log(JSON.stringify({ok:true,status:"ok"}));');
