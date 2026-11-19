@@ -9,7 +9,9 @@ contains its exact-byte qualification and completed public-install checks.
 The [0.1.2 candidate record](releases/0.1.2-plan.md#candidate-progress)
 records completed AMD archive, lifecycle, client and upgrade checks. Intel's
 required profile is still missing; those AMD passes do not certify or publish
-the candidate.
+the candidate. The [November 19 AMD evidence](https://zolotukhin.ai/zinc/validation/release-candidate-0.1.2-amd-2026-11-19.json)
+binds the refreshed archive hashes to those checks and retains the preceding
+RSS failure and separate development runs.
 
 The [0.1.1 record](releases/0.1.1-plan.md) retains its preparation, publication
 and earlier failed attempts. Version-specific `docs/releases/<version>-changes.md` files supply
