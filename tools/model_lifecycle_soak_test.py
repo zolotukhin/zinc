@@ -127,6 +127,30 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(report['samples']), 2)
         self.assertEqual(report['completed_cycles'], 1)
 
+    def test_a_transient_unloaded_rss_peak_still_blocks_the_release(self):
+        # Candidate 44468289728 exceeded the RSS budget in its second round,
+        # then fell below it. Averaging or checking only the final round would
+        # incorrectly certify the original failed run.
+        rss = [370778112, 511143936, 486580224, 487321600]
+        values = iter([{**sample(), 'rss_bytes': value} for value in rss])
+        settings = soak.limits(3, 1, 60)
+        report = soak.run_soak(FakeClient(), ['alpha', 'beta'], 'rocm', lambda: next(values),
+                               settings, settle=lambda: None)
+        self.assertLess(rss[-1] - rss[0], settings['max_growth']['rss_bytes'])
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['failure_stage'], 'memory_plateau')
+        self.assertEqual(report['max_growth']['rss_bytes'], 140365824)
+
+        report.update(status='passed', failure_stage=None, binary_sha256='a' * 64, cleanup=True, context=4096,
+                      telemetry='drm-process-resident', model_sizes=dict(alpha=10, beta=20))
+        report.pop('error_category', None)
+        report['max_growth']['rss_bytes'] = rss[-1] - rss[0]
+        spec = dict(cycles=3, warmup=1, deadline_seconds=60, context=4096,
+                    max_rss_growth_mib=128, max_vram_growth_mib=64, max_fd_growth=0)
+        with self.assertRaisesRegex(ValueError, 'exceeded its frozen growth budget'):
+            soak.verify_report(report, ['alpha', 'beta'], 'rocm', spec, 'a' * 64,
+                               dict(alpha=10, beta=20))
+
     def test_invalid_settings_and_ids_fail_before_mutation(self):
         for kwargs in [dict(cycles=0), dict(warmup=0), dict(deadline_seconds=59), dict(fd_growth=-1), dict(cycles=True)]:
             with self.assertRaises(ValueError):
