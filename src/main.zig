@@ -8,6 +8,7 @@ const host_io = @import("host_io");
 const build_info = @import("build_info.zig");
 const diagnostic_report = @import("diagnostic_report.zig");
 const capabilities_mod = @import("server/capabilities.zig");
+const host_memory_mod = @import("server/host_memory.zig");
 const gpu = @import("gpu/interface.zig");
 const runtime_assets = @import("runtime_assets.zig");
 const catalog_mod = @import("model/catalog.zig");
@@ -2797,6 +2798,8 @@ fn handleAcceleratorAction(manager: *AcceleratorManager, conn: *http_mod.Connect
         }
         const unloaded = manager.current != null;
         manager.unload();
+        // Exclusive lifecycle ownership still prevents a new generation here.
+        host_memory_mod.reclaimIdlePages();
         const response = try buildAcceleratorUnloadJson(allocator, unloaded);
         defer allocator.free(response);
         try conn.sendJson(200, response);

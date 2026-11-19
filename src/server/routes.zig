@@ -17,6 +17,7 @@ const memory_plan = @import("../gpu/memory_plan.zig");
 const tool_format = @import("tool_format.zig");
 const session_reuse_policy = @import("session_reuse_policy.zig");
 const raw_completion_stream = @import("raw_completion_stream.zig");
+const host_memory = @import("host_memory.zig");
 
 const log = std.log.scoped(.routes);
 const inference_timing_log = std.log.scoped(.forward);
@@ -945,6 +946,7 @@ fn unloadModel(manager: anytype, server_state: *ServerState, expected_id: []cons
     const unloaded = try manager.unloadActiveModel(expected_id);
     server_state.clearChatReuseCache();
     server_state.clearActiveContext();
+    host_memory.reclaimIdlePages();
     return unloaded;
 }
 

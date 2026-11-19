@@ -1168,6 +1168,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_model_discovery_tests = b.addRunArtifact(model_discovery_tests);
 
+    // Keep the RSS contract in its own process: its glibc test tunables must
+    // never affect the server or the other unit tests. No GPU/model is opened.
+    const host_memory_probe_mod = createModule(b, .{
+        .root_source_file = b.path("tools/host_memory_reclaim_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_memory_probe_mod.addImport("host_memory", createModule(b, .{
+        .root_source_file = b.path("src/server/host_memory.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }));
+    const host_memory_probe = addExecutable(b, .{
+        .name = "zinc-host-memory-reclaim-probe",
+        .root_module = host_memory_probe_mod,
+    });
+    const run_host_memory_probe = b.addRunArtifact(host_memory_probe);
+    b.step("test-host-memory", "Check idle host-memory reclamation without a GPU")
+        .dependOn(&run_host_memory_probe.step);
+
     // Compile Metal tests on a workstation without opening a GPU or a model.
     const test_build_step = b.step("test-build", "Compile all Zig tests without executing them");
     test_build_step.dependOn(&unit_tests.step);
@@ -1175,6 +1197,7 @@ pub fn build(b: *std.Build) void {
     test_build_step.dependOn(&forward_zinc_rt_tests.step);
     test_build_step.dependOn(&host_io_tests.step);
     test_build_step.dependOn(&model_discovery_tests.step);
+    test_build_step.dependOn(&host_memory_probe.step);
     if (metal_bench_cli_tests) |tests| test_build_step.dependOn(&tests.step);
     // The default test target is CPU-only. Full mode includes model-loading
     // and live API smoke tests and must run on a dedicated GPU worker.
@@ -1219,6 +1242,7 @@ pub fn build(b: *std.Build) void {
     print_summary.step.dependOn(&run_forward_zinc_rt_tests.step);
     print_summary.step.dependOn(&run_host_io_tests.step);
     print_summary.step.dependOn(&run_model_discovery_tests.step);
+    print_summary.step.dependOn(&run_host_memory_probe.step);
     print_summary.step.dependOn(&run_bun_tests.step);
     if (metal_bench_cli_tests) |tests| print_summary.step.dependOn(&b.addRunArtifact(tests).step);
 
