@@ -372,10 +372,11 @@ test('candidate preparation tables follow the frozen evidence', async () => {
   // These authored GFM tables contain plain labels and numeric cells. Compare
   // data cells rather than whitespace or formatter-dependent table padding.
   function rows(header: string) {
-    const first = lines.findIndex(
-      (line) => line.trim().startsWith('|') && cells(line)[0] === header,
+    const matches = lines.flatMap((line, index) =>
+      line.trim().startsWith('|') && cells(line)[0] === header ? [index] : [],
     );
-    expect(first).toBeGreaterThanOrEqual(0);
+    expect(matches).toHaveLength(1);
+    const first = matches[0];
     const result: string[][] = [];
     for (const line of lines.slice(first + 2)) {
       if (!line.trim().startsWith('|')) break;
@@ -408,6 +409,17 @@ test('candidate preparation tables follow the frozen evidence', async () => {
   );
   expect(markdown).toContain(candidate.manifest_sha256);
   expect(markdown).toContain(candidate.source);
+  // Release plans are read on GitHub as well as through links from the site.
+  // A site-root-relative download link would target github.com/zinc/... there.
+  expect(markdown).toContain(`https://zolotukhin.ai${candidatePath}`);
+  const install = candidate.installation.checks;
+  expect(markdown).toContain(
+    `**${install.filter((row: any) => row.passed).length}/${install.length}** isolated`,
+  );
+  const browserContext = candidate.browser_smoke.health.context_length.toLocaleString('en-US');
+  expect(markdown.replace(/\s+/g, ' ')).toContain(
+    `check on Qwen3.8 27B at ${browserContext}-token allocated capacity`,
+  );
 
   const modelLabels = [
     ['qwen35-9b-q4k-m', 'Qwen3.5 9B'],
