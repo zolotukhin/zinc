@@ -101,6 +101,14 @@ test('both agent indexes scope native lifecycle controls by release and live dis
 
 const candidatePath = '/zinc/validation/release-candidate-0.1.2-amd-2026-11-18.json';
 const candidate = await Bun.file(resolve(import.meta.dir, '../public' + candidatePath)).json();
+// These pin the coverage and observations of one immutable, dated snapshot.
+// A new run gets a separate record; arithmetic and doc rows are derived below.
+const candidateCoverage = {
+  source: '588db7f4c928fa89756aaefcfafaadb2f418a621',
+  lifecycle: { operations: 52, references: 156, models: 13 },
+  clients: { cohorts: 12, api: 322, code: 36, claw: 36 },
+  gemmaLoop: { vulkanRejected: 10, vulkanSteps: 16, hipRejected: 3 },
+};
 
 test('AMD preparation remains a partial snapshot, separate from the stable certificate', () => {
   // Two passing AMD profiles cannot stand in for the required Intel profile.
@@ -109,6 +117,7 @@ test('AMD preparation remains a partial snapshot, separate from the stable certi
   expect(candidate.certified).toBe(false);
   expect(candidate.published).toBe(false);
   expect(candidate.version).toBe('0.1.2');
+  expect(candidate.source).toBe(candidateCoverage.source);
   expect(candidate.manifest.commit).toBe(candidate.source);
   expect(candidate.manifest.version).toBe(candidate.version);
   expect(String(candidate.manifest.candidate_run)).toBe(candidate.candidate_run);
@@ -158,11 +167,7 @@ test('candidate AMD lifecycle totals, memory growth and archive identities agree
     references += soak.reference_cases;
     models += report.models.length;
   }
-  expect({ operations, references, models }).toEqual({
-    operations: 52,
-    references: 156,
-    models: 13,
-  });
+  expect({ operations, references, models }).toEqual(candidateCoverage.lifecycle);
   const native = candidate.hardware_reports.find((row: any) => row.profile === 'rocm-rdna4');
   expect(native.allocation_failures).toHaveLength(2);
   for (const probe of native.allocation_failures) {
@@ -243,8 +248,12 @@ test('candidate client scores are recomputed from independent checks on the froz
       code++;
     }
   }
-  expect(pairs.size).toBe(12);
-  expect({ api, code, claw }).toEqual({ api: 322, code: 36, claw: 36 });
+  expect(pairs.size).toBe(candidateCoverage.clients.cohorts);
+  expect({ api, code, claw }).toEqual({
+    api: candidateCoverage.clients.api,
+    code: candidateCoverage.clients.code,
+    claw: candidateCoverage.clients.claw,
+  });
   expect(summary.api).toEqual({ passed: api, total: api });
   expect(summary.OpenCode).toEqual({ passed: code, total: code });
   expect(summary.OpenClaw).toEqual({ passed: claw, total: claw });
@@ -263,12 +272,12 @@ test('superseded failures and matched helper follow-ups do not become current-ar
   expect(failed.cases[0].final_tests.tests).toEqual({ pass: 0, fail: 4 });
   const followups = candidate.matched_gemma_follow_up.campaigns;
   expect(followups).toHaveLength(2);
+  for (const row of candidate.actual_clients.campaigns) expect(row.trial).toBe('');
   for (const row of followups) {
     expect(row.commit).toBe(old.source);
     expect(row.harness_commit).not.toBe(row.commit);
     expect(row.trial).toBe('compact-budget');
     expect(row.passed).toBe(true);
-    expect(candidate.actual_clients.campaigns.some((current: any) => current.trial)).toBe(false);
   }
 });
 
@@ -278,17 +287,17 @@ test('passing Gemma acceptance retains redundant edits and missing agent verific
   // that every agent completed verification or followed an efficient workflow.
   const trace = candidate.actual_clients.delivery_trace_audit;
   expect(trace.complete).toBe(true);
-  expect(trace.fixture_traces).toBe(36);
+  expect(trace.fixture_traces).toBe(candidateCoverage.clients.code);
   expect(trace.observed_delivery_limits).toHaveLength(2);
   const vk = trace.observed_delivery_limits.find((row: any) => row.backend === 'vulkan');
   expect(vk.model).toBe('gemma4-26b-a4b-q4k-m');
   expect(vk.acceptance_passed).toBe(true);
-  expect(vk.rejected_identical_edits).toBe(10);
-  expect(vk.steps_started).toBe(16);
+  expect(vk.rejected_identical_edits).toBe(candidateCoverage.gemmaLoop.vulkanRejected);
+  expect(vk.steps_started).toBe(candidateCoverage.gemmaLoop.vulkanSteps);
   expect(vk.shell_calls_after_final_file_mutation).toBe(0);
   expect(vk.independent_tests).toEqual({ pass: 3, fail: 0 });
   const hip = trace.observed_delivery_limits.find((row: any) => row.backend === 'rocm');
-  expect(hip.rejected_identical_edits).toBe(3);
+  expect(hip.rejected_identical_edits).toBe(candidateCoverage.gemmaLoop.hipRejected);
   expect(hip.recognized_test_commands_after_final_file_mutation).toBe(1);
 });
 
@@ -347,4 +356,81 @@ test('browser evidence binds the embedded UI and scopes 64K to the tested 27B pr
     expect(row.binary_sha256).toBe(artifact.binary_sha256);
     expect(row.contains_exact_chat_ui).toBe(true);
   }
+});
+
+test('candidate preparation tables follow the frozen evidence', async () => {
+  const markdown = await readFile(
+    resolve(import.meta.dir, '../../docs/releases/0.1.2-plan.md'),
+    'utf8',
+  );
+  const lines = markdown.split(/\r?\n/);
+  const cells = (line: string) =>
+    line
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.trim().replace(/`/g, ''));
+  // These authored GFM tables contain plain labels and numeric cells. Compare
+  // data cells rather than whitespace or formatter-dependent table padding.
+  function rows(header: string) {
+    const first = lines.findIndex(
+      (line) => line.trim().startsWith('|') && cells(line)[0] === header,
+    );
+    expect(first).toBeGreaterThanOrEqual(0);
+    const result: string[][] = [];
+    for (const line of lines.slice(first + 2)) {
+      if (!line.trim().startsWith('|')) break;
+      result.push(cells(line));
+    }
+    return result;
+  }
+  const label = (backend: string) => (backend === 'rocm' ? 'HIP / ROCm' : 'Vulkan');
+  const growth = (bytes: number, decimals: number) =>
+    bytes === 0 ? '0' : (bytes / 1048576).toFixed(decimals) + ' MiB';
+  const profiles = [...candidate.hardware_reports].sort((a: any, b: any) =>
+    a.profile.localeCompare(b.profile),
+  );
+  expect(rows('R9700 backend')).toEqual(
+    profiles.map((report: any) => {
+      const s = report.lifecycle_soak;
+      return [
+        label(s.backend),
+        String(report.models.length),
+        String(s.operations),
+        String(s.direct_switches),
+        String(s.reference_cases),
+        growth(s.max_growth.rss_bytes, 1),
+        growth(s.max_growth.vram_bytes, 2),
+      ];
+    }),
+  );
+  expect(rows('Backend')).toEqual(
+    profiles.map((report: any) => [label(report.lifecycle_soak.backend), report.archive_sha256]),
+  );
+  expect(markdown).toContain(candidate.manifest_sha256);
+  expect(markdown).toContain(candidate.source);
+
+  const modelLabels = [
+    ['qwen35-9b-q4k-m', 'Qwen3.5 9B'],
+    ['qwen36-35b-a3b-q4k-xl', 'Qwen3.6 35B-A3B'],
+    ['qwen36-27b-q4k-m', 'Qwen3.6 27B'],
+    ['qwen38-27b-q4k-m', 'Qwen3.8 27B'],
+    ['gemma4-26b-a4b-q4k-m', 'Gemma 4 26B-A4B'],
+    ['gemma4-31b-q4k-m', 'Gemma 4 31B'],
+  ];
+  expect(rows('Model')).toEqual(
+    modelLabels.map(([id, name]) => {
+      const campaigns = ['rocm', 'vulkan'].map((backend) =>
+        candidate.actual_clients.campaigns.find(
+          (row: any) => row.backend === backend && row.model === id,
+        ),
+      );
+      expect(campaigns[0].context).toBe(campaigns[1].context);
+      const scores = campaigns.map((row: any) => {
+        const code = row.clients.filter((c: any) => c.client === 'OpenCode');
+        const claw = row.clients.find((c: any) => c.client === 'OpenClaw').cases;
+        return `${row.api.passed}/${row.api.total} · ${code.filter((c: any) => c.passed).length}/${code.length} · ${claw.filter((c: any) => c.passed).length}/${claw.length}`;
+      });
+      return [name, campaigns[0].context.toLocaleString('en-US'), ...scores];
+    }),
+  );
 });
