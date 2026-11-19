@@ -7,6 +7,12 @@ exact archive identities, independent test results and failures. The
 chronological reports below keep their original clients, source revisions and
 outcomes.
 
+The [0.1.2 candidate replay](releases/0.1.2-plan.md#actual-amd-clients) passes
+36/36 AMD fixtures after the small-context reserve fix. Its preparation record
+retains the original failed Gemma Python attempt and observed redundant-edit
+loops; independent test success remains separate from efficient delivery.
+The candidate is not published and still needs Intel qualification.
+
 The [Intel OpenCode investigation](INTEL_OPENCODE_VALIDATION.md) records the
 November 1 actual-client timeout failures and the active-prefill cancellation
 fix. Independently passing edits are kept separate from completed client runs.

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import path from 'node:path';
@@ -591,8 +591,9 @@ const reader=response.body.getReader();await reader.read();await reader.cancel()
     expect(starts).toBe(1);
   });
 
-  test('file changes and projects that cannot be fully checked prevent preparation retry', async () => {
-    for (const mode of ['write', 'delete', 'symlink', 'oversize', 'entries']) {
+  test.each(['write', 'delete', 'symlink', 'oversize', 'entries'])(
+    '%s changes or incomplete project checks prevent preparation retry',
+    async (mode) => {
       const f =
         await fakeClient(`${mode === 'write' ? "import {writeFileSync} from 'node:fs';writeFileSync('effect.txt','changed');" : mode === 'delete' ? "import {unlinkSync} from 'node:fs';unlinkSync('protected.txt');" : ''}
 console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`);
@@ -620,8 +621,40 @@ console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify
       expect(starts).toBe(1);
       if (mode === 'write')
         expect(await readFile(path.join(f.project, 'effect.txt'), 'utf8')).toBe('changed');
-    }
-  });
+    },
+  );
+
+  test.each([4096, 4097])(
+    'the snapshot entry budget counts the root and directories (%i total entries)',
+    async (total) => {
+      const f = await fakeClient(
+        `console.error(${JSON.stringify(preparationStderr)});console.log(${JSON.stringify(JSON.stringify(preparationReport()))});process.exit(1);`,
+      );
+      await writeConfig(f.project, config({ model: 'loaded' }));
+      // Include the root, the fixture files, and the private runtime config
+      // added by runOpenClaw. Empty directories still consume an entry each.
+      const directories = total - 1 - (await readdir(f.project)).length - 1;
+      await Promise.all(
+        Array.from({ length: directories }, (_, i) => mkdir(path.join(f.project, String(i)))),
+      );
+      let starts = 0;
+      await expect(
+        runOpenClaw(f.options, {
+          ...f.dependencies,
+          fetchImpl: async () => Response.json({ status: 'ok' }),
+          spawnImpl: (binary, args, options) => {
+            starts++;
+            return f.dependencies.spawnImpl(binary, args, options);
+          },
+        }),
+      ).rejects.toThrow('OpenClaw failed');
+      expect(starts).toBe(total === 4096 ? 2 : 1);
+      expect((await readdir(f.project)).some((name) => name.endsWith('.run'))).toBe(false);
+    },
+    // The accepted boundary fingerprints 4,096 real entries twice. Its I/O
+    // needs a larger budget than the early-rejection and small-project cases.
+    30000,
+  );
 
   test('interruption while fingerprinting stops before starting a client and removes listeners', async () => {
     const f = await fakeClient('console.log(JSON.stringify({ok:true,status:"ok"}));');

@@ -8,6 +8,11 @@ tests and keeping protected files intact. Most rows use 16K, Gemma 31B uses 8K,
 and its ROCm row sets `ZINC_PREFILL_CHUNK=128`. This cohort does not qualify
 Intel or Metal. The report below retains its original 0.1.0 scope and outcomes.
 
+The separate [0.1.2 candidate replay](releases/0.1.2-plan.md#actual-amd-clients)
+passes 36/36 tasks on the final-version AMD archives. It retains the earlier
+published failure and does not promote the candidate: Intel qualification and
+the protected publication gates remain incomplete.
+
 The first OpenClaw validation uses the **published ZINC 0.1.0 Linux archives**
 on a **Radeon AI PRO R9700 32 GB**. It tests the actual **OpenClaw 2026.11.1**
 client with Node **24.22.2**, rather than substituting a synthetic agent for the

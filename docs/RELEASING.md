@@ -6,6 +6,11 @@ Linux releases cover Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. The work
 The [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.1-plan.md)
 contains its exact-byte qualification and completed public-install checks.
 
+The [0.1.2 candidate record](releases/0.1.2-plan.md#candidate-progress)
+records completed AMD archive, lifecycle, client and upgrade checks. Intel's
+required profile is still missing; those AMD passes do not certify or publish
+the candidate.
+
 The [0.1.1 record](releases/0.1.1-plan.md) retains its preparation, publication
 and earlier failed attempts. Version-specific `docs/releases/<version>-changes.md` files supply
 reviewed change notes; the finalizer freezes them beside the generated hardware
@@ -32,7 +37,15 @@ Land implementation changes through ordinary reviewed PRs. A later release prepa
 
 PR code never runs on GPU/signing workers. Actions use commit pins, checkout credentials are not retained, and only the publisher has release-write permission. Nightly runs cannot be promoted. Enable them with repository variable `ZINC_ENABLE_RELEASE_NIGHTLY=true` after provisioning the selected workers. Signing configuration is required only when a selected release target requires it.
 
-The nightly schedule runs the full correctness/model matrix. Performance baselines and broader optional-feature qualifications remain separate work; this pipeline makes no TPS claims. ZINC checks use greedy decoding, one slot and the backend's default KV/MTP settings at the policy's context limits; the native reference uses F32 KV. Metal/Vulkan include browser chat; ROCm exposes CLI/HTTP routes without the built-in UI or hot model switching. Add checks before expanding that contract.
+The nightly schedule runs the full correctness/model matrix. Performance baselines and broader optional-feature qualifications remain separate work; this pipeline makes no TPS claims. ZINC checks use greedy decoding, one slot and the backend's default KV/MTP settings at the policy's context limits; the native reference uses F32 KV.
+
+The published 0.1.1 Vulkan archive includes browser chat; 0.1.1 ROCm provides
+CLI/HTTP routes without the built-in UI or hot model switching. Metal remains
+an unsigned preview. Current 0.1.2 source adds native browser chat,
+installed-model switching/unload and per-request
+MTP controls. Its candidate runs the lifecycle, repeated-reference and real
+failed-load recovery gates recorded in the [candidate plan](releases/0.1.2-plan.md).
+Keep the source/candidate contract separate from the published stable binary.
 
 ## Build environments and package format
 
