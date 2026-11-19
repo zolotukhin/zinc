@@ -2798,6 +2798,7 @@ fn handleAcceleratorAction(manager: *AcceleratorManager, conn: *http_mod.Connect
         }
         const unloaded = manager.current != null;
         manager.unload();
+        // Exclusive lifecycle ownership still prevents a new generation here.
         host_memory_mod.reclaimIdlePages();
         const response = try buildAcceleratorUnloadJson(allocator, unloaded);
         defer allocator.free(response);

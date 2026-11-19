@@ -12,6 +12,8 @@ extern "c" fn malloc_trim(pad: usize) c_int;
 /// ReleaseFast uses the C allocator: freeing vocabularies and graphs can leave
 /// hundreds of MiB resident in glibc's thread arenas. Return those unused pages
 /// at the idle unload boundary, rather than adding work to token generation.
+/// glibc 2.8+ reclaims pages across all arenas; only the padding hint is
+/// specific to the main heap. See https://man7.org/linux/man-pages/man3/malloc_trim.3.html.
 /// Other platforms keep their allocator's normal behavior.
 pub fn reclaimIdlePages() void {
     if (comptime has_malloc_trim) {
