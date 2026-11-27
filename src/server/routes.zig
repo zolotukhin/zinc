@@ -824,6 +824,24 @@ fn handleModels(
     try conn.sendJson(200, body.items);
 }
 
+/// Caller holds generation ownership across the activation and cache update.
+fn activateManagedAndResetChat(
+    manager: anytype,
+    server_state: *ServerState,
+    model_id: []const u8,
+    force: bool,
+) !void {
+    const tracks_revision = @hasDecl(@TypeOf(manager.*), "resourceRevision");
+    const previous = if (tracks_revision) manager.resourceRevision() else 0;
+    manager.activateManagedModel(model_id, true, force) catch |err| {
+        if (comptime tracks_revision) {
+            if (manager.resourceRevision() != previous) server_state.clearChatReuseCache();
+        }
+        return err;
+    };
+    server_state.clearChatReuseCache();
+}
+
 fn handleActivateModel(
     conn: *http.Connection,
     _manager: *model_manager_mod.ModelManager,
@@ -849,7 +867,7 @@ fn handleActivateModel(
     defer server_state.generation_mutex.unlock();
 
     const force_flag = if (parseJsonFields(_body)) |pj| pj.force else |_| false;
-    _manager.activateManagedModel(parsed.model_id, true, force_flag) catch |err| {
+    activateManagedAndResetChat(_manager, server_state, parsed.model_id, force_flag) catch |err| {
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown managed model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
@@ -865,7 +883,6 @@ fn handleActivateModel(
         try conn.sendError(status, "invalid_request_error", msg);
         return;
     };
-    server_state.clearChatReuseCache();
 
     var buf: [512]u8 = undefined;
     const response = std.fmt.bufPrint(&buf,
@@ -2895,7 +2912,7 @@ fn ensureRequestedModelActive(
         return false;
     }
 
-    manager.activateManagedModel(requested_model, true, false) catch |err| {
+    activateManagedAndResetChat(manager, server_state, requested_model, false) catch |err| {
         const status: u16 = switch (err) {
             error.UnknownManagedModel, error.ModelNotInstalled => 404,
             error.GpuAlreadyReserved => 409,
@@ -2917,7 +2934,6 @@ fn ensureRequestedModelActive(
         try conn.sendError(status, code, msg);
         return false;
     };
-    server_state.clearChatReuseCache();
     return true;
 }
 
@@ -6751,6 +6767,35 @@ test "rejected model unload preserves context and releases generation ownership"
     try std.testing.expectEqual(@as(u32, 2048), state.active_context_tokens.load(.monotonic));
     try std.testing.expect(state.generation_mutex.tryLock());
     state.generation_mutex.unlock();
+}
+
+test "failed replacement invalidates chat state only if resident resources changed" {
+    const FakeManager = struct {
+        revision: u64 = 0,
+        reload: bool = false,
+
+        pub fn resourceRevision(self: *const @This()) u64 {
+            return self.revision;
+        }
+
+        pub fn activateManagedModel(self: *@This(), _: []const u8, _: bool, _: bool) !void {
+            if (self.reload) self.revision += 1;
+            return error.ReplacementFailed;
+        }
+    };
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.generation_mutex.lock();
+    defer state.generation_mutex.unlock();
+    state.tokenize_cache.store("conversation", "A cached prefix", &.{ 1, 2, 3 });
+    state.tokenize_cache.im_start_id = 42;
+    var manager = FakeManager{};
+    try std.testing.expectError(error.ReplacementFailed, activateManagedAndResetChat(&manager, &state, "replacement", false));
+    try std.testing.expectEqual(@as(usize, 3), state.tokenize_cache.tokens.len);
+    manager.reload = true;
+    try std.testing.expectError(error.ReplacementFailed, activateManagedAndResetChat(&manager, &state, "replacement", false));
+    try std.testing.expectEqual(@as(usize, 0), state.tokenize_cache.tokens.len);
+    try std.testing.expect(state.tokenize_cache.im_start_id == null);
 }
 
 test "model lifecycle invalidates cached tokens and template markers" {
