@@ -66,9 +66,14 @@ If `rocminfo` cannot see the GPU, or HIP reports `hipErrorNoBinaryForGpu`, first
 
 ### AMD VRAM guide
 
+Start with Inkling 2 Mini Q4_0 for text chat on the RX 9070 XT or Radeon AI
+PRO R9700. The 14.9 GB checkpoint ran with a 4,096-token context and one
+request slot on both cards with Vulkan and ROCm.
+[AMD quickstart](/zinc/docs/getting-started/#quickstart-on-the-rx-9070-xt-and-r9700)
+
 | VRAM | What fits |
 | --- | --- |
-| 16 GB | 2B to 8B class models comfortably |
+| 16 GB | Smaller models such as Qwen 3.5 9B, and Inkling 2 Mini Q4_0 at 4K on the RX 9070 XT |
 | 32 GB | 27B dense models and 35B MoE models like Qwen3.6-35B-A3B Q4_K_XL |
 
 Exact fit depends on architecture, quantization, and context length. `--check -m <model>` prints a practical fit estimate.

@@ -113,16 +113,18 @@ Both Vulkan runs answered the short Paris question correctly and returned identi
 
 ## Run Inkling 2 Mini on AMD
 
-The managed model ID is `inkling-2-mini-q4-0`. The tested file is 14,922,755,456 bytes, about 13.9 GiB. Both tested cards can run a 4,096-token context with it. The port covers fixed-loop text generation. The DSpark prototype was measured separately from the supported build. [Model card](https://thinkingmachines.ai/model-card/inkling-2-mini/) · [Q4_0 checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf)
+The managed model ID is `inkling-2-mini-q4-0`. The tested file is 14,922,755,456 bytes, about 13.9 GiB. Both tested cards can run a 4,096-token context with it. The development branch below runs fixed-loop text generation. The DSpark prototype was measured separately. [Model card](https://thinkingmachines.ai/model-card/inkling-2-mini/) · [Q4_0 checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf)
 
 ```bash
-zig build -Dbackend=vulkan -Doptimize=ReleaseFast
+git clone --branch fix/qwen-smoke-token-anchor https://github.com/zolotukhin/zinc.git
+cd zinc
+ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
 ./zig-out/bin/zinc model pull inkling-2-mini-q4-0
 ./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
   --chat --prompt "Explain why a database uses a write-ahead log." -n 256
 ```
 
-Use `zig build -Dbackend=rocm -Doptimize=ReleaseFast` for the ROCm path. Drop the prompt flag and add `--port 9090` to start the server. The model then appears in the chat picker and in `GET /v1/models`. [Running ZINC](/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4) · [ROCm build guide](/zinc/docs/rocm/)
+For Vulkan, build with `zig build -Dbackend=vulkan -Doptimize=ReleaseFast` and set `RADV_PERFTEST=coop_matrix`. The server recipe uses one request slot and lists the ID in `GET /v1/models`. [Running ZINC](/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4) · [ROCm build guide](/zinc/docs/rocm/)
 
 The performance suite can reproduce the four-server-workload comparison with a prepared RDNA node and a llama-server build from the release tag. Point the model root at the directory containing the same GGUF for both engines.
 

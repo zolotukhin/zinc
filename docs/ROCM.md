@@ -35,7 +35,51 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
 If the ROCm libraries are not registered with the system dynamic linker, add
 `/opt/rocm/lib` to `LD_LIBRARY_PATH` for the build and run commands.
 
-Run a GGUF directly:
+## Inkling 2 Mini
+
+Start with **Inkling 2 Mini Q4_0** on the Radeon RX 9070 XT or Radeon AI PRO
+R9700. The development build runs text generation at a 4,096-token context
+with one request slot. The decoder gives each pass of the loop its own
+attention and convolution cache. The managed download is 14.9 GB.
+[Pinned checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf)
+
+```bash
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "Explain how a write-ahead log works." -n 256
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 \
+  --context 4096 --parallel 1 --port 9090
+```
+
+The ROCm server uses packed Q8 activations for Q4_0 projections and replays
+the decode graph across tokens. Set `ZINC_INKLING_Q8=0` to use floating-point
+activations for reference checks. The benchmark suite registers Inkling under
+`inkling-2-mini-q4-0`. Point the suite at the directory containing the GGUF so
+both engines load the same checkpoint.
+
+```bash
+bun tools/performance_suite.mjs \
+  --target rdna --rdna-backend rocm \
+  --models inkling-2-mini-q4-0 --runs 3 --warmup 1 \
+  --rdna-workdir "$ZINC_RDNA_WORKDIR" --rdna-model-root "$ZINC_RDNA_MODEL_ROOT" \
+  --rdna-vk-device "${ZINC_RDNA_VK_DEVICE:-0}" --rdna-rocm-device "${ZINC_RDNA_ROCM_DEVICE:-0}" \
+  --rdna-llama-server "$ZINC_RDNA_LLAMA_SERVER_REMOTE" --rdna-llama-device "$ZINC_RDNA_LLAMA_DEVICE" \
+  --rdna-keep-dpm --no-site-write --output /tmp/zinc-inkling-rdna.json
+```
+
+In the four-scenario server suite, each engine used the same GGUF and token
+budgets, with one warmup and three measured runs per scenario. ZINC ROCm won
+prefill and decode in every scenario on both cards. The decode ranges below
+use the scenario medians. [llama.cpp v1.1.0](https://github.com/ggml-org/llama.cpp/releases/tag/v1.1.0)
+
+| GPU | ZINC ROCm decode | llama.cpp Vulkan decode | Reduction in total prefill and decode time |
+| --- | ---: | ---: | ---: |
+| Radeon RX 9070 XT | 59.7–62.4 tok/s | 50.3–50.9 tok/s | 20.7% |
+| Radeon AI PRO R9700 | 63.8–66.9 tok/s | 46.0–46.2 tok/s | 28.9% |
+
+## Qwen 3.8 NextN
+
+Run the Qwen 3.8 GGUF directly to test its built-in drafter.
 
 ```bash
 ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
@@ -57,8 +101,7 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
   --parallel 1 --context 2048 --port 9090
 ```
 
-Gemma 4 26B-A4B serves through its single-sequence MoE path. Inkling 2 Mini
-and the reduced-memory configurations below also use one request slot.
+The reduced-memory configurations below also use one request slot.
 
 ### Radeon RX 9070 XT with 16 GB
 
@@ -196,48 +239,6 @@ reached **116.88%** of llama.cpp on the summed full-matrix phase-wall-time score
 scenarios, the prefill lead ranged from 120.52% to 160.29% and the decode lead
 from 6.86% to 8.16%. All four captured ZINC previews passed the suite's output
 quality checks.
-
-## Inkling 2 Mini
-
-Use an `inkling2_loop` GGUF for text generation. The decoder runs the fixed
-three-pass loop with a separate attention and convolution cache for each pass.
-The CLI and HTTP server use one sequence at a time. The 14.9 GB Q4_0 checkpoint
-is available on Hugging Face. [Checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-Q4_0.gguf)
-
-```bash
-ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
-./zig-out/bin/zinc model pull inkling-2-mini-q4-0
-./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
-  --chat --prompt "Explain how a write-ahead log works." -n 256
-./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 \
-  --context 4096 --parallel 1 --port 9090
-```
-
-The ROCm server uses packed Q8 activations for Q4_0 projections and replays
-the decode graph across tokens. Set `ZINC_INKLING_Q8=0` to use floating-point
-activations for reference checks. The benchmark suite registers Inkling under
-`inkling-2-mini-q4-0`. Point the suite at the directory containing the GGUF so
-both engines load the same checkpoint.
-
-```bash
-bun tools/performance_suite.mjs \
-  --target rdna --rdna-backend rocm \
-  --models inkling-2-mini-q4-0 --runs 3 --warmup 1 \
-  --rdna-workdir "$ZINC_RDNA_WORKDIR" --rdna-model-root "$ZINC_RDNA_MODEL_ROOT" \
-  --rdna-vk-device "${ZINC_RDNA_VK_DEVICE:-0}" --rdna-rocm-device "${ZINC_RDNA_ROCM_DEVICE:-0}" \
-  --rdna-llama-server "$ZINC_RDNA_LLAMA_SERVER_REMOTE" --rdna-llama-device "$ZINC_RDNA_LLAMA_DEVICE" \
-  --rdna-keep-dpm --no-site-write --output /tmp/zinc-inkling-rdna.json
-```
-
-In the four-scenario server suite, each engine used the same GGUF and token
-budgets, with one warmup and three measured runs per scenario. ZINC ROCm won
-prefill and decode in every scenario on both cards. The decode ranges below
-use the scenario medians. [llama.cpp v1.1.0](https://github.com/ggml-org/llama.cpp/releases/tag/v1.1.0)
-
-| GPU | ZINC ROCm decode | llama.cpp Vulkan decode | Reduction in total prefill and decode time |
-| --- | ---: | ---: | ---: |
-| Radeon RX 9070 XT | 59.7–62.4 tok/s | 50.3–50.9 tok/s | 20.7% |
-| Radeon AI PRO R9700 | 63.8–66.9 tok/s | 46.0–46.2 tok/s | 28.9% |
 
 ## Troubleshooting
 

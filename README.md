@@ -20,6 +20,30 @@ API.
 [Read the docs](https://zolotukhin.ai/zinc/docs/) ·
 [Join Discord](https://discord.gg/QRUgWH2aGV)
 
+## Get running
+
+**Start with Inkling 2 Mini Q4_0** on the Radeon RX 9070 XT or Radeon AI PRO
+R9700. The managed checkpoint runs text generation at a 4,096-token context.
+Use ROCm for the highest measured decode rate on both cards.
+[Inkling 2 Mini AMD benchmarks](site/src/content/posts/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks.md)
+
+These commands use the Inkling development branch, Zig 0.15.2 or newer, and
+the ROCm development libraries. [ROCm setup guide](docs/ROCM.md)
+
+```bash
+git clone --branch fix/qwen-smoke-token-anchor https://github.com/zolotukhin/zinc.git
+cd zinc
+ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
+./zig-out/bin/zinc --check
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "Explain how a write-ahead log works." -n 256
+```
+
+Both cards can also run Inkling with Vulkan. For Intel Arc, Apple Silicon, or a
+smaller model, start with Qwen 3.5 9B where it appears in `zinc model list`.
+[Getting started](docs/GETTING_STARTED.md)
+
 ## Faster on the hardware we test
 
 ZINC beats the comparison llama.cpp build on **prefill, decode, and combined
@@ -36,32 +60,6 @@ The [live benchmark page](https://zolotukhin.ai/zinc/benchmarks/#rdna-rocm)
 includes all four workloads, raw samples, exact prompts, build revisions, and
 the checked-in JSON.
 
-## Get running
-
-ZINC needs Zig 0.15.2 or newer. Linux Vulkan builds also need `glslc` and a
-Vulkan loader; ROCm builds need a working ROCm installation.
-
-```bash
-git clone https://github.com/zolotukhin/zinc.git
-cd zinc
-zig build -Doptimize=ReleaseFast
-
-./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen38-27b-q4k-m
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "Hello" --chat
-```
-
-Build the native AMD ROCm backend with:
-
-```bash
-ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
-ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc --check
-```
-
-See [Getting started](https://zolotukhin.ai/zinc/docs/getting-started/) for
-package prerequisites and the first-run walkthrough, or use the dedicated
-[ROCm setup guide](https://zolotukhin.ai/zinc/docs/rocm/).
-
 ## Supported GPU paths
 
 - AMD Radeon: Vulkan and ROCm/HIP
@@ -76,10 +74,9 @@ one place.
 
 ## Models
 
-ZINC works with local GGUF files and a managed model catalog. Inkling 2 Mini
-Q4_0 text inference is supported on the Radeon RX 9070 XT and Radeon AI PRO
-R9700 through Vulkan and ROCm. The catalog also covers Qwen 3.5, Qwen 3.6,
-Qwen 3.8, Gemma 4, and Muse Glimmer.
+ZINC works with local GGUF files and a managed model catalog. Run
+`zinc model list` for models validated on your GPU. The catalog also covers
+Qwen 3.5, Qwen 3.6, Qwen 3.8, Gemma 4, and Muse Glimmer.
 
 You can also point directly at a file or Hugging Face repository:
 
@@ -91,12 +88,12 @@ You can also point directly at a file or Hugging Face repository:
 ## Local server and API
 
 ```bash
-./zig-out/bin/zinc chat --model-id qwen38-27b-q4k-m
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1 --port 9090
 ```
 
-This starts the browser chat and OpenAI-compatible API. Health checks are at
-`/health`; model listing and chat completions are under `/v1`. The
-[API guide](https://zolotukhin.ai/zinc/docs/api/) has curl and SDK examples.
+This starts the OpenAI-compatible API. Health checks are at `/health`, and
+model listing and chat completions are under `/v1`. On Vulkan, open the browser
+chat at `http://localhost:9090/`. [API guide](docs/API.md)
 
 ## Build, test, contribute
 

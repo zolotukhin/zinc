@@ -3,6 +3,10 @@
 ZINC exposes a local OpenAI-compatible HTTP API. Point OpenAI-style clients at
 the server by changing the base URL.
 
+For text chat on the RX 9070 XT or Radeon AI PRO R9700, use the
+[Inkling 2 Mini server recipe](/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4)
+and set `model` to `inkling-2-mini-q4-0` in your requests.
+
 ```bash
 # Start the server. Plain server mode defaults to port 8080.
 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m -p 8080

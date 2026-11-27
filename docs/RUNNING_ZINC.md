@@ -2,7 +2,9 @@
 
 > **Current status**: ZINC is still experimental and under active development. The CLI path is the most dependable way to run it today. Server mode exists, but you should still treat it as evolving.
 
-This page is the shortest path from “the project builds” to “I can actually use it.”
+On the Radeon RX 9070 XT and Radeon AI PRO R9700, start with Inkling 2 Mini
+Q4_0 on the [development build](/zinc/docs/getting-started/#quickstart-on-the-rx-9070-xt-and-r9700).
+On other hardware, use `model list` to find a tested model that fits.
 
 ## Build the binary
 
@@ -18,6 +20,26 @@ The executable will be here:
 ./zig-out/bin/zinc
 ```
 
+## Inkling 2 Mini on AMD RDNA4
+
+Inkling 2 Mini Q4_0 is the recommended starting model for text generation on
+the RX 9070 XT and Radeon AI PRO R9700. Use a 4,096-token context and one
+request slot. Build with [ROCm](/zinc/docs/rocm/#inkling-2-mini) for the highest
+measured decode rate on both cards, or use Vulkan as shown below.
+
+```bash
+zig build -Dbackend=vulkan -Doptimize=ReleaseFast
+export RADV_PERFTEST=coop_matrix
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "Explain how a write-ahead log works." -n 256
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1 --port 9090
+```
+
+The server lists `inkling-2-mini-q4-0` at `/v1/models` and serves both
+`/v1/chat/completions` and `/v1/completions`. The same model ID works with the
+ROCm build. [Matched ROCm and Vulkan results on both cards](/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/)
+
 ## Run a preflight check first
 
 This is the fastest way to answer "does this machine, Vulkan or Metal stack, and model look runnable at all?"
@@ -32,8 +54,8 @@ export RADV_PERFTEST=coop_matrix
 # Check one exact GGUF file
 ./zig-out/bin/zinc --check -m /path/to/model.gguf
 
-# Or check one managed model from the built-in catalog
-./zig-out/bin/zinc --check --model-id qwen36-35b-a3b-q4k-xl
+# Check the recommended model on the RX 9070 XT or R9700
+./zig-out/bin/zinc --check --model-id inkling-2-mini-q4-0 --context 4096
 ```
 
 On the shared RDNA4 test node, the equivalent command is:
@@ -129,24 +151,6 @@ The warning in all three cases came from the shell environment, not from model f
 # The shared host shell did not have this set during the sample run
 RADV_PERFTEST: Not set in current shell [WARN]
 ```
-
-## Inkling 2 Mini on AMD RDNA4
-
-The Radeon RX 9070 XT and Radeon AI PRO R9700 run Inkling 2 Mini Q4_0 text
-generation with the Vulkan and ROCm backends. Use a 4,096-token context to
-reproduce the single-sequence measurements.
-
-```bash
-zig build -Dbackend=vulkan -Doptimize=ReleaseFast
-./zig-out/bin/zinc model pull inkling-2-mini-q4-0
-./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
-  --chat --prompt "Explain how a write-ahead log works." -n 256
-./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1 --port 9090
-```
-
-The server lists the managed model as `inkling-2-mini-q4-0` and serves both
-`/v1/chat/completions` and `/v1/completions`. Use the same model ID with a
-[ROCm build](/zinc/docs/rocm/#inkling-2-mini) for the HIP decoder.
 
 ## Troubleshooting (start here if something fails)
 
@@ -249,23 +253,24 @@ For machine-readable output (useful for AI agents and scripts):
 ./zig-out/bin/zinc model list --json
 ```
 
-If you want ZINC to manage downloads and the default startup model for you:
+Set Inkling as your default startup model on the RX 9070 XT or R9700. On
+other hardware, choose an ID from `model list`.
 
 ```bash
 # Download one managed model into the local cache
-./zig-out/bin/zinc model pull qwen38-27b-q4k-m
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
 
 # Mark it as the default managed model for future runs
-./zig-out/bin/zinc model use qwen38-27b-q4k-m
+./zig-out/bin/zinc model use inkling-2-mini-q4-0
 
 # Inspect the current managed default
 ./zig-out/bin/zinc model active
 
 # Remove a cached managed model
-./zig-out/bin/zinc model rm qwen38-27b-q4k-m
+./zig-out/bin/zinc model rm inkling-2-mini-q4-0
 
 # Force-unload it from the local server first if it is still active there
-./zig-out/bin/zinc model rm --force qwen38-27b-q4k-m
+./zig-out/bin/zinc model rm --force inkling-2-mini-q4-0
 ```
 
 `model rm` is conservative by default: if the local ZINC server still has that model loaded in GPU memory, the command refuses and leaves the cache untouched. Use `--force` to have the local server unload it first. If your server uses a non-default port, add `--port <port>` before `model rm`.

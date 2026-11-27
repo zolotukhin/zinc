@@ -19,7 +19,7 @@ const breadcrumbItems = [
 
 const docMeta: Record<string, { label: string; description: string; order: number }> = {
   'development': { label: 'Development Guide', description: 'Build, test, debug, benchmark, and contribute.', order: 5 },
-  'getting-started': { label: 'Getting Started', description: 'Build ZINC, verify Vulkan, and run the first prompt.', order: 1 },
+  'getting-started': { label: 'Getting Started', description: 'Start with Inkling 2 Mini on the RX 9070 XT or R9700, or choose a model for your GPU.', order: 1 },
   'hardware-requirements': { label: 'Hardware Requirements', description: 'Vulkan, ROCm, Metal, CUDA, GPU, VRAM, operating-system, and driver requirements.', order: 2 },
   rocm: { label: 'ROCm Backend', description: 'Build and validate the first-class HIP path on supported AMD RDNA4 systems.', order: 3 },
   'running-zinc': { label: 'Running ZINC', description: 'CLI usage, server mode, KV quantization, and graph exports.', order: 4 },
@@ -73,7 +73,7 @@ const jsonLd = {
 <BaseLayout
   title="ZINC Documentation"
   description="Documentation for using ZINC through Vulkan, ROCm, Metal, and experimental CUDA: getting started, hardware requirements, CLI and server use, architecture, tuning, and API reference."
-  keywords="ZINC docs, ZINC getting started, ZINC hardware requirements, ROCm GGUF inference, Vulkan GGUF docs, Metal inference, CUDA inference, ZINC API, RDNA4 tuning"
+  keywords="ZINC docs, ZINC getting started, Inkling 2 Mini AMD, ZINC hardware requirements, ROCm GGUF inference, Vulkan GGUF docs, Metal inference, CUDA inference, ZINC API, RDNA4 tuning"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
@@ -98,40 +98,18 @@ const jsonLd = {
     </section>
 
     <section class="quickstart-panel">
+      <h2>Run Inkling 2 Mini on AMD RDNA4</h2>
+      <p>Use the Inkling development build on the RX 9070 XT or Radeon AI PRO R9700. The quickstart also covers Vulkan and model choices for other GPUs. <a href="/zinc/docs/getting-started/#quickstart-on-the-rx-9070-xt-and-r9700">Getting started</a></p>
       <TerminalWindow
         title="bash"
         density="compact"
-        code={`# Fastest path: build ZINC, see which supported models fit,
-# pull one, and run it end to end.
-git clone https://github.com/zolotukhin/zinc.git
+        code={`git clone --branch fix/qwen-smoke-token-anchor https://github.com/zolotukhin/zinc.git
 cd zinc
-zig build -Doptimize=ReleaseFast
-
-# RDNA4 Vulkan only; skip for ROCm, Intel Arc, CUDA, and macOS.
-export RADV_PERFTEST=coop_matrix
-
-# Verify the selected GPU backend and runtime path first
+ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
 ./zig-out/bin/zinc --check
-
-# Show supported models for this machine
-./zig-out/bin/zinc model list
-
-# Pull one managed model from the built-in catalog
-./zig-out/bin/zinc model pull qwen38-27b-q4k-m
-
-# Check the managed model before the first run
-./zig-out/bin/zinc --check --model-id qwen38-27b-q4k-m
-
-# Run a prompt with that managed model
-./zig-out/bin/zinc \\
-  --model-id qwen38-27b-q4k-m \\
-  --prompt "The capital of France is"
-
-# If you already have a local GGUF file, use it directly instead
-./zig-out/bin/zinc --check -m /path/to/model.gguf
-./zig-out/bin/zinc \\
-  -m /path/to/model.gguf \\
-  --prompt "The capital of France is"`}
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \\
+  --chat --prompt "What is the capital of France?" -n 256`}
       />
     </section>
 

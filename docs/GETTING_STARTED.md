@@ -10,21 +10,40 @@ ZINC runs local LLMs through Vulkan or ROCm on AMD Radeon, Vulkan on Intel Arc, 
 
 If that works, move on to the [hardware requirements](/zinc/docs/hardware-requirements/), [running ZINC](/zinc/docs/running-zinc/), and the lower-level tuning docs.
 
-## Fast path
+## Quickstart on the RX 9070 XT and R9700
+
+Start with **Inkling 2 Mini Q4_0** for text chat on the Radeon RX 9070 XT or
+Radeon AI PRO R9700. Both cards ran it with a 4,096-token context and one
+request slot. ROCm had the highest measured decode rate on both cards.
+Use the development branch below and install the
+[ROCm prerequisites](/zinc/docs/rocm/#build-and-verify) before building.
+
+Thinking Machines Lab reported 48.2% on DeepSWE v1.1 for Inkling 2 Mini
+and 42.2% for Qwen 3.8 27B. [Model card](https://thinkingmachines.ai/model-card/inkling-2-mini/)
 
 ```bash
-git clone https://github.com/zolotukhin/zinc.git
+git clone --branch fix/qwen-smoke-token-anchor https://github.com/zolotukhin/zinc.git
 cd zinc
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zinc model pull qwen38-27b-q4k-m
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "What is the capital of France?" --chat
+ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
+./zig-out/bin/zinc --check
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "What is the capital of France?" -n 256
 ```
 
-On RDNA4 Linux with the Vulkan build, set the cooperative matrix fast path before the check or first prompt:
+For the Vulkan build on either card, use these commands in the same checkout.
+Then run the model pull and prompt above.
 
 ```bash
+zig build -Dbackend=vulkan -Doptimize=ReleaseFast
 export RADV_PERFTEST=coop_matrix
+./zig-out/bin/zinc --check
 ```
+
+For Intel Arc, Apple Silicon or a smaller download, follow the build for your
+platform and start with **Qwen 3.5 9B Q4_K_M** when it appears in `zinc model list`.
+The downloads on the [ZINC releases page](https://github.com/zolotukhin/zinc/releases)
+have their own tested model lists.
 
 ## Before you start
 
@@ -35,7 +54,7 @@ ZINC currently targets:
 - **Linux** with Intel Arc Xe2 / Battlemage GPUs through Vulkan 1.3
 - **macOS** with Apple Silicon (M1 through M5) through Metal
 - **Linux or WSL2** with NVIDIA RTX through the experimental CUDA backend
-- **GGUF models** (Q4_K, Q5_K, Q6_K, Q8_0, Q5_0, MXFP4, F16, F32 quantizations)
+- **GGUF models** (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, Q5_0, MXFP4, F16, F32 quantizations)
 
 **Native Windows is not supported.** The NVIDIA CUDA backend can be built experimentally under WSL2, but WSL2 is not part of the validated Vulkan or ROCm matrix.
 
@@ -45,7 +64,7 @@ This list keeps the local ZINC models in one place. A model ID is present only w
 
 | Model | Runtime | Model ID or access | Fits on | Current status |
 |------|------|------------|---------|--------|
-| **Inkling 2 Mini Q4_0** | Local GGUF, text | `inkling-2-mini-q4-0` · [checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF) | 16 GB VRAM with 4,096 tokens | AMD RDNA4 Vulkan and ROCm |
+| **Inkling 2 Mini Q4_0** | Local GGUF, text | `inkling-2-mini-q4-0` · [checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF) | 16 GB VRAM with 4,096 tokens | Recommended on the RX 9070 XT and R9700 with Vulkan or ROCm |
 | **Qwen 3.5 9B Q4_K_M** | Local GGUF | `qwen35-9b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | 8+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.6 35B-A3B Q4_K_XL** | Local GGUF | `qwen36-35b-a3b-q4k-xl` · [checkpoint](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.8 27B Q4_K_M** | Local GGUF | `qwen38-27b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM or 32+ GB unified | AMD RDNA4 ROCm and Apple Metal |
@@ -130,8 +149,12 @@ The catalog auto-detects your GPU profile (`amd-rdna4-32gb`, `apple-silicon`, et
 
 ## Download a model
 
+Set `zinc_model` to the first model you want to run in this shell. Use Inkling
+on the validated AMD cards or `qwen35-9b-q4k-m` for the smaller model.
+
 ```bash
-./zig-out/bin/zinc model pull qwen38-27b-q4k-m
+zinc_model=inkling-2-mini-q4-0
+./zig-out/bin/zinc model pull "$zinc_model"
 ```
 
 This downloads the model into a local cache and verifies the SHA-256 hash.
@@ -143,7 +166,7 @@ The `--chat` flag wraps your prompt in the model's chat template (system prompt,
 To reproduce an API chat workload exactly from the CLI, pass its system turn explicitly:
 
 ```bash
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m \
+./zig-out/bin/zinc --model-id "$zinc_model" --context 4096 \
   --chat \
   --system-prompt "You are a helpful assistant. Answer directly. Do not show analysis." \
   --prompt "Review this code for concurrency bugs."
@@ -157,7 +180,8 @@ To reproduce an API chat workload exactly from the CLI, pass its system turn exp
 # RDNA4 Vulkan only — required, not optional. Skip for ROCm, Intel Arc, CUDA, and macOS.
 export RADV_PERFTEST=coop_matrix
 
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "What is the capital of France?" --chat
+./zig-out/bin/zinc --model-id "$zinc_model" --context 4096 \
+  --chat --prompt "What is the capital of France?" -n 256
 ```
 
 Good first-run signals in the logs:
@@ -173,31 +197,35 @@ If you see a tok/s number and coherent output, the core path is working.
 
 ## Start the chat UI
 
-```bash
-./zig-out/bin/zinc chat
-```
-
-This starts the server (default port 9090) and opens the built-in chat UI in your browser. The server also exposes an OpenAI-compatible API at `http://localhost:9090/v1`.
-
-You can also start the server manually:
+On Vulkan or Metal, open the built-in browser chat.
 
 ```bash
-./zig-out/bin/zinc --model-id qwen38-27b-q4k-m -p 8080
+./zig-out/bin/zinc chat --model-id "$zinc_model" --context 4096 --parallel 1
 ```
 
-Then open `http://localhost:8080/` in your browser.
+The chat command starts the server on port 9090 and opens the browser. It also
+exposes an OpenAI-compatible API at `http://localhost:9090/v1`.
+
+To start the API on any supported backend, including ROCm, run the server
+directly.
+
+```bash
+./zig-out/bin/zinc --model-id "$zinc_model" --context 4096 --parallel 1 -p 8080
+```
+
+Point your client at `http://localhost:8080/v1`.
 
 ## Manage models
 
 ```bash
 # Set a default model for future runs
-./zig-out/bin/zinc model use qwen38-27b-q4k-m
+./zig-out/bin/zinc model use "$zinc_model"
 
 # Check the active default
 ./zig-out/bin/zinc model active
 
 # Remove a cached model
-./zig-out/bin/zinc model rm qwen38-27b-q4k-m
+./zig-out/bin/zinc model rm "$zinc_model"
 ```
 
 ## What to read next
