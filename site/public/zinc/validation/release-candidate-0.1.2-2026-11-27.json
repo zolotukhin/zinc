@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "kind": "certified-linux-candidate",
+  "version": "0.1.2",
+  "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+  "candidate_run": 46050966047,
+  "candidate_url": "https://github.com/zolotukhin/zinc/actions/runs/46050966047",
+  "certified": true,
+  "published": false,
+  "preflight": {
+    "checksums": true,
+    "attestations": true,
+    "source": true,
+    "protected_approval": true,
+    "manifest_sha256": "776dd4c475cb6a4ffa6e68f29309b2d0001acd47f15800e70b526c34c9013695",
+    "validation_sha256": "96e1de07e6d5e64c37bf90973d1596028791641ddf780a441bdb925f9a8cb523",
+    "provenance_sha256": "9a9ea9da3ef6da9d9a0f8fca570cb2d363310398b50b32f03e07dae32c1517dd"
+  },
+  "artifacts": [
+    {
+      "audit": {
+        "libraries": [
+          "ld-linux-x86-64.so.2",
+          "libc.so.6",
+          "libvulkan.so.1"
+        ],
+        "required_glibc": "2.34",
+        "runtime_paths": []
+      },
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "filename": "zinc-v0.1.2-linux-x86_64-vulkan.tar.gz",
+      "sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+      "signing": {
+        "status": "unsigned"
+      },
+      "size_bytes": 7952074,
+      "target": "linux-x86_64-vulkan"
+    },
+    {
+      "audit": {
+        "libraries": [
+          "ld-linux-x86-64.so.2",
+          "libamdhip64.so.7",
+          "libc.so.6",
+          "libhipblas.so.3",
+          "libhiprtc.so.7"
+        ],
+        "required_glibc": "2.36",
+        "runtime_paths": [
+          "/opt/rocm/lib"
+        ]
+      },
+      "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+      "filename": "zinc-v0.1.2-linux-x86_64-rocm.tar.gz",
+      "sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+      "signing": {
+        "status": "unsigned"
+      },
+      "size_bytes": 5751050,
+      "target": "linux-x86_64-rocm"
+    }
+  ],
+  "profiles": [
+    {
+      "profile": "rocm-rdna4",
+      "hardware": "Radeon AI PRO R9700 / HIP",
+      "archive_sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+      "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+      "model_rows": 6,
+      "reference_exact_choices": 287,
+      "reference_total_choices": 288,
+      "reference_qualified_near_ties": 1,
+      "lifecycle": {
+        "cycles": 3,
+        "operations": 24,
+        "resident_swaps": 20,
+        "repeated_reference_cases": 72,
+        "maximum_growth": {
+          "fds": 0,
+          "gpu_host_bytes": 0,
+          "rss_bytes": 14737408,
+          "vram_bytes": 126976
+        }
+      },
+      "allocation_failure_recoveries": 2,
+      "checks": {
+        "allocation_failure_recovery": true,
+        "cleanup": true,
+        "gpu": true,
+        "http": true,
+        "identity": true,
+        "inference_parity": true,
+        "kernel_reference": true,
+        "lifecycle_soak": true,
+        "model_hash": true,
+        "package": true,
+        "tokenizer_parity": true
+      }
+    },
+    {
+      "profile": "vulkan-intel-xe2",
+      "hardware": "Intel Arc Pro B70 / Vulkan",
+      "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "model_rows": 7,
+      "reference_exact_choices": 335,
+      "reference_total_choices": 336,
+      "reference_qualified_near_ties": 1,
+      "lifecycle": {
+        "cycles": 3,
+        "operations": 28,
+        "resident_swaps": 24,
+        "repeated_reference_cases": 84,
+        "maximum_growth": {
+          "fds": 0,
+          "gpu_host_bytes": 0,
+          "rss_bytes": 0,
+          "vram_bytes": 0
+        }
+      },
+      "allocation_failure_recoveries": 0,
+      "checks": {
+        "cleanup": true,
+        "gpu": true,
+        "http": true,
+        "identity": true,
+        "inference_parity": true,
+        "kernel_reference": true,
+        "lifecycle_soak": true,
+        "model_hash": true,
+        "package": true,
+        "tokenizer_parity": true
+      }
+    },
+    {
+      "profile": "vulkan-rdna4",
+      "hardware": "Radeon AI PRO R9700 / Vulkan",
+      "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "model_rows": 7,
+      "reference_exact_choices": 336,
+      "reference_total_choices": 336,
+      "reference_qualified_near_ties": 0,
+      "lifecycle": {
+        "cycles": 3,
+        "operations": 28,
+        "resident_swaps": 24,
+        "repeated_reference_cases": 84,
+        "maximum_growth": {
+          "fds": 0,
+          "gpu_host_bytes": 0,
+          "rss_bytes": 3657728,
+          "vram_bytes": 0
+        }
+      },
+      "allocation_failure_recoveries": 0,
+      "checks": {
+        "cleanup": true,
+        "gpu": true,
+        "http": true,
+        "identity": true,
+        "inference_parity": true,
+        "kernel_reference": true,
+        "lifecycle_soak": true,
+        "model_hash": true,
+        "package": true,
+        "tokenizer_parity": true
+      }
+    }
+  ]
+}
