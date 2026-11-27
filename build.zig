@@ -233,6 +233,24 @@ pub fn build(b: *std.Build) void {
         "per_expert_scale",
         "sigmoid_scale_acc",
         "argmax",
+        "inkling_embed",
+        "inkling_matvec",
+        "inkling_quantize",
+        "inkling_q4_0_q8",
+        "inkling_repack_q4_0",
+        "inkling_q6_k_head",
+        "inkling_norm",
+        "inkling_mix",
+        "inkling_copy",
+        "inkling_control",
+        "inkling_conv",
+        "inkling_clip",
+        "inkling_kv",
+        "inkling_attention",
+        "inkling_attention_merge",
+        "inkling_route",
+        "inkling_situ",
+        "inkling_combine",
         "ssm_conv1d",
         "ssm_qk_norm",
         "ssm_delta_net",
@@ -400,6 +418,11 @@ pub fn build(b: *std.Build) void {
             });
             const spv_output = compile_cmd.addOutputFileArg(spv_file);
             compile_cmd.addFileArg(b.path(comp_file));
+            if (std.mem.startsWith(u8, name, "inkling_")) {
+                compile_cmd.addFileInput(b.path(shader_dir ++ "/inkling_lanes.glsl"));
+                compile_cmd.addFileInput(b.path(shader_dir ++ "/inkling_weights.glsl"));
+                compile_cmd.addFileInput(b.path(shader_dir ++ "/inkling_reduce.glsl"));
+            }
 
             b.getInstallStep().dependOn(&b.addInstallFile(spv_output, "share/zinc/shaders/" ++ spv_file).step);
         }

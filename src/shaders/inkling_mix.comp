@@ -1,0 +1,80 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Current { float current[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Saved { float saved[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Query { float query[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float output_state[]; };
+layout(push_constant) uniform Params {
+    uint hidden;
+    uint capacity;
+    uint first_token;
+    uint blocks;
+    uint block_ids[16];
+} p;
+
+#include "inkling_reduce.glsl"
+#include "inkling_lanes.glsl"
+
+shared float scores[17];
+shared float inv_rms;
+
+void main() {
+    bool shuffle_scores = can_shuffle(32u);
+    uint lane = shuffle_scores ? shuffle_lane() : gl_LocalInvocationID.x;
+    uint token = p.first_token + gl_WorkGroupID.x;
+    uint src = token * p.hidden;
+    uint q = gl_WorkGroupID.y * p.hidden;
+    uint dst = (gl_WorkGroupID.y * p.capacity + gl_WorkGroupID.x) * p.hidden;
+    uint width = shuffle_scores ? 32u : 64u;
+    uint cohorts = 64u / width;
+
+    for (uint b = lane / width; b <= p.blocks; b += cohorts) {
+        bool partial = b == p.blocks;
+        uint prev = partial ? src : (p.block_ids[b] * p.capacity + token) * p.hidden;
+        float dp = 0.0, ss = 0.0;
+        for (uint i = lane % width; i < p.hidden; i += width) {
+            float v = partial ? current[prev + i] : saved[prev + i];
+            dp = fma(v, query[q + i], dp);
+            if (partial) ss = fma(v, v, ss);
+        }
+        if (shuffle_scores) {
+            for (uint delta = 16u; delta != 0u; delta >>= 1u) {
+                dp += subgroupShuffleXor(dp, delta);
+                if (partial) ss += subgroupShuffleXor(ss, delta);
+            }
+        } else {
+            dp = reduce_sum(dp);
+            if (partial) ss = reduce_sum(ss);
+        }
+        if (lane % width == 0u) {
+            float inv = partial ? inversesqrt(ss / float(p.hidden) + 1e-6) : 1.0;
+            if (partial) inv_rms = inv;
+            scores[b] = dp * inv * inversesqrt(float(p.hidden));
+        }
+    }
+    barrier();
+    if (lane == 0u) {
+        float mx = scores[0];
+        for (uint b = 1u; b <= p.blocks; ++b) mx = max(mx, scores[b]);
+        float total = 0.0;
+        for (uint b = 0u; b <= p.blocks; ++b) {
+            scores[b] = exp(scores[b] - mx);
+            total += scores[b];
+        }
+        for (uint b = 0u; b <= p.blocks; ++b) scores[b] /= total;
+    }
+    barrier();
+    for (uint i = lane; i < p.hidden; i += 64u) {
+        float v = current[src + i] * inv_rms * scores[p.blocks];
+        for (uint b = 0u; b < p.blocks; ++b) {
+            uint address = (p.block_ids[b] * p.capacity + token) * p.hidden + i;
+            v = fma(saved[address], scores[b], v);
+        }
+        output_state[dst + i] = v;
+    }
+}

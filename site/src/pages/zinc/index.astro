@@ -126,6 +126,7 @@ function buildBoard(target: any, ids: string[]) {
 }
 
 const rdnaBoard = buildBoard(rdnaTarget, [
+  'inkling-2-mini-q4-0',
   'qwen36-35b-a3b-q4k-xl',
   'qwen35-9b-q4k-m',
   'qwen38-27b-q4k-m',
@@ -134,6 +135,7 @@ const rdnaBoard = buildBoard(rdnaTarget, [
 ]);
 
 const rdnaRocmBoard = buildBoard(rdnaRocmTarget, [
+  'inkling-2-mini-q4-0',
   'muse-glimmer-30b-q4k-m',
   'qwen38-27b-q4k-m',
   'qwen36-35b-a3b-q4k-xl',
@@ -546,6 +548,7 @@ const jsonLd = {
       <li><strong>RDNA3</strong>: RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600</li>
     </ul>
     <p>Use Vulkan 1.3 with RADV/AMDVLK for the broad AMD path, or build with <code>-Dbackend=rocm</code> on a supported ROCm installation. The current ROCm reference stack is validated on RDNA4 <code>gfx1201</code>.</p>
+    <p>Inkling 2 Mini Q4_0 text inference is available on Vulkan and ROCm for the RX 9070 XT and Radeon AI PRO R9700. <a href="/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4">Run Inkling 2 Mini locally</a> or read the <a href="/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/">Inkling 2 Mini AMD benchmarks</a>.</p>
 
     <h3>Apple Silicon (macOS)</h3>
     <ul>

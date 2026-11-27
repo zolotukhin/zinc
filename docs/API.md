@@ -630,6 +630,7 @@ managed catalog:
 | Q4_K | Yes | Primary K-quant path |
 | Q5_K | Yes | K-quant path |
 | Q6_K | Yes | K-quant path |
+| Q4_0 | Yes | Inkling 2 Mini on AMD RDNA4 |
 | Q8_0 | Yes | Common attention and projection path |
 | F16 | Yes | Small tensors and some model data |
 | F32 | Yes | Baseline/scalar tensor path |

@@ -736,8 +736,25 @@ fn readGgufHeader(file: std.fs.File) !GgufHeader {
 /// @returns A `FitEstimate` with per-category byte counts and a budget-headroom context maximum.
 pub fn estimateFit(inspection: ModelInspection, vram_budget_bytes: u64, requested_context_length: ?u32) FitEstimate {
     const config = inspection.config;
-    const profile = memory_plan.profile(config);
     const max_ctx = memory_plan.effectiveContextCeiling(config, requested_context_length);
+    if (inspection.inkling_layout) |layout| {
+        const decoder = @import("compute/forward_inkling_vulkan.zig");
+        const reserve = @import("model/inkling.zig").vulkan_memory_reserve;
+        const usage = decoder.runtimeBytes(layout, max_ctx, std.math.maxInt(u64)).?;
+        const remaining = vram_budget_bytes -| inspection.tensor_bytes -| reserve;
+        return .{
+            .weights_bytes = inspection.tensor_bytes,
+            .runtime_device_local_bytes = usage.device + reserve,
+            .host_visible_bytes = @as(u64, layout.vocab) * @sizeOf(f32),
+            .kv_cache_bytes = usage.context,
+            .gpu_ssm_bytes = 0,
+            .total_device_local_bytes = inspection.tensor_bytes + usage.device + reserve,
+            .vram_budget_bytes = vram_budget_bytes,
+            .max_ctx = max_ctx,
+            .budget_max_ctx = decoder.contextCapacity(layout, layout.context, remaining, std.math.maxInt(u32)),
+        };
+    }
+    const profile = memory_plan.profile(config);
     const kv_cache_bytes = profile.deviceLocalContextBytes(max_ctx);
     const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(max_ctx);
     const host_visible_bytes = profile.runtimeHostVisibleBytes(max_ctx);

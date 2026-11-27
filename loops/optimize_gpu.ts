@@ -121,7 +121,7 @@ const MODEL_PRESETS: Record<string, ModelPreset> = {
   },
 };
 
-const DEFAULT_MODEL = "gemma4-26b-a4b-q4k-m";
+const DEFAULT_MODEL = "qwen38-27b-q4k-m";
 
 type ModelTarget = {
   key: string;

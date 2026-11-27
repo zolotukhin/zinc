@@ -1,0 +1,35 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer Projection { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { float weights[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Step { uint step[]; };
+layout(push_constant) uniform Params {
+    uint dim;
+    uint heads;
+    uint scale_floor;
+    float limit;
+    float alpha;
+} p;
+
+#include "inkling_reduce.glsl"
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    uint token = gl_WorkGroupID.y;
+    uint first = (token * p.heads + head) * p.dim;
+    float ss = 0.0;
+    for (uint i = lane; i < p.dim; i += 64u) {
+        float v = x[first + i] * weights[head * p.dim + i];
+        ss = fma(v, v, ss);
+    }
+    float tau = 1.0 + p.alpha * log(max(1.0, float(step[0] + token + 1u) / float(p.scale_floor)));
+    float scale = tau * p.limit / max(p.limit, sqrt(reduce_sum(ss)));
+    for (uint i = lane; i < p.dim; i += 64u) {
+        x[first + i] *= weights[head * p.dim + i] * scale;
+    }
+}

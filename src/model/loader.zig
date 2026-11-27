@@ -5,6 +5,7 @@
 const std = @import("std");
 const gguf = @import("gguf.zig");
 const config_mod = @import("config.zig");
+const inkling = @import("inkling.zig");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
 const Buffer = @import("../vulkan/buffer.zig").Buffer;
@@ -30,6 +31,7 @@ pub const ModelInspection = struct {
     offloadable_tensor_bytes: u64 = 0,
     tensor_count: u64,
     metadata_count: usize,
+    inkling_layout: ?inkling.Layout = null,
 };
 
 /// A tensor descriptor paired with the GPU buffer that stores its contents.
@@ -51,6 +53,20 @@ pub fn isMoEExpertTensor(name: []const u8) bool {
         std.mem.endsWith(u8, name, "ffn_up_exps.weight") or
         std.mem.endsWith(u8, name, "ffn_down_exps.weight") or
         std.mem.endsWith(u8, name, "ffn_down_exps_scale.weight");
+}
+
+fn isExpertTensorFor(architecture: Architecture, name: []const u8) bool {
+    return isMoEExpertTensor(name) or
+        (architecture == .inkling2_loop and std.mem.endsWith(u8, name, "ffn_gate_up_exps.weight"));
+}
+
+fn applyInklingConfig(config: *ModelConfig, file: *const gguf.GGUFFile) !?inkling.Layout {
+    if (config.architecture != .inkling2_loop) return null;
+    const layout = try inkling.Layout.read(file);
+    config.n_heads = layout.heads;
+    config.n_kv_heads = layout.kv_heads;
+    config.vocab_size = layout.vocab;
+    return layout;
 }
 
 /// Decided offload state for the most recently loaded model:
@@ -162,6 +178,27 @@ pub const Model = struct {
     mmap_file: ?std.fs.File,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
+
+    pub fn get(self: *const Model, name: []const u8) ?*const LoadedTensor {
+        for (self.tensors.items) |*tensor| {
+            if (std.mem.eql(u8, tensor.info.name, name)) return tensor;
+        }
+        return null;
+    }
+
+    pub fn getLayer(self: *const Model, layer: u32, suffix: []const u8) ?*const LoadedTensor {
+        var buf: [128]u8 = undefined;
+        const name = std.fmt.bufPrint(&buf, "blk.{d}.{s}", .{ layer, suffix }) catch return null;
+        return self.get(name);
+    }
+
+    pub fn deviceTensorBytes(self: *const Model) u64 {
+        var bytes: u64 = 0;
+        for (self.tensors.items) |*tensor| {
+            if (tensor.gpu_buffer.mapped == null) bytes += tensor.gpu_buffer.size;
+        }
+        return bytes;
+    }
 
     /// Release tensor buffers, GGUF metadata, and the backing file mapping owned by the model.
     /// @param self Model instance to tear down in place.
@@ -490,7 +527,9 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     var gf = try gguf.parseWithOptions(mmap_data, allocator, .{ .log_summary = false });
     defer gf.deinit();
 
-    return extractConfigWithLogging(&gf, false);
+    var config = extractConfigWithLogging(&gf, false);
+    _ = try applyInklingConfig(&config, &gf);
+    return config;
 }
 
 /// Inspect a GGUF file and return a `ModelInspection` containing the normalized
@@ -521,21 +560,25 @@ pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspec
     var gf = try gguf.parseWithOptions(mmap_data, allocator, .{ .log_summary = false });
     defer gf.deinit();
 
+    var config = extractConfigWithLogging(&gf, false);
+    const inkling_layout = try applyInklingConfig(&config, &gf);
     var tensor_bytes: u64 = 0;
     var offloadable_tensor_bytes: u64 = 0;
     for (gf.tensors.items) |tensor_info| {
-        const sz = tensor_info.sizeBytes();
+        const raw_size = tensor_info.sizeBytes();
+        const sz = if (inkling_layout != null) std.mem.alignForward(u64, raw_size, 4) else raw_size;
         tensor_bytes += sz;
-        if (isMoEExpertTensor(tensor_info.name)) offloadable_tensor_bytes += sz;
+        if (isExpertTensorFor(config.architecture, tensor_info.name)) offloadable_tensor_bytes += sz;
     }
 
     return .{
-        .config = extractConfigWithLogging(&gf, false),
+        .config = config,
         .file_size = stat.size,
         .tensor_bytes = tensor_bytes,
         .offloadable_tensor_bytes = offloadable_tensor_bytes,
         .tensor_count = gf.tensor_count,
         .metadata_count = gf.metadata.count(),
+        .inkling_layout = inkling_layout,
     };
 }
 
@@ -575,8 +618,13 @@ pub fn load(
     var gf = try gguf.parse(mmap_data, allocator);
     errdefer gf.deinit();
 
-    const config = extractConfig(&gf);
-
+    const is_inkling = std.mem.eql(u8, gf.getString("general.architecture") orelse "", inkling.architecture);
+    var config = extractConfigWithLogging(&gf, !is_inkling);
+    if (try applyInklingConfig(&config, &gf)) |layout| {
+        log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
+            inkling.architecture, layout.layers, layout.heads, layout.kv_heads, layout.hidden, layout.vocab,
+        });
+    }
     if (config.architecture == .unknown) {
         log.err("Unsupported model architecture. Supported: qwen2, qwen2_moe, qwen35, mistral, mamba, jamba", .{});
         return error.UnsupportedArchitecture;
@@ -598,27 +646,45 @@ pub fn load(
     var total_tensor_bytes: u64 = 0;
     var offloadable_tensor_bytes: u64 = 0;
     for (gf.tensors.items) |tensor_info| {
-        const sz = tensor_info.sizeBytes();
+        const raw_size = tensor_info.sizeBytes();
+        const sz = if (is_inkling) std.mem.alignForward(u64, raw_size, 4) else raw_size;
+        if (is_inkling and sz > instance.device_props.limits.maxStorageBufferRange) {
+            log.err("Inkling tensor {s} exceeds the device storage buffer range", .{tensor_info.name});
+            return error.InklingStorageBufferRangeExceeded;
+        }
         total_tensor_bytes += sz;
-        if (isMoEExpertTensor(tensor_info.name)) offloadable_tensor_bytes += sz;
+        if (isExpertTensorFor(config.architecture, tensor_info.name)) offloadable_tensor_bytes += sz;
     }
-    _ = decideOffloadForLoad(total_tensor_bytes, offloadable_tensor_bytes, instance.vramBytes());
+    // The 14.9 GB Inkling Q4_0 checkpoint can fit in 16 GiB with its compact
+    // sliding caches. The generic 20% reserve would offload it unnecessarily.
+    const inkling_offload = if (is_inkling) switch (readOffloadOverride()) {
+        .force_on => true,
+        .force_off => false,
+        .auto => total_tensor_bytes > instance.vramBytes() -| inkling.vulkan_memory_reserve,
+    } else blk: {
+        _ = decideOffloadForLoad(total_tensor_bytes, offloadable_tensor_bytes, instance.vramBytes());
+        break :blk false;
+    };
 
     var total_vram: u64 = 0;
     var total_host_visible: u64 = 0;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
+        const gpu_size = if (is_inkling) std.mem.alignForward(u64, tensor_size, 4) else tensor_size;
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
         const src_data = mmap_data[data_offset..][0..@intCast(tensor_size)];
-        const offload = shouldOffloadToHost(tensor_info.name);
+        const offload = if (is_inkling)
+            inkling_offload and isExpertTensorFor(config.architecture, tensor_info.name)
+        else
+            shouldOffloadToHost(tensor_info.name);
 
         var gpu_buf = blk: {
             if (offload) {
-                break :blk try Buffer.initHostVisibleStorage(instance, tensor_size);
+                break :blk try Buffer.initHostVisibleStorage(instance, gpu_size);
             } else {
                 break :blk try Buffer.initDeviceLocal(
                     instance,
-                    tensor_size,
+                    gpu_size,
                     vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 );
             }
@@ -628,14 +694,16 @@ pub fn load(
         if (offload) {
             // Host-visible: GPU reads directly over PCIe; memcpy from mmap, no staging.
             gpu_buf.upload(src_data);
-            total_host_visible += tensor_size;
+            if (gpu_size > tensor_size) @memset(gpu_buf.mapped.?[tensor_size..gpu_size], 0);
+            total_host_visible += gpu_size;
         } else {
             // Device-local: stage in host memory, then GPU-side copy into VRAM.
-            var staging = try Buffer.initStaging(instance, tensor_size);
+            var staging = try Buffer.initStaging(instance, gpu_size);
             defer staging.deinit();
             staging.upload(src_data);
-            try buffer_mod.copyBuffer(instance, cmd_pool.handle, &staging, &gpu_buf, tensor_size);
-            total_vram += tensor_size;
+            if (gpu_size > tensor_size) @memset(staging.mapped.?[tensor_size..gpu_size], 0);
+            try buffer_mod.copyBuffer(instance, cmd_pool.handle, &staging, &gpu_buf, gpu_size);
+            total_vram += gpu_size;
         }
 
         try loaded_tensors.append(allocator, .{

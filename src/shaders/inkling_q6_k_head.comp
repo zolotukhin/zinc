@@ -1,0 +1,59 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Weights { uint weights[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Input { vec4 x[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; } p;
+
+#include "inkling_weights.glsl"
+#include "inkling_reduce.glsl"
+
+uint word(uint at) {
+    uint a = weights[at >> 2u];
+    return (at & 2u) == 0u ? a : (a >> 16u) | (weights[(at >> 2u) + 1u] << 16u);
+}
+
+vec4 dequant(uint low, uint high, uint part) {
+    uint bits = ((low >> ((part >> 1u) * 4u)) & 0x0f0f0f0fu) |
+        (((high >> (2u * part)) & 0x03030303u) << 4u);
+    return vec4(bits & 255u, (bits >> 8u) & 255u, (bits >> 16u) & 255u, bits >> 24u) - 32.0;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint row_start = (gl_WorkGroupID.x + gl_WorkGroupID.z * gl_NumWorkGroups.x) * 8u;
+    if (row_start >= p.rows) return;
+
+    uint blocks = p.cols / 256u;
+    uint half_block = (lane & 15u) / 8u;
+    uint col = (lane & 7u) * 4u;
+    uint scale_index = half_block * 8u + col / 16u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint b = lane / 16u; b < blocks; b += 4u) {
+        uint j = b * 64u + half_block * 32u + col / 4u;
+        vec4 x0 = x[j], x1 = x[j + 8u], x2 = x[j + 16u], x3 = x[j + 24u];
+        for (uint r = 0u; r < 8u && row_start + r < p.rows; ++r) {
+            uint at = ((row_start + r) * blocks + b) * 210u;
+            uint lo0 = word(at + half_block * 64u + col);
+            uint lo1 = word(at + half_block * 64u + col + 32u);
+            uint hi = word(at + 128u + half_block * 32u + col);
+            uint sc = at + 192u + scale_index;
+            float s0 = float(bitfieldExtract(int(weight_byte(sc)), 0, 8));
+            float s1 = float(bitfieldExtract(int(weight_byte(sc + 2u)), 0, 8));
+            float s2 = float(bitfieldExtract(int(weight_byte(sc + 4u)), 0, 8));
+            float s3 = float(bitfieldExtract(int(weight_byte(sc + 6u)), 0, 8));
+            float scale = weight_half(at + 208u);
+            float result = dot(dequant(lo0, hi, 0u), x0) * s0 + dot(dequant(lo1, hi, 1u), x1) * s1 +
+                dot(dequant(lo0, hi, 2u), x2) * s2 + dot(dequant(lo1, hi, 3u), x3) * s3;
+            sums[r] = fma(scale, result, sums[r]);
+        }
+    }
+    for (uint r = 0u; r < 8u && row_start + r < p.rows; ++r) {
+        float result = reduce_sum(sums[r]);
+        if (lane == 0u) y[row_start + r] = result;
+    }
+}

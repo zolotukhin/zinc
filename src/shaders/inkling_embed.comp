@@ -1,0 +1,19 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Embeddings { uint weights[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Tokens { uint tokens[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float hidden[]; };
+layout(push_constant) uniform Params { uint width; uint kind; } p;
+
+#include "inkling_weights.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint token = gl_WorkGroupID.y;
+    if (i < p.width) {
+        uint row = tokens[1u + token] * weight_row_bytes(p.kind, p.width);
+        hidden[token * p.width + i] = weight_value(row, p.kind, i);
+    }
+}

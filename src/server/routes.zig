@@ -1618,14 +1618,14 @@ fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatR
     };
 }
 
-fn dropInjectedDefaultSystemForGemma(parsed: *ParsedChatRequest, is_gemma: bool) void {
-    if (!is_gemma or !parsed.injected_default_system) return;
+fn dropInjectedDefaultSystem(parsed: *ParsedChatRequest, template_owns_system: bool) void {
+    if (!template_owns_system or !parsed.injected_default_system) return;
     if (parsed.roles.len == 0 or parsed.contents.len == 0) return;
     if (!std.mem.eql(u8, parsed.roles[0], "system")) return;
     if (!std.mem.eql(u8, parsed.contents[0], default_chat_system_prompt)) return;
 
-    // Gemma chat templates already provide their own model turn scaffold.
-    // Keep user-supplied guidance, but do not add an invisible extra turn.
+    // Keep the model-specific template and any caller-supplied system turns.
+    // The fallback system prompt is intended for the generic chat path.
     parsed.roles = parsed.roles[1..];
     parsed.contents = parsed.contents[1..];
     parsed.injected_default_system = false;
@@ -1820,6 +1820,19 @@ fn findStreamingStopStart(text: []const u8, stop_strs: []const []const u8) ?usiz
     return first;
 }
 
+fn findChatStopStart(is_inkling: bool, text: []const u8, stop_strs: []const []const u8) ?usize {
+    // Inkling emits explicit reasoning and answer channels. Phrases in its
+    // reasoning can match the heuristics for models without channel markers.
+    return if (is_inkling) findFirstStop(text, stop_strs) else findStreamingStopStart(text, stop_strs);
+}
+
+test "Inkling reasoning is allowed to reach its final channel" {
+    const text = "<|message_model|><|content_thinking|>I need to consider the problem.\n\nThe user is asking";
+    try std.testing.expect(findChatStopStart(false, text, &.{}) != null);
+    try std.testing.expect(findChatStopStart(true, text, &.{}) == null);
+    try std.testing.expect(findChatStopStart(true, text, &.{" is asking"}) != null);
+}
+
 fn extractHarmonyMessage(text: []const u8, prefix: []const u8) []const u8 {
     const start = std.mem.indexOf(u8, text, prefix) orelse return "";
     const body = text[start + prefix.len ..];
@@ -1912,6 +1925,7 @@ pub fn normalizeStructuredAssistantOutput(
 ) ![]const u8 {
     const template_kind = tokenizer.detectTemplateKind();
     if (template_kind == .atem) return normalizeAtemAssistantOutput(text, thinking_enabled, buf);
+    if (template_kind == .inkling2) return normalizeInklingAssistantOutput(text, thinking_enabled, buf);
     if (template_kind != .openai_moe) return text;
 
     const analysis = extractHarmonyMessage(text, harmony_analysis_prefix);
@@ -1939,6 +1953,41 @@ pub fn normalizeStructuredAssistantOutput(
         pos += final.len;
     }
     return buf[0..pos];
+}
+
+fn normalizeInklingAssistantOutput(text: []const u8, thinking: bool, buf: []u8) ![]const u8 {
+    const model = "<|message_model|>";
+    const end = "<|end_message|>";
+    const thought = "<|content_thinking|>";
+    const final = "<|content_text|>";
+    var remaining = text;
+    var length: usize = 0;
+    while (std.mem.indexOf(u8, remaining, model)) |start| {
+        remaining = remaining[start + model.len ..];
+        const prefix = if (std.mem.startsWith(u8, remaining, final)) final else thought;
+        const reasoning = std.mem.startsWith(u8, remaining, thought);
+        if (!reasoning and !std.mem.startsWith(u8, remaining, final)) continue;
+        remaining = remaining[prefix.len..];
+        const close = std.mem.indexOf(u8, remaining, end);
+        if (!reasoning or thinking) {
+            const body = remaining[0 .. close orelse remaining.len];
+            const open_tag = if (reasoning) "<think>\n" else "";
+            const close_tag = if (reasoning and close != null) "\n</think>\n" else "";
+            const written = std.fmt.bufPrint(buf[length..], "{s}{s}{s}", .{ open_tag, body, close_tag }) catch return error.BufferTooSmall;
+            length += written.len;
+        }
+        remaining = remaining[(close orelse break) + end.len ..];
+    }
+    return buf[0..length];
+}
+
+test "Inkling streamed reasoning and answer stay prefix-stable" {
+    const thought = "<|message_model|><|content_thinking|>Consider";
+    const answer = thought ++ "<|end_message|><|message_model|><|content_text|>Paris<|end_message|>";
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("<think>\nConsider", try normalizeInklingAssistantOutput(thought, true, &buf));
+    try std.testing.expectEqualStrings("<think>\nConsider\n</think>\nParis", try normalizeInklingAssistantOutput(answer, true, &buf));
+    try std.testing.expectEqualStrings("Paris", try normalizeInklingAssistantOutput(answer, false, &buf));
 }
 
 fn sanitizeAnswerTail(text: []const u8) []const u8 {
@@ -2389,7 +2438,9 @@ fn handleChatCompletions(
     const engine = &resources.engine;
     const tokenizer = &resources.tokenizer;
     const model_name = resources.display_name;
-    dropInjectedDefaultSystemForGemma(&parsed, resources.model.config.architecture == .gemma);
+    const template_kind = tokenizer.detectTemplateKind();
+    const is_inkling = template_kind == .inkling2;
+    dropInjectedDefaultSystem(&parsed, resources.model.config.architecture == .gemma or is_inkling);
 
     // If the catalog marks this model's thinking as unstable, force-disable
     // visible thinking but still keep the tokenizer's no-thinking generation
@@ -2469,10 +2520,12 @@ fn handleChatCompletions(
     const seed_ns: i128 = std.time.nanoTimestamp();
     var req_id_buf: [32]u8 = undefined;
     const req_id = std.fmt.bufPrint(&req_id_buf, "chatcmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "chatcmpl-0";
-    const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
-    const is_atem = tokenizer.detectTemplateKind() == .atem;
+    const thinking_request = if (is_inkling and !skip_thinking_template) parsed.enable_thinking orelse true else parsed.enable_thinking;
+    const thinking_enabled = supportsEnabledThinking(tokenizer, thinking_request);
+    const structured_stream = template_kind == .atem or template_kind == .inkling2;
     const tools_for_choice = if (parsed.tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else parsed.tools;
     const forced_tool_name = forcedSingleToolName(tools_for_choice, parsed.tool_choice);
+    const send_thinking_prefix = thinking_enabled and forced_tool_name == null and !is_inkling;
     const forced_tool_first_arg_name = forcedSingleToolFirstArgumentName(tools_for_choice, parsed.tool_choice);
     const seed_bits: u128 = @bitCast(seed_ns);
     var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
@@ -2536,7 +2589,7 @@ fn handleChatCompletions(
             , .{ req_id, ts, model_name }) catch return;
             conn.writeSseEvent(chunk) catch return;
         }
-        if (thinking_enabled and forced_tool_name == null) {
+        if (send_thinking_prefix) {
             streamText(conn, thinking_prefix, req_id, ts, model_name) catch return;
         }
         if (conn.isPeerClosed()) return;
@@ -2546,6 +2599,9 @@ fn handleChatCompletions(
         server_state.chat_reuse_cache.matchingPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())
     else
         0;
+    // Inkling keeps the convolution and KV state for only the active prefix.
+    // Drop old ownership before generating, even if this request disconnects.
+    if (resources.model.config.architecture == .inkling2_loop) server_state.clearChatReuseCache();
     const prefill_start_ns = std.time.nanoTimestamp();
     const prefill_work_tokens = if (reused_prefix_len > 0)
         prompt_tokens.len - reused_prefix_len
@@ -2597,11 +2653,11 @@ fn handleChatCompletions(
                 return tok.isEndOfGeneration(token);
             }
         }.check;
-        const stop_strs = try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
+        const stop_strs = if (is_inkling) parsed.stop else try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
         var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
-        var sent_visible_len: usize = if (is_atem and thinking_enabled and forced_tool_name == null) thinking_prefix.len else 0;
+        var sent_visible_len: usize = if (structured_stream and send_thinking_prefix) thinking_prefix.len else 0;
         var visible_buf: [4096]u8 = undefined;
         var structured_stream_buf: [32768]u8 = undefined;
         var stopped = false;
@@ -2697,13 +2753,13 @@ fn handleChatCompletions(
                 }
 
                 // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
-                if (findStreamingStopStart(gen_text_buf[0..gen_text_len], stop_strs)) |stop_idx| {
-                    gen_text_len = stop_idx;
-                    const pending_text = gen_text_buf[sent_text_len..gen_text_len];
+                if (findChatStopStart(is_inkling, gen_text_buf[0..gen_text_len], stop_strs)) |stop_idx| {
+                    const pending_start = @min(sent_text_len, stop_idx);
+                    const pending_text = gen_text_buf[pending_start..stop_idx];
                     const cleaned_pending = trimTrailingChatArtifacts(pending_text);
-                    gen_text_len = sent_text_len + cleaned_pending.len;
+                    gen_text_len = pending_start + cleaned_pending.len;
                     if (forced_tool_name == null) {
-                        if (is_atem) {
+                        if (structured_stream) {
                             const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                             const cleaned_structured = trimTrailingChatArtifacts(structured);
                             if (cleaned_structured.len > sent_visible_len) {
@@ -2740,7 +2796,7 @@ fn handleChatCompletions(
                 if (!is_partial) {
                     if (forced_tool_name != null) {
                         sent_text_len = gen_text_len;
-                    } else if (is_atem) {
+                    } else if (structured_stream) {
                         const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                         const safe_visible = lastCompleteUtf8End(structured);
                         if (safe_visible > sent_visible_len) {
@@ -2789,7 +2845,7 @@ fn handleChatCompletions(
 
             // Flush any remaining pending tokens (only if we didn't hit stop)
             if (!stopped) {
-                if (is_atem) {
+                if (structured_stream) {
                     const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                     const cleaned_structured = trimTrailingChatArtifacts(structured);
                     if (cleaned_structured.len > sent_visible_len and forced_tool_name == null) {
@@ -2858,7 +2914,7 @@ fn handleChatCompletions(
         }
     } else {
         // Non-streaming: use same prefill+decode loop with stop detection
-        const stop_strs = try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
+        const stop_strs = if (is_inkling) parsed.stop else try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
         var text_buf: std.ArrayList(u8) = .{};
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
@@ -2885,7 +2941,7 @@ fn handleChatCompletions(
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
                 ns_gen += 1;
-                const hit = if (findStreamingStopStart(text_buf.items, stop_strs)) |pos| blk: {
+                const hit = if (findChatStopStart(is_inkling, text_buf.items, stop_strs)) |pos| blk: {
                     text_buf.shrinkRetainingCapacity(pos);
                     break :blk true;
                 } else false;
@@ -2897,7 +2953,7 @@ fn handleChatCompletions(
                 prev = runtime.sample(engine, &state, sampling, random);
                 state.generated_tokens.append(allocator, prev) catch {};
             }
-            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items, stop_strs) == null) {
+            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findChatStopStart(is_inkling, text_buf.items, stop_strs) == null) {
                 finish_reason = .length;
             }
         }
@@ -3060,6 +3116,7 @@ fn handleCompletions(
     var req_id_buf: [32]u8 = undefined;
     const req_id = std.fmt.bufPrint(&req_id_buf, "cmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "cmpl-0";
 
+    if (resources.model.config.architecture == .inkling2_loop) server_state.clearChatReuseCache();
     const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch |err| {
         log.err("Completion generation failed: {s}", .{@errorName(err)});
         try conn.sendError(500, "internal_error", "Generation failed");
@@ -3436,14 +3493,8 @@ fn jsonEscapeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     errdefer out.deinit(allocator);
     try out.ensureTotalCapacity(allocator, input.len);
     for (input) |c| {
-        switch (c) {
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, c),
-        }
+        var scratch: [6]u8 = undefined;
+        try out.appendSlice(allocator, jsonEscapeByte(c, &scratch));
     }
     return out.toOwnedSlice(allocator);
 }
@@ -3451,40 +3502,41 @@ fn jsonEscapeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
     var out: usize = 0;
     for (input) |c| {
-        if (out + 2 >= buf.len) break;
-        switch (c) {
-            '"' => {
-                buf[out] = '\\';
-                buf[out + 1] = '"';
-                out += 2;
-            },
-            '\\' => {
-                buf[out] = '\\';
-                buf[out + 1] = '\\';
-                out += 2;
-            },
-            '\n' => {
-                buf[out] = '\\';
-                buf[out + 1] = 'n';
-                out += 2;
-            },
-            '\r' => {
-                buf[out] = '\\';
-                buf[out + 1] = 'r';
-                out += 2;
-            },
-            '\t' => {
-                buf[out] = '\\';
-                buf[out + 1] = 't';
-                out += 2;
-            },
-            else => {
-                buf[out] = c;
-                out += 1;
-            },
-        }
+        var scratch: [6]u8 = undefined;
+        const bytes = jsonEscapeByte(c, &scratch);
+        if (bytes.len > buf.len - out) break;
+        @memcpy(buf[out..][0..bytes.len], bytes);
+        out += bytes.len;
     }
     return buf[0..out];
+}
+
+fn jsonEscapeByte(c: u8, scratch: *[6]u8) []const u8 {
+    return switch (c) {
+        '"' => "\\\"",
+        '\\' => "\\\\",
+        '\n' => "\\n",
+        '\r' => "\\r",
+        '\t' => "\\t",
+        else => if (c < 32) blk: {
+            const hex = "0123456789abcdef";
+            scratch.* = .{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] };
+            break :blk scratch;
+        } else blk: {
+            scratch[0] = c;
+            break :blk scratch[0..1];
+        },
+    };
+}
+
+test "JSON chat output escapes all control characters" {
+    const input = "before\x00\x08\x0b\x0c\x1fafter";
+    const expected = "before\\u0000\\u0008\\u000b\\u000c\\u001fafter";
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, jsonEscape(input, &buf));
+    const allocated = try jsonEscapeAlloc(std.testing.allocator, input);
+    defer std.testing.allocator.free(allocated);
+    try std.testing.expectEqualStrings(expected, allocated);
 }
 
 fn streamText(
@@ -3685,6 +3737,7 @@ fn fallbackModelName(model: *const Model) []const u8 {
         .gemma => "gemma",
         .gpt_oss => "gpt-oss-20b",
         .muse_glimmer => "muse-glimmer",
+        .inkling2_loop => "inkling-2-mini",
         .unknown => "zinc-model",
     };
 }
@@ -4659,7 +4712,7 @@ test "parseChatRequest prepends default system guidance when missing" {
     try std.testing.expectEqualStrings("user", parsed.roles[1]);
 }
 
-test "dropInjectedDefaultSystemForGemma removes only synthetic guidance" {
+test "dropInjectedDefaultSystem removes only synthetic guidance" {
     const body =
         \\{"messages":[{"role":"user","content":"hello"}]}
     ;
@@ -4667,7 +4720,7 @@ test "dropInjectedDefaultSystemForGemma removes only synthetic guidance" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.injected_default_system);
-    dropInjectedDefaultSystemForGemma(&parsed, true);
+    dropInjectedDefaultSystem(&parsed, true);
 
     try std.testing.expect(!parsed.injected_default_system);
     try std.testing.expectEqual(@as(usize, 1), parsed.roles.len);
@@ -4675,7 +4728,7 @@ test "dropInjectedDefaultSystemForGemma removes only synthetic guidance" {
     try std.testing.expectEqualStrings("hello", parsed.contents[0]);
 }
 
-test "dropInjectedDefaultSystemForGemma preserves explicit system guidance" {
+test "dropInjectedDefaultSystem preserves explicit system guidance" {
     const body =
         \\{"messages":[{"role":"system","content":"be terse"},{"role":"user","content":"hello"}]}
     ;
@@ -4683,7 +4736,7 @@ test "dropInjectedDefaultSystemForGemma preserves explicit system guidance" {
     defer parsed.deinit();
 
     try std.testing.expect(!parsed.injected_default_system);
-    dropInjectedDefaultSystemForGemma(&parsed, true);
+    dropInjectedDefaultSystem(&parsed, true);
 
     try std.testing.expectEqual(@as(usize, 2), parsed.roles.len);
     try std.testing.expectEqualStrings("system", parsed.roles[0]);

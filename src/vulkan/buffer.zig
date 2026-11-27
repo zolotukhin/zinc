@@ -116,24 +116,12 @@ pub const Buffer = struct {
     /// @returns A staging buffer ready for CPU writes through `mapped`.
     /// @note The buffer uses coherent host memory so writes do not require an explicit flush.
     pub fn initStaging(instance: *const Instance, size: vk.c.VkDeviceSize) !Buffer {
-        var buf = try init(
-            instance,
-            size,
-            vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        );
+        return initMapped(instance, size, vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    }
 
-        // Map staging buffers immediately
-        var ptr: ?*anyopaque = null;
-        const result = vk.c.vkMapMemory(instance.device, buf.memory, 0, size, 0, &ptr);
-        if (result != vk.c.VK_SUCCESS) {
-            log.err("vkMapMemory failed: {d}", .{result});
-            buf.deinit();
-            return error.MapMemoryFailed;
-        }
-        buf.mapped = @ptrCast(ptr);
-
-        return buf;
+    /// Create a coherent staging buffer for reading GPU transfer results.
+    pub fn initReadback(instance: *const Instance, size: vk.c.VkDeviceSize) !Buffer {
+        return initMapped(instance, size, vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
 
     /// Create a host-visible storage buffer that the GPU reads in place via PCIe.
@@ -145,10 +133,14 @@ pub const Buffer = struct {
     /// rarely-touched tensors (MoE expert weights) when device memory is insufficient.
     /// Coherent memory means no explicit invalidate is needed; we only write at load time.
     pub fn initHostVisibleStorage(instance: *const Instance, size: vk.c.VkDeviceSize) !Buffer {
+        return initMapped(instance, size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
+    fn initMapped(instance: *const Instance, size: vk.c.VkDeviceSize, usage: vk.c.VkBufferUsageFlags) !Buffer {
         var buf = try init(
             instance,
             size,
-            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            usage,
             vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
 

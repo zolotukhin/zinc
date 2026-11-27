@@ -259,12 +259,12 @@ pub const CommandBuffer = struct {
     /// @param self Command buffer currently being recorded.
     /// @param pipeline Compute pipeline whose set-0 layout was created for push descriptors.
     /// @param push_desc_fn Loaded `vkCmdPushDescriptorSetKHR` function pointer.
-    /// @param buffer_infos Storage-buffer bindings to push into set `0`; at most 8 entries.
+    /// @param buffer_infos Storage-buffer bindings to push into set `0`; at most 16 entries.
     /// @param push_data Raw bytes copied into the pipeline's push-constant range at offset `0`; may be empty.
     /// @param group_count_x Workgroup count in the X dimension.
     /// @param group_count_y Workgroup count in the Y dimension.
     /// @param group_count_z Workgroup count in the Z dimension.
-    /// @note Asserts that `push_desc_fn` is non-null and `buffer_infos.len <= 8`.
+    /// @note Asserts that `push_desc_fn` is non-null and `buffer_infos.len <= 16`.
     pub fn pushDescAndDispatch(
         self: *CommandBuffer,
         pipeline: *const Pipeline,
@@ -276,7 +276,7 @@ pub const CommandBuffer = struct {
         group_count_z: u32,
     ) void {
         std.debug.assert(push_desc_fn != null);
-        std.debug.assert(buffer_infos.len <= 8);
+        std.debug.assert(buffer_infos.len <= 16);
 
         if (self.last_bound_pipeline != pipeline.pipeline) {
             vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
@@ -293,7 +293,7 @@ pub const CommandBuffer = struct {
             );
         }
 
-        var writes: [8]vk.c.VkWriteDescriptorSet = undefined;
+        var writes: [16]vk.c.VkWriteDescriptorSet = undefined;
         for (buffer_infos, 0..) |*buffer_info, i| {
             writes[i] = .{
                 .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -516,6 +516,13 @@ pub const CommandBuffer = struct {
     /// @note Uses a coarse global memory barrier; prefer buffer barriers for fine-grained sync.
     pub fn computeBarrier(self: *const CommandBuffer) void {
         self.recordMemoryBarrier(computeBarrierSpec());
+    }
+
+    /// Expose prior compute writes to later storage reads and writes.
+    pub fn computeReadWriteBarrier(self: *const CommandBuffer) void {
+        var spec = computeBarrierSpec();
+        spec.dst_access |= vk.c.VK_ACCESS_SHADER_WRITE_BIT;
+        self.recordMemoryBarrier(spec);
     }
 
     /// Insert a compute-to-transfer pipeline barrier (shader write → transfer read/write).

@@ -43,14 +43,11 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
   --chat --prompt "Explain why fair LLM benchmarks need a warmup." -n 96
 ```
 
-Qwen 3.8 GGUFs that include the model's appended NextN block use it
-automatically for CLI generation. ZINC drafts two tokens, verifies the seed and
-drafts together with the full 64-layer model, and restores the recurrent state
-at the accepted boundary when a draft is rejected. `ZINC_MTP=0` returns to
-ordinary greedy decode. `ZINC_MTP_DRAFTS=2` is the measured R9700 default;
-`1` and `3` remain available for GPUs or workloads with a different acceptance
-profile. This path is currently CLI-only, so the reusable-server benchmark
-table below does not include its speedup.
+With capacity for the appended NextN block, Qwen 3.8 can draft tokens in CLI
+mode and on a single-slot server. ZINC verifies the seed and drafts together
+with the full 64-layer model and restores the recurrent state at the accepted
+boundary. `ZINC_MTP=0` selects ordinary greedy decode. `ZINC_MTP_DRAFTS=2` is
+the measured R9700 default, with `1` and `3` available for other workloads.
 
 Start the OpenAI-compatible server:
 
@@ -60,9 +57,45 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
   --parallel 1 --context 2048 --port 9090
 ```
 
-Gemma 4 26B-A4B currently serves through its single-sequence MoE path, so ZINC
-uses one request slot for that model even if a larger `--parallel` value is
-given. The other validated models keep the requested slot count.
+Gemma 4 26B-A4B serves through its single-sequence MoE path. Inkling 2 Mini
+and the reduced-memory configurations below also use one request slot.
+
+### Radeon RX 9070 XT with 16 GB
+
+ROCm runs the original Qwen 3.8 27B and Muse Glimmer 30B Q4_K_M checkpoints with
+a 2,048-token context and one request slot. Input embeddings stay in the
+memory-mapped GGUF. ZINC packs the active decoder weights into a single VRAM
+allocation and processes long prompts in batches of up to 224 tokens. In this
+configuration Qwen 3.8 uses ordinary decode with the optional NextN block left
+in the file mapping. Muse Glimmer reuses its existing KV cache for serving.
+
+```bash
+./zig-out/bin/zinc model list
+./zig-out/bin/zinc model pull qwen38-27b-q4k-m
+./zig-out/bin/zinc model pull muse-glimmer-30b-q4k-m
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --port 9090
+```
+
+On the RX 9070 XT, the benchmark harness used the same GGUF, a 2,048-token
+context, and one request slot in both servers. Rates are medians from three
+runs after one warmup per scenario. Each server applied its own chat template.
+[llama.cpp v1.1.0](https://github.com/ggml-org/llama.cpp/releases/tag/v1.1.0)
+
+| Model and scenario | ZINC ROCm prefill | llama.cpp Vulkan prefill | ZINC ROCm decode | llama.cpp Vulkan decode |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen 3.8 27B, Quick Chat | 209.8 tok/s | 136.9 tok/s | 32.4 tok/s | 30.5 tok/s |
+| Qwen 3.8 27B, Coding Review | 519.3 tok/s | 222.7 tok/s | 32.1 tok/s | 30.3 tok/s |
+| Muse Glimmer 30B, Quick Chat | 808.2 tok/s | 208.1 tok/s | 30.7 tok/s | 32.7 tok/s |
+| Muse Glimmer 30B, Coding Review | 1,006.1 tok/s | 277.7 tok/s | 28.5 tok/s | 32.6 tok/s |
+
+A separate recall check after live model switching used roughly 1,500 input
+tokens. Both engines returned the exact requested code for both checkpoints.
+ZINC prefills reached 658 tok/s on Qwen and 691 tok/s on Muse, compared with 356
+and 350 tok/s on llama.cpp. Muse decoded at 18.3 tok/s on that long prompt,
+compared with 32.2 tok/s on llama.cpp.
+
+Pass `--rdna-context 2048` to `tools/performance_suite.mjs` to set the same
+context capacity in both benchmark servers.
 
 The ROCm-tuned prefill and decode fusions are default-on. These switches remain
 available as correctness/performance A/B opt-outs:
@@ -163,6 +196,48 @@ reached **116.88%** of llama.cpp on the summed full-matrix phase-wall-time score
 scenarios, the prefill lead ranged from 120.52% to 160.29% and the decode lead
 from 6.86% to 8.16%. All four captured ZINC previews passed the suite's output
 quality checks.
+
+## Inkling 2 Mini
+
+Use an `inkling2_loop` GGUF for text generation. The decoder runs the fixed
+three-pass loop with a separate attention and convolution cache for each pass.
+The CLI and HTTP server use one sequence at a time. The 14.9 GB Q4_0 checkpoint
+is available on Hugging Face. [Checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-Q4_0.gguf)
+
+```bash
+ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "Explain how a write-ahead log works." -n 256
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 \
+  --context 4096 --parallel 1 --port 9090
+```
+
+The ROCm server uses packed Q8 activations for Q4_0 projections and replays
+the decode graph across tokens. Set `ZINC_INKLING_Q8=0` to use floating-point
+activations for reference checks. The benchmark suite registers Inkling under
+`inkling-2-mini-q4-0`. Point the suite at the directory containing the GGUF so
+both engines load the same checkpoint.
+
+```bash
+bun tools/performance_suite.mjs \
+  --target rdna --rdna-backend rocm \
+  --models inkling-2-mini-q4-0 --runs 3 --warmup 1 \
+  --rdna-workdir "$ZINC_RDNA_WORKDIR" --rdna-model-root "$ZINC_RDNA_MODEL_ROOT" \
+  --rdna-vk-device "${ZINC_RDNA_VK_DEVICE:-0}" --rdna-rocm-device "${ZINC_RDNA_ROCM_DEVICE:-0}" \
+  --rdna-llama-server "$ZINC_RDNA_LLAMA_SERVER_REMOTE" --rdna-llama-device "$ZINC_RDNA_LLAMA_DEVICE" \
+  --rdna-keep-dpm --no-site-write --output /tmp/zinc-inkling-rdna.json
+```
+
+In the four-scenario server suite, each engine used the same GGUF and token
+budgets, with one warmup and three measured runs per scenario. ZINC ROCm won
+prefill and decode in every scenario on both cards. The decode ranges below
+use the scenario medians. [llama.cpp v1.1.0](https://github.com/ggml-org/llama.cpp/releases/tag/v1.1.0)
+
+| GPU | ZINC ROCm decode | llama.cpp Vulkan decode | Reduction in total prefill and decode time |
+| --- | ---: | ---: | ---: |
+| Radeon RX 9070 XT | 59.7–62.4 tok/s | 50.3–50.9 tok/s | 20.7% |
+| Radeon AI PRO R9700 | 63.8–66.9 tok/s | 46.0–46.2 tok/s | 28.9% |
 
 ## Troubleshooting
 

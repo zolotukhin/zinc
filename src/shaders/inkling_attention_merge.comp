@@ -1,0 +1,49 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Partials { float partial[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Sink { float sink[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Gate { float gate[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float result[]; };
+layout(push_constant) uniform Params {
+    uint dim;
+    uint heads;
+    uint kv_heads;
+    uint capacity;
+    uint window;
+    uint relative_dim;
+    uint relative_extent;
+    uint tiles;
+} p;
+
+#include "inkling_reduce.glsl"
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint query = gl_WorkGroupID.y * p.heads + gl_WorkGroupID.x;
+    uint stride = p.dim + 2u;
+    uint first = query * p.tiles * stride;
+    float high = sink[query];
+    for (uint t = lane; t < p.tiles; t += 64u) high = max(high, partial[first + t * stride + p.dim]);
+    high = reduce_max(high);
+
+    float sum = 0.0;
+    for (uint t = lane; t < p.tiles; t += 64u) {
+        uint i = first + t * stride + p.dim;
+        sum = fma(exp(partial[i] - high), partial[i + 1u], sum);
+    }
+    float inverse_mass = 1.0 / (reduce_sum(sum) + exp(sink[query] - high));
+
+    for (uint i = lane; i < p.dim; i += 64u) {
+        float weighted = 0.0;
+        for (uint t = 0u; t < p.tiles; ++t) {
+            uint j = first + t * stride;
+            if (partial[j + p.dim + 1u] > 0.0) weighted = fma(exp(partial[j + p.dim] - high), partial[j + i], weighted);
+        }
+        uint dst = query * p.dim + i;
+        result[dst] = weighted * inverse_mass / (1.0 + exp(-gate[dst]));
+    }
+}

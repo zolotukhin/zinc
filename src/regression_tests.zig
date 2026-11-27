@@ -1754,7 +1754,8 @@ test "ROCm command completion events are allocated only for async waits" {
     const begin_end = std.mem.indexOfPos(u8, src, begin, "void cuda_dispatch") orelse return error.TestExpectedEqual;
     try expectNotContains(src[begin..begin_end], "hipEventCreateWithFlags");
     try expectContainsNear(src, "void cuda_commit_async", "hipEventCreateWithFlags", 500);
-    try expectContainsNear(src, "void cuda_commit_and_wait", "hipStreamSynchronize", 400);
+    try expectContainsNear(src, "int rocm_commit_and_wait_checked", "hipStreamSynchronize", 400);
+    try expectContainsNear(src, "void cuda_commit_and_wait", "rocm_commit_and_wait_checked", 200);
 }
 
 test "ROCm Gemma MoE fusions preserve activation and norm ABI boundaries" {

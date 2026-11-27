@@ -36,6 +36,8 @@ pub const CatalogEntry = struct {
     /// the model is installed.
     offloadable_vram_bytes: u64 = 0,
     default_context_length: u32,
+    /// Validated context on a 16 GB RDNA4 device using ROCm's reduced-memory path.
+    rocm_16gb_context_length: ?u32 = null,
     recommended_for_chat: bool,
     /// Whether the model produces stable, useful output when thinking is enabled.
     /// Small models may loop or fail to separate reasoning from answers.
@@ -58,9 +60,35 @@ pub const FitState = enum {
 
 /// Shared GPU profile string used for all Apple Silicon (Metal) devices.
 pub const apple_silicon_profile = "apple-silicon";
+/// Device capacity after firmware reservations on nominal 16 GB RDNA4 cards.
+pub const rocm_16gb_min_vram_bytes = (16 * 1024 - 128) * 1024 * 1024;
+
+pub fn rocm16GbContext(entry: CatalogEntry, profile: []const u8) ?u32 {
+    if (!std.mem.eql(u8, profile, "amd-rdna4-16gb")) return null;
+    return entry.rocm_16gb_context_length;
+}
 
 /// The complete list of ZINC-validated managed models available for download.
 pub const entries = [_]CatalogEntry{
+    .{
+        .id = "inkling-2-mini-q4-0",
+        .display_name = "Inkling 2 Mini Q4_0",
+        .release_date = "2026-11-20",
+        .family = "inkling2",
+        .format = "gguf",
+        .quantization = "Q4_0",
+        .file_name = "Inkling-2-Mini-Q4_0.gguf",
+        .homepage_url = "https://thinkingmachines.ai/model-card/inkling-2-mini/",
+        .download_url = "https://huggingface.co/codegood/Inkling-2-Mini-GGUF/resolve/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf?download=true",
+        .sha256 = "105a8cac3cc74f772484f105e49da2717bfa040735f2bfd69b72f09d94b4a76e",
+        .size_bytes = 14_922_755_456,
+        .required_vram_bytes = 15 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{ "amd-rdna4-32gb", "amd-rdna4-16gb" },
+    },
     .{
         .id = "qwen38-27b-q4k-m",
         .display_name = "Qwen3.8 27B Dense Q4_K_M",
@@ -70,7 +98,7 @@ pub const entries = [_]CatalogEntry{
         .quantization = "Q4_K_M",
         .file_name = "Qwen3.8-27B-Q4_K_M.gguf",
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF",
-        .download_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf?download=true",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4121cb19390a7984a0e6dc0f46bea9177b846f15/Qwen3.8-27B-Q4_K_M.gguf?download=true",
         .sha256 = "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
         .size_bytes = 17_106_775_008,
         // Qwen3.8-27B retains Qwen3.6-27B's qwen35 text architecture and
@@ -78,6 +106,7 @@ pub const entries = [_]CatalogEntry{
         // have enough headroom for weights, the capped context, and scratch.
         .required_vram_bytes = 20 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
+        .rocm_16gb_context_length = 2048,
         .recommended_for_chat = true,
         .thinking_stable = true,
         .status = .supported,
@@ -178,6 +207,7 @@ pub const entries = [_]CatalogEntry{
         .size_bytes = 16_756_683_904,
         .required_vram_bytes = 20 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
+        .rocm_16gb_context_length = 2048,
         .recommended_for_chat = true,
         .thinking_stable = true,
         .status = .supported,
@@ -308,7 +338,7 @@ pub fn findForLoadedModel(managed_id: ?[]const u8, model_path: []const u8, displ
 /// @returns Catalog profile key that can be matched against `CatalogEntry.tested_profiles`.
 pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     return switch (config.vendor) {
-        .amd_rdna4 => if (config.vram_mb >= 28 * 1024) "amd-rdna4-32gb" else if (config.vram_mb >= 14 * 1024) "amd-rdna4-16gb" else "amd-rdna4-small",
+        .amd_rdna4 => profileForRdna4(config.vram_mb),
         .amd_rdna4_apu => "amd-rdna4-apu",
         .amd_rdna3 => if (config.vram_mb >= 14 * 1024) "amd-rdna3-16gb" else "amd-rdna3-small",
         .amd_other => "amd-other",
@@ -317,6 +347,16 @@ pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
         .intel_arc => "intel-arc",
         .unknown => "unknown",
     };
+}
+
+fn profileForRdna4(vram_mib: u64) []const u8 {
+    return if (vram_mib >= 28 * 1024) "amd-rdna4-32gb" else if (vram_mib >= 14 * 1024) "amd-rdna4-16gb" else "amd-rdna4-small";
+}
+
+/// Map the HIP target and VRAM tier to the same catalog entries as Vulkan.
+pub fn profileForRocm(arch: []const u8, vram_bytes: u64) []const u8 {
+    if (std.mem.startsWith(u8, arch, "gfx120")) return profileForRdna4(vram_bytes / (1024 * 1024));
+    return "amd-rocm";
 }
 
 /// Return the catalog profile string for Apple Silicon Metal devices.
@@ -404,6 +444,7 @@ pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
         .{ "qwen2", "qwen2" },
         .{ "mistral", "mistral" },
         .{ "muse-glimmer", "muse-glimmer" },
+        .{ "inkling2", @import("inkling.zig").architecture },
         .{ "gemma4", "gemma4" },
         .{ "gemma2", "gemma2" },
         .{ "gemma", "gemma" },
@@ -643,6 +684,17 @@ test "qwen3.8 27b is visible on validated RDNA and Apple Silicon profiles" {
     try std.testing.expect(supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 32 * 1024 * 1024 * 1024));
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-16gb", 32 * 1024 * 1024 * 1024));
     try std.testing.expect(supportedOnCurrentGpu(entry.*, apple_silicon_profile, 32 * 1024 * 1024 * 1024));
+}
+
+test "Inkling 2 Mini is listed for both validated RDNA4 memory tiers" {
+    const entry = find("inkling-2-mini-q4-0") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(CatalogStatus.supported, entry.status);
+    for ([_]u64{ 16, 32 }) |gib| {
+        const bytes = gib * 1024 * 1024 * 1024;
+        try std.testing.expect(supportedOnCurrentGpu(entry.*, profileForRocm("gfx1201", bytes), bytes));
+    }
+    try std.testing.expect(!supportsProfile(entry.*, profileForCuda()));
+    try std.testing.expect(!supportsProfile(entry.*, profileForMetal()));
 }
 
 test "qwen thinking stability flags track validated chat behavior" {

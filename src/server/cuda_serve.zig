@@ -28,6 +28,8 @@
 const std = @import("std");
 const scheduler = @import("../scheduler/scheduler.zig");
 const forwardgemma = @import("../compute/forward_cuda_gemma.zig");
+const is_rocm = std.mem.eql(u8, @import("build_options").backend, "rocm");
+const Inkling = if (is_rocm) @import("../compute/forward_inkling.zig").ForwardInkling else noreturn;
 const forwardcuda = @import("../compute/forward_cuda.zig");
 const mtp_policy = @import("mtp_policy.zig");
 
@@ -47,23 +49,27 @@ const log = std.log.scoped(.cuda_serve);
 pub const Forward = union(enum) {
     gemma: *forwardgemma.ForwardGemma,
     qwen: *forwardcuda.ForwardCuda,
+    inkling: if (is_rocm) *Inkling else noreturn,
 
     fn allocSlots(self: Forward, nslots: u32, slot_ctx: u32) !void {
         switch (self) {
             .gemma => |g| try g.allocSlotKv(nslots, slot_ctx),
             .qwen => |q| try q.allocSlotState(nslots, slot_ctx),
+            .inkling => |model| if (comptime is_rocm) try model.allocSlots(nslots, slot_ctx) else unreachable,
         }
     }
     fn freeSlots(self: Forward) void {
         switch (self) {
             .gemma => |g| g.freeSlotKv(),
             .qwen => |q| q.freeSlotState(),
+            .inkling => {},
         }
     }
     fn decodeBatch(self: Forward, tokens: []const u32, positions: []const u32, slots: []const u32, out: []u32) !void {
         switch (self) {
             .gemma => |g| try g.decodeBatch(tokens, positions, slots, out),
             .qwen => |q| try q.decodeBatch(tokens, positions, slots, out),
+            .inkling => |model| if (comptime is_rocm) try model.decodeBatch(tokens, positions, slots, out) else unreachable,
         }
     }
     /// Clear a reused slot's accumulated state before a new request prefills into
@@ -73,6 +79,7 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => {},
             .qwen => |q| try q.resetSlot(slot),
+            .inkling => |model| if (comptime is_rocm) try model.resetSlot(slot) else unreachable,
         }
     }
     /// Batched prefill that writes state into the slot's per-sequence region.
@@ -81,6 +88,7 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => |g| return try g.prefillBatchedSlot(tokens, slot),
             .qwen => |q| return try q.prefillBatchedSlot(tokens, slot),
+            .inkling => |model| return if (comptime is_rocm) model.prefillBatchedSlot(tokens, slot) else unreachable,
         }
     }
 };
@@ -170,7 +178,7 @@ pub const ServeEngine = struct {
         const capability: MtpCapability = if (nslots != 1)
             .{ .unavailable_reason = "MTP currently requires exactly one request slot." }
         else switch (fwd) {
-            .gemma => .{ .unavailable_reason = "This model architecture does not expose the supported NextN/MTP layer." },
+            .gemma, .inkling => .{ .unavailable_reason = "This model architecture does not expose the supported NextN/MTP layer." },
             .qwen => |q| blk: {
                 if (q.mtpUnavailableReason()) |reason| break :blk .{ .unavailable_reason = reason };
                 const default_enabled = q.mtpDefaultEnabled();
@@ -395,7 +403,7 @@ pub const ServeEngine = struct {
     fn runMtpRequest(self: *ServeEngine, slot_id: u32, timer_opt: *?std.time.Timer) bool {
         const q = switch (self.fwd) {
             .qwen => |ptr| ptr,
-            .gemma => return false,
+            .gemma, .inkling => return false,
         };
         const req = &self.sched.slots[slot_id].?;
         const id = req.id;
@@ -543,7 +551,7 @@ pub const ServeEngine = struct {
                 // prompts) for qwen. Falls back to per-token for gemma or short prompts.
                 // Threshold: batched GEMM overhead dominates below ~32 tokens.
                 // A/B toggle: ZINC_BATCHED_PREFILL=0 disables (uses per-token fallback).
-                const use_batched = np >= 32 and
+                const use_batched = (np >= 32 or (is_rocm and fwd == .inkling)) and
                     (std.posix.getenv("ZINC_BATCHED_PREFILL") == null or
                         !std.mem.eql(u8, std.posix.getenv("ZINC_BATCHED_PREFILL").?, "0"));
                 const batched_tok = if (use_batched)

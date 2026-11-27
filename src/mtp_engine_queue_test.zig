@@ -89,6 +89,7 @@ test "MTP model compatibility and execution preference do not conflate a CUDA de
     const build_options = @import("build_options");
     var model: loader.Model = undefined;
     model.config.n_nextn_layers = 0;
+    model.nextn_weights_resident = true;
     model.tensor_map = std.StringHashMap(*loader.LoadedTensor).init(std.testing.allocator);
     defer model.tensor_map.deinit();
     var forward: ForwardCuda = undefined;
@@ -98,6 +99,9 @@ test "MTP model compatibility and execution preference do not conflate a CUDA de
     forward.mtp_execution_override = null;
     try std.testing.expect(forward.mtpModelUnavailableReason() != null);
     model.config.n_nextn_layers = 1;
+    model.nextn_weights_resident = false;
+    try std.testing.expect(std.mem.indexOf(u8, forward.mtpModelUnavailableReason().?, "left in host memory") != null);
+    model.nextn_weights_resident = true;
     forward.d.n_experts = 2;
     try std.testing.expect(std.mem.indexOf(u8, forward.mtpModelUnavailableReason().?, "dense") != null);
     forward.d.n_experts = 0;

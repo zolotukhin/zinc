@@ -31,7 +31,7 @@ pub fn mtpRequestError(enabled: ?bool) ?[]const u8 {
 /// Tokenizer module (shared across all backends).
 pub const tokenizer_mod = @import("../model/tokenizer.zig");
 /// Forward-pass module, selected by the active backend.
-pub const forward_mod = if (gpu.is_metal) @import("../compute/forward_metal.zig") else @import("../compute/forward.zig");
+pub const forward_mod = if (gpu.is_metal) @import("../compute/forward_metal.zig") else @import("../compute/vulkan_inference.zig");
 /// Model-loading module, selected by the active backend.
 pub const loader_mod = if (gpu.is_metal) @import("../model/loader_metal.zig") else @import("../model/loader.zig");
 /// Model-manager module, selected by the active backend.
@@ -66,7 +66,7 @@ pub fn enableLogitsReadback(_engine: *InferenceEngine) void {
 /// @returns `true` if the engine will expose logits after each decode step.
 pub fn logitsReadbackEnabled(_engine: *const InferenceEngine) bool {
     if (comptime gpu.is_vulkan) {
-        return _engine.logits_readback_enabled;
+        return _engine.logitsReadbackEnabled();
     } else if (comptime gpu.is_metal) {
         return _engine.logits_readback_enabled;
     }
@@ -76,7 +76,7 @@ pub fn logitsReadbackEnabled(_engine: *const InferenceEngine) bool {
 /// Set the logits readback intent flag on backends that can elide full logit materialization.
 pub fn setLogitsReadbackEnabled(_engine: *InferenceEngine, _enabled: bool) void {
     if (comptime gpu.is_vulkan) {
-        _engine.logits_readback_enabled = _enabled;
+        _engine.setLogitsReadbackEnabled(_enabled);
     } else if (comptime gpu.is_metal) {
         _engine.logits_readback_enabled = _enabled;
     }

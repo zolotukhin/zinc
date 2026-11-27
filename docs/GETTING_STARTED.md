@@ -45,6 +45,7 @@ This list keeps the local ZINC models in one place. A model ID is present only w
 
 | Model | Runtime | Model ID or access | Fits on | Current status |
 |------|------|------------|---------|--------|
+| **Inkling 2 Mini Q4_0** | Local GGUF, text | `inkling-2-mini-q4-0` · [checkpoint](https://huggingface.co/codegood/Inkling-2-Mini-GGUF) | 16 GB VRAM with 4,096 tokens | AMD RDNA4 Vulkan and ROCm |
 | **Qwen 3.5 9B Q4_K_M** | Local GGUF | `qwen35-9b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | 8+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.6 35B-A3B Q4_K_XL** | Local GGUF | `qwen36-35b-a3b-q4k-xl` · [checkpoint](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.8 27B Q4_K_M** | Local GGUF | `qwen38-27b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM or 32+ GB unified | AMD RDNA4 ROCm and Apple Metal |

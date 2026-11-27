@@ -76,8 +76,10 @@ one place.
 
 ## Models
 
-ZINC works with local GGUF files and a managed model catalog. Current tuning
-work covers Qwen 3.5, Qwen 3.6, Qwen 3.8, Gemma 4, and Muse Glimmer.
+ZINC works with local GGUF files and a managed model catalog. Inkling 2 Mini
+Q4_0 text inference is supported on the Radeon RX 9070 XT and Radeon AI PRO
+R9700 through Vulkan and ROCm. The catalog also covers Qwen 3.5, Qwen 3.6,
+Qwen 3.8, Gemma 4, and Muse Glimmer.
 
 You can also point directly at a file or Hugging Face repository:
 

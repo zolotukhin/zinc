@@ -1,0 +1,41 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { vec4 x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Packed { uint y[]; };
+layout(push_constant) uniform Params { uint width; } p;
+
+#include "inkling_lanes.glsl"
+
+shared float peaks[64];
+
+void main() {
+    bool shuffle_blocks = can_shuffle(8u);
+    uint tid = shuffle_blocks ? shuffle_lane() : gl_LocalInvocationID.x;
+    uint lane = tid & 7u;
+    uint chunk = gl_WorkGroupID.x * 8u + tid / 8u;
+    uint blocks = p.width / 32u;
+    uint row = gl_WorkGroupID.y;
+    bool valid = chunk < blocks;
+    vec4 v = vec4(0.0);
+    if (valid) v = x[(row * blocks + chunk) * 8u + lane];
+    vec4 a = abs(v);
+    float peak = max(max(a.x, a.y), max(a.z, a.w));
+    if (shuffle_blocks) {
+        for (uint delta = 4u; delta != 0u; delta >>= 1u) peak = max(peak, subgroupShuffleXor(peak, delta));
+    } else {
+        peaks[tid] = peak;
+        barrier();
+        for (uint i = 0u; i < 8u; ++i) peak = max(peak, peaks[(tid & ~7u) + i]);
+    }
+    if (!valid) return;
+
+    ivec4 q = peak > 0.0 ? ivec4(clamp(roundEven(v * (127.0 / peak)), -127.0, 127.0)) : ivec4(0);
+    uvec4 bytes = uvec4(q) & 255u;
+    uint base = (row * blocks + chunk) * 9u;
+    y[base + lane] = bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | (bytes.w << 24u);
+    if (lane == 0u) y[base + 8u] = floatBitsToUint(peak / 127.0);
+}

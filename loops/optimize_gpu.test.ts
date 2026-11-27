@@ -29,13 +29,13 @@ const env = {
 };
 
 describe("optimize_gpu args and model resolution", () => {
-  test("defaults to the smaller Gemma 4 preset", () => {
+  test("defaults to the Qwen 3.8 27B preset", () => {
     const opts = parseArgsFrom([], env);
     const target = resolveModelTarget(opts);
 
-    expect(opts.model).toBe("gemma4-26b-a4b-q4k-m");
-    expect(target.label).toBe("Gemma 4 26B-A4B MoE Q4_K_M");
-    expect(target.modelId).toBe("gemma4-26b-a4b-q4k-m");
+    expect(opts.model).toBe("qwen38-27b-q4k-m");
+    expect(target.label).toBe("Qwen3.8 27B Dense Q4_K_M");
+    expect(target.modelId).toBe("qwen38-27b-q4k-m");
     expect(target.promptMode).toBe("chat");
   });
 

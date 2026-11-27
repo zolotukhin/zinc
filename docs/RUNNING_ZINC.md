@@ -130,6 +130,24 @@ The warning in all three cases came from the shell environment, not from model f
 RADV_PERFTEST: Not set in current shell [WARN]
 ```
 
+## Inkling 2 Mini on AMD RDNA4
+
+The Radeon RX 9070 XT and Radeon AI PRO R9700 run Inkling 2 Mini Q4_0 text
+generation with the Vulkan and ROCm backends. Use a 4,096-token context to
+reproduce the single-sequence measurements.
+
+```bash
+zig build -Dbackend=vulkan -Doptimize=ReleaseFast
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "Explain how a write-ahead log works." -n 256
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1 --port 9090
+```
+
+The server lists the managed model as `inkling-2-mini-q4-0` and serves both
+`/v1/chat/completions` and `/v1/completions`. Use the same model ID with a
+[ROCm build](/zinc/docs/rocm/#inkling-2-mini) for the HIP decoder.
+
 ## Troubleshooting (start here if something fails)
 
 If `--check` or the first prompt fails, run these in order. The bottom of this page has a fuller [common-mistakes list](#common-early-mistakes) and a [troubleshooting command reference](#fast-troubleshooting-commands).

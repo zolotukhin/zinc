@@ -1,0 +1,48 @@
+#version 460
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Raw { float raw[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Taps { float weights[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Dynamic { float dynamic_taps[]; };
+layout(set = 0, binding = 3, std430) buffer History { float history[]; };
+layout(set = 0, binding = 4, std430) readonly buffer Residual { float residual[]; };
+layout(set = 0, binding = 5, std430) writeonly buffer Output { float result[]; };
+layout(set = 0, binding = 6, std430) readonly buffer Step { uint step[]; };
+layout(push_constant) uniform Params {
+    uint channels;
+    uint taps;
+    uint count;
+    uint history_offset;
+    uint dynamic_head_dim;
+    uint add_residual;
+    float scale;
+} p;
+
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= p.channels) return;
+    uint old = (p.history_offset + c) * (p.taps - 1u);
+    uint dyn_stride = p.dynamic_head_dim == 0u ? 0u : (p.channels / p.dynamic_head_dim) * p.taps;
+    uint dyn_channel = p.dynamic_head_dim == 0u ? 0u : (c / p.dynamic_head_dim) * p.taps;
+    uint position = step[0];
+    for (uint t = 0u; t < p.count; ++t) {
+        uint dst = t * p.channels + c;
+        float accum = raw[dst];
+        for (uint lag = 0u; lag < p.taps && lag <= position + t; ++lag) {
+            int src = int(t) - int(lag);
+            float v = src >= 0 ? raw[uint(src) * p.channels + c] :
+                history[old + uint(int(p.taps - 1u) + src)];
+            float w = weights[c * p.taps + p.taps - 1u - lag];
+            if (dyn_stride != 0u) w += dynamic_taps[t * dyn_stride + dyn_channel + lag];
+            accum = fma(v, w, accum);
+        }
+        result[dst] = accum * p.scale + (p.add_residual != 0u ? residual[dst] : 0.0);
+    }
+
+    for (uint i = 0u; i + 1u < p.taps; ++i) {
+        int src = int(p.count + i) - int(p.taps - 1u);
+        if (src >= 0) history[old + i] = raw[uint(src) * p.channels + c];
+        else if (int(position) + src >= 0) history[old + i] = history[old + p.count + i];
+        else history[old + i] = 0.0;
+    }
+}

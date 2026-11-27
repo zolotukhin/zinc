@@ -7,7 +7,7 @@ const loader_mod = @import("../model/loader.zig");
 const tokenizer_mod = @import("../model/tokenizer.zig");
 const catalog_mod = @import("../model/catalog.zig");
 const managed_mod = @import("../model/managed.zig");
-const forward_mod = @import("../compute/forward.zig");
+const forward_mod = @import("../compute/vulkan_inference.zig");
 const memory_plan = @import("../gpu/memory_plan.zig");
 const process_lock_mod = @import("../gpu/process_lock.zig");
 const gpu_detect = @import("../vulkan/gpu_detect.zig");
@@ -525,12 +525,15 @@ fn loadResourcesInto(
     // Derive a context length from the Vulkan device's VRAM budget when the
     // caller doesn't pin one. Matches the Metal path — see
     // `memory_plan.autoContextTokensForDeviceBudget` for the vLLM-inspired math.
-    const effective_requested = spec.requested_context_length orelse memory_plan.autoContextTokensForDeviceBudget(
-        memory_plan.profile(resources.model.config),
-        tensorBytes(&resources.model),
-        instance.vramBytes(),
-        resources.model.config.context_length,
-    );
+    const effective_requested = spec.requested_context_length orelse if (resources.model.config.architecture == .inkling2_loop)
+        resources.model.config.context_length
+    else
+        memory_plan.autoContextTokensForDeviceBudget(
+            memory_plan.profile(resources.model.config),
+            tensorBytes(&resources.model),
+            instance.vramBytes(),
+            resources.model.config.context_length,
+        );
     memory_plan.applyRequestedContextLimit(&resources.model.config, effective_requested);
 
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
@@ -551,9 +554,15 @@ fn loadResourcesInto(
     errdefer allocator.free(resources.display_name);
     const weights_bytes = tensorBytes(&resources.model);
     const profile = memory_plan.profile(resources.model.config);
-    const runtime_ctx = resources.engine.max_context_tokens;
-    const kv_cache_bytes = profile.deviceLocalContextBytes(runtime_ctx);
-    const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(runtime_ctx);
+    const runtime_ctx = resources.engine.contextCapacity();
+    const kv_cache_bytes = switch (resources.engine) {
+        .standard => profile.deviceLocalContextBytes(runtime_ctx),
+        .inkling => |decoder| decoder.usage.context,
+    };
+    const runtime_device_local_bytes = switch (resources.engine) {
+        .standard => profile.runtimeDeviceLocalBytes(runtime_ctx),
+        .inkling => |decoder| decoder.usage.device,
+    };
     resources.weights_bytes = weights_bytes;
     resources.runtime_device_local_bytes = runtime_device_local_bytes;
     resources.context_reserved_bytes = kv_cache_bytes;
@@ -561,11 +570,10 @@ fn loadResourcesInto(
     resources.context_bytes_per_token = if (runtime_ctx == 0) 0 else @divTrunc(kv_cache_bytes, runtime_ctx);
     resources.device_local_bytes = weights_bytes + runtime_device_local_bytes;
     resources.device_local_budget_bytes = instance.vramBytes();
-
-    std.debug.assert(resources.engine.model == &resources.model);
 }
 
 fn tensorBytes(model: *const loader_mod.Model) u64 {
+    if (model.config.architecture == .inkling2_loop) return model.deviceTensorBytes();
     // Only count device-local tensors against the VRAM budget. MoE expert
     // tensors offloaded to host-visible memory live in system RAM and do
     // not consume VRAM. See loader.shouldOffloadToHost for the rule.
@@ -588,6 +596,7 @@ fn fallbackModelName(model: *const loader_mod.Model) []const u8 {
         .gemma => "gemma",
         .gpt_oss => "gpt-oss-20b",
         .muse_glimmer => "muse-glimmer",
+        .inkling2_loop => "inkling-2-mini",
         .unknown => "zinc-model",
     };
 }

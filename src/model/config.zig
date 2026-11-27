@@ -25,6 +25,7 @@ pub const Architecture = enum {
     /// gated attention (separate `attn_gate` tensor) and QK-norm. Dense (no MoE),
     /// GQA 32/2 at head_dim 128. GGUF `general.architecture = "muse-glimmer"`.
     muse_glimmer,
+    inkling2_loop,
     unknown,
 };
 
@@ -131,6 +132,7 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "muse-glimmer")) return .muse_glimmer;
     if (std.mem.eql(u8, arch_str, "muse_glimmer")) return .muse_glimmer;
     if (std.mem.eql(u8, arch_str, "museglimmer")) return .muse_glimmer;
+    if (std.mem.eql(u8, arch_str, @import("inkling.zig").architecture)) return .inkling2_loop;
     return .unknown;
 }
 

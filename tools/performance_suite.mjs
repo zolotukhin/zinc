@@ -148,11 +148,16 @@ export function parseArgs(argv) {
     rdnaSync: false,
     rdnaBuild: false,
     rdnaStartLlama: false,
+    rdnaKeepDpm: false,
     rdnaNode: process.env.ZINC_RDNA_NODE ?? process.env.ZINC_NODE ?? null,
     rdnaBackend: process.env.ZINC_RDNA_BACKEND ?? "vulkan",
+    rdnaContext: null,
     rdnaVkDevice: process.env.ZINC_RDNA_VK_DEVICE != null
       ? parseInteger(process.env.ZINC_RDNA_VK_DEVICE, "ZINC_RDNA_VK_DEVICE")
       : 0,
+    rdnaRocmDevice: process.env.ZINC_RDNA_ROCM_DEVICE != null
+      ? parseInteger(process.env.ZINC_RDNA_ROCM_DEVICE, "ZINC_RDNA_ROCM_DEVICE")
+      : null,
     rdnaLlamaCli: process.env.ZINC_RDNA_LLAMA_CLI_REMOTE ?? process.env.ZINC_LLAMA_CLI_REMOTE ?? null,
     rdnaLlamaServer: process.env.ZINC_RDNA_LLAMA_SERVER_REMOTE ?? process.env.ZINC_LLAMA_SERVER_REMOTE ?? null,
     rdnaLlamaDevice: process.env.ZINC_RDNA_LLAMA_DEVICE ?? null,
@@ -248,11 +253,18 @@ export function parseArgs(argv) {
       case "--rdna-start-llama":
         args.rdnaStartLlama = true;
         break;
+      case "--rdna-keep-dpm":
+        args.rdnaKeepDpm = true;
+        break;
       case "--rdna-node":
         args.rdnaNode = argv[++i] ?? args.rdnaNode;
         break;
       case "--rdna-backend":
         args.rdnaBackend = argv[++i] ?? args.rdnaBackend;
+        break;
+      case "--rdna-context":
+        args.rdnaContext = parseInteger(argv[++i], "--rdna-context");
+        if (args.rdnaContext === 0) throw new Error("--rdna-context must be at least 1");
         break;
       case "--intel-sync":
         args.intelSync = true;
@@ -277,6 +289,9 @@ export function parseArgs(argv) {
         break;
       case "--rdna-vk-device":
         args.rdnaVkDevice = parseInteger(argv[++i], "--rdna-vk-device");
+        break;
+      case "--rdna-rocm-device":
+        args.rdnaRocmDevice = parseInteger(argv[++i], "--rdna-rocm-device");
         break;
       case "--rdna-llama-cli":
         args.rdnaLlamaCli = argv[++i] ?? args.rdnaLlamaCli;
@@ -364,8 +379,8 @@ function usage() {
   --phase <all|zinc|baseline> Measure both phases, only ZINC, or only llama.cpp (default: all)
   --scenarios <ids>           Comma-separated scenario ids: core,context-medium,context-long,decode-extended
   --timeout-ms <ms>           Per-command timeout (default: 900000)
-  --models <ids>              Comma-separated model ids to benchmark
-  --discover-models           Benchmark every discovered local model cache entry
+  --models <ids>              Comma-separated model ids to benchmark (Gemma is opt-in)
+  --discover-models           Include discovered model files. Select Gemma explicitly.
   --all-models                Alias for --discover-models
   --llama-cli <path>          Optional local llama-cli path for Metal comparisons
   --llama-server <path>       Optional local llama-server path for Metal OpenAI baselines
@@ -374,8 +389,10 @@ function usage() {
   --rdna-sync                 Rsync current repo to the RDNA node before running
   --rdna-build                Build ReleaseFast on the RDNA node before running
   --rdna-start-llama          Start llama-server on the RDNA node before baseline runs
+  --rdna-keep-dpm             Preserve the node's GPU memory clock and PCIe power policy
   --rdna-node <name>          Select node-specific env keys, e.g. rdna2 -> ZINC_RDNA2_HOST/PORT/USER
   --rdna-backend <backend>    ZINC backend to build on RDNA: auto, vulkan, rocm, zinc_rt (default: vulkan)
+  --rdna-context <tokens>     Set the same context capacity on both RDNA servers
   --intel-sync                Rsync current repo to the Intel node before running
   --intel-build               Build ReleaseFast on the Intel node before running
   --intel-start-llama         Stop stale llama-server processes on the Intel node before baseline runs
@@ -384,6 +401,7 @@ function usage() {
   --rdna-workdir <path>       Override remote ZINC checkout path
   --rdna-vk-device <n>        Vulkan device index on the RDNA node (default 0; env: ZINC_RDNA_VK_DEVICE).
                               Use 'vulkaninfo --summary' on the node to pick the discrete GPU.
+  --rdna-rocm-device <n>      Override the ROCm device index when Vulkan and ROCm enumerate GPUs differently.
   --rdna-llama-cli <path>     Override remote RDNA llama-cli baseline binary
   --rdna-llama-server <path>  Override remote RDNA llama-server baseline binary
   --rdna-llama-device <dev>   Override RDNA llama.cpp --device value, e.g. Vulkan1 or ROCm0.
@@ -1336,6 +1354,9 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_ROCM_DECODE_SSM_FAST",
   "ZINC_ROCM_FUSED_SSM_F32",
   "ZINC_ROCM_FUSED_Q4_PAIRS",
+  "ZINC_INKLING_Q8",
+  "ZINC_INKLING_GRAPH",
+  "ZINC_INKLING_BLOCK_Q4",
   "ZINC_BATCHED_TC",
   "ZINC_BATCHED_CUBLAS",
   "ZINC_BATCHED_CUBLAS_NOQ4",
@@ -1830,7 +1851,7 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs, targ
     ...(creds.serverDeviceArgs ?? ["--device", `Vulkan${creds.vkDevice ?? 1}`]),
     "-ngl", "999",
     "--metrics",
-    "--ctx-size", "4096",
+    "--ctx-size", String(targetId === "rdna" ? caseDef.context_tokens ?? 4096 : 4096),
     "--parallel", "1",
     // Default f16 KV cache. The previous -ctk q8_0 / -ctv q8_0 added
     // dequant-per-attention-read overhead that artificially lowered
@@ -1865,16 +1886,17 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs, targ
   return { port, logPath };
 }
 
-async function launchRdnaZincServer(caseDef, creds, timeoutMs) {
+async function launchRdnaZincServer(caseDef, creds, timeoutMs, lockDpm = true) {
   const port = await pickOpenPort();
   const logPath = `/tmp/zinc-rdna-zinc-${port}.log`;
-  await lockRdnaDpmHigh(creds);
+  const device = creds.zincDevice ?? creds.vkDevice;
+  if (lockDpm) await lockRdnaDpmHigh(creds);
 
   const cmd = [
     "./zig-out/bin/zinc",
     "-m", caseDef.model_path,
     ...(caseDef.context_tokens != null ? ["--context", String(caseDef.context_tokens)] : []),
-    ...(creds.vkDevice != null ? ["-d", String(creds.vkDevice)] : []),
+    ...(device != null ? ["-d", String(device)] : []),
     "--parallel", "1",
     "--port", String(port),
   ];
@@ -2118,7 +2140,8 @@ export function remoteZincCommand(caseDef, creds) {
   );
   if (caseDef.context_tokens != null) parts.push("--context", String(caseDef.context_tokens));
   parts.push("-m", shellQuote(caseDef.model_path));
-  if (creds.vkDevice != null) parts.push("-d", String(creds.vkDevice));
+  const device = creds.zincDevice ?? creds.vkDevice;
+  if (device != null) parts.push("-d", String(device));
   if (caseDef.prompt_mode === "chat") parts.push("--chat");
   parts.push("--prompt", shellQuote(caseDef.prompt));
   return remoteCommand(parts.join(" "), creds);
@@ -2127,7 +2150,7 @@ export function remoteZincCommand(caseDef, creds) {
 export function rdnaZincCommand(caseDef, creds) {
   return remoteZincCommand(caseDef, {
     ...creds,
-    commandPrelude: rdnaDpmHighScript(),
+    commandPrelude: creds.keepDpm ? null : rdnaDpmHighScript(),
     env: { RADV_PERFTEST: "coop_matrix", ...(creds.env ?? {}) },
   });
 }
@@ -2249,7 +2272,11 @@ async function detectMetalMachine() {
   }
 }
 
-export function defaultMetalCases(modelRoot) {
+export function isBenchmarkModelSelected(id, selected) {
+  return selected ? selected.has(id) : !id.startsWith("gemma");
+}
+
+export function defaultMetalCases(modelRoot, selected = null) {
   return [
     {
       id: "gemma4-26b-a4b-q4k-m",
@@ -2311,12 +2338,13 @@ export function defaultMetalCases(modelRoot) {
       max_tokens: defaultMaxTokensForModelId("qwen38-27b-q4k-m"),
       notes: ["Dense hybrid Qwen 3.8 case on Apple Silicon"],
     },
-  ];
+  ].filter((entry) => isBenchmarkModelSelected(entry.id, selected));
 }
 
 function titleFromId(id) {
   if (id === "gemma4-26b-a4b-q4k-m") return "Gemma 4 26B-A4B MoE Q4_K_M";
   if (id === "gemma4-31b-q4k-m") return "Gemma 4 31B Q4_K_M";
+  if (id === "inkling-2-mini-q4-0") return "Inkling 2 Mini Q4_0";
   return id
     .split("-")
     .map((chunk) => (chunk.length <= 3 ? chunk.toUpperCase() : `${chunk[0].toUpperCase()}${chunk.slice(1)}`))
@@ -2357,6 +2385,7 @@ export function canonicalModelIdFromPath(modelFile) {
 }
 
 export function guessFamily(id) {
+  if (id.startsWith("inkling")) return "Inkling 2";
   if (id.startsWith("muse-glimmer")) return "Muse Glimmer";
   if (id.startsWith("gemma4")) return "Gemma 4";
   if (id.startsWith("gemma")) return "Gemma";
@@ -2374,7 +2403,7 @@ function guessQuant(id) {
 }
 
 export function prefersChatPrompt(id) {
-  return id.startsWith("gemma") || id.startsWith("muse-glimmer") || id.startsWith("qwen35") || id.startsWith("qwen38");
+  return id.startsWith("gemma") || id.startsWith("inkling-2-mini") || id.startsWith("muse-glimmer") || id.startsWith("qwen35") || id.startsWith("qwen38");
 }
 
 export function defaultPromptForModelId(id) {
@@ -2576,8 +2605,27 @@ async function discoverMetalCases(modelRoot) {
   return discovered;
 }
 
-export function defaultRdnaCases(modelRoot) {
+function inklingMiniCase(modelFile) {
+  const id = "inkling-2-mini-q4-0";
+  return {
+    id,
+    label: "Inkling 2 Mini Q4_0",
+    family: "Inkling 2",
+    quant: "Q4_0",
+    model_path: modelFile,
+    context_tokens: 4096,
+    prompt_mode: "chat",
+    prompt: defaultPromptForModelId(id),
+    max_tokens: defaultMaxTokensForModelId(id),
+    notes: ["Inkling 2 Mini fixed-loop text inference"],
+  };
+}
+
+export function defaultRdnaCases(modelRoot, selected = null, backend = "vulkan") {
   return [
+    ...(["auto", "vulkan", "rocm"].includes(backend)
+      ? [inklingMiniCase(path.join(modelRoot, "Inkling-2-Mini-Q4_0.gguf"))]
+      : []),
     {
       id: "muse-glimmer-30b-q4k-m",
       label: "Muse Glimmer 30B Q4_K_M",
@@ -2644,11 +2692,11 @@ export function defaultRdnaCases(modelRoot) {
       max_tokens: defaultMaxTokensForModelId("qwen35-9b-q4k-m"),
       notes: ["RDNA4 small Qwen comparison against llama.cpp server"],
     },
-  ];
+  ].filter((entry) => isBenchmarkModelSelected(entry.id, selected));
 }
 
-export function defaultIntelCases(modelRoot) {
-  return defaultMetalCases(modelRoot)
+export function defaultIntelCases(modelRoot, selected = null) {
+  const cases = defaultMetalCases(modelRoot, selected)
     .filter((entry) => entry.id !== "qwen38-27b-q4k-m")
     .map((entry) => ({
       ...entry,
@@ -2656,6 +2704,9 @@ export function defaultIntelCases(modelRoot) {
       context_tokens: defaultIntelContextTokensForModel(entry.id),
       notes: ["Intel Arc Vulkan comparison against llama.cpp on the same host"],
     }));
+  const inklingId = "inkling-2-mini-q4-0";
+  if (selected?.has(inklingId)) cases.unshift(inklingMiniCase(modelPath(modelRoot, inklingId)));
+  return cases;
 }
 
 function defaultIntelContextTokensForModel(_id) {
@@ -2723,7 +2774,7 @@ async function prepareLocalBuild(args) {
 async function ensureManagedMetalModels(args, cases) {
   if (!args.metalPullMissing) return;
   for (const entry of cases) {
-    if (args.models && !args.models.has(entry.id)) continue;
+    if (!isBenchmarkModelSelected(entry.id, args.models)) continue;
     if (!entry.model_id) continue;
     if (await pathExists(entry.model_path)) continue;
     console.log(`[metal] pulling missing managed model ${entry.model_id} into ${DEFAULT_LOCAL_MODEL_ROOT}...`);
@@ -2895,7 +2946,7 @@ function primaryScenarioSummary(entry, scenarios) {
 async function runMetalTarget(args) {
   await prepareLocalBuild(args);
   const machine = await detectMetalMachine();
-  const knownCases = defaultMetalCases(args.localModelRoot);
+  const knownCases = defaultMetalCases(args.localModelRoot, args.models);
   const discoveredCases = args.discoverModels ? await discoverMetalCases(args.localModelRoot) : [];
   const mergedCases = new Map();
   for (const entry of [...discoveredCases, ...knownCases]) {
@@ -2905,7 +2956,7 @@ async function runMetalTarget(args) {
   await ensureManagedMetalModels(args, cases);
   const filtered = [];
   for (const entry of cases) {
-    if (args.models && !args.models.has(entry.id)) continue;
+    if (!isBenchmarkModelSelected(entry.id, args.models)) continue;
     if (await pathExists(entry.model_path)) {
       filtered.push(entry);
       continue;
@@ -3148,6 +3199,7 @@ export async function buildRdnaCreds(args) {
     throw new Error("RDNA benchmarking needs node-specific ZINC_<NODE>_HOST/ZINC_<NODE>_USER, ZINC_RDNA_HOST/ZINC_RDNA_USER, or ZINC_HOST/ZINC_USER in the environment or .env");
   }
   const tuningEnv = collectRemoteZincTuningEnv(dotEnv);
+  const rocmPath = rdnaEnvValue(dotEnv, args, "ROCM_PATH", "ZINC_RDNA_ROCM_PATH");
   return {
     host,
     user,
@@ -3155,9 +3207,11 @@ export async function buildRdnaCreds(args) {
     sshKey,
     workdir: args.rdnaWorkdir,
     env: args.rdnaBackend === "rocm"
-      ? { ...tuningEnv, ROCR_VISIBLE_DEVICES: String(args.rdnaVkDevice ?? 0) }
+      ? { ...tuningEnv, RADV_PERFTEST: "coop_matrix", ROCR_VISIBLE_DEVICES: String(args.rdnaRocmDevice ?? args.rdnaVkDevice ?? 0), ...(rocmPath ? { ROCM_PATH: rocmPath } : {}) }
       : { ...tuningEnv, RADV_PERFTEST: "coop_matrix" },
     vkDevice: args.rdnaVkDevice ?? 1,
+    zincDevice: args.rdnaBackend === "rocm" ? 0 : null,
+    keepDpm: args.rdnaKeepDpm,
     serverDeviceArgs: args.rdnaLlamaDevice != null ? llamaDeviceArgs(args.rdnaLlamaDevice) : undefined,
   };
 }
@@ -3265,6 +3319,7 @@ async function verifyRemoteVulkanDevice(creds, requireSubstring, options = {}) {
     );
   }
   process.stdout.write(`[${targetId}] Vulkan device ${creds.vkDevice}: ${selected.name} (${selected.type})\n`);
+  return selected;
 }
 
 async function verifyRemoteSshReachable(creds, options = {}) {
@@ -3281,7 +3336,10 @@ async function runRdnaTarget(args) {
   const creds = await buildRdnaCreds(args);
   await prepareRdna(args, creds);
   await verifyRdnaZincBackend(args, creds);
-  await verifyRemoteVulkanDevice(creds, args.requireRdnaDeviceSubstring);
+  const device = await verifyRemoteVulkanDevice(creds, args.requireRdnaDeviceSubstring);
+  const gpu = device.name.replace(/\s*\(RADV [^)]+\)$/, "");
+  const llamaDevice = args.rdnaLlamaDevice ?? `Vulkan${creds.vkDevice}`;
+  const llamaBackend = /rocm/i.test(llamaDevice) ? "ROCm" : "Vulkan";
   const rdnaLlamaCli = await detectRdnaLlamaCliPath(creds, args);
   const rdnaLlamaServer = await detectRdnaLlamaServerPath(creds, args);
   const baselineBinary = rdnaLlamaServer || rdnaLlamaCli;
@@ -3290,7 +3348,7 @@ async function runRdnaTarget(args) {
     : await captureRemoteGitProvenance(creds);
   const llamaCppProvenance = await captureRemoteLlamaCppProvenance(baselineBinary, creds);
 
-  const knownCases = defaultRdnaCases(args.rdnaModelRoot);
+  const knownCases = defaultRdnaCases(args.rdnaModelRoot, args.models, args.rdnaBackend);
   const discoveredCases = args.discoverModels ? await discoverRdnaCases(args.rdnaModelRoot, creds) : [];
   const mergedCases = new Map();
   for (const entry of [...discoveredCases, ...knownCases]) {
@@ -3298,12 +3356,12 @@ async function runRdnaTarget(args) {
   }
   const cases = [];
   for (const entry of mergedCases.values()) {
-    if (args.models && !args.models.has(entry.id)) continue;
+    if (!isBenchmarkModelSelected(entry.id, args.models)) continue;
     if (!(await rdnaPathExists(entry.model_path, creds))) {
       console.log(`[rdna] skipping ${entry.id}: missing GGUF at ${entry.model_path}`);
       continue;
     }
-    cases.push(entry);
+    cases.push(args.rdnaContext === null ? entry : { ...entry, context_tokens: args.rdnaContext });
   }
   const models = [];
 
@@ -3329,7 +3387,7 @@ async function runRdnaTarget(args) {
             triedLaunchingZincServer = true;
             try {
               await verifyRdnaZincBackend(args, creds, { quiet: true });
-              launchedZincServer = await launchRdnaZincServer(entry, creds, args.timeoutMs);
+              launchedZincServer = await launchRdnaZincServer(entry, creds, args.timeoutMs, !args.rdnaKeepDpm);
             } catch (error) {
               launchedZincServer = null;
               zincServerLaunchFailure = error;
@@ -3368,7 +3426,7 @@ async function runRdnaTarget(args) {
         if (!triedLaunchingServer && rdnaLlamaServer) {
           triedLaunchingServer = true;
           try {
-            launchedServer = await launchRdnaLlamaServer(entry, creds, rdnaLlamaServer, args.timeoutMs);
+            launchedServer = await launchRdnaLlamaServer(entry, creds, rdnaLlamaServer, args.timeoutMs, "rdna", !args.rdnaKeepDpm);
           } catch (error) {
             launchedServer = null;
             serverLaunchFailure = error;
@@ -3466,10 +3524,9 @@ async function runRdnaTarget(args) {
     machine: {
       label: "AMD RDNA bench node",
       machine_model: "Remote Linux host",
-      chip: "AMD Radeon AI PRO R9700",
-      memory: "32 GB VRAM · 640 GB/s",
-      gpu: "Radeon AI PRO R9700",
-      os: "Ubuntu Linux",
+      chip: gpu,
+      gpu,
+      os: "Linux",
     },
     provenance: {
       zinc: zincProvenance,
@@ -3480,18 +3537,20 @@ async function runRdnaTarget(args) {
       benchmark_style: "Four-scenario matrix with same-file baselines",
       zinc_backend: args.rdnaBackend === "vulkan" ? "Vulkan (RADV, coop_matrix)" : args.rdnaBackend.toUpperCase(),
       zinc_build: `zig build -Doptimize=ReleaseFast${args.rdnaBackend === "auto" ? "" : ` -Dbackend=${args.rdnaBackend}`}`,
-      llama_backend: /rocm/i.test(args.rdnaLlamaDevice ?? "") ? "ROCm" : "Vulkan",
-      llama_device: args.rdnaLlamaDevice ?? "--device Vulkan1",
+      llama_backend: llamaBackend,
+      llama_device: llamaDevice,
       notes: [
-        "Hardware: one AMD Radeon AI PRO R9700 benchmark node with 32 GB VRAM and 640 GB/s memory bandwidth. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
-        `ZINC path: sync the current source tree to the RDNA node, build ReleaseFast with the selected ${args.rdnaBackend} backend, then measure generation through one reusable single-slot ZINC server per model.`,
+        `ZINC and llama.cpp run on the same ${gpu} and use the same GGUF file for each model.`,
+        `The suite measures generation through one reusable single-slot ZINC server per model, built with the ${args.rdnaBackend} backend.`,
         `ZINC RDNA backend: ${args.rdnaBackend}.`,
-        `Baseline backend: llama.cpp ${/rocm/i.test(args.rdnaLlamaDevice ?? "") ? "ROCm" : "Vulkan"} (${args.rdnaLlamaDevice ?? "--device Vulkan1"}) on the same node and the same model file.`,
+        `llama.cpp uses ${llamaBackend} (${llamaDevice}) on the same node with the same model file.`,
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable single-slot llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
         benchmarkStatisticsNote(args.runs, args.warmupRuns),
         "Execution order: the harness records the full ZINC scenario matrix before starting the llama.cpp baseline phase, so only one inference engine owns the GPU during measurement.",
-        "Power policy: before either engine starts, the harness selects PCIe ASPM performance mode and locks the discrete AMD GPU's memory DPM policy high to prevent idle-clock drift between runs.",
+        args.rdnaKeepDpm
+          ? "The suite preserves the node's existing PCIe ASPM and GPU memory DPM settings."
+          : "Before either engine starts, the suite selects PCIe ASPM performance mode and sets GPU memory DPM to high.",
         "Run hygiene: published RDNA runs assume a clean node with no competing ZINC, llama.cpp, or other GPU workloads.",
       ],
       runs: args.runs,
@@ -3560,8 +3619,8 @@ async function buildCudaCreds(args) {
   };
 }
 
-export function defaultCudaCases(modelRoot) {
-  return defaultRdnaCases(modelRoot)
+export function defaultCudaCases(modelRoot, selected = null) {
+  return defaultRdnaCases(modelRoot, selected, "cuda")
     .filter((entry) => entry.id !== "qwen38-27b-q4k-m")
     .map((entry) => ({
       ...entry,
@@ -3639,7 +3698,7 @@ async function runCudaTarget(args) {
     : await captureRemoteGitProvenance(creds);
   const llamaCppProvenance = await captureRemoteLlamaCppProvenance(baselineBinary, creds);
 
-  const knownCases = defaultCudaCases(creds.modelRoot);
+  const knownCases = defaultCudaCases(creds.modelRoot, args.models);
   const discoveredCases = args.discoverModels ? await discoverRemoteCases(creds.modelRoot, creds, "Auto-discovered on the CUDA benchmark node") : [];
   const mergedCases = new Map();
   for (const entry of [...discoveredCases, ...knownCases]) {
@@ -3647,7 +3706,7 @@ async function runCudaTarget(args) {
   }
   const cases = [];
   for (const entry of mergedCases.values()) {
-    if (args.models && !args.models.has(entry.id)) continue;
+    if (!isBenchmarkModelSelected(entry.id, args.models)) continue;
     if (!(await rdnaPathExists(entry.model_path, creds))) {
       console.log(`[cuda] skipping ${entry.id}: missing GGUF at ${entry.model_path}`);
       continue;
@@ -3844,7 +3903,7 @@ async function runIntelTarget(args) {
     : await captureRemoteGitProvenance(creds);
   const llamaCppProvenance = await captureRemoteLlamaCppProvenance(baselineBinary, creds);
 
-  const knownCases = defaultIntelCases(config.modelRoot);
+  const knownCases = defaultIntelCases(config.modelRoot, args.models);
   const discoveredCases = args.discoverModels ? await discoverIntelCases(config.modelRoot, creds) : [];
   const mergedCases = new Map();
   for (const entry of [...discoveredCases, ...knownCases]) {
@@ -3852,7 +3911,7 @@ async function runIntelTarget(args) {
   }
   const cases = [];
   for (const entry of mergedCases.values()) {
-    if (args.models && !args.models.has(entry.id)) continue;
+    if (!isBenchmarkModelSelected(entry.id, args.models)) continue;
     if (!(await rdnaPathExists(entry.model_path, creds))) {
       console.log(`[intel] skipping ${entry.id}: missing GGUF at ${entry.model_path}`);
       continue;

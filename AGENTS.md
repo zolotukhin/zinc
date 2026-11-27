@@ -80,6 +80,7 @@ Agent policy:
 ### Supported Architectures
 - **Qwen 2/3 family** — dense, MoE, and hybrid attention/SSM variants
 - **Mistral/Llama, Mamba/Jamba, Gemma, GPT-OSS, and Muse Glimmer**
+- **Inkling 2 Mini** — fixed-loop text inference on AMD RDNA4 Vulkan and ROCm
 
 ## Project Structure
 

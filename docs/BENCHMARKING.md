@@ -46,6 +46,13 @@ RDNA suite runs sync into `/root/zinc-bench` by default. Keep that checkout isol
 
 For password-auth Intel nodes, the suite reads `ZINC_INTEL_SSH_PASSWORD`, `ZINC_INTEL_SSH_PASSWORD_ENV`, or `ZINC_INTEL_SSH_PASSWORD_FILE` and drives `ssh`/`rsync` through `SSH_ASKPASS`. The generic `loops/optimize_gpu.ts` loop accepts the same variables, plus the `ZINC_GPU_*` equivalents. The generated benchmark commands reference only the env-var name or file path, not the password itself. Remove the temporary secret after the node is converted to key-based SSH.
 
+To qualify Inkling 2 Mini Q4_0 on Intel Arc, first run `zinc model pull inkling-2-mini-q4-0` on the benchmark node. The Intel case reads the model from its managed cache and runs with a 4,096-token context. Use a Vulkan llama.cpp build with Inkling 2 support for the reference.
+
+```bash
+bun tools/performance_suite.mjs --target intel --models inkling-2-mini-q4-0 \
+  --runs 3 --warmup 1 --no-site-write --output /tmp/zinc-intel-inkling.json
+```
+
 The default RDNA suite covers Gemma 4 26B-A4B Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3.5 9B Q4_K_M, Qwen 3.6 35B-A3B UD Q4_K_XL, and Qwen 3.8 27B Q4_K_M. The small-Qwen row is `Qwen3.5-9B-Q4_K_M.gguf`, not the older Qwen 3 8B GGUF.
 
 ## Ad-hoc llama.cpp baseline on the RDNA4 node

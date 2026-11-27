@@ -30,6 +30,12 @@ const qwenWins = (qwen38?.scenarios ?? []).filter((scenario: any) =>
 
 const modelWork = [
   {
+    name: 'Inkling 2 Mini',
+    kind: 'Local / looped MoE',
+    note: 'Vulkan, ROCm, and DSpark measurements on the RX 9070 XT and Radeon AI PRO R9700.',
+    href: '/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/',
+  },
+  {
     name: 'Qwen 3.8 27B',
     kind: 'Local / dense',
     note: 'Current ROCm decode and speculative-decoding target.',
@@ -42,19 +48,13 @@ const modelWork = [
     href: 'https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf',
     external: true,
   },
-  {
-    name: 'Gemma 4',
-    kind: 'Local / dense + MoE',
-    note: 'Dense and sparse checkpoints that exercise different GPU paths.',
-    href: '/topics/gemma-local-inference/',
-  },
 ];
 ---
 
 <BaseLayout
   title="Stepan Zolotukhin — ZINC and GPU Inference"
   description="I build ZINC, a local LLM inference engine for consumer GPUs, and publish reproducible benchmarks and engineering notes about the work."
-  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, Intel Arc, Vulkan, ROCm, Metal, Zig, Qwen 3.8, Muse Glimmer, Gemma 4, GPU programming"
+  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, Intel Arc, Vulkan, ROCm, Metal, Zig, Inkling 2 Mini, Qwen 3.8, Muse Glimmer, GPU programming"
   jsonLd={{
     '@context': 'https://schema.org',
     '@type': 'WebSite',

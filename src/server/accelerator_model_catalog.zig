@@ -4,6 +4,7 @@
 //! Only the startup model's directory and curated managed-cache locations are
 //! inspected. Clients select an advertised ID; they never supply a load path.
 const std = @import("std");
+const gpu = @import("../gpu/interface.zig");
 const catalog = @import("../model/catalog.zig");
 const managed = @import("../model/managed.zig");
 
@@ -16,6 +17,7 @@ pub const Entry = struct {
     quantization: []const u8 = "",
     size_bytes: u64 = 0,
     required_vram_bytes: u64 = 0,
+    rocm_16gb_context_length: ?u32 = null,
     installed: bool = true,
     managed: bool = false,
     can_activate: bool = true,
@@ -35,20 +37,20 @@ pub const Inventory = struct {
     /// Borrows the ID owned by the startup entry in `entries`.
     initial_model_id: []const u8 = "",
 
-    pub fn init(allocator: std.mem.Allocator, initial_path: []const u8, budget_bytes: u64) !Inventory {
-        return collect(allocator, initial_path, budget_bytes, true);
+    pub fn init(allocator: std.mem.Allocator, initial_path: []const u8, budget_bytes: u64, rocm_profile: ?[]const u8) !Inventory {
+        return collect(allocator, initial_path, budget_bytes, true, rocm_profile);
     }
 
     /// `include_managed` permits hermetic filesystem tests without inspecting
     /// the user's cache. Production calls `init` and includes installed models.
-    pub fn collect(allocator: std.mem.Allocator, initial_path: []const u8, budget_bytes: u64, include_managed: bool) !Inventory {
+    pub fn collect(allocator: std.mem.Allocator, initial_path: []const u8, budget_bytes: u64, include_managed: bool, rocm_profile: ?[]const u8) !Inventory {
         var self = Inventory{ .allocator = allocator };
         errdefer self.deinit();
         const absolute = try std.fs.cwd().realpathAlloc(allocator, initial_path);
         defer allocator.free(absolute);
         // The explicitly supplied startup path is authorized by the operator.
         // Canonicalize it first, then admit only the resulting regular file.
-        try self.addFile(absolute, budget_bytes, false, true);
+        try self.addFile(absolute, budget_bytes, false, true, rocm_profile);
         if (self.entries.items.len == 0) return error.InvalidInitialModel;
         self.initial_model_id = self.entries.items[0].id;
 
@@ -60,7 +62,7 @@ pub const Inventory = struct {
             if (item.kind != .file or !isGguf(item.name)) continue;
             const path = try std.fs.path.join(allocator, &.{ parent, item.name });
             defer allocator.free(path);
-            try self.addFile(path, budget_bytes, false, false);
+            try self.addFile(path, budget_bytes, false, false, rocm_profile);
         }
         if (include_managed) {
             for (catalog.entries) |entry| {
@@ -69,7 +71,7 @@ pub const Inventory = struct {
                     else => continue,
                 };
                 defer allocator.free(path);
-                self.addFile(path, budget_bytes, true, false) catch |err| switch (err) {
+                self.addFile(path, budget_bytes, true, false, rocm_profile) catch |err| switch (err) {
                     error.OutOfMemory => return err,
                     else => continue,
                 };
@@ -90,13 +92,18 @@ pub const Inventory = struct {
         return null;
     }
 
-    fn addFile(self: *Inventory, path: []const u8, budget_bytes: u64, is_managed: bool, is_initial: bool) !void {
+    fn addFile(self: *Inventory, path: []const u8, budget_bytes: u64, is_managed: bool, is_initial: bool, rocm_profile: ?[]const u8) !void {
         if (!isGguf(std.fs.path.basename(path))) return;
         const size = regularFileSize(path) catch return;
         const canonical = try std.fs.cwd().realpathAlloc(self.allocator, path);
         defer self.allocator.free(canonical);
         for (self.entries.items) |entry| if (std.mem.eql(u8, entry.path, canonical)) return;
         const known = catalog.findForLoadedModel(null, canonical, "");
+        if (!gpu.is_rocm and !is_initial) {
+            if (known) |entry| {
+                if (std.mem.eql(u8, entry.family, "inkling2")) return;
+            }
+        }
         var entry = Entry{};
         errdefer entry.deinit(self.allocator);
         entry.id = if (known) |model| try self.allocator.dupe(u8, model.id) else blk: {
@@ -116,7 +123,14 @@ pub const Inventory = struct {
         entry.family = try self.allocator.dupe(u8, if (known) |model| model.family else "");
         entry.quantization = try self.allocator.dupe(u8, if (known) |model| model.quantization else "");
         entry.size_bytes = size;
-        entry.required_vram_bytes = if (known) |model| model.required_vram_bytes else size;
+        if (rocm_profile != null and known != null)
+            entry.rocm_16gb_context_length = catalog.rocm16GbContext(known.?.*, rocm_profile.?);
+        entry.required_vram_bytes = if (entry.rocm_16gb_context_length != null)
+            catalog.rocm_16gb_min_vram_bytes
+        else if (known) |model|
+            model.required_vram_bytes
+        else
+            size;
         entry.fits_current_gpu = budget_bytes == 0 or entry.required_vram_bytes <= budget_bytes;
         entry.fit_source = if (known != null) "catalog" else "estimate";
         // An unrecognized sibling is not implicitly validated merely because
@@ -161,7 +175,7 @@ test "accelerator inventory discovers installed siblings without following symli
     try tmp.dir.symLink("start.gguf", "alias.gguf", .{});
     const path = try tmp.dir.realpathAlloc(allocator, "start.gguf");
     defer allocator.free(path);
-    var inventory = try Inventory.collect(allocator, path, 64, false);
+    var inventory = try Inventory.collect(allocator, path, 64, false, null);
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 2), inventory.entries.items.len);
     const initial = inventory.find(inventory.initial_model_id).?;
@@ -188,7 +202,7 @@ test "accelerator inventory matches curated names and preserves fit metadata" {
     try tmp.dir.writeFile(.{ .sub_path = known.file_name, .data = "fixture" });
     const path = try tmp.dir.realpathAlloc(allocator, known.file_name);
     defer allocator.free(path);
-    var inventory = try Inventory.collect(allocator, path, 1024, false);
+    var inventory = try Inventory.collect(allocator, path, 1024, false, null);
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 1), inventory.entries.items.len);
     const entry = inventory.find(known.id).?;
@@ -199,6 +213,13 @@ test "accelerator inventory matches curated names and preserves fit metadata" {
     try std.testing.expectEqualStrings(known.id, inventory.initial_model_id);
     try std.testing.expect(entry.can_activate);
     try std.testing.expectEqualStrings("catalog", entry.fit_source);
+
+    var rocm = try Inventory.collect(allocator, path, catalog.rocm_16gb_min_vram_bytes, false, "amd-rdna4-16gb");
+    defer rocm.deinit();
+    const compact = rocm.find(known.id).?;
+    try std.testing.expect(compact.fits_current_gpu);
+    try std.testing.expectEqual(catalog.rocm_16gb_min_vram_bytes, compact.required_vram_bytes);
+    try std.testing.expectEqual(@as(?u32, 2048), compact.rocm_16gb_context_length);
 }
 
 test "accelerator inventory does not discover models recursively" {
@@ -210,13 +231,13 @@ test "accelerator inventory does not discover models recursively" {
     try tmp.dir.writeFile(.{ .sub_path = "subdir/hidden.gguf", .data = "hidden" });
     const path = try tmp.dir.realpathAlloc(allocator, "start.gguf");
     defer allocator.free(path);
-    var inventory = try Inventory.collect(allocator, path, 0, false);
+    var inventory = try Inventory.collect(allocator, path, 0, false, null);
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 1), inventory.entries.items.len);
 }
 
 fn allocationFixture(allocator: std.mem.Allocator, path: []const u8) !void {
-    var inventory = try Inventory.collect(allocator, path, 0, false);
+    var inventory = try Inventory.collect(allocator, path, 0, false, null);
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 1), inventory.entries.items.len);
 }

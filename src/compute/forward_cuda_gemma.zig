@@ -31,7 +31,7 @@ const CudaBuffer = buffer.CudaBuffer;
 const CudaPipeline = pipeline.CudaPipeline;
 const LoadedTensor = loader.LoadedTensor;
 
-const KERNELS_CU = @embedFile("../shaders/cuda/kernels.cu");
+const KERNELS_CU = @import("cuda_kernels.zig").source;
 const is_rocm = std.mem.eql(u8, build_options.backend, "rocm");
 
 // ---- kernel push-constant structs (must byte-match kernels.cu) --------------
@@ -69,6 +69,7 @@ const GemmaAttnBatchPush = extern struct {
     T: u32,
     scale_bits: u32,
     window: u32,
+    base_position: u32,
 };
 const RmsRopePush = extern struct { head_dim: u32, eps: f32, rope_dim: u32, position: u32, dst_offset: u32 };
 const RmsKvWritePush = extern struct { head_dim: u32, eps: f32, dst_offset: u32 };
@@ -423,6 +424,11 @@ const BatchScratch = struct {
     // T2 v1 single-launch: padded order + per-tile expert id (size 1 when unused).
     padded_order: CudaBuffer, // [P + 64*n_experts] u32 ((token<<16|slot) or 0xFFFFFFFF)
     tile_expert: CudaBuffer, // [(P + 64*n_experts)/64] u32 (expert id per 64-tile or 0xFFFFFFFF)
+    fn deinit(self: *BatchScratch) void {
+        inline for (std.meta.fields(BatchScratch)) |field| {
+            if (field.type == CudaBuffer) buffer.freeBuffer(&@field(self, field.name));
+        }
+    }
 };
 
 pub const ForwardGemma = struct {
@@ -1140,6 +1146,19 @@ pub const ForwardGemma = struct {
     /// FFN is position-independent → looping it is output-identical; full
     /// batched-expert routing (group T tokens by expert) is a later cycle.
     pub fn prefillBatched(self: *ForwardGemma, tokens: []const u32) !u32 {
+        if (tokens.len == 0) return error.EmptyPrompt;
+        if (tokens.len > self.max_ctx) return error.ContextLengthExceeded;
+        // Limit batched scratch on the 16 GB Muse path. KV stays in its
+        // canonical allocation so later chunks can attend to earlier ones.
+        const chunk_size = if (self.model.constrained_vram) @min(tokens.len, 224) else tokens.len;
+        var start: usize = 0;
+        while (start + chunk_size < tokens.len) : (start += chunk_size) {
+            _ = try self.prefillChunk(tokens[start .. start + chunk_size], @intCast(start), false);
+        }
+        return self.prefillChunk(tokens[start..], @intCast(start), true);
+    }
+
+    fn prefillChunk(self: *ForwardGemma, tokens: []const u32, base_position: u32, produce_token: bool) !u32 {
         const d = self.d;
         const ctx = self.ctx;
         const T: u32 = @intCast(tokens.len);
@@ -1173,7 +1192,7 @@ pub const ForwardGemma = struct {
         // and +76% on gemma-31b dense prefill @T=512 (the effort's #1 gap row),
         // neutral on gemma-26b. Gated on T >= cublas_min_t in gemmDispatchA so
         // short prompts keep the proven gemm_q4k_tc path.
-        self.use_cublas = cublasDefaultOn();
+        self.use_cublas = !self.model.constrained_vram and cublasDefaultOn();
         // Effort 26 cycle 10: extend the cuBLAS prefill GEMM to Q6_K dense weights
         // (gemma-31b ffn_down — ~1/7 of the dense GEMM, still on gemm_q6k_tc_f16a
         // after cycle 9). DEFAULT-ON when cuBLAS is on; ZINC_BATCHED_CUBLAS_NOQ6
@@ -1274,12 +1293,12 @@ pub const ForwardGemma = struct {
                 var t: u32 = 0;
                 while (t < T) : (t += 1) {
                     self.hidden = try buffer.aliasBuffer(&b.hidden, t * d.n_embd * f4, d.n_embd * f4);
-                    try self.attentionLayer(L, t);
+                    try self.attentionLayer(L, base_position + t);
                     buffer.freeBuffer(&self.hidden);
                 }
                 self.hidden = saved_hidden;
             } else {
-                try self.attentionLayerBatched(L, T, b);
+                try self.attentionLayerBatched(L, T, b, base_position);
             }
             if (profile) {
                 self.waitPending();
@@ -1406,6 +1425,7 @@ pub const ForwardGemma = struct {
             });
         }
 
+        if (!produce_token) return 0;
         // TAIL on the last token only: rms_norm → LM head → argmax. Reuse the
         // single-token decode scratch (norm_buf/logits_buf/argmax_buf) on the
         // last token's slice of the batched hidden stream.
@@ -1446,7 +1466,7 @@ pub const ForwardGemma = struct {
         // single-sequence KV cache. Populate that same cache during prefill. The
         // previous slot alias wrote the prompt into kv_*_slots and then restored
         // kv_k/kv_v, leaving decodeStep to attend to an empty/stale history.
-        if (self.d.n_experts > 0) {
+        if (self.d.n_experts > 0 or self.model.constrained_vram) {
             if (self.n_slots != 1 or slot != 0) return error.Unsupported;
             return self.prefillBatched(tokens);
         }
@@ -1520,7 +1540,7 @@ pub const ForwardGemma = struct {
     /// causal softmax LOOPED per token (reusing the single-token kernels through
     /// token-major aliases). Mirrors `attentionLayer` op-for-op so the output is
     /// the same residual stream, batched. One stream-ordered command per layer.
-    fn attentionLayerBatched(self: *ForwardGemma, L: u32, T: u32, b: *BatchScratch) !void {
+    fn attentionLayerBatched(self: *ForwardGemma, L: u32, T: u32, b: *BatchScratch, base_position: u32) !void {
         const d = self.d;
         const ctx = self.ctx;
         const g = self.geom[L];
@@ -1569,7 +1589,7 @@ pub const ForwardGemma = struct {
         const nr_sh = g.head_dim * f4;
         const v_base = if (wv_opt != null) &b.v else &b.k;
         if (d.is_muse) {
-            const qkv = MuseQkvBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = 0, .n_head = d.n_head, .n_kv_head = g.n_kv_head, .use_rope = @intFromBool(g.is_swa) };
+            const qkv = MuseQkvBatchPush{ .head_dim = g.head_dim, .eps = d.rms_eps, .rope_dim = g.rope_dim, .base_position = base_position, .n_head = d.n_head, .n_kv_head = g.n_kv_head, .use_rope = @intFromBool(g.is_swa) };
             cmd.dispatch(&self.pipes.muse_norm_qkv_batched, .{ d.n_head + 2 * g.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &b.k, v_base, &wqn.gpu_buffer, &wkn.gpu_buffer, inv_freq, &b.q, &self.kv_k[L], &self.kv_v[L] }, &qkv, @sizeOf(MuseQkvBatchPush), nr_sh);
         } else {
             // V per-head plain-normalize fused with the V KV-cache write.
@@ -1592,13 +1612,15 @@ pub const ForwardGemma = struct {
             .n_heads = d.n_head,
             .n_kv_heads = g.n_kv_head,
             .T = T,
+            .base_position = base_position,
             .scale_bits = if (d.attn_scale != 0) @bitCast(d.attn_scale) else 0,
             .window = window,
         };
+        const max_seq_len = base_position + T;
         if (self.use_attn_v2) {
-            cmd.dispatch(&self.pipes.gemma_attention_v2, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), (T + g.head_dim) * 4);
+            cmd.dispatch(&self.pipes.gemma_attention_v2, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), (max_seq_len + g.head_dim) * 4);
         } else {
-            cmd.dispatch(&self.pipes.gemma_attention_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), T * 4);
+            cmd.dispatch(&self.pipes.gemma_attention_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &b.attn_out }, &attn, @sizeOf(GemmaAttnBatchPush), max_seq_len * 4);
         }
 
         if (d.is_muse) {
@@ -1754,7 +1776,7 @@ pub const ForwardGemma = struct {
         // owns its normal KV cache and is the same path used by the CLI. The
         // server clamps Gemma MoE to one slot, so request reuse simply overwrites
         // KV positions from zero on the next request.
-        if (d.n_experts > 0) {
+        if (d.n_experts > 0 or self.model.constrained_vram) {
             if (tokens.len != 1 or positions.len != 1 or slots.len != 1 or out_tokens.len != 1) {
                 return error.Unsupported;
             }
@@ -2529,59 +2551,58 @@ pub const ForwardGemma = struct {
         const ctx = self.ctx;
         const f4 = @sizeOf(f32);
         const ff = d.ff_buf_max;
-        self.batch = BatchScratch{
-            .t_cap = T,
-            .hidden = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .norm = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .q = try buffer.createBuffer(ctx, T * d.q_dim_max * f4),
-            .k = try buffer.createBuffer(ctx, T * d.kv_dim_max * f4),
-            .v = try buffer.createBuffer(ctx, T * d.kv_dim_max * f4),
-            .attn_out = try buffer.createBuffer(ctx, T * d.q_dim_max * f4),
-            .o = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .ffn_norm = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .gate = try buffer.createBuffer(ctx, T * ff * f4),
-            .up = try buffer.createBuffer(ctx, T * ff * f4),
-            .geglu = try buffer.createBuffer(ctx, T * ff * f4),
-            .down = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .shared = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .router_in = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .router_logits = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts) * f4),
-            .router_table = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), 2 * d.n_experts_used) * @sizeOf(u32)),
-            // Routed-expert FFN scratch: n_used routed experts × intermediate ef per token.
-            .moe_norm_e = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .gate_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4),
-            .up_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4),
-            .geglu_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4),
-            .down_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_embd) * f4),
-            .moe_out_e = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .expert_order = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used) * @sizeOf(u32)),
-            // T2 grouped TC expert-GEMM scratch (P = T*n_used positions).
-            .a_grouped = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used) * d.n_embd * f4),
-            .yg_gate = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4),
-            .yg_up = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4),
-            .expert_offsets = try buffer.createBuffer(ctx, (@max(@as(u32, 1), d.n_experts) + 1) * @sizeOf(u32)),
-            // T2 v1: max_pos = P + 64*n_experts bounds the padded order; tiles = max_pos/64.
-            .padded_order = try buffer.createBuffer(ctx, @max(@as(u32, 1), T * d.n_experts_used + 64 * d.n_experts) * @sizeOf(u32)),
-            .tile_expert = try buffer.createBuffer(ctx, @max(@as(u32, 1), (T * d.n_experts_used >> 2) + d.n_experts + 2) * @sizeOf(u32)),
-            // fp16 activation scratch: T × largest-activation halves (2 bytes each).
-            // TC Q4_K GEMMs read A with K ∈ {n_embd (gate/up,Q/K/V), q_dim (O)};
-            // size to the max of those and ff for headroom.
-            .act_f16 = try buffer.createBuffer(ctx, T * @max(ff, @max(d.q_dim_max, d.n_embd)) * @sizeOf(u16)),
-            .act_q8 = try buffer.createBuffer(ctx, T * (@max(d.n_experts_used * d.n_ff, @max(ff, @max(d.q_dim_max, d.n_embd))) / 32) * 36),
-            .attn_scores = try buffer.createBuffer(ctx, d.n_head * self.max_ctx * f4),
-            .attn_probs = try buffer.createBuffer(ctx, d.n_head * self.max_ctx * @sizeOf(u16)),
-            // Largest dense Q4_K weight: gate/up (ff·n_embd), O (n_embd·q_dim),
-            // Q (q_dim·n_embd). max(M)·max(K) is a safe upper bound on M·K.
-            .w_f16 = try buffer.createBuffer(ctx, @max(ff, @max(d.q_dim_max, d.n_embd)) * @max(d.n_embd, d.q_dim_max) * @sizeOf(u16)),
-        };
+        var batch = std.mem.zeroes(BatchScratch);
+        batch.t_cap = T;
+        errdefer batch.deinit();
+        batch.hidden = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.norm = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.q = try buffer.createBuffer(ctx, T * d.q_dim_max * f4);
+        batch.k = try buffer.createBuffer(ctx, T * d.kv_dim_max * f4);
+        batch.v = try buffer.createBuffer(ctx, T * d.kv_dim_max * f4);
+        batch.attn_out = try buffer.createBuffer(ctx, T * d.q_dim_max * f4);
+        batch.o = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.ffn_norm = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.gate = try buffer.createBuffer(ctx, T * ff * f4);
+        batch.up = try buffer.createBuffer(ctx, T * ff * f4);
+        batch.geglu = try buffer.createBuffer(ctx, T * ff * f4);
+        batch.down = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.shared = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.router_in = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.router_logits = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts) * f4);
+        batch.router_table = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), 2 * d.n_experts_used) * @sizeOf(u32));
+        // Routed-expert FFN scratch: n_used routed experts × intermediate ef per token.
+        batch.moe_norm_e = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.gate_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4);
+        batch.up_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4);
+        batch.geglu_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4);
+        batch.down_e = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_embd) * f4);
+        batch.moe_out_e = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.expert_order = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used) * @sizeOf(u32));
+        // T2 grouped TC expert-GEMM scratch (P = T*n_used positions).
+        batch.a_grouped = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used) * d.n_embd * f4);
+        batch.yg_gate = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4);
+        batch.yg_up = try buffer.createBuffer(ctx, T * @max(@as(u32, 1), d.n_experts_used * d.n_ff) * f4);
+        batch.expert_offsets = try buffer.createBuffer(ctx, (@max(@as(u32, 1), d.n_experts) + 1) * @sizeOf(u32));
+        // T2 v1: max_pos = P + 64*n_experts bounds the padded order; tiles = max_pos/64.
+        batch.padded_order = try buffer.createBuffer(ctx, @max(@as(u32, 1), T * d.n_experts_used + 64 * d.n_experts) * @sizeOf(u32));
+        batch.tile_expert = try buffer.createBuffer(ctx, @max(@as(u32, 1), (T * d.n_experts_used >> 2) + d.n_experts + 2) * @sizeOf(u32));
+        // fp16 activation scratch: T × largest-activation halves (2 bytes each).
+        // TC Q4_K GEMMs read A with K ∈ {n_embd (gate/up,Q/K/V), q_dim (O)};
+        // size to the max of those and ff for headroom.
+        batch.act_f16 = try buffer.createBuffer(ctx, T * @max(ff, @max(d.q_dim_max, d.n_embd)) * @sizeOf(u16));
+        batch.act_q8 = try buffer.createBuffer(ctx, T * (@max(d.n_experts_used * d.n_ff, @max(ff, @max(d.q_dim_max, d.n_embd))) / 32) * 36);
+        batch.attn_scores = try buffer.createBuffer(ctx, d.n_head * self.max_ctx * f4);
+        batch.attn_probs = try buffer.createBuffer(ctx, d.n_head * self.max_ctx * @sizeOf(u16));
+        // Largest dense Q4_K weight: gate/up (ff·n_embd), O (n_embd·q_dim),
+        // Q (q_dim·n_embd). max(M)·max(K) is a safe upper bound on M·K.
+        batch.w_f16 = if (self.model.constrained_vram) .{ .handle = null, .size = 0 } else try buffer.createBuffer(ctx, @max(ff, @max(d.q_dim_max, d.n_embd)) * @max(d.n_embd, d.q_dim_max) * @sizeOf(u16));
+        self.batch = batch;
         return &self.batch.?;
     }
 
     fn freeBatch(self: *ForwardGemma) void {
         if (self.batch) |*bb| {
-            inline for (.{ &bb.hidden, &bb.norm, &bb.q, &bb.k, &bb.v, &bb.attn_out, &bb.o, &bb.ffn_norm, &bb.gate, &bb.up, &bb.geglu, &bb.down, &bb.shared, &bb.router_in, &bb.router_logits, &bb.router_table, &bb.moe_norm_e, &bb.gate_e, &bb.up_e, &bb.geglu_e, &bb.down_e, &bb.moe_out_e, &bb.expert_order, &bb.act_f16, &bb.act_q8, &bb.attn_scores, &bb.attn_probs, &bb.w_f16, &bb.a_grouped, &bb.yg_gate, &bb.yg_up, &bb.expert_offsets, &bb.padded_order, &bb.tile_expert }) |buf| {
-                buffer.freeBuffer(buf);
-            }
+            bb.deinit();
             self.batch = null;
         }
     }
@@ -2596,6 +2617,12 @@ pub const ForwardGemma = struct {
     /// frees any prior slot KV first. Sub-step 1a only allocates + smoke-tests it.
     pub fn allocSlotKv(self: *ForwardGemma, n_slots: u32, slot_ctx: u32) !void {
         self.freeSlotKv();
+        if (self.model.constrained_vram) {
+            if (n_slots != 1 or slot_ctx != self.max_ctx) return error.Unsupported;
+            self.n_slots = n_slots;
+            self.slot_ctx = slot_ctx;
+            return;
+        }
         const ctx = self.ctx;
         const f4 = @sizeOf(f32);
         const kk = try self.allocator.alloc(CudaBuffer, self.d.n_layers);

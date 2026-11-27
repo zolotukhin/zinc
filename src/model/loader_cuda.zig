@@ -1,9 +1,8 @@
-//! CUDA-specific model loading — mmap the GGUF, upload every tensor to the
-//! NVIDIA device, and expose them to the CUDA forward pass.
+//! CUDA and ROCm model loading — map the GGUF and upload inference weights.
 //!
 //! Unlike the Metal loader (Apple unified memory, zero-copy
 //! newBufferWithBytesNoCopy), CUDA device memory is NOT CPU-visible, so each
-//! tensor is copied host->device once at load time via `cuda_buffer.uploadMmap`.
+//! device-resident tensor is copied host->device once at load time via `cuda_buffer.uploadMmap`.
 //! The file mapping is kept alive after upload because the embedding lookup
 //! (`dequantEmbeddingRow`) dequantizes a single `token_embd.weight` row on the
 //! CPU directly out of the mapping.
@@ -21,8 +20,19 @@ const ModelConfig = config_mod.ModelConfig;
 const GGMLType = gguf.GGMLType;
 const shim = @import("../cuda/c.zig").shim;
 const cuda_buffer = @import("../cuda/buffer.zig");
+const inkling = @import("inkling.zig");
+const is_rocm = std.mem.eql(u8, @import("build_options").backend, "rocm");
 
 const log = std.log.scoped(.loader_cuda);
+const weight_alignment = 256;
+
+fn hostEmbedding(name: []const u8, offload: bool) bool {
+    return offload and std.mem.eql(u8, name, "token_embd.weight");
+}
+
+fn omittedNextn(name: []const u8, prefix: []const u8) bool {
+    return prefix.len != 0 and std.mem.startsWith(u8, name, prefix);
+}
 
 /// A GGUF tensor descriptor paired with the device buffer holding its weights.
 /// `info` carries the on-disk shape/quant/offset metadata; `gpu_buffer` is the
@@ -32,9 +42,8 @@ pub const LoadedTensor = struct {
     gpu_buffer: cuda_buffer.CudaBuffer,
 };
 
-/// Runtime model state: parsed config, the live CUDA context, every weight
-/// tensor resident on the GPU, and the still-mapped GGUF file (kept alive for
-/// CPU-side embedding dequantization).
+/// Runtime model state: parsed config, the live CUDA context, device weights,
+/// and the still-mapped GGUF file for CPU-side embedding dequantization.
 pub const Model = struct {
     config: ModelConfig,
     /// CUDA context that owns all device buffers (borrowed; not destroyed here).
@@ -44,7 +53,7 @@ pub const Model = struct {
     // --- internal state ---
     /// Parsed GGUF header/metadata/tensor table (owns tensor-name strings).
     gguf_file: gguf.GGUFFile,
-    /// Backing storage for every uploaded tensor; pointers into this array are
+    /// Backing storage for every tensor descriptor; pointers into this array are
     /// stable for the model's lifetime (we never append after `load`).
     tensors: std.ArrayList(LoadedTensor),
     /// Name -> *LoadedTensor index for O(1) lookup by exact tensor name.
@@ -54,13 +63,17 @@ pub const Model = struct {
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
     /// Open file handle backing the mapping; closed in `deinit`.
     mmap_file: ?std.fs.File,
+    weight_arena: ?cuda_buffer.CudaBuffer = null,
+    inkling_expert_layout: enum { original, blocked, invalid } = .original,
+    constrained_vram: bool = false,
+    nextn_weights_resident: bool = true,
 
-    /// Open + mmap the GGUF at `path`, parse it, extract the config, and upload
-    /// every tensor to `ctx`. The mapping is retained for embedding lookups.
+    /// Open + mmap the GGUF at `path`, extract the config, and upload weights
+    /// to `ctx`. The mapping is retained for embedding lookups.
     /// @param allocator Owns the GGUF metadata, the tensor list, and the name map.
     /// @param ctx Live CUDA context that will own every uploaded weight buffer.
     /// @param path Filesystem path to the GGUF model.
-    /// @returns A fully resident `Model`; call `deinit` to release device + host memory.
+    /// @returns The loaded model. Call `deinit` to release device and host memory.
     pub fn load(allocator: std.mem.Allocator, ctx: ?*shim.CudaCtx, path: []const u8) !Model {
         log.info("Loading model (CUDA): {s}", .{path});
 
@@ -88,43 +101,95 @@ pub const Model = struct {
         var gf = try gguf.parse(mmap_data, allocator);
         errdefer gf.deinit();
 
-        const config = extractConfig(&gf);
+        const config = try inspectParsedConfig(&gf, true);
         if (config.architecture == .unknown) {
             log.err("Unsupported model architecture in {s}", .{path});
             return error.UnsupportedArchitecture;
         }
 
-        // Pre-size the tensor list so its backing buffer never reallocates while
-        // we hand out *LoadedTensor pointers into it below.
+        // Muse already looks up embeddings on the CPU. Dense Qwen can use
+        // that same zero-copy lookup when weights need most of the free VRAM.
+        // The check for a separate output head preserves tied embeddings.
+        const free_vram = if (comptime is_rocm) shim.cuda_free_memory(ctx) else 0;
+        const constrained_vram = is_rocm and (config.architecture == .qwen35 or config.architecture == .muse_glimmer) and
+            free_vram > 0 and free_vram -| file_size < 1024 * 1024 * 1024;
+        const keep_embedding_on_host = is_rocm and gf.findTensor("output.weight") != null and
+            (config.architecture == .muse_glimmer or (config.architecture == .qwen35 and constrained_vram));
+        // The appended NextN block is independent of the main decoder. Leave
+        // its weights in the mapping on low-VRAM devices to make room for KV and SSM state.
+        const omit_nextn = constrained_vram and config.architecture == .qwen35 and config.n_nextn_layers == 1;
+        var nextn_name: [32]u8 = undefined;
+        const nextn_prefix = if (omit_nextn) try std.fmt.bufPrint(&nextn_name, "blk.{d}.", .{config.n_layers}) else "";
+        if (omit_nextn) log.info("Keeping the optional NextN block in host memory; using ordinary decode", .{});
+
+        // One aligned allocation on a tight ROCm device avoids per-tensor
+        // driver allocation padding. Each kernel still gets its usual view.
+        var arena: ?cuda_buffer.CudaBuffer = null;
+        errdefer if (arena) |*allocation| cuda_buffer.freeBuffer(allocation);
+        if (constrained_vram) {
+            var size: usize = 0;
+            for (gf.tensors.items) |info| {
+                if (hostEmbedding(info.name, keep_embedding_on_host) or omittedNextn(info.name, nextn_prefix)) continue;
+                const bytes: usize = @intCast(info.sizeBytes());
+                size = std.math.add(usize, std.mem.alignForward(usize, size, weight_alignment), bytes) catch return error.InvalidTensorRange;
+            }
+            arena = try cuda_buffer.createBuffer(ctx, size);
+            log.info("Packed device weights into a {d} MiB allocation", .{size / (1024 * 1024)});
+        }
+
+        // Keep the descriptor addresses stable for entries in the name map.
         var tensors = std.ArrayList(LoadedTensor){};
         errdefer {
             for (tensors.items) |*t| cuda_buffer.freeBuffer(&t.gpu_buffer);
             tensors.deinit(allocator);
         }
         try tensors.ensureTotalCapacityPrecise(allocator, gf.tensors.items.len);
-
         var tensor_map = std.StringHashMap(*LoadedTensor).init(allocator);
         errdefer tensor_map.deinit();
         try tensor_map.ensureTotalCapacity(@intCast(gf.tensors.items.len));
 
-        // Upload every tensor host->device. uploadMmap is a single H2D copy from
-        // the mapped file region into a fresh device-local allocation.
         var uploaded_bytes: u64 = 0;
+        var uploaded_count: usize = 0;
+        var arena_offset: usize = 0;
         for (gf.tensors.items) |info| {
-            const src_off: usize = @intCast(gf.tensor_data_offset + info.offset);
-            const sz: usize = @intCast(info.sizeBytes());
-            const buf = try cuda_buffer.uploadMmap(ctx, mmap_data.ptr + src_off, sz);
+            if (omittedNextn(info.name, nextn_prefix)) continue;
+            const start = std.math.add(u64, gf.tensor_data_offset, info.offset) catch return error.InvalidTensorRange;
+            const bytes = info.sizeBytes();
+            if (arena != null or config.architecture == .inkling2_loop) {
+                if (bytes == 0 or start > file_size or bytes > file_size - start) {
+                    log.err("Invalid or unsupported tensor: {s} ({s})", .{ info.name, @tagName(info.type_) });
+                    return error.InvalidTensorRange;
+                }
+            }
+            const src_off: usize = @intCast(start);
+            const sz: usize = @intCast(bytes);
+            const buf: cuda_buffer.CudaBuffer = if (hostEmbedding(info.name, keep_embedding_on_host)) blk: {
+                log.info("Keeping input embeddings in the GGUF mapping ({d} MiB)", .{sz / (1024 * 1024)});
+                break :blk .{ .handle = null, .size = 0 };
+            } else blk: {
+                const source = mmap_data.ptr + src_off;
+                const gpu_buffer = if (arena) |*allocation| copy: {
+                    arena_offset = std.mem.alignForward(usize, arena_offset, weight_alignment);
+                    var view = try cuda_buffer.aliasBuffer(allocation, arena_offset, sz);
+                    errdefer cuda_buffer.freeBuffer(&view);
+                    if (shim.cuda_copy_mmap(ctx, view.handle, source, sz) == 0) return error.CudaMmapUploadFailed;
+                    arena_offset += sz;
+                    break :copy view;
+                } else try cuda_buffer.uploadMmap(ctx, source, sz);
+                uploaded_bytes += sz;
+                uploaded_count += 1;
+                break :blk gpu_buffer;
+            };
 
             tensors.appendAssumeCapacity(.{ .info = info, .gpu_buffer = buf });
             const slot = &tensors.items[tensors.items.len - 1];
             // info.name is owned by the GGUF file (alive for the model lifetime),
             // so it is safe to use directly as the map key.
             tensor_map.putAssumeCapacity(slot.info.name, slot);
-            uploaded_bytes += sz;
         }
 
         log.info("Uploaded {d} tensors ({d} MB) to GPU", .{
-            tensors.items.len, uploaded_bytes / (1024 * 1024),
+            uploaded_count, uploaded_bytes / (1024 * 1024),
         });
 
         return Model{
@@ -136,6 +201,9 @@ pub const Model = struct {
             .tensor_map = tensor_map,
             .mmap_data = mmap_data,
             .mmap_file = file,
+            .weight_arena = arena,
+            .constrained_vram = constrained_vram,
+            .nextn_weights_resident = !omit_nextn,
         };
     }
 
@@ -190,6 +258,7 @@ pub const Model = struct {
         for (self.tensors.items) |*t| {
             cuda_buffer.freeBuffer(&t.gpu_buffer);
         }
+        if (self.weight_arena) |*allocation| cuda_buffer.freeBuffer(allocation);
         self.tensors.deinit(self.allocator);
         self.tensor_map.deinit();
 
@@ -232,7 +301,26 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     var gf = try gguf.parse(mmap_data, allocator);
     defer gf.deinit();
 
-    return extractConfigWithLogging(&gf, false);
+    return inspectParsedConfig(&gf, false);
+}
+
+fn inspectParsedConfig(file: *const gguf.GGUFFile, log_metadata: bool) !ModelConfig {
+    const arch = file.getString("general.architecture") orelse "unknown";
+    if (!std.mem.eql(u8, arch, inkling.architecture)) return extractConfigWithLogging(file, log_metadata);
+    if (!is_rocm) return error.UnsupportedArchitecture;
+    const layout = try inkling.Layout.read(file);
+    var config = extractConfigWithLogging(file, false);
+    config.n_heads = layout.heads;
+    config.n_kv_heads = layout.kv_heads;
+    config.vocab_size = layout.vocab;
+    config.intermediate_dim = layout.expert_width;
+    config.n_nextn_layers = 0;
+    if (log_metadata) {
+        log.info("Inkling 2 Mini: {d} layers, {d} heads ({d} KV), {d} experts ({d} active)", .{
+            layout.layers, layout.heads, layout.kv_heads, layout.experts, layout.active,
+        });
+    }
+    return config;
 }
 
 // ===========================================================================
@@ -454,10 +542,6 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         },
         .rope_original_context = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.original_context_length", .{prefix}) catch "") orelse 0,
     };
-}
-
-fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
-    return extractConfigWithLogging(gf, true);
 }
 
 // ===========================================================================

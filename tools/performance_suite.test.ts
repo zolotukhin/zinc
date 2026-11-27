@@ -291,6 +291,8 @@ test("parseArgs reads RDNA backend and device options", () => {
     "rdna1",
     "--rdna-backend",
     "vulkan",
+    "--rdna-context",
+    "2048",
     "--rdna-vk-device",
     "1",
     "--rdna-llama-server",
@@ -306,6 +308,7 @@ test("parseArgs reads RDNA backend and device options", () => {
   expect(args.target).toBe("rdna");
   expect(args.rdnaNode).toBe("rdna1");
   expect(args.rdnaBackend).toBe("vulkan");
+  expect(args.rdnaContext).toBe(2048);
   expect(args.rdnaVkDevice).toBe(1);
   expect(args.rdnaLlamaServer).toBe("/opt/baseline/bin/llama-server");
   expect(args.rdnaLlamaCli).toBe("/opt/baseline/bin/llama-cli");
@@ -333,8 +336,15 @@ test("parseArgs rejects invalid RDNA backend", () => {
   );
 });
 
-test("parseArgs accepts the ROCm RDNA backend", () => {
-  expect(parseArgs(["--target", "rdna", "--rdna-backend", "rocm"]).rdnaBackend).toBe("rocm");
+test("RDNA ROCm selection preserves independent GPU ordinals and power policy", () => {
+  const args = parseArgs([
+    "--target", "rdna", "--rdna-backend", "rocm",
+    "--rdna-vk-device", "1", "--rdna-rocm-device", "0", "--rdna-keep-dpm",
+  ]);
+  expect(args.rdnaBackend).toBe("rocm");
+  expect(args.rdnaVkDevice).toBe(1);
+  expect(args.rdnaRocmDevice).toBe(0);
+  expect(args.rdnaKeepDpm).toBe(true);
 });
 
 test("RDNA benchmark identities keep Vulkan and ROCm publications separate", () => {
@@ -411,11 +421,9 @@ test("default Metal cases use managed cache ids and replace Qwen 3.6 27B with Qw
   expect(cases.some((entry) => entry.id === "qwen36-27b-q4k-m")).toBe(false);
 });
 
-test("default RDNA cases include Muse, Gemma, and current Qwen rows", () => {
+test("default RDNA cases include Muse and current Qwen rows", () => {
   const cases = defaultRdnaCases("/root/models");
   const muse = cases.find((entry) => entry.id === "muse-glimmer-30b-q4k-m");
-  const gemma26 = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
-  const gemma31 = cases.find((entry) => entry.id === "gemma4-31b-q4k-m");
   const qwen38Dense = cases.find((entry) => entry.id === "qwen38-27b-q4k-m");
   const qwen35 = cases.find((entry) => entry.id === "qwen35-9b-q4k-m");
 
@@ -424,15 +432,7 @@ test("default RDNA cases include Muse, Gemma, and current Qwen rows", () => {
   expect(muse?.prompt).toContain("benchmark screenshots");
   expect(muse?.max_tokens).toBe(96);
 
-  expect(gemma26?.model_path).toBe("/root/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf");
-  expect(gemma26?.prompt_mode).toBe("chat");
-  expect(gemma26?.prompt).toContain("benchmark screenshots");
-  expect(gemma26?.max_tokens).toBe(96);
-
-  expect(gemma31?.model_path).toBe("/root/models/gemma-4-31B-it-Q4_K_M.gguf");
-  expect(gemma31?.prompt_mode).toBe("chat");
-  expect(gemma31?.prompt).toContain("benchmark screenshots");
-  expect(gemma31?.max_tokens).toBe(96);
+  expect(cases.some((entry) => entry.id.startsWith("gemma"))).toBe(false);
 
   expect(qwen38Dense?.model_path).toBe("/root/models/Qwen3.8-27B-Q4_K_M.gguf");
   expect(qwen38Dense?.prompt_mode).toBe("chat");
@@ -447,17 +447,32 @@ test("default RDNA cases include Muse, Gemma, and current Qwen rows", () => {
   expect(qwen35?.max_tokens).toBe(96);
 });
 
+test("Vulkan and ROCm register Inkling and Gemma cases remain explicitly selectable", () => {
+  const ids = new Set(["inkling-2-mini-q4-0", "gemma4-26b-a4b-q4k-m"]);
+  const [inkling, gemma] = defaultRdnaCases("/models", ids, "rocm");
+  expect(inkling?.model_path).toBe("/models/Inkling-2-Mini-Q4_0.gguf");
+  expect(inkling?.context_tokens).toBe(4096);
+  expect(inkling?.prompt_mode).toBe("chat");
+  expect(gemma?.model_path).toBe("/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf");
+  expect(defaultRdnaCases("/models", ids)).toEqual([inkling, gemma]);
+  expect(defaultRdnaCases("/models", ids, "zinc_rt")).toEqual([gemma]);
+  expect(defaultCudaCases("/models", ids).some((entry) => entry.id === "inkling-2-mini-q4-0")).toBe(false);
+  const [intelInkling] = defaultIntelCases("/remote/cache", new Set(["inkling-2-mini-q4-0"]));
+  expect(intelInkling).toEqual({
+    ...inkling,
+    model_path: "/remote/cache/inkling-2-mini-q4-0/model.gguf",
+  });
+});
+
 test("default Intel cases use the remote managed cache layout", () => {
   const cases = defaultIntelCases("/remote/cache");
   expect(cases.map((entry) => entry.id)).toEqual([
-    "gemma4-26b-a4b-q4k-m",
-    "gemma4-31b-q4k-m",
     "qwen35-9b-q4k-m",
     "qwen36-35b-a3b-q4k-xl",
   ]);
   expect(cases.some((entry) => entry.id === "qwen38-27b-q4k-m")).toBe(false);
   const qwen = cases.find((entry) => entry.id === "qwen35-9b-q4k-m");
-  const gemma = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
+  const [gemma] = defaultIntelCases("/remote/cache", new Set(["gemma4-26b-a4b-q4k-m"]));
 
   expect(qwen?.model_path).toBe("/remote/cache/qwen35-9b-q4k-m/model.gguf");
   expect(qwen?.prompt_mode).toBe("chat");

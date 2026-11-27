@@ -582,6 +582,7 @@ fn fallbackModelName(model: *const loader_mod.Model) []const u8 {
         .gemma => "gemma",
         .gpt_oss => "gpt-oss-20b",
         .muse_glimmer => "muse-glimmer",
+        .inkling2_loop => "inkling-2-mini",
         .unknown => "zinc-model",
     };
 }

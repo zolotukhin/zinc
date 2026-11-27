@@ -30,7 +30,7 @@ const is_rocm = std.mem.eql(u8, build_options.backend, "rocm");
 const dmmv_fast_block: u32 = 64;
 
 /// The CUDA kernel library, bundled into the binary and NVRTC-compiled on load.
-const KERNELS_CU = @embedFile("../shaders/cuda/kernels.cu");
+const KERNELS_CU = @import("cuda_kernels.zig").source;
 
 // ---- kernel push-constant structs (must byte-match kernels.cu) --------------
 const RmsPush = extern struct { N: u32, eps: f32 };
@@ -556,6 +556,11 @@ const BatchScratch = struct {
     // single-launch grouped-TC gate/up GEMM (ZINC_MOE_TC). Stubs on dense qwen35.
     padded_order: CudaBuffer, // [P + 64*n_experts] u32 ((token<<16|slot) or INV)
     tile_expert: CudaBuffer, // [(P + 64*n_experts)/64] u32 (expert id per 64-tile)
+    fn deinit(self: *BatchScratch) void {
+        inline for (std.meta.fields(BatchScratch)) |field| {
+            if (field.type == CudaBuffer) buffer.freeBuffer(&@field(self, field.name));
+        }
+    }
 };
 
 /// Effort 28 4c: token-major [B, dim] activation scratch for batched decode.
@@ -1186,7 +1191,7 @@ pub const ForwardCuda = struct {
         // Tiny-but-nonzero stubs so the dense path (n_experts==0) still allocates/free uniformly.
         const router_logits_elems = @max(@as(u32, 1), d.n_experts);
         const router_out_elems = @max(@as(u32, 1), 2 * d.n_experts_used);
-        const state_layers = d.n_layers + model.config.n_nextn_layers;
+        const state_layers = d.n_layers + if (model.nextn_weights_resident) model.config.n_nextn_layers else 0;
         var self = ForwardCuda{
             .allocator = allocator,
             .ctx = ctx,
@@ -1327,7 +1332,7 @@ pub const ForwardCuda = struct {
         // dequant path. The device buffer pointer is stable for the model's life.
         if (model.get("token_embd.weight")) |t| {
             self.embed_weight = &t.gpu_buffer;
-            self.embed_gpu = (t.info.type_ == .q4_k) and (d.n_embd % 256 == 0);
+            self.embed_gpu = t.gpu_buffer.handle != null and (t.info.type_ == .q4_k) and (d.n_embd % 256 == 0);
         }
 
         // Per-layer KV / SSM state, sized only for the layer type. We still
@@ -1835,6 +1840,30 @@ pub const ForwardCuda = struct {
     }
 
     pub fn prefillBatched(self: *ForwardCuda, tokens: []const u32) !u32 {
+        if (tokens.len == 0) return error.EmptyPrompt;
+        if (tokens.len > self.max_ctx) return error.ContextLengthExceeded;
+        // Reserve up to two gfx12 WMMA tiles before advancing any KV or SSM
+        // state. HIP can leave less free VRAM after a model switch.
+        var chunk_size = if (self.model.constrained_vram) @min(tokens.len, 224) else tokens.len;
+        if (self.model.constrained_vram) {
+            while (true) {
+                _ = self.ensureBatch(@intCast(chunk_size)) catch |err| {
+                    if (err != error.CudaBufferAllocFailed or chunk_size <= 32) return err;
+                    chunk_size = @max(32, chunk_size / 2);
+                    continue;
+                };
+                break;
+            }
+        }
+        // Each chunk advances the same KV cache and recurrent state.
+        var start: usize = 0;
+        while (start + chunk_size < tokens.len) : (start += chunk_size) {
+            _ = try self.prefillChunk(tokens[start .. start + chunk_size], @intCast(start), false);
+        }
+        return self.prefillChunk(tokens[start..], @intCast(start), true);
+    }
+
+    fn prefillChunk(self: *ForwardCuda, tokens: []const u32, base_position: u32, produce_token: bool) !u32 {
         const d = self.d;
         const ctx = self.ctx;
         const T: u32 = @intCast(tokens.len);
@@ -1852,7 +1881,7 @@ pub const ForwardCuda = struct {
         self.use_cublas_q4 = self.use_cublas and !is_rocm and std.posix.getenv("ZINC_BATCHED_CUBLAS_NOQ4") == null;
         self.use_cublas_q5 = self.use_cublas and !is_rocm and std.posix.getenv("ZINC_BATCHED_CUBLAS_NOQ5") == null;
         self.use_cublas_q6 = self.use_cublas and !is_rocm and std.posix.getenv("ZINC_BATCHED_CUBLAS_NOQ6") == null;
-        self.use_cublas_q8 = self.use_cublas and std.posix.getenv("ZINC_BATCHED_CUBLAS_NOQ8") == null;
+        self.use_cublas_q8 = self.use_cublas and !self.model.constrained_vram and std.posix.getenv("ZINC_BATCHED_CUBLAS_NOQ8") == null;
         // ROCm initializes this threshold to 1 because hipBLAS F32 projection
         // batching wins even on short prompts; CUDA retains its existing gate.
         if (std.posix.getenv("ZINC_CUBLAS_MIN_T")) |mt| {
@@ -1888,7 +1917,7 @@ pub const ForwardCuda = struct {
                 self.waitPending();
                 const t0 = std.time.milliTimestamp();
                 if (self.layer_is_attn[L]) {
-                    try self.attentionLayerBatched(L, T, b, 0);
+                    try self.attentionLayerBatched(L, T, b, base_position);
                 } else {
                     try self.ssmLayerBatched(L, T, b);
                 }
@@ -1916,7 +1945,7 @@ pub const ForwardCuda = struct {
                 prof_ffn += std.time.milliTimestamp() - t1;
             } else {
                 if (self.layer_is_attn[L]) {
-                    try self.attentionLayerBatched(L, T, b, 0);
+                    try self.attentionLayerBatched(L, T, b, base_position);
                 } else {
                     try self.ssmLayerBatched(L, T, b);
                 }
@@ -1947,6 +1976,7 @@ pub const ForwardCuda = struct {
             });
         }
 
+        if (!produce_token) return 0;
         // TAIL on the last token only: rms_norm → LM head → argmax.
         const last = T - 1;
         const out_norm = self.model.get("output_norm.weight") orelse return error.MissingTensor;
@@ -1981,6 +2011,8 @@ pub const ForwardCuda = struct {
         if (self.d.n_experts != 0) return "MTP serving currently requires a dense model.";
         if (self.model.config.n_nextn_layers != 1)
             return "This model does not contain exactly one compatible NextN/MTP layer.";
+        if (!self.model.nextn_weights_resident)
+            return "The NextN/MTP block was left in host memory to fit this model on the GPU.";
         const L = self.d.n_layers;
         if (self.model.getLayer(L, "nextn.eh_proj.weight") == null or
             self.model.getLayer(L, "nextn.enorm.weight") == null or
@@ -3388,49 +3420,48 @@ pub const ForwardCuda = struct {
         const nu = @max(@as(u32, 1), d.n_experts_used);
         const e_gu = if (moe) T * nu * d.n_ff * f4 else f4; // [T, n_used*ef]
         const e_dn = if (moe) T * nu * d.n_embd * f4 else f4; // [T, n_used*n_embd]
-        self.batch = BatchScratch{
-            .t_cap = T,
-            .hidden = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .norm = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .o = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .qfull = try buffer.createBuffer(ctx, T * 2 * d.q_dim * f4),
-            .q = try buffer.createBuffer(ctx, T * d.q_dim * f4),
-            .attn_gate = try buffer.createBuffer(ctx, T * d.q_dim * f4),
-            .k = try buffer.createBuffer(ctx, T * d.kv_dim * f4),
-            .v = try buffer.createBuffer(ctx, T * d.kv_dim * f4),
-            .attn_out = try buffer.createBuffer(ctx, T * d.q_dim * f4),
-            .qkv = try buffer.createBuffer(ctx, T * d.conv_channels * f4),
-            .conv_out = try buffer.createBuffer(ctx, T * d.conv_channels * f4),
-            .z = try buffer.createBuffer(ctx, T * d.d_inner * f4),
-            .alpha = try buffer.createBuffer(ctx, T * d.dt_rank * f4),
-            .beta = try buffer.createBuffer(ctx, T * d.dt_rank * f4),
-            .delta_out = try buffer.createBuffer(ctx, T * d.d_inner * f4),
-            .ssm_gn = try buffer.createBuffer(ctx, T * d.d_inner * f4),
-            .ffn_norm = try buffer.createBuffer(ctx, T * d.n_embd * f4),
-            .gate_ff = try buffer.createBuffer(ctx, T * max_ff * f4),
-            .up_ff = try buffer.createBuffer(ctx, T * max_ff * f4),
-            .swiglu_ff = try buffer.createBuffer(ctx, T * max_ff * f4),
-            .act_f16 = try buffer.createBuffer(ctx, T * max_k * @sizeOf(u16)),
-            .w_f16 = try buffer.createBuffer(ctx, max_w * @sizeOf(u16)),
-            .act_q8 = try buffer.createBuffer(ctx, T * (@max(max_k, nu * d.n_ff) / 32) * 36),
-            .router_logits_e = try buffer.createBuffer(ctx, if (moe) T * d.n_experts * f4 else f4),
-            .router_table_e = try buffer.createBuffer(ctx, if (moe) T * 2 * nu * f4 else f4),
-            .gate_e = try buffer.createBuffer(ctx, e_gu),
-            .up_e = try buffer.createBuffer(ctx, e_gu),
-            .swiglu_e = try buffer.createBuffer(ctx, e_gu),
-            .down_e = try buffer.createBuffer(ctx, e_dn),
-            .gate_scalar_e = try buffer.createBuffer(ctx, if (moe) T * f4 else f4),
-            .padded_order = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), T * nu + 64 * d.n_experts) * @sizeOf(u32) else f4),
-            .tile_expert = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), (T * nu >> 4) + d.n_experts + 2) * @sizeOf(u32) else f4),
-        };
+        var batch = std.mem.zeroes(BatchScratch);
+        batch.t_cap = T;
+        errdefer batch.deinit();
+        batch.hidden = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.norm = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.o = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.qfull = try buffer.createBuffer(ctx, T * 2 * d.q_dim * f4);
+        batch.q = try buffer.createBuffer(ctx, T * d.q_dim * f4);
+        batch.attn_gate = try buffer.createBuffer(ctx, T * d.q_dim * f4);
+        batch.k = try buffer.createBuffer(ctx, T * d.kv_dim * f4);
+        batch.v = try buffer.createBuffer(ctx, T * d.kv_dim * f4);
+        batch.attn_out = try buffer.createBuffer(ctx, T * d.q_dim * f4);
+        batch.qkv = try buffer.createBuffer(ctx, T * d.conv_channels * f4);
+        batch.conv_out = try buffer.createBuffer(ctx, T * d.conv_channels * f4);
+        batch.z = try buffer.createBuffer(ctx, T * d.d_inner * f4);
+        batch.alpha = try buffer.createBuffer(ctx, T * d.dt_rank * f4);
+        batch.beta = try buffer.createBuffer(ctx, T * d.dt_rank * f4);
+        batch.delta_out = try buffer.createBuffer(ctx, T * d.d_inner * f4);
+        batch.ssm_gn = try buffer.createBuffer(ctx, T * d.d_inner * f4);
+        batch.ffn_norm = try buffer.createBuffer(ctx, T * d.n_embd * f4);
+        batch.gate_ff = try buffer.createBuffer(ctx, T * max_ff * f4);
+        batch.up_ff = try buffer.createBuffer(ctx, T * max_ff * f4);
+        batch.swiglu_ff = try buffer.createBuffer(ctx, T * max_ff * f4);
+        batch.act_f16 = try buffer.createBuffer(ctx, T * max_k * @sizeOf(u16));
+        batch.w_f16 = if (self.model.constrained_vram) .{ .handle = null, .size = 0 } else try buffer.createBuffer(ctx, max_w * @sizeOf(u16));
+        batch.act_q8 = try buffer.createBuffer(ctx, T * (@max(max_k, nu * d.n_ff) / 32) * 36);
+        batch.router_logits_e = try buffer.createBuffer(ctx, if (moe) T * d.n_experts * f4 else f4);
+        batch.router_table_e = try buffer.createBuffer(ctx, if (moe) T * 2 * nu * f4 else f4);
+        batch.gate_e = try buffer.createBuffer(ctx, e_gu);
+        batch.up_e = try buffer.createBuffer(ctx, e_gu);
+        batch.swiglu_e = try buffer.createBuffer(ctx, e_gu);
+        batch.down_e = try buffer.createBuffer(ctx, e_dn);
+        batch.gate_scalar_e = try buffer.createBuffer(ctx, if (moe) T * f4 else f4);
+        batch.padded_order = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), T * nu + 64 * d.n_experts) * @sizeOf(u32) else f4);
+        batch.tile_expert = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), (T * nu >> 4) + d.n_experts + 2) * @sizeOf(u32) else f4);
+        self.batch = batch;
         return &self.batch.?;
     }
 
     fn freeBatch(self: *ForwardCuda) void {
         if (self.batch) |*bb| {
-            inline for (.{ &bb.hidden, &bb.norm, &bb.o, &bb.qfull, &bb.q, &bb.attn_gate, &bb.k, &bb.v, &bb.attn_out, &bb.qkv, &bb.conv_out, &bb.z, &bb.alpha, &bb.beta, &bb.delta_out, &bb.ssm_gn, &bb.ffn_norm, &bb.gate_ff, &bb.up_ff, &bb.swiglu_ff, &bb.act_f16, &bb.w_f16, &bb.act_q8, &bb.router_logits_e, &bb.router_table_e, &bb.gate_e, &bb.up_e, &bb.swiglu_e, &bb.down_e, &bb.gate_scalar_e, &bb.padded_order, &bb.tile_expert }) |buf| {
-                buffer.freeBuffer(buf);
-            }
+            bb.deinit();
             self.batch = null;
         }
     }
