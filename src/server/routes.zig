@@ -824,6 +824,21 @@ fn handleModels(
     try conn.sendJson(200, body.items);
 }
 
+/// Caller holds generation ownership across the activation and cache update.
+fn activateManagedAndResetChat(
+    manager: *model_manager_mod.ModelManager,
+    server_state: *ServerState,
+    model_id: []const u8,
+    force: bool,
+) !void {
+    const previous = manager.currentResources();
+    manager.activateManagedModel(model_id, true, force) catch |err| {
+        if (manager.currentResources() != previous) server_state.clearChatReuseCache();
+        return err;
+    };
+    server_state.clearChatReuseCache();
+}
+
 fn handleActivateModel(
     conn: *http.Connection,
     _manager: *model_manager_mod.ModelManager,
@@ -849,7 +864,7 @@ fn handleActivateModel(
     defer server_state.generation_mutex.unlock();
 
     const force_flag = if (parseJsonFields(_body)) |pj| pj.force else |_| false;
-    _manager.activateManagedModel(parsed.model_id, true, force_flag) catch |err| {
+    activateManagedAndResetChat(_manager, server_state, parsed.model_id, force_flag) catch |err| {
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown managed model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
@@ -865,7 +880,6 @@ fn handleActivateModel(
         try conn.sendError(status, "invalid_request_error", msg);
         return;
     };
-    server_state.clearChatReuseCache();
 
     var buf: [512]u8 = undefined;
     const response = std.fmt.bufPrint(&buf,
@@ -2895,7 +2909,7 @@ fn ensureRequestedModelActive(
         return false;
     }
 
-    manager.activateManagedModel(requested_model, true, false) catch |err| {
+    activateManagedAndResetChat(manager, server_state, requested_model, false) catch |err| {
         const status: u16 = switch (err) {
             error.UnknownManagedModel, error.ModelNotInstalled => 404,
             error.GpuAlreadyReserved => 409,
@@ -2917,7 +2931,6 @@ fn ensureRequestedModelActive(
         try conn.sendError(status, code, msg);
         return false;
     };
-    server_state.clearChatReuseCache();
     return true;
 }
 

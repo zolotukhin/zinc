@@ -8,6 +8,7 @@ const loader_mod = @import("../model/loader.zig");
 const tokenizer_mod = @import("../model/tokenizer.zig");
 const catalog_mod = @import("../model/catalog.zig");
 const managed_mod = @import("../model/managed.zig");
+const model_replacement = @import("model_replacement.zig");
 const forward_mod = @import("../compute/forward.zig");
 const memory_plan = @import("../gpu/memory_plan.zig");
 const kv_dtype = @import("../compute/kv_dtype.zig");
@@ -463,32 +464,60 @@ pub const ModelManager = struct {
 
         const new_path = try managed_mod.resolveInstalledModelPath(model_id, self.allocator);
         defer self.allocator.free(new_path);
-        var acquired_gpu_lock = false;
+        var previous: ?LoadSpec = null;
+        defer if (previous) |spec| {
+            self.allocator.free(spec.model_path);
+            if (spec.managed_id) |id| self.allocator.free(id);
+        };
+        if (self.current) |resident| {
+            const old_path = try self.allocator.dupe(u8, resident.model_path);
+            errdefer self.allocator.free(old_path);
+            previous = .{
+                .model_path = old_path,
+                .managed_id = if (resident.managed_id) |id| try self.allocator.dupe(u8, id) else null,
+                .requested_context_length = self.requested_context_length,
+            };
+        }
         if (!self.gpu_process_lock.isHeld()) {
             self.gpu_process_lock = try process_lock_mod.acquire(.vulkan, self.instance.selected_device_index);
-            acquired_gpu_lock = true;
-            errdefer if (acquired_gpu_lock) self.gpu_process_lock.deinit();
         }
-        const switched = try self.allocator.create(LoadedResources);
-        errdefer self.allocator.destroy(switched);
-        loadResourcesInto(switched, .{
+        errdefer if (self.current == null) self.gpu_process_lock.release();
+
+        // Allocate distinct storage before retiring the resident engine, so
+        // HTTP callers can detect a reload even when its model ID is unchanged.
+        const storage = try self.allocator.create(LoadedResources);
+        defer if (self.current != storage) self.allocator.destroy(storage);
+        var replacement: ResourceReplacement = .{ .manager = self, .current = self.current, .storage = storage };
+        self.current = null;
+        const outcome = model_replacement.replace(&replacement, LoadSpec{
             .model_path = new_path,
             .managed_id = model_id,
             .requested_context_length = self.requested_context_length,
-        }, self.instance, self.gpu_config, self.shader_dir, self.allocator) catch |switch_err| {
-            return switch_err;
-        };
-
-        const previous = self.current;
-        self.current = switched;
-        acquired_gpu_lock = false;
-        if (previous) |old| {
-            old.deinit(self.instance, self.allocator);
-            self.allocator.destroy(old);
-        }
+        }, previous);
+        self.current = replacement.current;
+        try outcome;
 
         if (persist_active) try managed_mod.writeActiveSelection(model_id, self.allocator);
     }
+
+    const ResourceReplacement = struct {
+        manager: *ModelManager,
+        current: ?*LoadedResources,
+        storage: *LoadedResources,
+
+        pub fn unload(self: *@This()) void {
+            const resident = self.current orelse return;
+            self.current = null;
+            resident.deinit(self.manager.instance, self.manager.allocator);
+            self.manager.allocator.destroy(resident);
+        }
+
+        pub fn load(self: *@This(), spec: LoadSpec) !*LoadedResources {
+            const manager = self.manager;
+            try loadResourcesInto(self.storage, spec, manager.instance, manager.gpu_config, manager.shader_dir, manager.allocator);
+            return self.storage;
+        }
+    };
 
     /// Uninstalls a managed model from disk and, if it is currently loaded, optionally evicts it from the GPU.
     /// @note Caller must hold the shared generation lock before calling this function.

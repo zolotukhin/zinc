@@ -15,6 +15,12 @@ pub fn activate(context: anytype, entry: anytype) !void {
     // Reject bad metadata/impossible weights while the current model is resident.
     if (@hasDecl(@TypeOf(context.*), "validate")) try context.validate(entry);
     const previous = if (context.current) |current| current.entry else null;
+    try replace(context, entry, previous);
+}
+
+/// Replace a validated model using a load specification that survives teardown.
+/// Callers snapshot any paths or IDs owned by the outgoing resources first.
+pub fn replace(context: anytype, entry: anytype, previous: ?@TypeOf(entry)) !void {
     context.unload();
     context.current = context.load(entry) catch |err| {
         if (previous) |old| context.current = context.load(old) catch |restore_err| blk: {
