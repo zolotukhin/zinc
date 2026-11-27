@@ -20,6 +20,7 @@ pub fn activate(context: anytype, entry: anytype) !void {
 
 /// Replace a validated model using a load specification that survives teardown.
 /// Callers snapshot any paths or IDs owned by the outgoing resources first.
+/// A restored model keeps serving, but the caller receives the replacement error.
 pub fn replace(context: anytype, entry: anytype, previous: ?@TypeOf(entry)) !void {
     context.unload();
     context.current = context.load(entry) catch |err| {

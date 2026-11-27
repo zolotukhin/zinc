@@ -826,14 +826,17 @@ fn handleModels(
 
 /// Caller holds generation ownership across the activation and cache update.
 fn activateManagedAndResetChat(
-    manager: *model_manager_mod.ModelManager,
+    manager: anytype,
     server_state: *ServerState,
     model_id: []const u8,
     force: bool,
 ) !void {
-    const previous = manager.currentResources();
+    const tracks_revision = @hasDecl(@TypeOf(manager.*), "resourceRevision");
+    const previous = if (tracks_revision) manager.resourceRevision() else 0;
     manager.activateManagedModel(model_id, true, force) catch |err| {
-        if (manager.currentResources() != previous) server_state.clearChatReuseCache();
+        if (comptime tracks_revision) {
+            if (manager.resourceRevision() != previous) server_state.clearChatReuseCache();
+        }
         return err;
     };
     server_state.clearChatReuseCache();
@@ -6764,6 +6767,35 @@ test "rejected model unload preserves context and releases generation ownership"
     try std.testing.expectEqual(@as(u32, 2048), state.active_context_tokens.load(.monotonic));
     try std.testing.expect(state.generation_mutex.tryLock());
     state.generation_mutex.unlock();
+}
+
+test "failed replacement invalidates chat state only if resident resources changed" {
+    const FakeManager = struct {
+        revision: u64 = 0,
+        reload: bool = false,
+
+        pub fn resourceRevision(self: *const @This()) u64 {
+            return self.revision;
+        }
+
+        pub fn activateManagedModel(self: *@This(), _: []const u8, _: bool, _: bool) !void {
+            if (self.reload) self.revision += 1;
+            return error.ReplacementFailed;
+        }
+    };
+    var state = ServerState.init(0);
+    defer state.deinit();
+    state.generation_mutex.lock();
+    defer state.generation_mutex.unlock();
+    state.tokenize_cache.store("conversation", "A cached prefix", &.{ 1, 2, 3 });
+    state.tokenize_cache.im_start_id = 42;
+    var manager = FakeManager{};
+    try std.testing.expectError(error.ReplacementFailed, activateManagedAndResetChat(&manager, &state, "replacement", false));
+    try std.testing.expectEqual(@as(usize, 3), state.tokenize_cache.tokens.len);
+    manager.reload = true;
+    try std.testing.expectError(error.ReplacementFailed, activateManagedAndResetChat(&manager, &state, "replacement", false));
+    try std.testing.expectEqual(@as(usize, 0), state.tokenize_cache.tokens.len);
+    try std.testing.expect(state.tokenize_cache.im_start_id == null);
 }
 
 test "model lifecycle invalidates cached tokens and template markers" {

@@ -109,6 +109,7 @@ pub const ModelManager = struct {
     gpu_process_lock: process_lock_mod.ProcessLock = .{},
     requested_context_length: ?u32 = null,
     current: ?*LoadedResources,
+    resource_revision: u64 = 0,
 
     /// Outcome of a managed model removal, including whether it was unloaded from the GPU.
     pub const RemoveResult = struct {
@@ -190,6 +191,12 @@ pub const ModelManager = struct {
         return self.current;
     }
 
+    /// Revision of the resident resources, including a reload of the same model.
+    /// The caller holds generation ownership.
+    pub fn resourceRevision(self: *const ModelManager) u64 {
+        return self.resource_revision;
+    }
+
     /// Capability for the currently loaded model, sampled under the model lock.
     pub fn supportsChatSessionReuse(self: *ModelManager) bool {
         self.state_mutex.lock();
@@ -241,6 +248,7 @@ pub const ModelManager = struct {
             if (!std.mem.eql(u8, expected_id, active_id)) return error.ActiveModelChanged;
         }
         self.current = null;
+        self.resource_revision +%= 1;
         current.deinit(self.instance, self.allocator);
         self.allocator.destroy(current);
         self.gpu_process_lock.release();
@@ -479,16 +487,18 @@ pub const ModelManager = struct {
             };
         }
         if (!self.gpu_process_lock.isHeld()) {
+            std.debug.assert(self.current == null);
             self.gpu_process_lock = try process_lock_mod.acquire(.vulkan, self.instance.selected_device_index);
         }
-        errdefer if (self.current == null) self.gpu_process_lock.release();
+        // A restored model was resident on entry and keeps its existing lease.
+        // An empty slot has no GPU resources to reserve.
+        defer if (self.current == null) self.gpu_process_lock.release();
 
-        // Allocate distinct storage before retiring the resident engine, so
-        // HTTP callers can detect a reload even when its model ID is unchanged.
         const storage = try self.allocator.create(LoadedResources);
         defer if (self.current != storage) self.allocator.destroy(storage);
         var replacement: ResourceReplacement = .{ .manager = self, .current = self.current, .storage = storage };
         self.current = null;
+        self.resource_revision +%= 1;
         const outcome = model_replacement.replace(&replacement, LoadSpec{
             .model_path = new_path,
             .managed_id = model_id,
@@ -514,6 +524,8 @@ pub const ModelManager = struct {
 
         pub fn load(self: *@This(), spec: LoadSpec) !*LoadedResources {
             const manager = self.manager;
+            // The loader reinitializes storage and unwinds partial allocations
+            // before a second load can use it to restore the previous model.
             try loadResourcesInto(self.storage, spec, manager.instance, manager.gpu_config, manager.shader_dir, manager.allocator);
             return self.storage;
         }
@@ -540,6 +552,7 @@ pub const ModelManager = struct {
                     }
                     previous = current;
                     self.current = null;
+                    self.resource_revision +%= 1;
                     unloaded_from_gpu = true;
                 }
             }
