@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "version": "0.1.2",
+  "source": "d5d339fac52e3de1e2c214bea2721f56fa8d1cb9",
+  "candidate_run": 44493677941,
+  "attempt": 3,
+  "recorded_on": "2026-11-27",
+  "intel_job": "https://github.com/zolotukhin/zinc/actions/runs/44493677941/job/140645690570",
+  "status": "failed_qualification",
+  "certified": false,
+  "published": false,
+  "manifest_sha256": "1a83f6a3b91c722f6ec97073fb1fbb8a832c0a4d6b7cee479575edc8792a09cc",
+  "artifacts": [
+    {
+      "target": "linux-x86_64-vulkan",
+      "filename": "zinc-v0.1.2-linux-x86_64-vulkan.tar.gz",
+      "sha256": "4f3ff3409d124fc57f2b7658377bbfbd5972ce6297fcc30ee54bee1064fe6212",
+      "binary_sha256": "0618c6b0ce2747a80f4b1990a3ba8da096b35f9425f453cb319e694d91ef204c"
+    },
+    {
+      "target": "linux-x86_64-rocm",
+      "filename": "zinc-v0.1.2-linux-x86_64-rocm.tar.gz",
+      "sha256": "73de0946c5c03b943f64db57e4496cbedd9da30f949ac98f9fc0101b360eab1e",
+      "binary_sha256": "a07b3c629010dcb355c89fe20843b287e34a3cf77612ca6826f852590206a234"
+    }
+  ],
+  "official_hardware": {
+    "vulkan-rdna4": "passed",
+    "rocm-rdna4": "passed",
+    "vulkan-intel-xe2": {
+      "model_rows_passed": 7,
+      "reference_choices_exact": 335,
+      "reference_choices": 336,
+      "qualified_near_ties": 1,
+      "lifecycle": "failed"
+    }
+  },
+  "intel_lifecycle_reproduction": {
+    "failure_stage": "model_lifecycle",
+    "failure_model": "qwen36-27b-q4k-m",
+    "successful_model_operations": 2,
+    "completed_measured_rounds": 0,
+    "replayed_reference_cases": 0,
+    "direct_from": "qwen36-35b-a3b-q4k-xl",
+    "direct_activation_status": 400,
+    "chat_activation_error": "QueueSubmitFailed",
+    "clean_explicit_unload_status": 200,
+    "activation_after_clean_unload_status": 200,
+    "cleanup": true
+  },
+  "browser": [
+    {
+      "source": "d5d339fac52e3de1e2c214bea2721f56fa8d1cb9",
+      "version": "0.1.2",
+      "profile": "vulkan-rdna4",
+      "archive_sha256": "4f3ff3409d124fc57f2b7658377bbfbd5972ce6297fcc30ee54bee1064fe6212",
+      "binary_sha256": "0618c6b0ce2747a80f4b1990a3ba8da096b35f9425f453cb319e694d91ef204c",
+      "model": "qwen35-9b-q4k-m",
+      "context": 16384,
+      "reported_context": 16384,
+      "healthy": true,
+      "browser": {
+        "profile": "vulkan-rdna4",
+        "viewports": [
+          {
+            "mode": "desktop",
+            "viewport": {
+              "width": 1366,
+              "height": 800
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "shift_enter_inserts_line_break": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "stop_and_next_reply": true,
+            "passed": true
+          },
+          {
+            "mode": "mobile",
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "passed": true
+          }
+        ],
+        "checks": {},
+        "errors": [],
+        "browser_version": "158.0.8127.38",
+        "passed": true
+      },
+      "server_cleanup": true
+    },
+    {
+      "source": "d5d339fac52e3de1e2c214bea2721f56fa8d1cb9",
+      "version": "0.1.2",
+      "profile": "vulkan-intel-xe2",
+      "archive_sha256": "4f3ff3409d124fc57f2b7658377bbfbd5972ce6297fcc30ee54bee1064fe6212",
+      "binary_sha256": "0618c6b0ce2747a80f4b1990a3ba8da096b35f9425f453cb319e694d91ef204c",
+      "model": "qwen35-9b-q4k-m",
+      "context": 16384,
+      "reported_context": 16384,
+      "mtp_capability": null,
+      "healthy": true,
+      "browser": {
+        "profile": "vulkan-intel-xe2",
+        "viewports": [
+          {
+            "mode": "desktop",
+            "viewport": {
+              "width": 1366,
+              "height": 800
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "shift_enter_inserts_line_break": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "stop_and_next_reply": true,
+            "passed": true
+          },
+          {
+            "mode": "mobile",
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "passed": true
+          }
+        ],
+        "checks": {},
+        "errors": [],
+        "browser_version": "158.0.8127.38",
+        "passed": true
+      },
+      "server_cleanup": true,
+      "openai_sdk": {
+        "sdk": "openai",
+        "version": "7.65.0",
+        "model": "qwen35-9b-q4k-m",
+        "checks": {
+          "list": true,
+          "json": true,
+          "sse": true,
+          "bad_request": true
+        },
+        "passed": true
+      }
+    },
+    {
+      "source": "d5d339fac52e3de1e2c214bea2721f56fa8d1cb9",
+      "version": "0.1.2",
+      "profile": "rocm-rdna4",
+      "archive_sha256": "73de0946c5c03b943f64db57e4496cbedd9da30f949ac98f9fc0101b360eab1e",
+      "binary_sha256": "a07b3c629010dcb355c89fe20843b287e34a3cf77612ca6826f852590206a234",
+      "model": "qwen38-27b-q4k-m",
+      "context": 16384,
+      "reported_context": 16384,
+      "mtp_capability": true,
+      "healthy": true,
+      "browser": {
+        "profile": "rocm-rdna4",
+        "viewports": [
+          {
+            "mode": "desktop",
+            "viewport": {
+              "width": 1366,
+              "height": 800
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": true,
+            "shift_enter_inserts_line_break": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "stop_and_next_reply": true,
+            "mtp_off_state": {
+              "wire": {
+                "requested": false,
+                "enabled": false,
+                "used": false,
+                "drafted": 0,
+                "accepted": 0,
+                "cycles": 0,
+                "fallback_reason": null
+              },
+              "status": "Last reply: MTP off"
+            },
+            "explicit_mtp_off_reported": true,
+            "mtp_on_state": {
+              "wire": {
+                "requested": true,
+                "enabled": true,
+                "used": true,
+                "drafted": 141,
+                "accepted": 71,
+                "cycles": 47,
+                "fallback_reason": null
+              }
+            },
+            "explicit_mtp_on_confirmed_execution": true,
+            "passed": true
+          },
+          {
+            "mode": "mobile",
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "passed": true
+          }
+        ],
+        "checks": {},
+        "errors": [],
+        "browser_version": "158.0.8127.38",
+        "passed": true
+      },
+      "server_cleanup": true,
+      "openai_sdk": {
+        "sdk": "openai",
+        "version": "7.65.0",
+        "model": "qwen38-27b-q4k-m",
+        "checks": {
+          "list": true,
+          "json": true,
+          "sse": true,
+          "bad_request": true
+        },
+        "json_response": {
+          "type": "object",
+          "content_type": "application/json",
+          "status": 200,
+          "fields": [
+            "id",
+            "created",
+            "model",
+            "object",
+            "choices",
+            "usage",
+            "mtp",
+            "timings"
+          ]
+        },
+        "passed": true
+      }
+    }
+  ],
+  "intel_installer": {
+    "version": "0.1.2",
+    "baseline": "0.1.1",
+    "target": "linux-x86_64-vulkan",
+    "binary_sha256": "0618c6b0ce2747a80f4b1990a3ba8da096b35f9425f453cb319e694d91ef204c",
+    "checks": {
+      "clean_0_1_1_install": true,
+      "upgrade": true,
+      "rollback_to_baseline": true,
+      "reinstall": true,
+      "repair_command_link": true,
+      "repeated_install": true,
+      "reject_corrupt_archive_preserve_active_install": true,
+      "preserve_cache": true
+    },
+    "installer_sha256": "7597025558e01d365a888eeb0431efd2a995de626f71627e9f0093fe32f1830a"
+  },
+  "offline_clients": {
+    "opencode": "2.2.6",
+    "openclaw": "2026.11.1",
+    "opencode_passed": true,
+    "openclaw_passed": true
+  }
+}
