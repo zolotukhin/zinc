@@ -167,5 +167,3189 @@
         "tokenizer_parity": true
       }
     }
-  ]
+  ],
+  "live_clients": {
+    "summary": {
+      "api": {
+        "passed": 536,
+        "total": 538
+      },
+      "coding": {
+        "opencode": {
+          "passed": 54,
+          "total": 54,
+          "starter_passed": 0,
+          "starter_total": 6
+        },
+        "openclaw": {
+          "passed": 53,
+          "total": 54,
+          "starter_passed": 0,
+          "starter_total": 6
+        }
+      }
+    },
+    "profiles": [
+      {
+        "profile": "vulkan-rdna4",
+        "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+        "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+        "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+        "opencode": "2.2.6",
+        "openclaw": "2026.11.1",
+        "slots": 1,
+        "kv": "f16",
+        "mtp": "off",
+        "opencode_steps": 16,
+        "models": [
+          {
+            "model": "qwen3-0.6b-q8-0",
+            "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": false,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 1,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": false,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 11,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": false,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 26,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": false,
+                "checks": null,
+                "seconds": 13.243,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": false,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": false,
+                  "tests": false
+                },
+                "seconds": 27.196,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": false,
+                "checks": null,
+                "seconds": 12.223,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen35-9b-q4k-m",
+            "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 9.051,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 20.845,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 8.291,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen36-27b-q4k-m",
+            "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 12.646,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 60.521,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 12.718,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen36-35b-a3b-q4k-xl",
+            "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 8.027,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 24.128,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 10.005,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen38-27b-q4k-m",
+            "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 15.455,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 61.948,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 13.597,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "gemma4-26b-a4b-q4k-m",
+            "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 10.701,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 28.171,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 8.156,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "gemma4-31b-q4k-m",
+            "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+            "context": 8192,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 26,
+              "total": 26,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 28.546,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 41.123,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 28.617,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          }
+        ]
+      },
+      {
+        "profile": "rocm-rdna4",
+        "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+        "archive_sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+        "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+        "opencode": "2.2.6",
+        "openclaw": "2026.11.1",
+        "slots": 1,
+        "kv": "f16",
+        "mtp": "off",
+        "opencode_steps": 16,
+        "models": [
+          {
+            "model": "qwen35-9b-q4k-m",
+            "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 3,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 6.928,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 17.474,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 6.945,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen36-27b-q4k-m",
+            "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 11.388,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 60.942,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 11.057,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen36-35b-a3b-q4k-xl",
+            "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 6.966,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 23.488,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 6.926,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen38-27b-q4k-m",
+            "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 10.956,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 56.322,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 11.062,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "gemma4-26b-a4b-q4k-m",
+            "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+            "context": 16384,
+            "open_code_max_output_tokens": 4096,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 11,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 6.085,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 18.834,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 6.089,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "gemma4-31b-q4k-m",
+            "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+            "context": 8192,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 26,
+              "total": 26,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 22.494,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 95.698,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 22.596,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          }
+        ]
+      },
+      {
+        "profile": "vulkan-intel-xe2",
+        "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+        "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+        "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+        "opencode": "2.2.6",
+        "openclaw": "2026.11.1",
+        "slots": 1,
+        "kv": "f16",
+        "mtp": "off",
+        "opencode_steps": 16,
+        "models": [
+          {
+            "model": "qwen3-0.6b-q8-0",
+            "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+            "context": 16384,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": false,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 1,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": false,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": false,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 25,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": false,
+                "checks": null,
+                "seconds": 10.217,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": false,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": false,
+                  "tests": false
+                },
+                "seconds": 18.885,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": false,
+                "checks": null,
+                "seconds": 10.052,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen35-9b-q4k-m",
+            "model_sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+            "context": 16384,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 13.117,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 40.845,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 13.113,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen36-27b-q4k-m",
+            "model_sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+            "context": 16384,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 9,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 24.931,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 134.839,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 25.395,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen36-35b-a3b-q4k-xl",
+            "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+            "context": 16384,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 54.551,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": false,
+                "checks": null,
+                "seconds": 305.812,
+                "completed": false
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 54.47,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "qwen38-27b-q4k-m",
+            "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+            "context": 16384,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 27,
+              "total": 27,
+              "complete": true,
+              "failed_checks": []
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 26.675,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 166.516,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 27.318,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "gemma4-26b-a4b-q4k-m",
+            "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+            "context": 16384,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 26,
+              "total": 27,
+              "complete": true,
+              "failed_checks": [
+                "Long prompt above the former 8192-token SSM limit"
+              ]
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 6,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 86.503,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 110.169,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 86.593,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          },
+          {
+            "model": "gemma4-31b-q4k-m",
+            "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+            "context": 12288,
+            "open_code_max_output_tokens": 2048,
+            "api": {
+              "passed": 26,
+              "total": 27,
+              "complete": true,
+              "failed_checks": [
+                "Long prompt above the former 8192-token SSM limit"
+              ]
+            },
+            "initial_answer_contains_expected_place": true,
+            "same_answer_after_clients": true,
+            "opencode": [
+              {
+                "fixture": "rate-limiter-single",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 5,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 3
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "cart-multi-file",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 7,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 1,
+                  "fail": 2
+                },
+                "final_tests": {
+                  "pass": 3,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              },
+              {
+                "fixture": "python-log-cli",
+                "passed": true,
+                "client_exit": 0,
+                "client_timeout": false,
+                "tool_calls": 4,
+                "tool_errors": 0,
+                "baseline_tests": {
+                  "pass": 0,
+                  "fail": 4
+                },
+                "final_tests": {
+                  "pass": 4,
+                  "fail": 0
+                },
+                "protected_violations": 0,
+                "unexpected_files": 0,
+                "trace_repairs": null,
+                "trace_suppressed": null,
+                "shortcut_events": {}
+              }
+            ],
+            "openclaw": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 76.05,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 102.81,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 76.055,
+                "completed": true
+              }
+            ],
+            "health": true,
+            "owned_process_cleanup": true
+          }
+        ]
+      }
+    ],
+    "intel_deadline_retries": {
+      "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+      "version": "0.1.2",
+      "profile": "vulkan-intel-xe2",
+      "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "openclaw_initial_deadline_s": 300,
+      "openclaw_retry_deadline_s": 900,
+      "api_initial_deadline_s": 180,
+      "api_retry_deadline_s": 345,
+      "models": [
+        {
+          "model": "qwen36-35b-a3b-q4k-xl",
+          "model_sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450",
+          "context": 16384,
+          "initial_timed_out_openclaw_tasks": [
+            "workspace"
+          ],
+          "openclaw_exit": 0,
+          "openclaw": {
+            "passed": true,
+            "healthy_after": true,
+            "tasks": [
+              {
+                "name": "text",
+                "passed": true,
+                "checks": null,
+                "seconds": 54.743,
+                "completed": true
+              },
+              {
+                "name": "workspace",
+                "passed": true,
+                "checks": {
+                  "contract.json": true,
+                  "feature.test.mjs": true,
+                  "receipt": true,
+                  "tests": true
+                },
+                "seconds": 301.406,
+                "completed": true
+              },
+              {
+                "name": "recovery",
+                "passed": true,
+                "checks": null,
+                "seconds": 54.918,
+                "completed": true
+              }
+            ]
+          },
+          "healthy_after": true,
+          "initial_answer_expected": true,
+          "same_answer_after": true,
+          "owned_process_cleanup": true
+        },
+        {
+          "model": "gemma4-26b-a4b-q4k-m",
+          "model_sha256": "52de2d7c8efde0a3c99825440e1fb23d6075168978dc6d31f8e6fa5a29f49f4c",
+          "context": 16384,
+          "api": {
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "seconds": 208.67,
+            "prompt_tokens": 9232,
+            "completion_tokens": 2,
+            "passed": true
+          },
+          "healthy_after": true,
+          "initial_answer_expected": true,
+          "same_answer_after": true,
+          "owned_process_cleanup": true
+        },
+        {
+          "model": "gemma4-31b-q4k-m",
+          "model_sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84",
+          "context": 12288,
+          "api": {
+            "name": "Long prompt above the former 8192-token SSM limit",
+            "seconds": 183.089,
+            "prompt_tokens": 9232,
+            "completion_tokens": 1,
+            "passed": true
+          },
+          "healthy_after": true,
+          "initial_answer_expected": true,
+          "same_answer_after": true,
+          "owned_process_cleanup": true
+        }
+      ],
+      "initial_opencode_per_fixture_deadline_s": 900,
+      "initial_opencode_wall_time_s": {
+        "qwen3-0.6b-q8-0": {
+          "rate-limiter-single": 11.212,
+          "cart-multi-file": 14.464,
+          "python-log-cli": 159.866
+        },
+        "qwen35-9b-q4k-m": {
+          "rate-limiter-single": 114.631,
+          "cart-multi-file": 82.675,
+          "python-log-cli": 91.154
+        },
+        "qwen36-27b-q4k-m": {
+          "rate-limiter-single": 487.711,
+          "cart-multi-file": 216.428,
+          "python-log-cli": 168.386
+        },
+        "qwen36-35b-a3b-q4k-xl": {
+          "rate-limiter-single": 348.372,
+          "cart-multi-file": 295.814,
+          "python-log-cli": 323.735
+        },
+        "qwen38-27b-q4k-m": {
+          "rate-limiter-single": 169.988,
+          "cart-multi-file": 154.301,
+          "python-log-cli": 151.808
+        },
+        "gemma4-26b-a4b-q4k-m": {
+          "rate-limiter-single": 872.788,
+          "cart-multi-file": 792.25,
+          "python-log-cli": 799.699
+        },
+        "gemma4-31b-q4k-m": {
+          "rate-limiter-single": 447.068,
+          "cart-multi-file": 379.981,
+          "python-log-cli": 440.541
+        }
+      },
+      "openclaw_initial_timeouts": 1,
+      "openclaw_recovered": 1,
+      "api_initial_timeouts": 2,
+      "api_recovered": 2
+    }
+  },
+  "browser_and_sdk": [
+    {
+      "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+      "version": "0.1.2",
+      "profile": "vulkan-rdna4",
+      "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "model": "qwen35-9b-q4k-m",
+      "context": 16384,
+      "reported_context": 16384,
+      "mtp_capability": null,
+      "healthy": true,
+      "browser": {
+        "profile": "vulkan-rdna4",
+        "viewports": [
+          {
+            "mode": "desktop",
+            "viewport": {
+              "width": 1366,
+              "height": 800
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "shift_enter_inserts_line_break": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "stop_and_next_reply": true,
+            "passed": true
+          },
+          {
+            "mode": "mobile",
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "passed": true
+          }
+        ],
+        "checks": {},
+        "errors": [],
+        "browser_version": "158.0.8127.38",
+        "passed": true
+      },
+      "openai_sdk": {
+        "sdk": "openai",
+        "version": "7.65.0",
+        "model": "qwen35-9b-q4k-m",
+        "checks": {
+          "list": true,
+          "json": true,
+          "default_non_streaming": true,
+          "sse": true,
+          "bad_request": true
+        },
+        "json_response": {
+          "type": "object",
+          "content_type": "application/json",
+          "status": 200,
+          "fields": [
+            "id",
+            "object",
+            "created",
+            "model",
+            "choices",
+            "usage"
+          ]
+        },
+        "passed": true
+      },
+      "cleanup": true
+    },
+    {
+      "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+      "version": "0.1.2",
+      "profile": "rocm-rdna4",
+      "archive_sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+      "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+      "model": "qwen38-27b-q4k-m",
+      "context": 16384,
+      "reported_context": 16384,
+      "mtp_capability": true,
+      "healthy": true,
+      "browser": {
+        "profile": "rocm-rdna4",
+        "viewports": [
+          {
+            "mode": "desktop",
+            "viewport": {
+              "width": 1366,
+              "height": 800
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": true,
+            "shift_enter_inserts_line_break": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "stop_and_next_reply": true,
+            "mtp_off_state": {
+              "wire": {
+                "requested": false,
+                "enabled": false,
+                "used": false,
+                "drafted": 0,
+                "accepted": 0,
+                "cycles": 0,
+                "fallback_reason": null
+              },
+              "status": "Last reply: MTP off"
+            },
+            "explicit_mtp_off_reported": true,
+            "mtp_on_state": {
+              "wire": {
+                "requested": true,
+                "enabled": true,
+                "used": true,
+                "drafted": 141,
+                "accepted": 71,
+                "cycles": 47,
+                "fallback_reason": null
+              }
+            },
+            "explicit_mtp_on_confirmed_execution": true,
+            "passed": true
+          },
+          {
+            "mode": "mobile",
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "passed": true
+          }
+        ],
+        "checks": {},
+        "errors": [],
+        "browser_version": "158.0.8127.38",
+        "passed": true
+      },
+      "openai_sdk": {
+        "sdk": "openai",
+        "version": "7.65.0",
+        "cases": {
+          "explicit_json_and_documented_sse_default": 16,
+          "explicit_sse": 1,
+          "invalid_budget_400": 1
+        },
+        "passed": true,
+        "default_response_type": "text/event-stream"
+      },
+      "cleanup": true
+    },
+    {
+      "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+      "version": "0.1.2",
+      "profile": "vulkan-intel-xe2",
+      "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "model": "qwen35-9b-q4k-m",
+      "context": 16384,
+      "reported_context": 16384,
+      "mtp_capability": null,
+      "healthy": true,
+      "browser": {
+        "profile": "vulkan-intel-xe2",
+        "viewports": [
+          {
+            "mode": "desktop",
+            "viewport": {
+              "width": 1366,
+              "height": 800
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "shift_enter_inserts_line_break": true,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "stop_and_next_reply": true,
+            "passed": true
+          },
+          {
+            "mode": "mobile",
+            "viewport": {
+              "width": 390,
+              "height": 844
+            },
+            "exact_chat_html": true,
+            "connected_selected_model": true,
+            "mtp_control_available": false,
+            "streamed_markdown_and_model_id": true,
+            "composer_fits_viewport": true,
+            "history_survives_reload": true,
+            "passed": true
+          }
+        ],
+        "checks": {},
+        "errors": [],
+        "browser_version": "158.0.8127.38",
+        "passed": true
+      },
+      "openai_sdk": {
+        "sdk": "openai",
+        "version": "7.65.0",
+        "model": "qwen35-9b-q4k-m",
+        "checks": {
+          "list": true,
+          "json": true,
+          "default_non_streaming": true,
+          "sse": true,
+          "bad_request": true
+        },
+        "json_response": {
+          "type": "object",
+          "content_type": "application/json",
+          "status": 200,
+          "fields": [
+            "id",
+            "object",
+            "created",
+            "model",
+            "choices",
+            "usage"
+          ]
+        },
+        "passed": true
+      },
+      "cleanup": true
+    }
+  ],
+  "installer": [
+    {
+      "version": "0.1.2",
+      "baseline": "0.1.1",
+      "target": "linux-x86_64-vulkan",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "checks": {
+        "clean_0_1_1_install": true,
+        "upgrade": true,
+        "rollback_to_baseline": true,
+        "reinstall": true,
+        "repair_command_link": true,
+        "repeated_install": true,
+        "reject_corrupt_archive_preserve_active_install": true,
+        "preserve_cache": true
+      },
+      "installer_sha256": "7597025558e01d365a888eeb0431efd2a995de626f71627e9f0093fe32f1830a",
+      "profile": "vulkan-rdna4"
+    },
+    {
+      "version": "0.1.2",
+      "baseline": "0.1.1",
+      "target": "linux-x86_64-rocm",
+      "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+      "checks": {
+        "clean_0_1_1_install": true,
+        "upgrade": true,
+        "rollback_to_baseline": true,
+        "reinstall": true,
+        "repair_command_link": true,
+        "repeated_install": true,
+        "reject_corrupt_archive_preserve_active_install": true,
+        "preserve_cache": true
+      },
+      "installer_sha256": "7597025558e01d365a888eeb0431efd2a995de626f71627e9f0093fe32f1830a",
+      "profile": "rocm-rdna4"
+    },
+    {
+      "version": "0.1.2",
+      "baseline": "0.1.1",
+      "target": "linux-x86_64-vulkan",
+      "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+      "checks": {
+        "clean_0_1_1_install": true,
+        "upgrade": true,
+        "rollback_to_baseline": true,
+        "reinstall": true,
+        "repair_command_link": true,
+        "repeated_install": true,
+        "reject_corrupt_archive_preserve_active_install": true,
+        "preserve_cache": true
+      },
+      "installer_sha256": "7597025558e01d365a888eeb0431efd2a995de626f71627e9f0093fe32f1830a",
+      "profile": "vulkan-intel-xe2"
+    }
+  ],
+  "macos_preview": {
+    "target": "macos-aarch64-metal",
+    "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+    "preview_version": "0.1.0-dev.46050961524",
+    "archive_sha256": "8448789a8a8c4e1bb5ae5f37cce8f2bb6001dc44a16758b27448c9fb982f8f51",
+    "binary_sha256": "3e847ea6bf17d9d234db1a2726b8e23eb5d577b8df7215b5cb8c60d5ee1a31d4",
+    "workflow": "https://github.com/zolotukhin/zinc/actions/runs/46050961524",
+    "checks": {
+      "cpu_cli_and_assets": true,
+      "clean_install": true,
+      "idempotent_install": true,
+      "command_link_repair": true
+    }
+  },
+  "matched_performance": {
+    "model": "qwen38-27b-q4k-m",
+    "model_sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+    "context": 16384,
+    "mtp": "off",
+    "warmups": 1,
+    "runs": 3,
+    "baseline_version": "0.1.1",
+    "scenarios": [
+      {
+        "profile": "vulkan-rdna4",
+        "case": "core",
+        "matching_output_and_token_counts": true,
+        "baseline": {
+          "version": "0.1.1",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "archive_sha256": "b1367bb8c0296f7d2f68bc6a27345228eedac4929d6892a60986223a1f9a5179",
+          "case": "core",
+          "samples": [
+            {
+              "prompt_tps": 356.5,
+              "decode_tps": 34.13,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "3f6da2f96a96fdb7c01efbe648e47a52d53f7b6afd24f2dd4079eaf5b41f4c59",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 361.12,
+              "decode_tps": 34.07,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "3f6da2f96a96fdb7c01efbe648e47a52d53f7b6afd24f2dd4079eaf5b41f4c59",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 361.74,
+              "decode_tps": 34.05,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "3f6da2f96a96fdb7c01efbe648e47a52d53f7b6afd24f2dd4079eaf5b41f4c59",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 361.12,
+          "decode_median": 34.07
+        },
+        "candidate": {
+          "version": "0.1.2",
+          "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+          "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+          "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+          "case": "core",
+          "samples": [
+            {
+              "prompt_tps": 362.7,
+              "decode_tps": 34.15,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "3f6da2f96a96fdb7c01efbe648e47a52d53f7b6afd24f2dd4079eaf5b41f4c59",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 362.83,
+              "decode_tps": 34.11,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "3f6da2f96a96fdb7c01efbe648e47a52d53f7b6afd24f2dd4079eaf5b41f4c59",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 362.04,
+              "decode_tps": 34.13,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "3f6da2f96a96fdb7c01efbe648e47a52d53f7b6afd24f2dd4079eaf5b41f4c59",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 362.7,
+          "decode_median": 34.13
+        }
+      },
+      {
+        "profile": "vulkan-rdna4",
+        "case": "context-long",
+        "matching_output_and_token_counts": true,
+        "baseline": {
+          "version": "0.1.1",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "archive_sha256": "b1367bb8c0296f7d2f68bc6a27345228eedac4929d6892a60986223a1f9a5179",
+          "case": "context-long",
+          "samples": [
+            {
+              "prompt_tps": 499.46,
+              "decode_tps": 33.84,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "b47a84997544c9de58124868f3ee1079015a5bb29e46dbe864050b4212cd7a1a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 498.13,
+              "decode_tps": 33.8,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "b47a84997544c9de58124868f3ee1079015a5bb29e46dbe864050b4212cd7a1a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 498.25,
+              "decode_tps": 33.82,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "b47a84997544c9de58124868f3ee1079015a5bb29e46dbe864050b4212cd7a1a",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 498.25,
+          "decode_median": 33.82
+        },
+        "candidate": {
+          "version": "0.1.2",
+          "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+          "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+          "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+          "case": "context-long",
+          "samples": [
+            {
+              "prompt_tps": 501.15,
+              "decode_tps": 33.87,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "b47a84997544c9de58124868f3ee1079015a5bb29e46dbe864050b4212cd7a1a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 500.11,
+              "decode_tps": 33.82,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "b47a84997544c9de58124868f3ee1079015a5bb29e46dbe864050b4212cd7a1a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 499.79,
+              "decode_tps": 33.84,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "b47a84997544c9de58124868f3ee1079015a5bb29e46dbe864050b4212cd7a1a",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 500.11,
+          "decode_median": 33.84
+        }
+      },
+      {
+        "profile": "vulkan-rdna4",
+        "case": "decode-extended",
+        "matching_output_and_token_counts": true,
+        "baseline": {
+          "version": "0.1.1",
+          "binary_sha256": "a6942d6ea238b94494577996f7407b11af7660a1e9e6035b38da51eb75ea2fcb",
+          "archive_sha256": "b1367bb8c0296f7d2f68bc6a27345228eedac4929d6892a60986223a1f9a5179",
+          "case": "decode-extended",
+          "samples": [
+            {
+              "prompt_tps": 306.71,
+              "decode_tps": 33.78,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "b1453aaeaea5009797de95a989645e2d8fac07b8b377c75c469ac605476fe600",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 306.52,
+              "decode_tps": 33.75,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "b1453aaeaea5009797de95a989645e2d8fac07b8b377c75c469ac605476fe600",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 306.11,
+              "decode_tps": 33.78,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "b1453aaeaea5009797de95a989645e2d8fac07b8b377c75c469ac605476fe600",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 306.52,
+          "decode_median": 33.78
+        },
+        "candidate": {
+          "version": "0.1.2",
+          "binary_sha256": "31273b6fb84abe4a6d11757135c946858de216b492d42acf8457d17ddd3dbfda",
+          "archive_sha256": "cbae80dcf503a3d77c5ca9b281fce9431c60cc0367753d3199539a005b99d129",
+          "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+          "case": "decode-extended",
+          "samples": [
+            {
+              "prompt_tps": 307.12,
+              "decode_tps": 33.8,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "b1453aaeaea5009797de95a989645e2d8fac07b8b377c75c469ac605476fe600",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 306.83,
+              "decode_tps": 33.77,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "b1453aaeaea5009797de95a989645e2d8fac07b8b377c75c469ac605476fe600",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 307.24,
+              "decode_tps": 33.8,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "b1453aaeaea5009797de95a989645e2d8fac07b8b377c75c469ac605476fe600",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 307.12,
+          "decode_median": 33.8
+        }
+      },
+      {
+        "profile": "rocm-rdna4",
+        "case": "core",
+        "matching_output_and_token_counts": true,
+        "baseline": {
+          "version": "0.1.1",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "archive_sha256": "fd5a70764fbd92396b8c23cfb8e2772c99bbedb54478aeebd17dd6232b16e97f",
+          "case": "core",
+          "samples": [
+            {
+              "prompt_tps": 566.44,
+              "decode_tps": 33.04,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "58ac98d90a819c168b974175a0ea688323c8d828badcbd697ca206bead859e7a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 567.74,
+              "decode_tps": 33.02,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "58ac98d90a819c168b974175a0ea688323c8d828badcbd697ca206bead859e7a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 565.51,
+              "decode_tps": 33.01,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "58ac98d90a819c168b974175a0ea688323c8d828badcbd697ca206bead859e7a",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 566.44,
+          "decode_median": 33.02
+        },
+        "candidate": {
+          "version": "0.1.2",
+          "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+          "archive_sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+          "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+          "case": "core",
+          "samples": [
+            {
+              "prompt_tps": 567.76,
+              "decode_tps": 33.07,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "58ac98d90a819c168b974175a0ea688323c8d828badcbd697ca206bead859e7a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 569.43,
+              "decode_tps": 33.06,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "58ac98d90a819c168b974175a0ea688323c8d828badcbd697ca206bead859e7a",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 567.53,
+              "decode_tps": 33.06,
+              "context_tokens": 58,
+              "prefilled_tokens": 58,
+              "decode_tokens": 96,
+              "output_sha256": "58ac98d90a819c168b974175a0ea688323c8d828badcbd697ca206bead859e7a",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 567.76,
+          "decode_median": 33.06
+        }
+      },
+      {
+        "profile": "rocm-rdna4",
+        "case": "context-long",
+        "matching_output_and_token_counts": true,
+        "baseline": {
+          "version": "0.1.1",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "archive_sha256": "fd5a70764fbd92396b8c23cfb8e2772c99bbedb54478aeebd17dd6232b16e97f",
+          "case": "context-long",
+          "samples": [
+            {
+              "prompt_tps": 858.34,
+              "decode_tps": 32.64,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "c0f537c9bca943c1a9dd2f1e3c92419f044dd72b2be1b9bafed2e1aac4e8e5a6",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 857.42,
+              "decode_tps": 32.63,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "c0f537c9bca943c1a9dd2f1e3c92419f044dd72b2be1b9bafed2e1aac4e8e5a6",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 855.73,
+              "decode_tps": 32.63,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "c0f537c9bca943c1a9dd2f1e3c92419f044dd72b2be1b9bafed2e1aac4e8e5a6",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 857.42,
+          "decode_median": 32.63
+        },
+        "candidate": {
+          "version": "0.1.2",
+          "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+          "archive_sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+          "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+          "case": "context-long",
+          "samples": [
+            {
+              "prompt_tps": 861.17,
+              "decode_tps": 32.68,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "c0f537c9bca943c1a9dd2f1e3c92419f044dd72b2be1b9bafed2e1aac4e8e5a6",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 858.2,
+              "decode_tps": 32.66,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "c0f537c9bca943c1a9dd2f1e3c92419f044dd72b2be1b9bafed2e1aac4e8e5a6",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 857.35,
+              "decode_tps": 32.66,
+              "context_tokens": 349,
+              "prefilled_tokens": 349,
+              "decode_tokens": 128,
+              "output_sha256": "c0f537c9bca943c1a9dd2f1e3c92419f044dd72b2be1b9bafed2e1aac4e8e5a6",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 858.2,
+          "decode_median": 32.66
+        }
+      },
+      {
+        "profile": "rocm-rdna4",
+        "case": "decode-extended",
+        "matching_output_and_token_counts": true,
+        "baseline": {
+          "version": "0.1.1",
+          "binary_sha256": "766de17bbd8a6b0ef2c78012f2f1e0ad4751b4c7f34f67cd0b0724f2b70c7de3",
+          "archive_sha256": "fd5a70764fbd92396b8c23cfb8e2772c99bbedb54478aeebd17dd6232b16e97f",
+          "case": "decode-extended",
+          "samples": [
+            {
+              "prompt_tps": 617.95,
+              "decode_tps": 32.66,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "2aa95f90cc22d1249e27bc4c80d8609476dfff10e51894d21d52355de3e7798b",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 619.5,
+              "decode_tps": 32.62,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "2aa95f90cc22d1249e27bc4c80d8609476dfff10e51894d21d52355de3e7798b",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 617.69,
+              "decode_tps": 32.65,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "2aa95f90cc22d1249e27bc4c80d8609476dfff10e51894d21d52355de3e7798b",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 617.95,
+          "decode_median": 32.65
+        },
+        "candidate": {
+          "version": "0.1.2",
+          "binary_sha256": "74d6be42b8572883530f8d68a7c5caa77bd717550dcad674754fabea783f691a",
+          "archive_sha256": "4ba14d4b22377b13961ee7b213b6cd5321e1a2ae15a0f7f8db5af2bf338eb9c8",
+          "source": "690cc52672d3201cd209e1ed424e81101bbfd3d3",
+          "case": "decode-extended",
+          "samples": [
+            {
+              "prompt_tps": 615.37,
+              "decode_tps": 32.68,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "2aa95f90cc22d1249e27bc4c80d8609476dfff10e51894d21d52355de3e7798b",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 614.51,
+              "decode_tps": 32.71,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "2aa95f90cc22d1249e27bc4c80d8609476dfff10e51894d21d52355de3e7798b",
+              "nonempty": true
+            },
+            {
+              "prompt_tps": 615.87,
+              "decode_tps": 32.72,
+              "context_tokens": 80,
+              "prefilled_tokens": 80,
+              "decode_tokens": 256,
+              "output_sha256": "2aa95f90cc22d1249e27bc4c80d8609476dfff10e51894d21d52355de3e7798b",
+              "nonempty": true
+            }
+          ],
+          "prefill_median": 615.37,
+          "decode_median": 32.71
+        }
+      }
+    ]
+  }
 }
