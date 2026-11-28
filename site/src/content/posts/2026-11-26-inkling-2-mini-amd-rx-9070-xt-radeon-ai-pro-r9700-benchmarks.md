@@ -23,7 +23,7 @@ keywords:
   - Inkling 2 Mini Vulkan ROCm
   - Inkling 2 Mini llama.cpp
   - Inkling 2 Mini DSpark AMD
-excerpt: "Inkling 2 Mini runs on the 16 GB RX 9070 XT and 32 GB Radeon AI PRO R9700. See the same-checkpoint ROCm and Vulkan results against llama.cpp and what a verified DSpark prototype changed."
+excerpt: "Inkling 2 Mini runs on the 16 GB RX 9070 XT and 32 GB Radeon AI PRO R9700. See the same-checkpoint results against llama.cpp ROCm and Vulkan and what a verified DSpark prototype changed."
 seoDescription: "Inkling 2 Mini Q4_0 benchmarks on AMD RX 9070 XT and Radeon AI PRO R9700, with ZINC ROCm, Vulkan, llama.cpp, VRAM and DSpark results."
 faqs:
   - question: "Can an AMD Radeon RX 9070 XT run Inkling 2 Mini?"
@@ -36,7 +36,7 @@ faqs:
 
 Inkling 2 Mini has 24 stored layers, but it visits 48 layers to generate each token. The middle 12 layers run three times. That means the 16 GB Radeon RX 9070 XT can hold the Q4_0 checkpoint while the GPU still does substantially more work than a single pass through the weights. Getting the model to fit was the easy part. Getting those repeated visits to keep their own history was where the port got interesting.
 
-Across four single-sequence workloads, ZINC ROCm decoded at **59.7–62.4 tok/s** on the RX 9070 XT and **63.8–66.9 tok/s** on the Radeon AI PRO R9700. It led llama.cpp v1.1.0 on both prefill and decode in all eight comparisons. ZINC Vulkan ran at **33.7–35.9 tok/s** and **34.7–36.0 tok/s** respectively. The experimental DSpark verifier reached **142.1 tok/s** on the RX 9070 XT and **143.5 tok/s** on the R9700 on the Coding Review workload.
+Across four single-sequence workloads, ZINC ROCm decoded at **59.7–62.4 tok/s** on the RX 9070 XT and **63.8–66.9 tok/s** on the Radeon AI PRO R9700. Against the llama.cpp v1.1.0 Vulkan build, ZINC ROCm led both prefill and decode in all eight comparisons. ZINC Vulkan ran at **33.7–35.9 tok/s** and **34.7–36.0 tok/s** respectively. The experimental DSpark verifier reached **142.1 tok/s** on the RX 9070 XT and **143.5 tok/s** on the R9700 on the Coding Review workload.
 
 ## Why Inkling 2 Mini is interesting locally
 
@@ -75,6 +75,27 @@ Each cell shows **prefill / decode** in tokens per second. Prefill processes the
 Quick Chat makes the difference between prefill and decode easy to see. On the RX 9070 XT, ZINC ROCm processed the 53-token prompt at 698.8 tok/s and decoded at 62.4 tok/s. The baseline managed 153.0 and 50.9 tok/s respectively. Median request latency went from 2.39 s to 1.79 s. On the R9700, the largest prompt in the speed matrix was already processed at 713.7 tok/s by llama.cpp, so ZINC's 742.5 tok/s gave it a much smaller prefill lead. Decode still came in at 63.8 against 46.0 tok/s.
 
 On ROCm, ZINC packs the activations for the Q4_0 projections and groups expert routes during prefill, giving the matrix hardware multiple tokens to work on for a given expert. The Vulkan path also uses packed activations when integer dot products are available and replays the recorded single-token commands. ZINC Vulkan led prefill in four of eight comparisons. llama.cpp decoded faster in all eight. ROCm delivered the highest sustained generation rate on both cards.
+
+## ROCm against ROCm
+
+The first matrix used a common Vulkan reference. For this follow-up, both
+engines used ROCm on the same card, with llama.cpp built from the v1.1.0
+release tag for `gfx1201`. The RX 9070 XT used ROCm 7.2.1 and the R9700 used
+7.2.4. Both servers used the same Q4_0 weights, one slot, a 4,096-token
+context and the same four chat workloads. Drafting was disabled. Each
+cell reports the median of three measured requests after one warmup.
+[Measurements and build hashes](/blog/inkling-2-mini-amd/benchmark-results.json)
+
+| GPU | Workload | ZINC ROCm prefill / decode | llama.cpp ROCm prefill / decode | ZINC decode lead |
+| --- | --- | ---: | ---: | ---: |
+| RX 9070 XT | Quick Chat | 606.3 / 61.3 | 13.6 / 33.9 | +80.7% |
+| RX 9070 XT | Coding Review | 704.1 / 58.5 | 54.1 / 34.6 | +69.2% |
+| RX 9070 XT | Incident Context | 718.9 / 58.6 | 87.1 / 35.0 | +67.6% |
+| RX 9070 XT | Long Coding Draft | 526.8 / 59.0 | 19.3 / 34.5 | +70.9% |
+| R9700 | Quick Chat | 711.4 / 67.1 | 30.5 / 40.5 | +65.7% |
+| R9700 | Coding Review | 742.4 / 64.1 | 119.6 / 41.2 | +55.5% |
+| R9700 | Incident Context | 746.2 / 64.0 | 226.0 / 41.5 | +54.3% |
+| R9700 | Long Coding Draft | 585.0 / 64.4 | 50.5 / 41.2 | +56.4% |
 
 ## DSpark reached 143.5 tok/s with the same target weights
 
