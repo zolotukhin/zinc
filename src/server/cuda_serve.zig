@@ -89,7 +89,11 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => |g| try g.allocSlotKv(nslots, slot_ctx),
             .qwen => |q| try q.allocSlotState(nslots, slot_ctx),
-            .inkling => |model| if (comptime is_rocm) try model.validateServeSlots(nslots, slot_ctx) else unreachable,
+            .inkling => |model| {
+                if (comptime !is_rocm) unreachable;
+                // Inkling's forward pass already owns one fixed-size sequence.
+                if (nslots != 1 or slot_ctx != model.max_ctx) return error.InvalidParallelism;
+            },
         }
     }
     fn freeSlots(self: Forward) void {
