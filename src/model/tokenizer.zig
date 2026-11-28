@@ -141,6 +141,7 @@ pub const Tokenizer = struct {
         /// gpt2_ascii in newline-absorbing punctuation runs, 3-digit caps,
         /// symbol-prefixed words, suffix contractions, and case splitting.
         llama4,
+        inkling2,
         /// Reference `qwen35` pretokenizer regex (Qwen 3.5/3.6/3.8): symbol-
         /// prefixed letter-or-mark runs, single digits, newline-absorbing
         /// symbol runs, grouped newline whitespace, Unicode classes.
@@ -302,6 +303,8 @@ pub const Tokenizer = struct {
         if (chat_template) |tmpl| log.debug("Chat template: {d} chars", .{tmpl.len});
         const pretokenizer: Pretokenizer = if (std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, pre_name, "gemma4"))
             .gemma4_bpe
+        else if (std.mem.eql(u8, pre_name, "inkling2"))
+            .inkling2
         else if ((std.mem.eql(u8, pre_name, "llama4") or std.mem.eql(u8, pre_name, "gpt-4o")) and merges_list.items.len > 0)
             .llama4
         else if (scores == null and merges_list.items.len > 0 and isQwen35LikeName(pre_name))
@@ -468,6 +471,11 @@ pub const Tokenizer = struct {
                 @memcpy(copy, unicode_char[0..len]);
                 symbols.appendAssumeCapacity(copy);
             }
+        }
+
+        if (self.pretokenizer == .inkling2) {
+            if (self.token_to_id.get(initial_bytes[0..initial_end])) |id|
+                return self.allocator.dupe(u32, &.{id});
         }
 
         // Gemma4 is BPE over raw UTF-8 with spaces normalized to ▁ (the GGUF
@@ -882,7 +890,7 @@ pub const Tokenizer = struct {
         var pos: usize = 0;
         while (pos < text.len) {
             const chunk = switch (self.pretokenizer) {
-                .llama4 => nextLlama4PretokenChunk(text, &pos),
+                .llama4, .inkling2 => nextLlama4PretokenChunk(text, &pos),
                 .qwen35 => nextQwenPretokenChunk(text, &pos, true),
                 .qwen2 => nextQwenPretokenChunk(text, &pos, false),
                 else => nextGpt2PretokenChunk(text, &pos),
@@ -1540,6 +1548,7 @@ pub const Tokenizer = struct {
 
     /// Return whether the model's chat template supports an explicit thinking toggle.
     pub fn supportsThinkingToggle(self: *const Tokenizer) bool {
+        if (self.detectTemplateKind() == .inkling2) return true;
         return if (self.chat_template) |tmpl|
             std.mem.indexOf(u8, tmpl, "enable_thinking") != null and
                 (std.mem.indexOf(u8, tmpl, "<think>") != null or
@@ -1556,6 +1565,11 @@ pub const Tokenizer = struct {
     /// @returns A slice of `buf` containing the rendered prompt.
     pub fn applyChatTemplate(self: *const Tokenizer, roles: []const []const u8, contents: []const []const u8, buf: []u8) ![]const u8 {
         return self.applyChatTemplateWithOptions(roles, contents, .{}, buf);
+    }
+
+    fn appendInklingEffort(buf: []u8, effort: []const u8) !usize {
+        const rendered = std.fmt.bufPrint(buf, "<|message_system|><|content_text|>Thinking effort level: {s}<|end_message|>", .{effort}) catch return error.BufferTooSmall;
+        return rendered.len;
     }
 
     /// Format a conversation into a model prompt with fine-grained rendering control.
@@ -1863,6 +1877,32 @@ pub const Tokenizer = struct {
                     pos += suffix.len;
                 }
             },
+            .inkling2 => {
+                var effort_emitted = false;
+                const effort = if (options.enable_thinking orelse true) "0.9" else "0";
+                for (0..n) |i| {
+                    const role = roles[i];
+                    const system = std.mem.eql(u8, role, "system") or std.mem.eql(u8, role, "developer");
+                    if (!system and !effort_emitted) {
+                        pos += try appendInklingEffort(buf[pos..], effort);
+                        effort_emitted = true;
+                    }
+                    const speaker: []const u8 = if (system)
+                        "system"
+                    else if (std.mem.eql(u8, role, "user"))
+                        "user"
+                    else if (std.mem.eql(u8, role, "assistant"))
+                        "model"
+                    else if (std.mem.eql(u8, role, "tool"))
+                        "tool"
+                    else
+                        return error.InvalidChatRole;
+                    const end = if (std.mem.eql(u8, speaker, "model")) "<|content_model_end_sampling|>" else "";
+                    const line = std.fmt.bufPrint(buf[pos..], "<|message_{s}|><|content_text|>{s}<|end_message|>{s}", .{ speaker, contents[i], end }) catch return error.BufferTooSmall;
+                    pos += line.len;
+                }
+                if (!effort_emitted) pos += try appendInklingEffort(buf[pos..], effort);
+            },
             .generic => {
                 for (0..n) |i| {
                     const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
@@ -1875,7 +1915,7 @@ pub const Tokenizer = struct {
 
     /// Enumeration of recognized chat-template families used for prompt formatting.
     /// `generic` is the fallback for templates that do not match any known pattern.
-    pub const TemplateKind = enum { chatml, llama3, gemma, openai_moe, atem, generic };
+    pub const TemplateKind = enum { chatml, llama3, gemma, openai_moe, atem, inkling2, generic };
 
     /// Return the detected chat template kind as a human-readable string (e.g. "chatml", "openai_moe").
     pub fn detectTemplateKindName(self: *const Tokenizer) []const u8 {
@@ -1888,6 +1928,8 @@ pub const Tokenizer = struct {
     /// embedded (the safest default for most Qwen-family GGUFs).
     pub fn detectTemplateKind(self: *const Tokenizer) TemplateKind {
         const tmpl = self.chat_template orelse return .chatml;
+        if (std.mem.indexOf(u8, tmpl, "<|content_model_end_sampling|>") != null and
+            std.mem.indexOf(u8, tmpl, "<|message_model|>") != null) return .inkling2;
         if (std.mem.indexOf(u8, tmpl, "im_start") != null) return .chatml;
         if (std.mem.indexOf(u8, tmpl, "start_header_id") != null) return .llama3;
         if (std.mem.indexOf(u8, tmpl, "start_of_turn") != null or
@@ -2430,6 +2472,33 @@ test "applyChatTemplate with im_start template uses ChatML" {
     try std.testing.expect(std.mem.indexOf(u8, result, "system") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "You help.") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "Hi") != null);
+}
+
+test "Inkling renders the effort after system messages and before the user" {
+    const tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = undefined,
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 200006,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+        .chat_template = "<|message_model|><|content_model_end_sampling|>",
+    };
+    var buf: [512]u8 = undefined;
+    const text = try tok.applyChatTemplateWithOptions(
+        &.{ "system", "user" },
+        &.{ "Be precise.", "Hi" },
+        .{ .enable_thinking = false },
+        &buf,
+    );
+    try std.testing.expectEqualStrings(
+        "<|message_system|><|content_text|>Be precise.<|end_message|>" ++
+            "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|>" ++
+            "<|message_user|><|content_text|>Hi<|end_message|>",
+        text,
+    );
 }
 
 test "applyChatTemplate openai_moe defaults generation to final channel" {

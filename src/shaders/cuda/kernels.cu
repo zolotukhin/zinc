@@ -5959,7 +5959,9 @@ extern "C" __global__ void dmmv_q4k_btok27(const unsigned* a_u32, const float* x
 // small B. Same per-element Q6_K dequant as dmmv_q6k_fast; per-token local sum
 // then sum[t] += s (the proven dmmv_q4k_btok reduction pattern) → token-identical
 // to dmmv_q6k_fast on x[t]. x token-major [B,K], y token-major [B,M].
-template<int B>
+// Inkling verification carries each lane's running sum across blocks to
+// match the single-token output head's accumulation order.
+template<int B, bool scalar_order = false>
 __device__ __forceinline__ void dmmv_q6k_btok_impl(const unsigned char* a, const float* x, float* y, DmmvPush pc) {
     unsigned row = blockIdx.x;
     if (row >= pc.M) return;
@@ -5994,11 +5996,12 @@ __device__ __forceinline__ void dmmv_q6k_btok_impl(const unsigned char* a, const
         for (int t = 0; t < B; t++) {
             const float4* xv = (const float4*)(x + (unsigned)t * pc.K + xo);
             float4 bx0 = xv[xb], bx32 = xv[xb + 8u], bx64 = xv[xb + 16u], bx96 = xv[xb + 24u];
-            float s = 0.0f;
+            float s = scalar_order ? sum[t] : 0.0f;
             #pragma unroll
             for (unsigned li = 0; li < 4u; li++)
                 s += ds0 * q1[li] * (&bx0.x)[li] + ds2 * q2[li] * (&bx32.x)[li] + ds4 * q3[li] * (&bx64.x)[li] + ds6 * q4[li] * (&bx96.x)[li];
-            sum[t] += s;
+            if constexpr (scalar_order) sum[t] = s;
+            else sum[t] += s;
         }
     }
     #pragma unroll
@@ -10618,6 +10621,7 @@ extern "C" __global__ void muse_norm_qkv_batched(
 {
     unsigned bx = blockIdx.x;
     unsigned t = blockIdx.y;
+    unsigned position = pc.base_position + t;
     unsigned hd = pc.head_dim;
     unsigned q_dim = pc.n_head * hd;
     unsigned kv_dim = pc.n_kv_head * hd;
@@ -10634,12 +10638,12 @@ extern "C" __global__ void muse_norm_qkv_batched(
     } else if (bx < pc.n_head + pc.n_kv_head) {
         unsigned head = bx - pc.n_head;
         xt = k_in + (size_t)t * kv_dim + (size_t)head * hd;
-        yt = k_out + (size_t)t * kv_dim + (size_t)head * hd;
+        yt = k_out + (size_t)position * kv_dim + (size_t)head * hd;
         w = wk;
     } else {
         unsigned head = bx - pc.n_head - pc.n_kv_head;
         xt = v_in + (size_t)t * kv_dim + (size_t)head * hd;
-        yt = v_out + (size_t)t * kv_dim + (size_t)head * hd;
+        yt = v_out + (size_t)position * kv_dim + (size_t)head * hd;
         for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) yt[i] = xt[i];
         return;
     }
@@ -10662,7 +10666,6 @@ extern "C" __global__ void muse_norm_qkv_batched(
         for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) yt[i] = sh[i];
         return;
     }
-    unsigned position = pc.base_position + t;
     unsigned pairs = pc.rope_dim >> 1;
     for (unsigned i = threadIdx.x; i < pairs; i += blockDim.x) {
         unsigned i0 = i << 1;
@@ -11046,15 +11049,15 @@ extern "C" __global__ void gemma_attention_gqa2(
 // KV cache [T, n_kv_heads, head_dim] (positions 0..T-1, written per token). out is
 // token-major [T, n_heads, head_dim]. No sink (gemma). Math/reduction order are
 // byte-for-byte identical to gemma_attention with seq_len=t+1 → bit-identical out.
-struct GemmaAttnBatchPush { unsigned head_dim, n_heads, n_kv_heads, T, scale_bits, window; };
+struct GemmaAttnBatchPush { unsigned head_dim, n_heads, n_kv_heads, T, scale_bits, window, base_position; };
 extern "C" __global__ void gemma_attention_batched(const float* q, const float* k, const float* v,
                                                    float* out, GemmaAttnBatchPush pc) {
-    extern __shared__ float s_scores[];           // size = T floats (max causal length)
+    extern __shared__ float s_scores[];           // size = base_position + T floats
     __shared__ float s_m, s_inv;
     unsigned head = blockIdx.x;
     unsigned t = blockIdx.y;                       // query position
     if (t >= pc.T) return;
-    unsigned seq_len = t + 1u;                     // causal: query t attends keys [0..t]
+    unsigned seq_len = pc.base_position + t + 1u;
     unsigned tid = threadIdx.x;
     unsigned hd = pc.head_dim;
     unsigned kv_head = head / (pc.n_heads / pc.n_kv_heads);
@@ -11113,13 +11116,13 @@ extern "C" __global__ void gemma_attention_batched(const float* q, const float* 
 extern "C" __global__ void gemma_attention_batched_v2(const float* q, const float* k, const float* v,
                                                       float* out, GemmaAttnBatchPush pc) {
     extern __shared__ float smem[];
-    float* s_scores = smem;               // [T]
-    float* qsh = smem + pc.T;             // [head_dim]
+    float* s_scores = smem;
+    float* qsh = smem + pc.base_position + pc.T;   // [head_dim]
     __shared__ float s_m, s_inv;
     unsigned head = blockIdx.x;
     unsigned t = blockIdx.y;
     if (t >= pc.T) return;
-    unsigned seq_len = t + 1u;
+    unsigned seq_len = pc.base_position + t + 1u;
     unsigned tid = threadIdx.x, hd = pc.head_dim, nthr = blockDim.x;
     unsigned kv_head = head / (pc.n_heads / pc.n_kv_heads);
     const float* qh = q + ((size_t)t * pc.n_heads + head) * hd;

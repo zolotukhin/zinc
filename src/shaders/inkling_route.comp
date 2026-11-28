@@ -1,0 +1,92 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Logits { float logits[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Bias { float bias[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer IDs { uint ids[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Weights { float weights[]; };
+layout(push_constant) uniform Params {
+    uint experts;
+    uint used;
+    uint biased;
+    float scale;
+} p;
+
+#include "inkling_lanes.glsl"
+
+shared float probabilities[256];
+shared float scores[256];
+
+float probability(uint start, uint expert) {
+    return 1.0 / (1.0 + exp(-logits[start + expert]));
+}
+
+void main() {
+    bool shuffle_experts = can_shuffle(32u);
+    uint lane = shuffle_experts ? shuffle_lane() : gl_LocalInvocationID.x;
+    uint start = gl_WorkGroupID.x * p.experts;
+    uint dst = gl_WorkGroupID.x * p.used;
+    const float negative_inf = uintBitsToFloat(0xff800000u);
+    float selected[16];
+    float total = 1e-20;
+
+    if (shuffle_experts) {
+        if (lane >= 32u) return;
+        float probs[8], rank[8];
+        uint rounds = (p.experts + 31u) / 32u;
+        for (uint j = 0u; j < rounds; ++j) {
+            uint e = 32u * j + lane;
+            probs[j] = e < p.experts ? probability(start, e) : 0.0;
+            rank[j] = e < p.experts ? probs[j] + (p.biased != 0u ? bias[e] : 0.0) : negative_inf;
+        }
+        for (uint k = 0u; k < p.used; ++k) {
+            uint id = lane;
+            float best = rank[0];
+            for (uint j = 1u; j < rounds; ++j) {
+                if (rank[j] > best) {
+                    best = rank[j];
+                    id = 32u * j + lane;
+                }
+            }
+            for (uint delta = 16u; delta != 0u; delta >>= 1u) {
+                float score = subgroupShuffleXor(best, delta);
+                uint other = subgroupShuffleXor(id, delta);
+                if (score > best || (score == best && other < id)) {
+                    best = score;
+                    id = other;
+                }
+            }
+            float prob = subgroupShuffle(probs[id / 32u], id & 31u);
+            if ((id & 31u) == lane) rank[id / 32u] = negative_inf;
+            if (lane == 0u) {
+                ids[dst + k] = id;
+                selected[k] = prob;
+                total += prob;
+            }
+        }
+    } else {
+        for (uint e = lane; e < p.experts; e += 64u) {
+            probabilities[e] = probability(start, e);
+            scores[e] = probabilities[e] + (p.biased != 0u ? bias[e] : 0.0);
+        }
+        barrier();
+        if (lane != 0u) return;
+        for (uint k = 0u; k < p.used; ++k) {
+            uint id = 0u;
+            for (uint e = 1u; e < p.experts; ++e) {
+                if (scores[e] > scores[id]) id = e;
+            }
+            ids[dst + k] = id;
+            selected[k] = probabilities[id];
+            total += probabilities[id];
+            scores[id] = negative_inf;
+        }
+    }
+    if (lane == 0u) {
+        float factor = (p.scale != 0.0 ? p.scale : 1.0) / total;
+        for (uint k = 0u; k < p.used; ++k) weights[dst + k] = selected[k] * factor;
+    }
+}

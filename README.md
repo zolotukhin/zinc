@@ -12,7 +12,7 @@ and the Metal preview also include browser chat.
 [![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Try Inkling 2 Mini](#inkling-2-mini-development-build) ·
+[Try Inkling 2 Mini](#inkling-2-mini-on-amd-rdna4) ·
 [Install stable ZINC](https://zolotukhin.ai/zinc/docs/getting-started/) ·
 [Documentation](https://zolotukhin.ai/zinc/docs/) ·
 [Benchmarks](https://zolotukhin.ai/zinc/benchmarks/) ·
@@ -20,20 +20,20 @@ and the Metal preview also include browser chat.
 
 ## Use it your way
 
-### Inkling 2 Mini development build
+### Inkling 2 Mini on AMD RDNA4
 
 Start with **Inkling 2 Mini Q4_0** on the Radeon RX 9070 XT or Radeon AI PRO
 R9700. Both cards were tested at 4,096 tokens on ROCm and Vulkan. ROCm had
 higher decode throughput on both cards. [AMD benchmarks and setup](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
 
-On Linux, use Zig 0.15.2 and the ROCm development libraries. Build the pinned
-checkout and pull Inkling from the managed catalog.
+Build the current source on Linux with the ROCm development libraries, then
+pull Inkling from the managed catalog. The build wrapper uses the pinned Zig
+0.17.1 toolchain.
 
 ```bash
-git clone --branch fix/qwen-smoke-token-anchor https://github.com/zolotukhin/zinc.git zinc-inkling
-cd zinc-inkling
-git checkout --detach 88360b9fda3c23cd32b799c36dfe347b0d36ac67
-ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
+git clone https://github.com/zolotukhin/zinc.git
+cd zinc
+ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
 ./zig-out/bin/zinc model pull inkling-2-mini-q4-0
 ```
 
@@ -52,6 +52,8 @@ ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
 
 **An existing app** can connect to `http://127.0.0.1:9090/v1` while the chat
 server is running. [API guide](https://zolotukhin.ai/zinc/docs/api/).
+
+[Vulkan and optional ROCm DSpark setup](docs/RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4).
 
 ## Install stable Linux
 

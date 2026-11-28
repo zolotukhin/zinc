@@ -226,11 +226,17 @@ CudaBuf* cuda_create_buffer_staged(CudaCtx* ctx, size_t size, void** cpu_ptr) {
 CudaBuf* cuda_upload_mmap(CudaCtx* ctx, const void* host_ptr, size_t size) {
     CudaBuf* buf = cuda_create_buffer(ctx, size);
     if (!buf) return NULL;
-    if (!hip_ok(hipMemcpy(buf->dptr, host_ptr, size, hipMemcpyHostToDevice), "hipMemcpy(mmap)")) {
+    if (!cuda_copy_mmap(ctx, buf, host_ptr, size)) {
         cuda_free_buffer(buf);
         return NULL;
     }
     return buf;
+}
+
+int cuda_copy_mmap(CudaCtx* ctx, CudaBuf* buf, const void* host_ptr, size_t size) {
+    if (!ctx || !buf || size > buf->size) return 0;
+    if (!hip_ok(hipSetDevice(ctx->device), "hipSetDevice")) return 0;
+    return hip_ok(hipMemcpy(buf->dptr, host_ptr, size, hipMemcpyHostToDevice), "hipMemcpy(mmap)");
 }
 
 CudaBuf* cuda_alias_buffer(CudaBuf* base, size_t offset, size_t size) {
@@ -533,11 +539,17 @@ void cuda_barrier(CudaCmd* cmd) {
     (void)cmd; // a single HIP stream is ordered
 }
 
-void cuda_commit_and_wait(CudaCmd* cmd) {
-    if (!cmd) return;
-    execution_ok(cmd->ctx, hipStreamSynchronize(cmd->stream), "hipStreamSynchronize(command)");
+int rocm_commit_and_wait_checked(CudaCmd* cmd) {
+    if (!cmd) return 0;
+    const int ok = execution_ok(cmd->ctx, hipStreamSynchronize(cmd->stream), "hipStreamSynchronize(command)") &&
+                   !cmd->ctx->execution_failed;
     if (cmd->event) hipEventDestroy(cmd->event);
     free(cmd);
+    return ok;
+}
+
+void cuda_commit_and_wait(CudaCmd* cmd) {
+    (void)rocm_commit_and_wait_checked(cmd);
 }
 
 void cuda_commit_async(CudaCmd* cmd) {
@@ -643,6 +655,16 @@ void cuda_cublas_sgemm_strided_batched(CudaCtx* ctx, unsigned trans_a, unsigned 
     if (status != HIPBLAS_STATUS_SUCCESS) { ctx->execution_failed = 1; set_err("hipblasSgemmStridedBatched", "failed"); }
 }
 
+int rocm_try_sgemm(CudaCtx* ctx, unsigned rows, unsigned cols, unsigned count,
+                   CudaBuf* weights, CudaBuf* input, CudaBuf* output) {
+    if (!ctx || !ctx->hipblas || !weights || !input || !output) return 0;
+    const float one = 1.0f, zero = 0.0f;
+    return hipblasSgemm(ctx->hipblas, HIPBLAS_OP_T, HIPBLAS_OP_N, (int)rows, (int)count, (int)cols,
+                       &one, (const float*)weights->dptr, (int)cols,
+                       (const float*)input->dptr, (int)cols, &zero, (float*)output->dptr,
+                       (int)rows) == HIPBLAS_STATUS_SUCCESS;
+}
+
 // ---- HIP graphs (decode capture/replay) -------------------------------------
 // The CUDA scheduler records an invariant per-token kernel chain and updates
 // only its node parameters on subsequent tokens. HIP exposes the same capture,
@@ -663,7 +685,7 @@ int cuda_graph_begin(CudaCtx* ctx) {
                   "hipStreamBeginCapture");
 }
 
-int cuda_graph_end_launch(CudaCtx* ctx, CudaGraph* cached) {
+static int rocm_graph_end_capture(CudaCtx* ctx, CudaGraph* cached) {
     if (!ctx || !cached) return 0;
     hipGraph_t graph = NULL;
     if (!execution_ok(ctx, hipStreamEndCapture(ctx->stream, &graph), "hipStreamEndCapture")) return 0;
@@ -687,8 +709,30 @@ int cuda_graph_end_launch(CudaCtx* ctx, CudaGraph* cached) {
         cached->have_exec = 1;
     }
     hipGraphDestroy(graph);
-    if (!execution_ok(ctx, hipGraphLaunch(cached->exec, ctx->stream), "hipGraphLaunch")) return 0;
+    return !ctx->execution_failed;
+}
+
+int rocm_graph_replay(CudaCtx* ctx, CudaGraph* graph) {
+    if (!ctx || ctx->execution_failed || !graph || !graph->have_exec) return 0;
+    if (!execution_ok(ctx, hipGraphLaunch(graph->exec, ctx->stream), "hipGraphLaunch")) return 0;
     return execution_ok(ctx, hipStreamSynchronize(ctx->stream), "hipStreamSynchronize(graph)");
+}
+
+int cuda_graph_end_launch(CudaCtx* ctx, CudaGraph* graph) {
+    return rocm_graph_end_capture(ctx, graph) && rocm_graph_replay(ctx, graph);
+}
+
+int rocm_graph_end_recorded(CudaCtx* ctx, CudaGraph* graph, CudaCmd* cmd) {
+    const int failed = ctx->execution_failed;
+    cuda_release_completed(cmd);
+    if (failed) {
+        hipGraph_t discarded = NULL;
+        (void)hipStreamEndCapture(ctx->stream, &discarded);
+        if (discarded) hipGraphDestroy(discarded);
+        return -1;
+    }
+    if (!rocm_graph_end_capture(ctx, graph)) return ctx->execution_failed ? -1 : 0;
+    return rocm_graph_replay(ctx, graph) ? 1 : -1;
 }
 
 void cuda_graph_free(CudaGraph* graph) {

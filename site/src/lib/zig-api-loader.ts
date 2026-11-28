@@ -94,7 +94,7 @@ export interface ZigApiIndex {
   modules: ZigApiModule[];
 }
 
-interface ParsedComment extends ZigApiDocBlock { }
+interface ParsedComment extends ZigApiDocBlock {}
 
 const EXCLUDED_MODULES = new Set(['vulkan/vk.zig', 'regression_tests.zig']);
 
@@ -110,7 +110,9 @@ const EXCLUDED_MODULES = new Set(['vulkan/vk.zig', 'regression_tests.zig']);
 // for every other module (Zig errors on the first failing @import in the
 // analyzer's compilation, taking down all the others with it).
 const STRUCT_EXTRACTOR_TAINTED_IMPORTS = new Set([
-  'gguf', 'zinc_rt', 'forward_zinc_rt',
+  'gguf',
+  'zinc_rt',
+  'forward_zinc_rt',
   ...(process.platform === 'darwin' ? ['vulkan_c'] : []),
 ]);
 
@@ -157,7 +159,7 @@ function computeStructExtractorExcluded(fileContents: Map<string, string>): Set<
   const excluded = new Set<string>();
   // Seed: files importing a tainted named module.
   for (const [path, imports] of importsByFile) {
-    if (imports.named.some(name => STRUCT_EXTRACTOR_TAINTED_IMPORTS.has(name))) {
+    if (imports.named.some((name) => STRUCT_EXTRACTOR_TAINTED_IMPORTS.has(name))) {
       excluded.add(path);
     }
   }
@@ -167,15 +169,15 @@ function computeStructExtractorExcluded(fileContents: Map<string, string>): Set<
     grew = false;
     for (const [path, imports] of importsByFile) {
       if (excluded.has(path)) continue;
-      if (imports.relative.some(r => excluded.has(r))) {
+      if (imports.relative.some((r) => excluded.has(r))) {
         excluded.add(path);
         grew = true;
       }
     }
   }
 
-  // CUDA implementation modules need toolkit headers from the NVIDIA build
-  // box. Exclude them from the host-only documentation probe
+  // CUDA and ROCm implementation modules need their backend's C bindings.
+  // Exclude them from the host-only documentation probe
   // DIRECTLY rather than seeding it into the BFS above: every cuda import outside
   // the subtree (e.g. in `gpu/interface.zig`) sits behind a comptime-dead
   // `if (is_cuda)` branch on the analyzer host, so those importers still compile
@@ -183,7 +185,14 @@ function computeStructExtractorExcluded(fileContents: Map<string, string>): Set<
   // the whole backend abstraction. Metal's portable C header is translated by
   // the analyzer build target without loading the Metal runtime.
   for (const path of importsByFile.keys()) {
-    if (path.startsWith('src/cuda/') || /(?:^|\/)\w*cuda\w*\.zig$/.test(path)) excluded.add(path);
+    if (
+      path.startsWith('src/cuda/') ||
+      /(?:^|\/)\w*cuda\w*\.zig$/.test(path) ||
+      path === 'src/compute/forward_inkling.zig' ||
+      path === 'src/compute/inkling_dspark.zig'
+    ) {
+      excluded.add(path);
+    }
   }
 
   return excluded;
@@ -194,7 +203,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'cli-entrypoints',
     {
       title: 'CLI & Entrypoints',
-      description: 'Startup, argument parsing, and the top-level process path that wires model loading, tokenization, and generation together.',
+      description:
+        'Startup, argument parsing, and the top-level process path that wires model loading, tokenization, and generation together.',
       order: 0,
     },
   ],
@@ -202,7 +212,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'model-format-loading',
     {
       title: 'Model Format & Loading',
-      description: 'GGUF parsing, metadata normalization, and the runtime structures that move weights from disk into GPU-resident buffers.',
+      description:
+        'GGUF parsing, metadata normalization, and the runtime structures that move weights from disk into GPU-resident buffers.',
       order: 1,
     },
   ],
@@ -210,7 +221,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'tokenization',
     {
       title: 'Tokenization',
-      description: 'Prompt and output text conversion between UTF-8 strings and token IDs used by the decode loop.',
+      description:
+        'Prompt and output text conversion between UTF-8 strings and token IDs used by the decode loop.',
       order: 2,
     },
   ],
@@ -218,7 +230,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'decode-planning',
     {
       title: 'Decode Planning',
-      description: 'Static graph construction and dependency ordering for the per-token compute work that the runtime records and submits.',
+      description:
+        'Static graph construction and dependency ordering for the per-token compute work that the runtime records and submits.',
       order: 3,
     },
   ],
@@ -226,7 +239,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'inference-runtime',
     {
       title: 'Inference Runtime',
-      description: 'Decode state, pipeline ownership, command recording, and token sampling inside the active inference loop.',
+      description:
+        'Decode state, pipeline ownership, command recording, and token sampling inside the active inference loop.',
       order: 4,
     },
   ],
@@ -234,7 +248,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'sampling',
     {
       title: 'Sampling',
-      description: 'Logit post-processing, argmax helpers, and token-selection controls layered on top of the decode runtime.',
+      description:
+        'Logit post-processing, argmax helpers, and token-selection controls layered on top of the decode runtime.',
       order: 5,
     },
   ],
@@ -242,7 +257,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'shader-dispatch',
     {
       title: 'Shader Dispatch',
-      description: 'Typed wrappers around the compute shaders that prepare push constants, descriptor layouts, and per-op dispatch dimensions.',
+      description:
+        'Typed wrappers around the compute shaders that prepare push constants, descriptor layouts, and per-op dispatch dimensions.',
       order: 6,
     },
   ],
@@ -250,7 +266,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'hardware-detection',
     {
       title: 'Hardware Detection',
-      description: 'Vendor and architecture heuristics that translate raw Vulkan properties into tuning defaults for AMD, NVIDIA, and Intel GPUs.',
+      description:
+        'Vendor and architecture heuristics that translate raw Vulkan properties into tuning defaults for AMD, NVIDIA, and Intel GPUs.',
       order: 7,
     },
   ],
@@ -258,7 +275,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'vulkan-runtime',
     {
       title: 'Vulkan Runtime',
-      description: 'Low-level Vulkan setup, memory allocation, buffers, pipelines, and command submission primitives used throughout the engine.',
+      description:
+        'Low-level Vulkan setup, memory allocation, buffers, pipelines, and command submission primitives used throughout the engine.',
       order: 8,
     },
   ],
@@ -266,7 +284,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'metal-runtime',
     {
       title: 'Metal Runtime',
-      description: 'Low-level Metal device discovery, buffers, pipelines, and command submission primitives used by the Apple Silicon backend.',
+      description:
+        'Low-level Metal device discovery, buffers, pipelines, and command submission primitives used by the Apple Silicon backend.',
       order: 9,
     },
   ],
@@ -274,7 +293,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'managed-models',
     {
       title: 'Managed Models',
-      description: 'Catalog metadata, cache management, model downloads, and active-selection helpers used by the CLI and server.',
+      description:
+        'Catalog metadata, cache management, model downloads, and active-selection helpers used by the CLI and server.',
       order: 10,
     },
   ],
@@ -282,7 +302,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'scheduler',
     {
       title: 'Scheduler',
-      description: 'Continuous batching scheduler, paged KV cache management, and request lifecycle tracking for concurrent inference serving.',
+      description:
+        'Continuous batching scheduler, paged KV cache management, and request lifecycle tracking for concurrent inference serving.',
       order: 11,
     },
   ],
@@ -290,7 +311,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'api-server',
     {
       title: 'API Server',
-      description: 'OpenAI-compatible HTTP server, route dispatch, SSE streaming, and session management for serving inference over the network.',
+      description:
+        'OpenAI-compatible HTTP server, route dispatch, SSE streaming, and session management for serving inference over the network.',
       order: 12,
     },
   ],
@@ -298,7 +320,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'tool-calling',
     {
       title: 'Tool Calling',
-      description: 'Tool-use protocol helpers: chat-template-aware tool definitions, argument parsing, and response formatting for function-calling-capable models.',
+      description:
+        'Tool-use protocol helpers: chat-template-aware tool definitions, argument parsing, and response formatting for function-calling-capable models.',
       order: 13,
     },
   ],
@@ -306,7 +329,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'cuda-runtime',
     {
       title: 'CUDA Runtime',
-      description: 'CUDA device discovery, context management, device buffers, NVRTC-compiled pipelines, and stream-based command submission for the NVIDIA backend.',
+      description:
+        'CUDA device discovery, context management, device buffers, NVRTC-compiled pipelines, and stream-based command submission for the NVIDIA backend.',
       order: 14,
     },
   ],
@@ -314,7 +338,8 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     'cuda-multi-tenant-serving-engine-effort-28-increment-3-3b',
     {
       title: 'CUDA Multi-Tenant Serving Engine',
-      description: 'Continuous-batching serving worker, request registry, per-token streaming channels, and GPU-owned decode loop for concurrent CUDA inference.',
+      description:
+        'Continuous-batching serving worker, request registry, per-token streaming channels, and GPU-owned decode loop for concurrent CUDA inference.',
       order: 15,
     },
   ],
@@ -328,7 +353,10 @@ function resolveSiteRoot(): string {
   }
 
   const nestedSiteRoot = join(cwd, 'site');
-  if (existsSync(join(nestedSiteRoot, 'astro.config.mjs')) && existsSync(join(nestedSiteRoot, 'src'))) {
+  if (
+    existsSync(join(nestedSiteRoot, 'astro.config.mjs')) &&
+    existsSync(join(nestedSiteRoot, 'src'))
+  ) {
     return nestedSiteRoot;
   }
 
@@ -360,7 +388,7 @@ function prettyToken(token: string): string {
 
   return token
     .split('_')
-    .map(part => upperTokens.get(part) ?? `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`)
+    .map((part) => upperTokens.get(part) ?? `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`)
     .join(' ');
 }
 
@@ -383,9 +411,7 @@ function moduleHref(slug: string): string {
 }
 
 function sourcePathSlug(sourcePath: string): string {
-  const pathWithoutExtension = sourcePath
-    .replace(/^src\//, '')
-    .replace(/\.zig$/, '');
+  const pathWithoutExtension = sourcePath.replace(/^src\//, '').replace(/\.zig$/, '');
   const slug = toSlugPart(pathWithoutExtension);
   if (!pathWithoutExtension.includes('/')) return `root-${slug || 'module'}`;
   return slug || 'module';
@@ -408,9 +434,7 @@ function qualifiedModuleTitle(module: ZigApiModule): string {
     ['cuda', 'CUDA'],
     ['gpu', 'GPU'],
   ]);
-  const qualifier = parentParts
-    .map(part => labels.get(part) ?? prettyToken(part))
-    .join(' ');
+  const qualifier = parentParts.map((part) => labels.get(part) ?? prettyToken(part)).join(' ');
   const baseTitle = module.title === 'Mod' ? 'Module' : module.title;
   return `${qualifier} ${baseTitle}`;
 }
@@ -443,7 +467,7 @@ function disambiguateModuleRoutes(modules: ZigApiModule[]): void {
     modulesBySlug.set(module.slug, matches);
   }
 
-  const claimedSlugs = new Set(modules.map(module => module.slug));
+  const claimedSlugs = new Set(modules.map((module) => module.slug));
 
   for (const [legacySlug, matches] of modulesBySlug) {
     if (matches.length < 2) continue;
@@ -460,7 +484,7 @@ function disambiguateModuleRoutes(modules: ZigApiModule[]): void {
       const routeSlug = sourcePathSlug(module.sourcePath);
       if (claimedSlugs.has(routeSlug)) {
         throw new Error(
-          `Unable to create a unique Zig API route for ${module.sourcePath}: ${routeSlug}`
+          `Unable to create a unique Zig API route for ${module.sourcePath}: ${routeSlug}`,
         );
       }
       claimedSlugs.add(routeSlug);
@@ -490,7 +514,10 @@ function collapseWhitespace(value: string): string {
 }
 
 function normalizeDocLines(lines: string[]): string {
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return lines
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function toParagraphs(raw: string): string[] {
@@ -498,7 +525,7 @@ function toParagraphs(raw: string): string[] {
 
   return raw
     .split(/\n{2,}/)
-    .map(paragraph => collapseWhitespace(paragraph.replace(/\n/g, ' ')))
+    .map((paragraph) => collapseWhitespace(paragraph.replace(/\n/g, ' ')))
     .filter(Boolean);
 }
 
@@ -617,7 +644,7 @@ function stripLineComment(line: string): string {
       continue;
     }
 
-    if (!inString && char === '\'') {
+    if (!inString && char === "'") {
       inChar = !inChar;
     }
   }
@@ -637,7 +664,10 @@ function braceDelta(line: string): number {
   return delta;
 }
 
-function captureDeclaration(lines: string[], startIndex: number): { signature: string; endIndex: number; hasBlock: boolean } {
+function captureDeclaration(
+  lines: string[],
+  startIndex: number,
+): { signature: string; endIndex: number; hasBlock: boolean } {
   const declaration: string[] = [];
 
   for (let i = startIndex; i < lines.length; i += 1) {
@@ -647,10 +677,7 @@ function captureDeclaration(lines: string[], startIndex: number): { signature: s
     if (source.includes('{') || source.trimEnd().endsWith(';')) {
       return {
         signature: collapseWhitespace(
-          declaration
-            .join(' ')
-            .replace(/\s+\{/g, '')
-            .replace(/;$/, '')
+          declaration.join(' ').replace(/\s+\{/g, '').replace(/;$/, ''),
         ),
         endIndex: i,
         hasBlock: source.includes('{'),
@@ -678,7 +705,10 @@ function captureBlockEnd(lines: string[], startIndex: number): number {
   return startIndex;
 }
 
-function classifySymbol(signature: string, declarationKind: ZigApiSymbol['declarationKind']): ZigApiSymbol['symbolKind'] {
+function classifySymbol(
+  signature: string,
+  declarationKind: ZigApiSymbol['declarationKind'],
+): ZigApiSymbol['symbolKind'] {
   if (declarationKind === 'fn') return 'function';
   if (/\=\s*(?:extern\s+)?struct\b/.test(signature)) return 'struct';
   if (/\=\s*(?:extern\s+)?enum\b/.test(signature)) return 'enum';
@@ -753,7 +783,12 @@ function defaultSectionForPath(relativePath: string): string {
   }
 }
 
-function sectionMeta(sectionTitle: string): { title: string; description: string; order: number; slug: string } {
+function sectionMeta(sectionTitle: string): {
+  title: string;
+  description: string;
+  order: number;
+  slug: string;
+} {
   const slug = toSlugPart(sectionTitle);
   const known = SECTION_META.get(slug);
 
@@ -778,7 +813,7 @@ function parseContainerMembers(
   containerEnd: number,
   relativePath: string,
   moduleSlug: string,
-  parentName: string
+  parentName: string,
 ): ZigApiMember[] {
   const members: ZigApiMember[] = [];
   let pendingDocs: string[] = [];
@@ -908,7 +943,7 @@ function parseZigModuleContent(content: string, relativePath: string): ZigApiMod
   const memberCount = symbols.reduce((count, symbol) => count + symbol.members.length, 0);
   const summary =
     moduleDoc.summary ||
-    symbols.find(symbol => symbol.doc.summary)?.doc.summary ||
+    symbols.find((symbol) => symbol.doc.summary)?.doc.summary ||
     `Public API surface for ${modulePath(relativePath)}.`;
 
   return {
@@ -941,7 +976,7 @@ async function collectZigFiles(directory: string, prefix = ''): Promise<string[]
     const fullPath = join(directory, entry.name);
 
     if (entry.isDirectory()) {
-      results.push(...await collectZigFiles(fullPath, relativePath));
+      results.push(...(await collectZigFiles(fullPath, relativePath)));
       continue;
     }
 
@@ -1022,7 +1057,8 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
   return {
     schema_version: 'zinc-zig-api-v1',
     title: 'ZINC Zig API',
-    description: 'Primary generated reference for the ZINC Zig runtime and supporting Vulkan compute modules.',
+    description:
+      'Primary generated reference for the ZINC Zig runtime and supporting Vulkan compute modules.',
     site: base,
     root_url: absoluteUrl(base, '/zinc/docs/zig-api'),
     json_url: absoluteUrl(base, '/zinc/docs/zig-api.json'),
@@ -1038,14 +1074,14 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
       methods: api.memberCount,
       symbols: api.symbolCount,
     },
-    sections: api.sections.map(section => ({
+    sections: api.sections.map((section) => ({
       slug: section.slug,
       title: section.title,
       description: section.description,
       url: absoluteUrl(base, `/zinc/docs/zig-api#${section.slug}`),
       module_count: section.modules.length,
       symbol_count: section.symbolCount,
-      modules: section.modules.map(module => ({
+      modules: section.modules.map((module) => ({
         slug: module.slug,
         title: module.title,
         section: module.section,
@@ -1060,7 +1096,7 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
           methods: module.memberCount,
           symbols: module.symbolCount,
         },
-        symbols: module.symbols.map(symbol => ({
+        symbols: module.symbols.map((symbol) => ({
           name: symbol.name,
           qualified_name: symbol.qualifiedName,
           declaration_kind: symbol.declarationKind,
@@ -1072,12 +1108,14 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
           source_line: symbol.line,
           source_url: sourceHref(symbol.sourcePath, symbol.line),
           doc: normalizeDocBlock(symbol.doc),
-          ...(symbol.symbolKind === 'struct' && symbol.size !== undefined ? {
-            size: symbol.size,
-            alignment: symbol.alignment,
-            fields: symbol.fields,
-          } : {}),
-          members: symbol.members.map(member => ({
+          ...(symbol.symbolKind === 'struct' && symbol.size !== undefined
+            ? {
+                size: symbol.size,
+                alignment: symbol.alignment,
+                fields: symbol.fields,
+              }
+            : {}),
+          members: symbol.members.map((member) => ({
             name: member.name,
             qualified_name: member.qualifiedName,
             declaration_kind: member.declarationKind,
@@ -1123,7 +1161,7 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
         `URL: ${module.url}`,
         `Source: ${module.source_path}`,
         `Code lines: ${module.counts.code_lines}`,
-        `Summary: ${module.summary}`
+        `Summary: ${module.summary}`,
       );
 
       for (const paragraph of module.overview) {
@@ -1135,7 +1173,7 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
           '',
           `- ${symbol.qualified_name} [${symbol.kind}]`,
           `  URL: ${symbol.url}`,
-          `  Signature: ${symbol.signature}`
+          `  Signature: ${symbol.signature}`,
         );
 
         if (symbol.doc.summary) lines.push(`  Summary: ${symbol.doc.summary}`);
@@ -1155,7 +1193,9 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
           if (symbol.fields && symbol.fields.length > 0) {
             lines.push(`  Fields:`);
             for (const field of symbol.fields) {
-              lines.push(`    - ${field.name}: ${field.type} (offset: ${field.offset}, size: ${field.size}, align: ${field.alignment})`);
+              lines.push(
+                `    - ${field.name}: ${field.type} (offset: ${field.offset}, size: ${field.size}, align: ${field.alignment})`,
+              );
             }
           }
         }
@@ -1164,7 +1204,7 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
           lines.push(
             `  - ${member.qualified_name} [method]`,
             `    URL: ${member.url}`,
-            `    Signature: ${member.signature}`
+            `    Signature: ${member.signature}`,
           );
 
           if (member.doc.summary) lines.push(`    Summary: ${member.doc.summary}`);
@@ -1217,13 +1257,17 @@ async function loadZigApiImpl(): Promise<ZigApiIndex> {
     if (structExtractorExcluded.has(mod.sourcePath)) continue;
     for (const sym of mod.symbols) {
       if (sym.symbolKind === 'struct') {
-        structSymbols.push({ modulePath: sym.sourcePath, qualifiedName: sym.qualifiedName, symbol: sym });
+        structSymbols.push({
+          modulePath: sym.sourcePath,
+          qualifiedName: sym.qualifiedName,
+          symbol: sym,
+        });
       }
     }
   }
 
   if (structSymbols.length > 0) {
-    const structModulePaths = [...new Set(structSymbols.map(s => s.modulePath))];
+    const structModulePaths = [...new Set(structSymbols.map((s) => s.modulePath))];
     const zigScriptContent = `const std = @import("std");
 const host_io = @import("host_io");
 
@@ -1257,22 +1301,26 @@ pub fn main() !void {
     const out = &stdout.interface;
     try out.print("{{", .{});
     var first = true;
-${structSymbols.map((s) => {
-      const modIdx = structModulePaths.indexOf(s.modulePath);
-      // Guard with @hasDecl so any symbol the source parser surfaced that is not a
-      // real top-level module decl (e.g. a nested `pub const X = struct` inside a
-      // container, which Zig sees as `Parent.X`, not `mod.X`) is skipped at comptime
-      // instead of failing the entire analyzer compile.
-      return `    if (@hasDecl(mod${modIdx}, "${s.qualifiedName}") and @TypeOf(mod${modIdx}.${s.qualifiedName}) == type) {\n        dumpStruct(mod${modIdx}.${s.qualifiedName}, "${s.qualifiedName}", &first, out) catch {};\n    }`;
-    }).join('\n')}
+${structSymbols
+  .map((s) => {
+    const modIdx = structModulePaths.indexOf(s.modulePath);
+    // Guard with @hasDecl so any symbol the source parser surfaced that is not a
+    // real top-level module decl (e.g. a nested `pub const X = struct` inside a
+    // container, which Zig sees as `Parent.X`, not `mod.X`) is skipped at comptime
+    // instead of failing the entire analyzer compile.
+    return `    if (@hasDecl(mod${modIdx}, "${s.qualifiedName}") and @TypeOf(mod${modIdx}.${s.qualifiedName}) == type) {\n        dumpStruct(mod${modIdx}.${s.qualifiedName}, "${s.qualifiedName}", &first, out) catch {};\n    }`;
+  })
+  .join('\n')}
     try out.print("}}", .{});
     try out.flush();
 }
 
-${structModulePaths.map((path, idx) => {
-  const target = path === 'src/host_io.zig' ? 'host_io' : `../${path.replace(/^src\//, '')}`;
-  return `const mod${idx} = @import("${target}");`;
-}).join('\n')}
+${structModulePaths
+  .map((path, idx) => {
+    const target = path === 'src/host_io.zig' ? 'host_io' : `../${path.replace(/^src\//, '')}`;
+    return `const mod${idx} = @import("${target}");`;
+  })
+  .join('\n')}
 `;
 
     const { mkdir, writeFile } = await import('node:fs/promises');
@@ -1347,7 +1395,9 @@ ${structModulePaths.map((path, idx) => {
 
   return {
     generatedAt: new Date().toISOString().split('T')[0],
-    lastmod: latestMtime ? new Date(latestMtime).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+    lastmod: latestMtime
+      ? new Date(latestMtime).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0],
     moduleCount: modules.length,
     codeLineCount,
     exportCount,

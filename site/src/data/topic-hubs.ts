@@ -299,14 +299,14 @@ export const topicHubs: TopicHub[] = [
     keywords: 'Inkling 2 Mini, Inkling 2 Mini AMD, Inkling 2 Mini RX 9070 XT, Inkling 2 Mini R9700, Inkling 2 Mini GGUF, Inkling 2 Mini ROCm, Inkling 2 Mini Vulkan, Inkling 2 Mini DSpark',
     summary: 'Run Thinking Machines Lab’s Inkling 2 Mini on AMD RDNA4. See same-checkpoint prefill and decode comparisons with llama.cpp, plus context tests on the 16 GB RX 9070 XT and 32 GB Radeon AI PRO R9700.',
     updated: '2026-11-27',
-    practicalAnswer: 'Use the Inkling development build and pull the managed model inkling-2-mini-q4-0. Start with one request slot and a 4,096-token context on either card. Use ROCm for the fastest measured ZINC decode. The setup guide also covers Vulkan.',
+    practicalAnswer: 'Build ZINC for Linux and pull the managed model inkling-2-mini-q4-0. Start with one request slot and a 4,096-token context on either card. Use ROCm for the fastest measured ZINC decode. The setup guide also covers Vulkan.',
     bestUse: 'Start here to choose a context budget, run the pinned GGUF, or compare ZINC and llama.cpp on the same AMD card.',
     status: [
       { label: 'Radeon RX 9070 XT', detail: 'The 16 GB card ran the 13.9 GiB Q4_0 checkpoint and a Q8_0 DSpark drafter at a 4,096-token context. A separate DSpark memory probe left 271 MiB free.' },
       { label: 'Radeon AI PRO R9700', detail: 'The 32 GB card recovered all three planted codes from a 62,591-token prompt in a 65,536-token window. Prefill took about 255 seconds.' },
     ],
     actionPlan: [
-      { label: 'Use the Inkling development checkout', detail: 'Follow the AMD setup guide to build the ROCm or Vulkan backend and pull the checksum-pinned GGUF.' },
+      { label: 'Build ZINC with Inkling support', detail: 'Follow the AMD setup guide to build the ROCm or Vulkan backend and pull the checksum-pinned GGUF.' },
       { label: 'Start with a 4K window', detail: 'Use one request slot and verify a complete response before increasing context or trying the experimental DSpark path.' },
     ],
     checklist: [
@@ -337,14 +337,14 @@ export const topicHubs: TopicHub[] = [
       },
     ],
     docs: [
-      { title: 'Run Inkling 2 Mini on AMD RDNA4', href: '/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4', description: 'Development build instructions and the managed model ID.' },
+      { title: 'Run Inkling 2 Mini on AMD RDNA4', href: '/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4', description: 'Build instructions, the managed model ID, and optional ROCm DSpark.' },
       { title: 'Exact Inkling 2 Mini Q4_0 GGUF', href: 'https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf', description: 'Revision-pinned checkpoint used in the measurements.' },
       { title: 'Inkling 2 Mini model card', href: 'https://thinkingmachines.ai/model-card/inkling-2-mini/', description: 'The model’s looped architecture, input modalities, and published evaluations.' },
     ],
     related: ['amd-rdna4-llm-inference', 'qwen3-8-local-inference', 'kv-cache-quantization'],
     faqs: [
       { question: 'Does Inkling 2 Mini fit on a 16 GB RX 9070 XT?', answer: 'Yes. The 13.9 GiB Q4_0 GGUF ran on the RX 9070 XT at a 4,096-token context, including in a separate test with the DSpark drafter.' },
-      { question: 'What is the ZINC model ID for Inkling 2 Mini?', answer: 'The Inkling development build uses inkling-2-mini-q4-0 for the pinned Q4_0 checkpoint.' },
+      { question: 'What is the ZINC model ID for Inkling 2 Mini?', answer: 'Use inkling-2-mini-q4-0 for the pinned Q4_0 checkpoint.' },
       { question: 'How much Inkling 2 Mini context was tested on the R9700?', answer: 'The R9700 recovered all three planted codes with a 62,591-token prompt and a 65,536-token window. It also loaded a separate 401,408-token window with a 3,167-token prompt.' },
     ],
   },

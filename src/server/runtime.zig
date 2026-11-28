@@ -29,7 +29,7 @@ pub fn mtpRequestError(enabled: ?bool) ?[]const u8 {
 /// Tokenizer module (shared across all backends).
 pub const tokenizer_mod = @import("../model/tokenizer.zig");
 /// Forward-pass module, selected by the active backend.
-pub const forward_mod = if (gpu.is_metal) @import("../compute/forward_metal.zig") else @import("../compute/forward.zig");
+pub const forward_mod = if (gpu.is_metal) @import("../compute/forward_metal.zig") else @import("../compute/vulkan_inference.zig");
 /// Model-loading module, selected by the active backend.
 pub const loader_mod = if (gpu.is_metal) @import("../model/loader_metal.zig") else @import("../model/loader.zig");
 /// Model-manager module, selected by the active backend.
@@ -46,8 +46,12 @@ pub const RequestControl = @import("../gpu/request_control.zig").RequestControl;
 pub fn setPrefillControl(engine: *InferenceEngine, control: ?RequestControl) void {
     if (comptime gpu.is_vulkan) {
         // Only the synchronous, serialized handler owns this stack callback.
-        if (control != null) std.debug.assert(engine.prefill_control == null);
-        engine.prefill_control = control;
+        switch (engine.*) {
+            inline else => |*decoder| {
+                if (control != null) std.debug.assert(decoder.prefill_control == null);
+                decoder.prefill_control = control;
+            },
+        }
     }
 }
 /// Loaded model handle (weights, hyperparams, GGUF metadata).
@@ -75,7 +79,7 @@ pub fn enableLogitsReadback(_engine: *InferenceEngine) void {
 /// @returns `true` if the engine will expose logits after each decode step.
 pub fn logitsReadbackEnabled(_engine: *const InferenceEngine) bool {
     if (comptime gpu.is_vulkan) {
-        return _engine.logits_readback_enabled;
+        return _engine.logitsReadbackEnabled();
     } else if (comptime gpu.is_metal) {
         return _engine.logits_readback_enabled;
     }
@@ -85,7 +89,7 @@ pub fn logitsReadbackEnabled(_engine: *const InferenceEngine) bool {
 /// Set the logits readback intent flag on backends that can elide full logit materialization.
 pub fn setLogitsReadbackEnabled(_engine: *InferenceEngine, _enabled: bool) void {
     if (comptime gpu.is_vulkan) {
-        _engine.logits_readback_enabled = _enabled;
+        _engine.setLogitsReadbackEnabled(_enabled);
     } else if (comptime gpu.is_metal) {
         _engine.logits_readback_enabled = _enabled;
     }
@@ -128,26 +132,28 @@ pub const mtp_max_draft: u32 = if (gpu.is_vulkan) InferenceEngine.mtp_max_draft_
 /// Reset per-request MTP state; call before the prompt prefill.
 pub fn mtpBeginRequest(_engine: *InferenceEngine) void {
     if (comptime gpu.is_vulkan) {
+        if (_engine.* != .standard) return;
         // Prepare the draft state before the prompt prefill so the very first
         // request captures its prompt rows (preparing lazily in mtpPrime left
         // request 1 on ordinary decode).
-        if (_engine.mtpEnabled()) _ = _engine.mtpPrepare() catch false;
-        _engine.mtpBeginRequest();
+        if (_engine.standard.mtpEnabled()) _ = _engine.standard.mtpPrepare() catch false;
+        _engine.standard.mtpBeginRequest();
     }
 }
 
 /// Log counters for the completed request, before another request can reset them.
 pub fn mtpLogRequest(_engine: *const InferenceEngine) void {
-    if (comptime gpu.is_vulkan) _engine.mtpLogRequest();
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) _engine.standard.mtpLogRequest();
 }
 
 /// Prime the NextN block over the freshly prefilled prompt. Returns false when
 /// MTP is unavailable (env off, model without NextN block, partial prefill).
 pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens: []const u32) bool {
     if (comptime gpu.is_vulkan) {
-        if (!_engine.mtpEnabled()) return false;
-        if (!(_engine.mtpPrepare() catch false)) return false;
-        return _engine.mtpPrime(_state, _prompt_tokens) catch false;
+        if (_engine.* != .standard) return false;
+        if (!_engine.standard.mtpEnabled()) return false;
+        if (!(_engine.standard.mtpPrepare() catch false)) return false;
+        return _engine.standard.mtpPrime(_state, _prompt_tokens) catch false;
     }
     return false;
 }
@@ -155,47 +161,49 @@ pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens:
 /// Whether a chunked prefill primes the draft block chunk by chunk (off for
 /// requests that sample non-greedily, where speculation is unused).
 pub fn mtpSetPrimeDuringPrefill(_engine: *InferenceEngine, _on: bool) void {
-    if (comptime gpu.is_vulkan) _engine.mtpSetPrimeDuringPrefill(_on);
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) _engine.standard.mtpSetPrimeDuringPrefill(_on);
 }
 
 /// Recurrent-state checkpoints for chat reuse on hybrid models (see
 /// InferenceEngine.ssm_checkpoint). All return false / null on other backends.
 pub fn ssmCheckpointTake(_engine: *InferenceEngine, _state: *DecodeState) bool {
-    if (comptime gpu.is_vulkan) return _engine.ssmCheckpointTake(_state) catch false;
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) return _engine.standard.ssmCheckpointTake(_state) catch false;
     return false;
 }
 pub fn ssmCheckpointRestore(_engine: *InferenceEngine, _state: *DecodeState) bool {
-    if (comptime gpu.is_vulkan) return _engine.ssmCheckpointRestore(_state) catch false;
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) return _engine.standard.ssmCheckpointRestore(_state) catch false;
     return false;
 }
 pub fn ssmCheckpointPosition(_engine: *const InferenceEngine) ?u32 {
-    if (comptime gpu.is_vulkan) return _engine.ssmCheckpointPosition();
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) return _engine.standard.ssmCheckpointPosition();
     return null;
 }
 pub fn ssmCheckpointInvalidate(_engine: *InferenceEngine) void {
-    if (comptime gpu.is_vulkan) _engine.ssmCheckpointInvalidate();
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) _engine.standard.ssmCheckpointInvalidate();
 }
 
 /// A canonical suffix may overwrite old KV rows only when there is no
 /// recurrent or draft state to restore. An enabled lazy draft counts too.
 pub fn canRewindAttentionPrefix(_engine: *const InferenceEngine) bool {
     if (comptime gpu.is_vulkan) {
-        return @import("session_reuse_policy.zig").canRewindPrefix(true, _engine.model.config.ssm_d_inner, _engine.mtp != null or _engine.mtpEnabled(), _engine.active_kv_page_ids != null);
+        if (_engine.* != .standard) return false;
+        return @import("session_reuse_policy.zig").canRewindPrefix(true, _engine.standard.model.config.ssm_d_inner, _engine.standard.mtp != null or _engine.standard.mtpEnabled(), _engine.standard.active_kv_page_ids != null);
     }
     return false;
 }
 
 pub fn canonicalPrefixDefault(_engine: *const InferenceEngine) bool {
     if (comptime gpu.is_vulkan) {
-        const cfg = _engine.model.config;
-        return @import("session_reuse_policy.zig").defaultRewind(true, _engine.gpu_config.vendor == .intel_arc_xe2, cfg.architecture == .gemma, cfg.n_experts, cfg.ssm_d_inner);
+        if (_engine.* != .standard) return false;
+        const cfg = _engine.standard.model.config;
+        return @import("session_reuse_policy.zig").defaultRewind(true, _engine.standard.gpu_config.vendor == .intel_arc_xe2, cfg.architecture == .gemma, cfg.n_experts, cfg.ssm_d_inner);
     }
     return false;
 }
 
 /// Forget captured prefill rows so the next prefill's capture starts at row 0.
 pub fn mtpResetCapture(_engine: *InferenceEngine) void {
-    if (comptime gpu.is_vulkan) _engine.mtpResetCapture();
+    if (comptime gpu.is_vulkan) if (_engine.* == .standard) _engine.standard.mtpResetCapture();
 }
 
 /// Prime the NextN block over only the tokens appended after a reused prompt
@@ -203,9 +211,10 @@ pub fn mtpResetCapture(_engine: *InferenceEngine) void {
 /// case the caller keeps ordinary decode.
 pub fn mtpPrimeSuffix(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens: []const u32, _reused_prefix_len: u32) bool {
     if (comptime gpu.is_vulkan) {
-        if (!_engine.mtpEnabled()) return false;
-        if (!(_engine.mtpPrepare() catch false)) return false;
-        return _engine.mtpPrimeSuffix(_state, _prompt_tokens, _reused_prefix_len) catch false;
+        if (_engine.* != .standard) return false;
+        if (!_engine.standard.mtpEnabled()) return false;
+        if (!(_engine.standard.mtpPrepare() catch false)) return false;
+        return _engine.standard.mtpPrimeSuffix(_state, _prompt_tokens, _reused_prefix_len) catch false;
     }
     return false;
 }
@@ -231,16 +240,16 @@ pub const MtpSource = struct {
         _random: std.Random,
     ) !u32 {
         if (comptime gpu.is_vulkan) {
-            if (self.active) {
+            if (_engine.* == .standard and self.active) {
                 if (self.i < self.n) {
                     const t = self.queue[self.i];
                     self.i += 1;
                     return t;
                 }
-                const context_room = _engine.max_context_tokens -| _state.position;
+                const context_room = _engine.standard.max_context_tokens -| _state.position;
                 if (tokens_remaining >= 2 and context_room > 2) {
                     const max_drafts: u32 = @min(mtp_max_draft, @min(tokens_remaining - 1, context_room - 2));
-                    const r = try _engine.mtpCycle(_state, prev, _state.position, max_drafts, self.eos_id);
+                    const r = try _engine.standard.mtpCycle(_state, prev, _state.position, max_drafts, self.eos_id);
                     self.n = 0;
                     self.i = 0;
                     var k: u32 = 0;
@@ -258,8 +267,8 @@ pub const MtpSource = struct {
             }
         }
         if (comptime gpu.is_vulkan) {
-            if (!_params.requiresLogitsReadback() and _engine.chainedDecodeAvailable()) {
-                return _engine.decodeChained(_state, prev);
+            if (_engine.* == .standard and !_params.requiresLogitsReadback() and _engine.standard.chainedDecodeAvailable()) {
+                return _engine.standard.decodeChained(_state, prev);
             }
         }
         try decodeStep(_engine, _state, prev, true);
@@ -269,7 +278,7 @@ pub const MtpSource = struct {
     /// Wait for any decode step queued ahead by `step` (Vulkan chained greedy
     /// decode) so the engine is idle when the request ends.
     pub fn finish(_: *MtpSource, _engine: *InferenceEngine) void {
-        if (comptime gpu.is_vulkan) _engine.chainDrain() catch {};
+        if (comptime gpu.is_vulkan) if (_engine.* == .standard) _engine.standard.chainDrain() catch {};
     }
 };
 

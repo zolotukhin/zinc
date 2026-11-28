@@ -195,8 +195,13 @@ CudaBuf* cuda_create_buffer_staged(CudaCtx* c, size_t size, void** cpu_ptr) {
 CudaBuf* cuda_upload_mmap(CudaCtx* c, const void* host_ptr, size_t size) {
     CudaBuf* b = cuda_create_buffer(c, size);
     if (!b) return NULL;
-    if (!cu_ok(cuMemcpyHtoD(b->dptr, host_ptr, size), "cuMemcpyHtoD(mmap)")) { cuda_free_buffer(b); return NULL; }
+    if (!cuda_copy_mmap(c, b, host_ptr, size)) { cuda_free_buffer(b); return NULL; }
     return b;
+}
+int cuda_copy_mmap(CudaCtx* c, CudaBuf* b, const void* host_ptr, size_t size) {
+    if (!c || !b || size > b->size) return 0;
+    if (!cu_ok(cuCtxSetCurrent(c->ctx), "cuCtxSetCurrent")) return 0;
+    return cu_ok(cuMemcpyHtoD(b->dptr, host_ptr, size), "cuMemcpyHtoD(mmap)");
 }
 CudaBuf* cuda_alias_buffer(CudaBuf* base, size_t offset, size_t size) {
     CudaBuf* b = (CudaBuf*)calloc(1, sizeof *b);

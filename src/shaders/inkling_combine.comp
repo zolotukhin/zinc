@@ -1,0 +1,18 @@
+#version 460
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Values { float values[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { float weights[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float result[]; };
+layout(push_constant) uniform Params { uint width; uint used; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.width) return;
+    uint start = gl_WorkGroupID.y * p.used;
+    float sum = 0.0;
+    for (uint k = 0u; k < p.used; ++k) {
+        sum = fma(values[(start + k) * p.width + i], weights[start + k], sum);
+    }
+    result[gl_WorkGroupID.y * p.width + i] = sum;
+}

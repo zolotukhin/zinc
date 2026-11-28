@@ -45,7 +45,7 @@ const server_runtime = @import("server/runtime.zig");
 // On macOS they are stubbed out; the GPU abstraction refactor will make them platform-independent.
 const loader_mod = if (gpu.is_vulkan) @import("model/loader.zig") else struct {};
 const architecture_mod = if (gpu.is_vulkan) @import("model/architecture.zig") else struct {};
-const forward_mod = if (gpu.is_vulkan) @import("compute/forward.zig") else struct {};
+const forward_mod = if (gpu.is_vulkan) @import("compute/vulkan_inference.zig") else struct {};
 
 // Backend-specific imports (only one branch compiles per platform)
 const instance_mod = if (gpu.is_vulkan) @import("vulkan/instance.zig") else gpu.backend;
@@ -55,6 +55,7 @@ const cuda_device_mod = if (gpu.is_cuda) @import("cuda/device.zig") else struct 
 const loader_cuda_mod = if (gpu.is_cuda) @import("model/loader_cuda.zig") else struct {};
 const forward_cuda_mod = if (gpu.is_cuda) @import("compute/forward_cuda.zig") else struct {};
 const forward_cuda_gemma_mod = if (gpu.is_cuda) @import("compute/forward_cuda_gemma.zig") else struct {};
+const forward_inkling_mod = if (gpu.is_rocm) @import("compute/forward_inkling.zig") else struct {};
 // CUDA/ROCm batched serving engine; inactive on Vulkan and Metal.
 const cuda_serve_mod = if (gpu.is_cuda) @import("server/cuda_serve.zig") else struct {};
 const accelerator_catalog = @import("server/accelerator_model_catalog.zig");
@@ -150,6 +151,7 @@ comptime {
     }
     // Platform-independent modules
     _ = @import("model/config.zig");
+    _ = @import("model/inkling.zig");
     _ = @import("model/hf.zig");
     _ = @import("model/gguf.zig");
     _ = @import("model/tokenizer.zig");
@@ -635,6 +637,9 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
 
 fn shouldAutoChatCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8) bool {
     const tmpl = tokenizer.chat_template orelse return false;
+    if (tokenizer.detectTemplateKind() == .inkling2) {
+        return std.mem.indexOf(u8, prompt, "<|message_user|>") == null;
+    }
     // ATEM (Muse Glimmer): a reasoning-tuned model that degenerates badly on
     // raw completion — auto-apply its chat template unless the caller already
     // wrote the turn markers themselves.
@@ -1773,7 +1778,12 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
 
     // The server owns its model resources so unload and activation can replace
     // them while retaining the same selected device and HTTP listener.
-    const max_ctx: u32 = config.context_length orelse 2048;
+    const entry = catalog_mod.findForLoadedModel(config.model_id, model_path, "");
+    const default_ctx: u32 = if (entry != null and std.mem.eql(u8, entry.?.family, "inkling2"))
+        entry.?.default_context_length
+    else
+        2048;
+    const max_ctx: u32 = config.context_length orelse default_ctx;
     if (config.prompt == null) return runCudaServe(&device, model_path, config, max_ctx, allocator);
 
     // Load the model onto the GPU (weights uploaded verbatim-quantized).
@@ -1792,6 +1802,14 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     // gemma4 dense forward AND the qwen35/36 hybrid-SSM+MoE forward expose the
     // batched serving path (decodeBatch + slot state); the server dispatches by
     // architecture via cuda_serve.Forward. Prompt mode (single-sequence) unchanged.
+
+    if (comptime gpu.is_rocm) {
+        if (model.config.architecture == .inkling2_loop) {
+            var fwd = try forward_inkling_mod.ForwardInkling.init(allocator, &model, max_ctx);
+            defer fwd.deinit();
+            return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
+        }
+    }
 
     // Build the forward state. max_ctx must cover prompt + generated tokens.
     // gemma4 and Muse Glimmer use the dense transformer forward path
@@ -1856,7 +1874,7 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
     log.info("Prompt: {s}", .{prompt});
     log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 30)] });
 
-    const eos_id = tokenizer.eosId();
+    const eos_id = cliGenerationStopId(&tokenizer, use_chat_prompt);
     const max_new: u32 = config.max_tokens;
 
     // Clamp generation so prompt + generated never exceeds the KV/SSM context.
@@ -1943,12 +1961,13 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
     if (comptime @hasDecl(@TypeOf(fwd.*), "mtpCycle")) {
         if (mtp_active) {
             generated_with_mtp = true;
+            const draft_limit: u32 = if (comptime @hasDecl(@TypeOf(fwd.*), "draftLimit")) fwd.draftLimit() else 3;
             mtp_loop: while (produced < max_new and pos < max_ctx) {
                 if (next_tok == eos_id) break;
 
                 const token_room = max_new - produced;
                 const context_room = max_ctx - pos;
-                const max_drafts = @min(@as(u32, 3), @min(token_room - 1, context_room - 1));
+                const max_drafts = @min(draft_limit, @min(token_room - 1, context_room - 1));
                 if (max_drafts == 0) {
                     try generated.append(allocator, next_tok);
                     produced += 1;
@@ -2022,8 +2041,15 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
             try text_buf.appendSlice(allocator, "<?>");
         }
     }
-    const output_text = trimCliOutputText(text_buf.items, use_chat_prompt);
-    log.info("Output ({d} tokens): {s}", .{ generated.items.len, output_text });
+    const template_kind = tokenizer.detectTemplateKind();
+    if (use_chat_prompt and (template_kind == .inkling2 or template_kind == .atem)) {
+        const normalized = try allocator.alloc(u8, text_buf.items.len);
+        defer allocator.free(normalized);
+        const text = try routes_mod.normalizeStructuredAssistantOutput(&tokenizer, text_buf.items, template_kind == .inkling2, normalized);
+        log.info("Output ({d} tokens): {s}", .{ generated.items.len, text });
+    } else {
+        log.info("Output ({d} tokens): {s}", .{ generated.items.len, trimCliOutputText(text_buf.items, use_chat_prompt) });
+    }
 }
 
 // ── Shared CUDA/ROCm HTTP/SSE serving ───────────────────────────────────────
@@ -2049,7 +2075,8 @@ const AcceleratorResources = struct {
 
     fn load(allocator: std.mem.Allocator, device: *cuda_device_mod.CudaDevice, entry: *const accelerator_catalog.Entry, config: Config, max_ctx: u32) !*AcceleratorResources {
         const self = try allocator.create(AcceleratorResources);
-        self.* = .{ .allocator = allocator, .entry = entry, .debug_ids = envIsOn("ZINC_SERVE_DEBUG_IDS"), .slot_ctx = max_ctx };
+        const slot_ctx = max_ctx;
+        self.* = .{ .allocator = allocator, .entry = entry, .debug_ids = envIsOn("ZINC_SERVE_DEBUG_IDS"), .slot_ctx = slot_ctx };
         errdefer self.destroy(device);
         const model = try allocator.create(loader_cuda_mod.Model);
         model.* = loader_cuda_mod.Model.load(allocator, device.ctx, entry.path) catch |err| {
@@ -2057,16 +2084,23 @@ const AcceleratorResources = struct {
             return err;
         };
         self.model = model;
-        if (model.config.architecture == .gemma or model.config.architecture == .muse_glimmer) {
+        if (gpu.is_rocm and model.config.architecture == .inkling2_loop) {
+            const fwd = try allocator.create(forward_inkling_mod.ForwardInkling);
+            fwd.* = forward_inkling_mod.ForwardInkling.init(allocator, model, slot_ctx) catch |err| {
+                allocator.destroy(fwd);
+                return err;
+            };
+            self.fwd = .{ .inkling = fwd };
+        } else if (model.config.architecture == .gemma or model.config.architecture == .muse_glimmer) {
             const fwd = try allocator.create(forward_cuda_gemma_mod.ForwardGemma);
-            fwd.* = forward_cuda_gemma_mod.ForwardGemma.init(allocator, model, max_ctx) catch |err| {
+            fwd.* = forward_cuda_gemma_mod.ForwardGemma.init(allocator, model, slot_ctx) catch |err| {
                 allocator.destroy(fwd);
                 return err;
             };
             self.fwd = .{ .gemma = fwd };
         } else {
             const fwd = try allocator.create(forward_cuda_mod.ForwardCuda);
-            fwd.* = forward_cuda_mod.ForwardCuda.init(allocator, model, max_ctx) catch |err| {
+            fwd.* = forward_cuda_mod.ForwardCuda.init(allocator, model, slot_ctx) catch |err| {
                 allocator.destroy(fwd);
                 return err;
             };
@@ -2082,10 +2116,12 @@ const AcceleratorResources = struct {
         if (host_io.getenv("ZINC_SCHED_EOS")) |v| eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
         const eot = if (self.debug_ids) null else if (tool_format_mod.forTokenizer(tokenizer).native_gemma) tokenizer.token_to_id.get("<|tool_response>") else if (tokenizer.detectTemplateKind() == .atem) tokenizer.eot_id else null;
         const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
-        const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
-        if (gemma_moe and config.max_parallel != 1) log.warn("Gemma MoE serving currently uses one request slot; ignoring --parallel {d}", .{config.max_parallel});
+        const single_sequence = gemma_moe or model.config.architecture == .inkling2_loop;
+        const nslots = cudaServeSlotCount(config.max_parallel, single_sequence);
+        if (single_sequence and config.max_parallel != 1)
+            log.warn("{s} serving uses one request slot, ignoring --parallel {d}", .{ @tagName(model.config.architecture), config.max_parallel });
         const engine = try allocator.create(cuda_serve_mod.ServeEngine);
-        engine.* = cuda_serve_mod.ServeEngine.init(allocator, self.fwd.?, nslots, max_ctx, eos, eot) catch |err| {
+        engine.* = cuda_serve_mod.ServeEngine.init(allocator, self.fwd.?, nslots, slot_ctx, eos, eot) catch |err| {
             allocator.destroy(engine);
             return err;
         };
@@ -2116,6 +2152,10 @@ const AcceleratorResources = struct {
                 ptr.deinit();
                 self.allocator.destroy(ptr);
             },
+            .inkling => |ptr| if (comptime gpu.is_rocm) {
+                ptr.deinit();
+                self.allocator.destroy(ptr);
+            } else unreachable,
         };
         if (self.model) |model| {
             model.deinit();
@@ -2163,7 +2203,7 @@ const AcceleratorManager = struct {
             else => return error.UnsupportedModelArchitecture,
         }
         const format = @import("compute/kv_storage.zig").Format.parse(host_io.getenv("ZINC_KV_CACHE")) catch return error.UnsupportedKvCacheConfiguration;
-        const slots = cudaServeSlotCount(self.config.max_parallel, cfg.architecture == .gemma and cfg.n_experts > 0);
+        const slots = cudaServeSlotCount(self.config.max_parallel, (cfg.architecture == .gemma and cfg.n_experts > 0) or cfg.architecture == .inkling2_loop);
         if (format == .q8 and (!gpu.is_rocm or (cfg.architecture != .qwen35 and cfg.architecture != .qwen2_moe) or slots != 1)) return error.UnsupportedKvCacheConfiguration;
         const estimate = @import("gpu/native_memory_estimate.zig").estimate(cfg, inspection.weights_bytes, self.max_ctx, slots, format) catch return error.InvalidModel;
         try validateAcceleratorMemoryBudget(estimate, self.device.totalMemory());
@@ -2221,9 +2261,9 @@ const ServeGenerateCtx = struct {
     model_path: ?[]const u8,
 };
 
-fn cudaServeSlotCount(requested: u32, gemma_moe: bool) u32 {
+fn cudaServeSlotCount(requested: u32, single_sequence: bool) u32 {
     const clamped = std.math.clamp(requested, 1, 64);
-    return if (gemma_moe) 1 else clamped;
+    return if (single_sequence) 1 else clamped;
 }
 
 fn runCudaServe(device: *cuda_device_mod.CudaDevice, initial_path: []const u8, config: Config, max_ctx: u32, allocator: std.mem.Allocator) !void {
@@ -2869,7 +2909,7 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
         return;
     }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/v1/models")) {
-        const body = buildAcceleratorModelsJson(ctx.allocator, manager.inventory.entries.items, if (current) |r| r.entry.id else null, manager.max_ctx, if (current) |r| r.tokenizer.?.supportsThinkingToggle() else false, capability) catch {
+        const body = buildAcceleratorModelsJson(ctx.allocator, manager.inventory.entries.items, if (current) |r| r.entry.id else null, if (current) |r| r.slot_ctx else 0, if (current) |r| r.tokenizer.?.supportsThinkingToggle() else false, capability) catch {
             conn.sendError(500, "server_error", "Failed to describe installed models") catch {};
             return;
         };
@@ -3011,12 +3051,13 @@ fn handleServeGenerate(ctx: *ServeGenerateCtx, conn: *http_mod.Connection, body:
     defer if (owns_tokens) allocator.free(prompt_tokens);
 
     const template_kind = ctx.tokenizer.detectTemplateKind();
-    const structured_chat = is_chat and !ctx.debug_ids and (template_kind == .atem or template_kind == .openai_moe);
+    const structured_chat = is_chat and !ctx.debug_ids and
+        (template_kind == .atem or template_kind == .openai_moe or template_kind == .inkling2);
     // ATEM models always begin on their private reasoning channel. Expose that
     // channel by default (callers can still request enable_thinking=false), or a
     // short completion that has not reached the final channel serializes as an
     // empty assistant message even though the model generated valid tokens.
-    const thinking_enabled = structured_chat and (enable_thinking orelse (template_kind == .atem)) and
+    const thinking_enabled = structured_chat and (enable_thinking orelse (template_kind == .atem or template_kind == .inkling2)) and
         (ctx.tokenizer.supportsThinkingToggle() or template_kind == .atem);
 
     if (prompt_tokens.len == 0) {
@@ -3490,7 +3531,7 @@ fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: st
             try printDiagnosticCheck(writer, report, .fail, "KV format", "{s}", .{@errorName(err)});
             return error.DiagnosticsFailed;
         };
-        const slots = if (config.prompt != null) 1 else cudaServeSlotCount(config.max_parallel, cfg.architecture == .gemma and cfg.n_experts > 0);
+        const slots = if (config.prompt != null) 1 else cudaServeSlotCount(config.max_parallel, (cfg.architecture == .gemma and cfg.n_experts > 0) or cfg.architecture == .inkling2_loop);
         if (format == .q8 and (!gpu.is_rocm or (cfg.architecture != .qwen35 and cfg.architecture != .qwen2_moe) or slots != 1)) {
             try printDiagnosticCheck(writer, report, .fail, "KV format", "Q8 requires a supported ROCm Qwen model and --parallel 1", .{});
             return error.DiagnosticsFailed;
@@ -3937,6 +3978,8 @@ pub fn main(process_init: std.process.Init) !void {
         defer model.deinit(&vk_instance);
         if (config.context_length) |requested_context| {
             memory_plan.applyRequestedContextLimit(&model.config, requested_context);
+        } else if (model.config.architecture == .inkling2_loop) {
+            memory_plan.applyRequestedContextLimit(&model.config, @import("model/inkling.zig").default_context_length);
         } else {
             // Same vLLM-style auto context as the server and the Metal CLI:
             // spend 85% of VRAM on weights + KV. Handing the engine the
@@ -3960,7 +4003,8 @@ pub fn main(process_init: std.process.Init) !void {
         defer engine.deinit();
 
         if (wants_graph_artifacts) {
-            writeDecodeGraphArtifacts(&engine.decode_graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+            const graph = engine.decodeGraph() orelse return error.UnsupportedArchitecture;
+            writeDecodeGraphArtifacts(graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
                 log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -4048,18 +4092,14 @@ pub fn main(process_init: std.process.Init) !void {
                 log.debug("  gen[{d}]: id={d} \"{s}\"", .{ ti, output_tokens[ti], tok_str });
             }
         }
-        // Check specific token logits (Paris=11751, not=524)
+        // Debug: inspect the last logits, including the legacy Qwen anchors.
         if (config.debug) {
-            const logits_ptr2: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
-            log.debug("  logit[11751 'Paris']={d:.4} logit[524 'not']={d:.4} logit[264 'a']={d:.4}", .{
-                logits_ptr2[11751], logits_ptr2[524], logits_ptr2[264],
-            });
-        }
-        // Debug: dump top-5 logits from the last decode step
-        if (config.debug) {
-            const vocab_size = model.config.vocab_size;
-            const logits_ptr: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
-            const logits = logits_ptr[0..vocab_size];
+            const logits = engine.lastLogits();
+            if (model.config.architecture != .inkling2_loop and logits.len > 11751) {
+                log.debug("  logit[11751 'Paris']={d:.4} logit[524 'not']={d:.4} logit[264 'a']={d:.4}", .{
+                    logits[11751], logits[524], logits[264],
+                });
+            }
             // Find top 5
             var top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
             var top_vals: [5]f32 = .{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
@@ -4095,7 +4135,7 @@ pub fn main(process_init: std.process.Init) !void {
                 sum_abs += @abs(@as(f64, v));
             }
             log.debug("  logit stats: zeros={d} NaN={d} Inf={d} mean_abs={d:.4}", .{
-                n_zero, n_nan, n_inf, sum_abs / @as(f64, @floatFromInt(vocab_size)),
+                n_zero, n_nan, n_inf, sum_abs / @as(f64, @floatFromInt(logits.len)),
             });
         }
 
@@ -4112,7 +4152,13 @@ pub fn main(process_init: std.process.Init) !void {
                     try text_buf.appendSlice(allocator, "<?>");
                 }
             }
-            const output_text = trimCliOutputText(text_buf.items, use_chat_prompt or eos_id == std.math.maxInt(u32));
+            const structured = use_chat_prompt and tokenizer.detectTemplateKind() == .inkling2;
+            const normalized = if (structured) try allocator.alloc(u8, text_buf.items.len) else null;
+            defer if (normalized) |buf| allocator.free(buf);
+            const output_text = if (normalized) |buf|
+                try routes_mod.normalizeStructuredAssistantOutput(&tokenizer, text_buf.items, true, buf)
+            else
+                trimCliOutputText(text_buf.items, use_chat_prompt or eos_id == std.math.maxInt(u32));
             log.info("Output text: {s}", .{output_text});
             // Also log raw token IDs for debugging
             log.info("Output tokens ({d}): first20={any}", .{

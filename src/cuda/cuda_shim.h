@@ -66,6 +66,8 @@ CudaBuf* cuda_create_buffer_staged(CudaCtx* ctx, size_t size, void** cpu_ptr);
 // Register an existing host mapping (e.g. mmap'd weights) as pinned and copy to
 // device — the CUDA analogue of mtl_wrap_mmap (which is zero-copy on Apple).
 CudaBuf* cuda_upload_mmap(CudaCtx* ctx, const void* host_ptr, size_t size);
+// Copy a mapped range into an existing buffer or alias. Returns 1 on success.
+int      cuda_copy_mmap(CudaCtx* ctx, CudaBuf* buf, const void* host_ptr, size_t size);
 // Sub-buffer view sharing the parent's device allocation (no new alloc).
 CudaBuf* cuda_alias_buffer(CudaBuf* base, size_t offset, size_t size);
 // Raw device pointer (CUdeviceptr) as an integer, for arg packing / aliasing.
@@ -113,6 +115,11 @@ void cuda_dispatch(CudaCmd* cmd, CudaPipe* pipe,
 // stream; kept for surface parity and future multi-stream (event) use.
 void cuda_barrier(CudaCmd* cmd);
 void cuda_commit_and_wait(CudaCmd* cmd);
+// ROCm-only checked submission. Returns zero for a failed launch or sync.
+int rocm_commit_and_wait_checked(CudaCmd* cmd);
+// ROCm FP32 prefill projection. Returns zero if the caller needs the portable kernel.
+int rocm_try_sgemm(CudaCtx* ctx, unsigned rows, unsigned cols, unsigned count,
+                   CudaBuf* weights, CudaBuf* input, CudaBuf* output);
 void cuda_commit_async(CudaCmd* cmd);
 void cuda_wait(CudaCmd* cmd);
 void cuda_release_completed(CudaCmd* cmd);
@@ -164,6 +171,10 @@ CudaGraph* cuda_graph_create(void);
 int        cuda_graph_begin(CudaCtx* ctx);                 // 1 on success, 0 on failure
 int        cuda_graph_end_launch(CudaCtx* ctx, CudaGraph* graph); // 1 on success
 void       cuda_graph_free(CudaGraph* graph);
+// ROCm static replay. End and execute the initial capture. Returns 0 if no
+// kernels executed, -1 if the launch or its completion failed, or 1 on success.
+int rocm_graph_end_recorded(CudaCtx* ctx, CudaGraph* graph, CudaCmd* cmd);
+int rocm_graph_replay(CudaCtx* ctx, CudaGraph* graph);
 
 // ---- Diagnostics -------------------------------------------------------------
 // Last CUDA/NVRTC error string for the calling thread ("" if none). Not freed.

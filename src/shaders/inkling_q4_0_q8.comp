@@ -1,0 +1,91 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_spirv_intrinsics : enable
+
+// OpSDot with PackedVectorFormat4x8Bit (SPIR-V 1.6). This also works
+// with glslc releases that provide the intrinsic syntax but no GLSL dot API.
+#ifdef GL_EXT_spirv_intrinsics
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6019, 6018], id = 4450)
+int signed_dot(int a, int b, spirv_literal int format);
+#else
+int signed_dot(int a, int b, int format) {
+    int sum = 0;
+    for (int i = 0; i < 32; i += 8) sum += bitfieldExtract(a, i, 8) * bitfieldExtract(b, i, 8);
+    return sum;
+}
+#endif
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Weights { uint weights[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Input { uint x[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Indices { uint experts[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+    uint routes;
+    uint per_route;
+    uint blocked;
+} p;
+
+#include "inkling_lanes.glsl"
+
+shared float dots[64];
+
+uint read_word(uint at) {
+    uint low = weights[at >> 2u];
+    return (at & 2u) == 0u ? low : (low >> 16u) | (weights[(at >> 2u) + 1u] << 16u);
+}
+
+int signed_nibbles(uint bits) {
+    uint xored = (bits & 0x0f0f0f0fu) ^ 0x08080808u;
+    return int(xored | ((xored & 0x08080808u) * 30u));
+}
+
+void main() {
+    bool shuffle_rows = can_shuffle(16u);
+    uint tid = shuffle_rows ? shuffle_lane() : gl_LocalInvocationID.x;
+    uint lane = tid & 15u;
+    uint word = lane & 3u;
+    uint workgroup = gl_WorkGroupID.x + gl_WorkGroupID.z * gl_NumWorkGroups.x;
+    uint row = workgroup * 4u + tid / 16u;
+    uint entry = gl_WorkGroupID.y;
+    uint expert = p.routes != 0u ? experts[entry] : 0u;
+    uint token = p.routes != 0u && p.per_route == 0u ? entry / p.routes : entry;
+    uint blocks = p.cols / 32u;
+    uint weight_row = expert * p.rows + row;
+    uint base = weight_row * blocks * 18u;
+    float sum = 0.0;
+    if (row < p.rows) {
+        for (uint b = lane / 4u; b < blocks; b += 4u) {
+            float scale;
+            uint bits;
+            if (p.blocked != 0u) {
+                uint tile = (weight_row / 4u * blocks + (b & ~3u)) * 18u;
+                uint slot = (weight_row & 3u) * 4u + (b & 3u);
+                bits = weights[tile + slot * 4u + word];
+                scale = unpackHalf2x16(weights[tile + 64u + slot / 2u])[slot & 1u];
+            } else {
+                uint at = base + b * 18u;
+                scale = unpackHalf2x16(weights[at >> 2u])[(at >> 1u) & 1u];
+                bits = read_word(at + 2u + word * 4u);
+            }
+            uint src = (token * blocks + b) * 9u;
+            int dp = signed_dot(signed_nibbles(bits), int(x[src + word]), 0) +
+                signed_dot(signed_nibbles(bits >> 4u), int(x[src + 4u + word]), 0);
+            sum = fma(scale * uintBitsToFloat(x[src + 8u]), float(dp), sum);
+        }
+    }
+    if (shuffle_rows) {
+        for (uint delta = 8u; delta != 0u; delta >>= 1u) sum += subgroupShuffleXor(sum, delta);
+    } else {
+        dots[tid] = sum;
+        barrier();
+        if (lane == 0u) {
+            for (uint i = 1u; i < 16u; ++i) sum += dots[tid + i];
+        }
+    }
+    if (lane == 0u && row < p.rows) y[entry * p.rows + row] = sum;
+}

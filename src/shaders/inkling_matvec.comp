@@ -1,0 +1,63 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint kind = 0u;
+layout(set = 0, binding = 0, std430) readonly buffer Weights { uint weights[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Indices { uint experts[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+    uint routes;
+    uint per_route;
+    uint blocked;
+} p;
+
+#include "inkling_weights.glsl"
+#include "inkling_lanes.glsl"
+
+shared float dots[64];
+
+void main() {
+    bool shuffle_rows = can_shuffle(16u);
+    uint tid = shuffle_rows ? shuffle_lane() : gl_LocalInvocationID.x;
+    uint lane = tid & 15u;
+    uint workgroup = gl_WorkGroupID.x + gl_WorkGroupID.z * gl_NumWorkGroups.x;
+    uint row = workgroup * 4u + tid / 16u;
+    uint entry = gl_WorkGroupID.y;
+    uint expert = p.routes == 0u ? 0u : experts[entry];
+    uint token = p.routes == 0u || p.per_route != 0u ? entry : entry / p.routes;
+    uint base = token * p.cols;
+    uint weight_row = (expert * p.rows + row) * weight_row_bytes(kind, p.cols);
+    float sum = 0.0;
+    if (row < p.rows) {
+        if (kind == Q4_0) {
+            for (uint i = 0u; i < p.cols; i += 32u) {
+                uint block = weight_row + i / 32u * 18u;
+                uint q = weight_byte(block + 2u + lane);
+                float lo = float(int(q & 15u) - 8) * x[base + i + lane];
+                float hi = float(int(q >> 4u) - 8) * x[base + i + lane + 16u];
+                sum = fma(weight_half(block), lo + hi, sum);
+            }
+        } else {
+            for (uint i = lane; i < p.cols; i += 16u) {
+                sum = fma(weight_value(weight_row, kind, i), x[base + i], sum);
+            }
+        }
+    }
+
+    if (shuffle_rows) {
+        for (uint delta = 8u; delta != 0u; delta >>= 1u) sum += subgroupShuffleXor(sum, delta);
+    } else {
+        dots[tid] = sum;
+        barrier();
+        if (lane == 0u) {
+            for (uint i = 1u; i < 16u; ++i) sum += dots[tid + i];
+        }
+    }
+    if (lane == 0u && row < p.rows) y[entry * p.rows + row] = sum;
+}

@@ -193,7 +193,7 @@ pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.A
         // SwiGLU) with extra gated-attention + QK-norm tensors; the dense Gemma
         // graph is the closest weight-size model for the profiling report.
         .muse_glimmer => try buildGemmaDecodeGraph(config, allocator, gf),
-        .unknown => error.UnsupportedArchitecture,
+        .inkling2_loop, .unknown => error.UnsupportedArchitecture,
     };
 }
 

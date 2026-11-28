@@ -36,10 +36,12 @@ pub fn resolveRequest(capability: Capability, requested: ?bool) !bool {
 }
 
 pub fn draftBudget(remaining_output: u32, position: u32, max_context: u32) u32 {
-    // Three is the native verifier's maximum capacity, not an environment
-    // override: ForwardCuda.mtpCycle further clamps this by ZINC_MTP_DRAFTS
-    // (or its adaptive policy). Reserve the already-published seed as well.
-    return @min(3, @min(remaining_output, (max_context -| position) -| 1));
+    return draftBudgetForLimit(3, remaining_output, position, max_context);
+}
+
+fn draftBudgetForLimit(limit: u32, remaining_output: u32, position: u32, max_context: u32) u32 {
+    // Reserve a context position for the seed that was already published.
+    return @min(limit, @min(remaining_output, (max_context -| position) -| 1));
 }
 
 pub const DecodeLimits = struct {
@@ -48,6 +50,7 @@ pub const DecodeLimits = struct {
     max_context: u32,
     eos: u32,
     eot: ?u32 = null,
+    draft_limit: u32 = 3,
 };
 
 fn stops(token: u32, limits: DecodeLimits) bool {
@@ -74,7 +77,7 @@ pub fn runDecode(ctx: anytype, limits: DecodeLimits, seed: u32, stats: *Result) 
 
     while (produced < max_tokens) {
         if (ctx.isCancelled()) return;
-        const budget = draftBudget(max_tokens - produced, position, limits.max_context);
+        const budget = draftBudgetForLimit(limits.draft_limit, max_tokens - produced, position, limits.max_context);
         if (budget == 0) return;
         const result = try ctx.cycle(next, position, budget, limits.eos);
         stats.used = true;

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { intelModelIds, intelWorkloads } from './intel_workloads.mjs';
 
-test('Intel matrix covers the entire managed catalog using the four canonical workloads', () => {
+test('Intel matrix covers the qualified Intel catalog using the four canonical workloads', () => {
   // Compile the actual data: source formatting and nonliteral IDs must not
   // hide a model. The exporter only serializes constants, without GPU access.
   const exported = spawnSync('./scripts/zig.sh', ['run', 'src/catalog_manifest.zig', '-lc'], {
@@ -11,7 +11,10 @@ test('Intel matrix covers the entire managed catalog using the four canonical wo
     timeout: 120_000,
   });
   expect(exported.status, exported.stderr).toBe(0);
-  const catalogIds = JSON.parse(exported.stdout).map((entry: { id: string }) => entry.id);
+  const entries: { id: string; tested_profiles: string[] }[] = JSON.parse(exported.stdout);
+  const catalogIds = entries
+    .filter((entry) => entry.tested_profiles.includes('intel-arc'))
+    .map((entry) => entry.id);
   expect(catalogIds.length).toBeGreaterThan(0);
   expect([...intelModelIds].sort()).toEqual(catalogIds.sort());
   for (const id of intelModelIds) {
