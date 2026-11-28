@@ -1,8 +1,8 @@
 // Documentation follows main; a published executable keeps its frozen feature
 // set. New commands must be marked Development until a release includes them.
-export const STABLE_RELEASE = '0.1.1';
+export const STABLE_RELEASE = '0.1.2';
 export const STABLE_RELEASE_URL = `https://github.com/zolotukhin/zinc/releases/tag/v${STABLE_RELEASE}`;
-export const STABLE_VALIDATION_PATH = '/zinc/validation/release-candidate-0.1.1-2026-11-16.json';
+export const STABLE_VALIDATION_PATH = '/zinc/validation/release-candidate-0.1.2-2026-11-27.json';
 
 export function docsReleaseStatus(slug: string) {
   if (slug === 'getting-started')

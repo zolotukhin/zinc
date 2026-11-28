@@ -88,12 +88,9 @@ test('both agent indexes scope native lifecycle controls by release and live dis
   for (const render of [renderLlmsTxt, renderLlmsFullTxt]) {
     const text = render(index, [], 'https://example.test/');
     expect(text).toContain(
-      'Stable 0.1.1 HIP provides CLI/HTTP chat without browser UI or model switching',
+      'Stable Linux HIP and Vulkan include browser chat, installed-model switching and unload',
     );
-    expect(text).toContain('Current HIP source adds browser chat');
-    expect(text).toContain(
-      'current HIP/CUDA source advertises installed-model switching and unload',
-    );
+    expect(text).toContain('HIP also offers request-level MTP for eligible loaded models');
     expect(text).toContain('Enable controls through live capability discovery');
     expect(text).not.toContain('native HIP/CUDA do not offer hot model management');
   }

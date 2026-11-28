@@ -5,11 +5,27 @@ import TerminalWindow from '../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import benchmarkData from '../../data/zinc-performance.json';
 import pinnedZigVersion from '../../../../.zig-version?raw';
-import { STABLE_RELEASE } from '../../lib/docs-release-status';
+import { STABLE_RELEASE, STABLE_VALIDATION_PATH } from '../../lib/docs-release-status';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const compilerVersion = pinnedZigVersion.trim();
-const discordInvite = 'https://discord.gg/QRUgWH2aGV';
+const githubRepo = 'https://github.com/zolotukhin/zinc';
+const discordInviteCode = 'QRUgWH2aGV';
+const discordInvite = `https://discord.gg/${discordInviteCode}`;
+const numberFormat = new Intl.NumberFormat('en-US');
+// Public counts at deployment. The browser refreshes them when the providers answer.
+const communityLinks = [
+  {
+    id: 'github', label: 'GitHub', href: githubRepo, count: 535, unit: 'star',
+    endpoint: 'https://api.github.com/repos/zolotukhin/zinc', field: 'stargazers_count',
+  },
+  {
+    id: 'discord', label: 'Join Discord', href: discordInvite, count: 29, unit: 'member',
+    endpoint: `https://discord.com/api/v10/invites/${discordInviteCode}?with_counts=true`,
+    field: 'approximate_member_count',
+  },
+];
+const inklingArticle = '/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/';
 const breadcrumbItems = [{ name: 'Home', href: '/' }, { name: 'ZINC' }];
 const target = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
@@ -46,7 +62,7 @@ const description = 'Run GGUF language models with native HIP / ROCm on AMD RDNA
         '@type': 'SoftwareApplication', name: 'ZINC', description,
         url: `${siteUrl}/zinc/`, applicationCategory: 'DeveloperApplication',
         operatingSystem: 'Linux, macOS',
-        codeRepository: 'https://github.com/zolotukhin/zinc',
+        codeRepository: githubRepo,
         license: 'https://github.com/zolotukhin/zinc/blob/main/LICENSE',
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
       },
@@ -63,15 +79,28 @@ const description = 'Run GGUF language models with native HIP / ROCm on AMD RDNA
       <p class="intro">Load a GGUF model, chat in your browser, or connect an app through the OpenAI-compatible API.</p>
       <div class="actions">
         <a href="/zinc/docs/getting-started/" class="button primary">Get started <span aria-hidden="true">→</span></a>
-        <a href="https://github.com/zolotukhin/zinc" class="button">View on GitHub <span aria-hidden="true">↗</span></a>
-        <a href={discordInvite} class="button">Join Discord <span aria-hidden="true">↗</span></a>
+        <div class="community-links">
+          {communityLinks.map(({ id, label, href, count, unit, endpoint, field }) => (
+            <a href={href} class:list={['button', 'community-button', id]}>
+              <img src={`/zinc/community/${id}.svg`} alt="" width="22" height="22" />
+              <span class="community-label">
+                <span>{label}</span>
+                <span class="community-count" data-count-url={endpoint} data-count-field={field} data-count-unit={unit}>
+                  {numberFormat.format(count)} {unit}s
+                </span>
+              </span>
+              <span aria-hidden="true" class="community-arrow">↗</span>
+            </a>
+          ))}
+        </div>
       </div>
       <p class="build-note">One native binary · Zig {compilerVersion} · MIT licensed</p>
+      <p class="article-note"><a href={inklingArticle}>Inkling 2 Mini benchmarks on RX 9070 XT and R9700 →</a></p>
     </div>
     <div class="use-cases" aria-label="Ways to use ZINC">
       <a href="/zinc/docs/getting-started/#start-the-chat-ui">
         <span class="number" aria-hidden="true">01</span>
-        <div><h2>Chat in your browser</h2><p>Vulkan and Metal, plus current HIP source builds.</p></div>
+        <div><h2>Chat in your browser</h2><p>HIP / ROCm, Vulkan and the Metal preview.</p></div>
         <span aria-hidden="true">↗</span>
       </a>
       <a href="/zinc/docs/running-zinc/">
@@ -104,7 +133,7 @@ export PATH="$HOME/.local/bin:$PATH"
 zinc --check
 zinc model pull qwen35-9b-q4k-m
 zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1`} />
-      <p class="caption">This stable HIP example serves Qwen 3.5 9B through the API. HIP browser chat is available in current source builds; stable {STABLE_RELEASE} includes browser chat on Vulkan. See <a href="/zinc/docs/running-zinc/#browser-chat">browser options</a>, <a href="/zinc/docs/hardware-requirements/">memory requirements</a> and <code>zinc model list</code>.</p>
+      <p class="caption">This stable HIP example serves Qwen 3.5 9B through the API. Stable {STABLE_RELEASE} includes browser chat on HIP and Vulkan. See <a href="/zinc/docs/running-zinc/#browser-chat">browser options</a>, <a href="/zinc/docs/hardware-requirements/">memory requirements</a> and <code>zinc model list</code>.</p>
     </div>
   </section>
 
@@ -149,12 +178,12 @@ node setup-openclaw.mjs run --project ../my-project -- \\
   "Fix the failing tests and run them."`} />
         <p class="caption"><code>check</code> validates the config and server; it does not prove coding ability. Review the resulting diff and independently run your project's tests after each task.</p>
         <p class="harness-links"><a href="/zinc/docs/openclaw/">OpenClaw setup guide →</a> <a href="/zinc/harnesses/setup-openclaw.mjs" download="setup-openclaw.mjs">Download helper ↓</a></p>
-        <p class="caption">The 0.1.1 AMD cohort passed 35/36 OpenClaw tasks across six larger models on Vulkan and ROCm; one incorrect receipt remains failed. The small starter model did not qualify. See <a href="/zinc/docs/openclaw-amd-validation/">model results and limits</a>; this report does not qualify Intel or Metal.</p>
+        <p class="caption">The {STABLE_RELEASE} archives passed 53/54 first-pass OpenClaw tasks across six larger models on AMD HIP, AMD Vulkan and Intel Vulkan. The Intel timeout passed on retry with a longer deadline. The starter passed the Vulkan API checks and scored 0/12 across both coding clients. <a href={STABLE_VALIDATION_PATH}>Release validation</a></p>
       </article>
       <article class="harness-client terminal-wrap" aria-labelledby="opencode-heading" data-coding-harness="opencode">
         <h3 id="opencode-heading">OpenCode</h3>
         <p class="harness-intro">Coding rounds with streaming tool calls and an independent project verification command. Requires Bun 1.4.4 or newer.</p>
-        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.0.21
+        <TerminalWindow title="2. Connect OpenCode" density="compact" code={`bun add --global --trust @opencode/cli@2.2.6
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 bun setup-opencode.mjs --project ../my-project \\
   --model qwen35-9b-q4k-m --context auto --output 2048 --steps 16
@@ -183,7 +212,7 @@ bun setup-opencode.mjs run --project ../my-project \\
         ))}</tbody>
       </table>
       <p class="caption">Radeon AI PRO R9700 · ROCm · Q4_K_M · Quick Chat median · {target?.generated_at?.slice(0, 10)}. Speculative decoding is off for both engines. <a href="/zinc/benchmarks/#rdna-rocm">Method and samples →</a></p>
-      <p class="engineering-note">Latest engineering note: <a href="/zinc/docs/rocm-mtp-0-17/">faster Qwen 3.8 27B speculative decoding on Zig 0.17 →</a></p>
+      <p class="engineering-note">Read the <a href={inklingArticle}>Inkling 2 Mini benchmarks and development setup →</a></p>
     </div>
   </section>
 
@@ -200,6 +229,26 @@ bun setup-opencode.mjs run --project ../my-project \\
   </section>
 </BaseLayout>
 
+<script>
+  const numberFormat = new Intl.NumberFormat('en-US');
+
+  for (const count of document.querySelectorAll<HTMLElement>('[data-count-url]')) {
+    const { countUrl, countField, countUnit } = count.dataset;
+    if (!countUrl || !countField || !countUnit) continue;
+
+    fetch(countUrl, {
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      signal: AbortSignal.timeout(4000),
+    }).then(async (response) => {
+      if (!response.ok) return;
+      const total = (await response.json())[countField];
+      if (!Number.isSafeInteger(total) || total < 0) return;
+      count.textContent = `${numberFormat.format(total)} ${countUnit}${total === 1 ? '' : 's'}`;
+    }).catch(() => {});
+  }
+</script>
+
 <style>
   :global(main.container) { max-width: var(--max-width-wide); }
   .hero { display: grid; grid-template-columns: 1.2fr 1fr; align-items: center; gap: 5rem; padding: 2rem 0 4.5rem; }
@@ -212,7 +261,16 @@ bun setup-opencode.mjs run --project ../my-project \\
   .button.primary { color: white; background: #b34700; border-color: #b34700; }
   .button:hover { border-color: var(--color-accent); text-decoration: none; }
   .button.primary:hover { background: #943c00; border-color: #943c00; }
-  .build-note { margin: 1rem 0 0; color: var(--color-text-muted); font-size: 0.72rem; }
+  .community-links { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+  .community-button { justify-content: start; gap: 0.58rem; padding: 0.58rem 0.67rem; color: #fff; background: var(--brand); border-color: var(--brand-border, var(--brand)); }
+  .community-button:hover { background: var(--brand-hover); border-color: var(--brand-border, var(--brand-hover)); }
+  .community-button.github { --brand: #24292f; --brand-hover: #30363d; --brand-border: #65707e; }
+  .community-button.discord { --brand: #5865f2; --brand-hover: #4754dc; }
+  .community-button img { display: block; flex: none; object-fit: contain; }
+  .community-label { display: grid; gap: 0.15rem; line-height: 1.15; }
+  .community-count { font-size: 0.72rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .community-arrow { margin-left: auto; }
+  .build-note, .article-note { margin: 1rem 0 0; color: var(--color-text-muted); font-size: 0.72rem; }
   .use-cases { border-top: 1px solid var(--color-border); }
   .use-cases a { display: grid; grid-template-columns: 1.4rem 1fr 1rem; align-items: baseline; gap: 1rem; padding: 1.65rem 0; border-bottom: 1px solid var(--color-border); color: var(--color-text); }
   .use-cases a:hover { text-decoration: none; }
@@ -262,6 +320,7 @@ bun setup-opencode.mjs run --project ../my-project \\
     .hero, .page-section { grid-template-columns: 1fr; }
     .hero { padding: 1.5rem 0 3rem; }
     .hero h1 { max-width: 30rem; }
+    .community-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(100%, 22rem); }
     .use-cases a { padding: 1.2rem 0; }
     .page-section { padding: 2.5rem 0; gap: 1.5rem; }
     .harness-grid { grid-template-columns: 1fr; }
@@ -270,7 +329,8 @@ bun setup-opencode.mjs run --project ../my-project \\
   }
   @media (max-width: 380px) {
     h1 { font-size: 2.4rem; }
-    .button { width: 100%; justify-content: space-between; }
+    .button.primary { width: 100%; justify-content: space-between; }
+    .community-links { width: 100%; grid-template-columns: 1fr; }
     .platform { align-items: start; }
     .platform-detail { max-width: 8rem; }
     table { font-size: 0.73rem; }

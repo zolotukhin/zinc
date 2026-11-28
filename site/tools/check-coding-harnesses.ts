@@ -100,8 +100,8 @@ try {
         const claw = section.locator('[data-coding-harness="openclaw"]');
         assert.match(await claw.innerText(), /24\.16\+.*24\.x.*26\.1\+/);
         assert.match(await claw.innerText(), /independently run your project's tests/);
-        assert.match(await claw.innerText(), /small starter model did not qualify/);
-        assert.match(await claw.innerText(), /does not qualify Intel or Metal/);
+        assert.match(await claw.innerText(), /starter passed the Vulkan API checks and scored 0\/12/);
+        assert.match(await claw.innerText(), /AMD HIP, AMD Vulkan and Intel Vulkan/);
         const counts = releaseEvidence.supplementary.actual_client_counts;
         assert.ok(
           (await claw.innerText()).includes(

@@ -2,16 +2,10 @@
 
 Linux releases cover Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. The workflow builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
-[Linux 0.1.1 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1).
-The [release record](https://github.com/zolotukhin/zinc/blob/main/docs/releases/0.1.1-plan.md)
-contains its exact-byte qualification and completed public-install checks.
-
-The [0.1.2 candidate record](releases/0.1.2-plan.md#candidate-progress)
-records completed AMD archive, lifecycle, client and upgrade checks. Intel's
-required profile is still missing; those AMD passes do not certify or publish
-the candidate. The [November 19 AMD evidence](https://zolotukhin.ai/zinc/validation/release-candidate-0.1.2-amd-2026-11-19.json)
-binds the refreshed archive hashes to those checks and retains the preceding
-RSS failure and separate development runs.
+[Linux 0.1.2 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.2).
+The [0.1.2 release record](releases/0.1.2-plan.md) covers the certified Radeon
+and Intel archives, the lifecycle, client and upgrade checks, and the
+successful public downloads and clean installations.
 
 The [0.1.1 record](releases/0.1.1-plan.md) retains its preparation, publication
 and earlier failed attempts. Version-specific `docs/releases/<version>-changes.md` files supply
@@ -41,13 +35,10 @@ PR code never runs on GPU/signing workers. Actions use commit pins, checkout cre
 
 The nightly schedule runs the full correctness/model matrix. Performance baselines and broader optional-feature qualifications remain separate work; this pipeline makes no TPS claims. ZINC checks use greedy decoding, one slot and the backend's default KV/MTP settings at the policy's context limits; the native reference uses F32 KV.
 
-The published 0.1.1 Vulkan archive includes browser chat; 0.1.1 ROCm provides
-CLI/HTTP routes without the built-in UI or hot model switching. Metal remains
-an unsigned preview. Current 0.1.2 source adds native browser chat,
-installed-model switching/unload and per-request
-MTP controls. Its candidate runs the lifecycle, repeated-reference and real
-failed-load recovery gates recorded in the [candidate plan](releases/0.1.2-plan.md).
-Keep the source/candidate contract separate from the published stable binary.
+Both Linux 0.1.2 archives include browser chat and installed-model switching
+and unload. HIP provides per-request MTP controls for eligible models. The
+[release record](releases/0.1.2-plan.md) includes lifecycle, repeated-reference
+and failed-load recovery results. Metal remains an unsigned preview.
 
 ## Build environments and package format
 
@@ -334,7 +325,7 @@ passed publication and both public-install jobs. All nine anonymous downloads
 match the certified files. The [public installation rehearsal](/zinc/validation/public-install-upgrade-0.1.1-2026-11-17.json)
 passed 12 controls across the two backends, including upgrade from 0.1.0,
 rollback, reinstall, command-link repair and default stable selection, with
-cache sentinels preserved. The current stable release is 0.1.1.
+cache sentinels preserved.
 
 ## Model lifecycle qualification
 

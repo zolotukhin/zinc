@@ -6,7 +6,7 @@ This is a lightweight public roadmap for contributors. It is not a guarantee of 
 
 Current priorities:
 
-- refresh the [Linux 0.1.2 candidate](releases/0.1.2-plan.md) after the OpenClaw guard change and finish Intel qualification. Retain the earlier AMD model/lifecycle, client and upgrade/rollback results against their frozen archives; missing Intel evidence still blocks publication. [0.1.1 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1), and Metal remains an unsigned preview
+- qualify Inkling 2 Mini for a future release using the [AMD development results](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/) and the [published 0.1.2 Linux checks](releases/0.1.2-plan.md) as a starting point
 - make the core Linux AMD path more stable on real hardware
 - keep source builds and packages reliable across the documented Linux and macOS targets
 - harden the OpenAI-compatible server path

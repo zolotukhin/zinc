@@ -6,6 +6,7 @@ export const docHeadingAliases: HeadingAliases = {
   api: {
     'backend-coverage': ['compatibility-notes'],
     'capability-discovery': ['development-capability-discovery'],
+    'hip-browser-chat-and-model-lifecycle': ['development-hip-browser-chat'],
     'status-and-compatibility-limits': [
       'status-known-gaps-read-first',
       'status--known-gaps-read-first',
@@ -73,6 +74,7 @@ export const docHeadingAliases: HeadingAliases = {
       'remove-a-managed-model-from-a-running-server',
     ],
     'terminal-prompts': ['run-a-single-prompt-from-the-terminal'],
+    'hip-browser-chat': ['development-hip-browser-chat'],
     'device-context-and-kv-settings': [
       'pick-a-specific-gpu',
       'change-context-length',
@@ -124,6 +126,7 @@ export const docHeadingAliases: HeadingAliases = {
     ],
   },
   rocm: {
+    'browser-chat-on-hip': ['development-browser-chat-on-hip'],
     'amd-hip-rocm-setup': ['amd-rocm-setup', 'rocm-backend', 'install-and-run', 'run-a-model'],
     'runtime-prerequisites': ['validated-stack'],
     'serving-limits': ['http-api-coverage', 'api-client-notes'],

@@ -2,12 +2,12 @@
 
 After [installing ZINC and running a first prompt](GETTING_STARTED.md), choose
 [browser chat](#browser-chat), a [terminal prompt](#terminal-prompts), or the
-[HTTP API](#start-the-api). These commands work with stable Linux 0.1.1,
+[HTTP API](#start-the-api). These commands work with stable Linux 0.1.2,
 including [structured discovery](#structured-discovery).
 
 ## Browser chat
 
-Vulkan and Metal include a browser interface:
+Open the browser interface on HIP, Vulkan, or the Metal preview.
 
 ```bash
 zinc chat --model-id qwen35-9b-q4k-m -c 4096 --port 9090
@@ -15,18 +15,22 @@ zinc chat --model-id qwen35-9b-q4k-m -c 4096 --port 9090
 
 Keep that terminal running. Open [localhost:9090](http://localhost:9090/) if the
 browser does not open automatically. Press Ctrl-C in the server terminal to
-stop it. ROCm/CUDA in stable 0.1.1 provide the API only; use an external chat client instead.
+stop it.
 Stop this server before starting another ZINC command on the same GPU or port.
 
-### Development: HIP browser chat
+### HIP browser chat
 
-Current HIP source builds serve the shared browser interface with installed-model
-switching and unload/reload. After [building ROCm](ROCM.md#build-from-source), use
-`zinc chat --model-id qwen38-27b-q4k-m -c 65536 --parallel 1` on a card with
-enough memory. It supports streaming, the model's thinking toggle and advertised
-MTP controls. Sampling remains greedy. These features are not in the published
-0.1.1 archive. See [context and KV choices](ROCM.md#context-kv-cache-and-mtp)
+HIP supports switching among installed models and unloading or reloading them.
+It streams responses, uses greedy sampling, and shows thinking and MTP controls
+when the active model advertises them. See [context and KV choices](ROCM.md#context-kv-cache-and-mtp)
 before increasing the window. Over SSH, use `--no-browser` and forward port 9090.
+
+## Inkling 2 Mini on AMD RDNA4
+
+Use the Inkling development build for the `inkling-2-mini-q4-0` managed model.
+The 16 GB Radeon RX 9070 XT and 32 GB Radeon AI PRO R9700 both ran the Q4_0
+checkpoint at 4,096 tokens with ROCm and Vulkan. See the
+[build commands and comparison with llama.cpp](/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
 
 ## Terminal prompts
 
@@ -137,11 +141,10 @@ zinc model use qwen35-9b-q4k-m
 zinc model active
 ```
 
-`use` sets the default for future launches. It does not switch an already
-running native server. Vulkan/Metal support live model management through the
-[API](API.md#post-v1-models-activate). Stable 0.1.1 native builds require a restart;
-current HIP/CUDA source advertises installed-model activation and unload through
-capability discovery.
+`use` sets the default for future launches. To switch a running server, use
+[model activation](API.md#post-v1-models-activate). Stable Linux HIP and Vulkan,
+the Metal preview, and current experimental CUDA advertise activation and
+unload through capability discovery.
 
 For a GGUF you already have, replace `--model-id` with `-m`:
 
@@ -161,9 +164,8 @@ zinc model rm qwen35-9b-q4k-m
 
 Vulkan/Metal can refuse removal while a local server has the model loaded.
 `--force` requests that server unload it first; for a custom server port, use
-`zinc --port 9090 model rm --force <id>`. Current native source exposes
-`/v1/models/unload`, but HTTP removal remains unavailable; stop a native server
-before removing its cached model. Stable 0.1.1 native archives have no unload endpoint.
+`zinc --port 9090 model rm --force <id>`. On HIP and CUDA, stop the running
+server before removing the model from the local cache.
 
 ## Device, context and KV settings
 

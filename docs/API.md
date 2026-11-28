@@ -6,7 +6,7 @@ the server by changing the base URL.
 For a first connection, follow [Run models and connect apps](RUNNING_ZINC.md#start-the-api).
 This page is the request/response reference. Examples use port 9090 and the
 installed `zinc` command. Use the loaded model ID from `/v1/models` when copying
-requests; older ROCm/CUDA builds use GGUF filenames, while current native source
+requests; older ROCm/CUDA builds use GGUF filenames, and 0.1.2 native serving
 uses catalog IDs for known installed models.
 
 Jump to [backend coverage](#backend-coverage), [endpoints](#endpoints),
@@ -19,8 +19,8 @@ and [OpenCode](/zinc/docs/opencode/).
 Each executable contains one backend. Check `zinc --version` before selecting
 an interface or copying server settings. HIP / ROCm is the preferred AMD RDNA
 path; Vulkan serves Intel and provides an AMD alternative. Metal is a macOS
-preview, and CUDA is experimental. The matrix below describes stable 0.1.1;
-[current HIP browser support](#development-hip-browser-chat) is listed separately.
+preview, and CUDA is experimental. The table describes Linux 0.1.2 and the
+current Metal preview and experimental CUDA builds.
 
 | Feature           | Vulkan / Metal                  | ROCm / CUDA                      |
 | ----------------- | ------------------------------- | -------------------------------- |
@@ -29,8 +29,8 @@ preview, and CUDA is experimental. The matrix below describes stable 0.1.1;
 | Chat sampling     | Supported                       | Greedy                           |
 | Serving           | Serialized; requests queue      | Batched; Gemma MoE uses one slot |
 | Default context   | Auto-sized                      | 2,048 per slot                   |
-| Models            | Catalog and hot switching       | Startup model only               |
-| Browser chat      | Included                        | Unavailable                      |
+| Models            | Catalog and hot switching       | Installed-model switching        |
+| Browser chat      | Included                        | HIP only                         |
 | Prefix reuse      | Eligible Vulkan models          | Unavailable                      |
 | Chat stop strings | Applied                         | Ignored                          |
 | Health details    | Model, queue, uptime and memory | Status, backend and context      |
@@ -38,9 +38,8 @@ preview, and CUDA is experimental. The matrix below describes stable 0.1.1;
 Both chat APIs accept `max_completion_tokens` and `max_tokens`; tools depend on
 the model template. Vulkan/Metal default to 256 output tokens. ROCm/CUDA default
 to the CLI `-n` value (256 unless overridden), and `-c 0` still means a
-2,048-token context per slot. In stable 0.1.1, ROCm/CUDA's `model` field does not switch the
-startup model, and its model discovery lists that loaded model rather than the
-catalog. Native health returns 503 after GPU execution failure. On ROCm/CUDA, a zero output
+2,048-token context per slot. Native health returns 503 after GPU execution
+failure. On ROCm/CUDA, a zero output
 limit uses the remaining context budget; send a positive limit for bounded
 portable requests.
 
@@ -49,10 +48,9 @@ the [ROCm guide](ROCM.md). Vulkan and ROCm use independent device lists, driver
 stacks and benchmark results. Release qualification is narrower than source
 compatibility; consult the [binary release guide](GETTING_STARTED.md).
 
-Historical native examples below are marked as stable 0.1.1. Current native
-model controls are documented under [development support](#development-hip-browser-chat).
-For portable clients, set `stream` explicitly, get the loaded model from
-`/v1/models`, and do not assume model switching, sampling or prefix caching.
+See [HIP browser chat and model lifecycle](#hip-browser-chat-and-model-lifecycle)
+for details. For portable clients, set `stream` explicitly, get the loaded model
+from `/v1/models`, and check `/v1/capabilities` for optional behavior.
 
 ## Capability discovery
 
@@ -73,13 +71,13 @@ All four backends return the same schema:
 | `schema_version` | `1`; clients must tolerate additive fields.                                                                                                                                                                       |
 | `build`          | `version`, `commit`, `target`, `optimize`, and compiled `backend`.                                                                                                                                                |
 | `backend`        | `vulkan`, `metal`, `rocm`, or `cuda`.                                                                                                                                                                             |
-| `active_model`   | Loaded ID matching `/v1/models`, or null when idle. Stable 0.1.1 native builds use GGUF basenames; current native source uses catalog IDs for known models.                                                       |
+| `active_model`   | Loaded ID matching `/v1/models`, or null when idle. HIP 0.1.2 uses catalog IDs for known models. Older native builds use GGUF basenames.                                                       |
 | `context_length` | Live capacity per request/slot, or null when idle.                                                                                                                                                                |
 | `capabilities`   | Boolean `chat_completions`, `text_completions`, `chat_streaming`, `text_streaming`, `model_management`, `model_switching`, `browser_ui`, `sampling`, and `chat_session_reuse`; `tool_calls` is `model_dependent`. |
 
 Healthy `/health` responses include these fields and preserve their existing
 backend-specific fields. Vulkan/Metal's legacy `model` remains a display name;
-use `active_model` as the request ID. An unloaded Vulkan/Metal server can be
+use `active_model` as the request ID. An unloaded server can be
 healthy while `active_model` and `context_length` are null. Native execution
 failure still returns HTTP 503. Discovery describes features; it does not
 execute a request or qualify a model's output quality.
@@ -124,10 +122,10 @@ as unknown. See [Run models and connect apps](RUNNING_ZINC.md) for the complete 
 | GET    | `/v1/models`           | All four backends; different detail     |
 | GET    | `/health`              | All four backends; different detail     |
 | POST   | `/v1/models/pull`      | Vulkan / Metal                          |
-| POST   | `/v1/models/activate`  | Vulkan / Metal; current HIP/CUDA source |
-| POST   | `/v1/models/unload`    | Current source; all four backends       |
+| POST   | `/v1/models/activate`  | Vulkan, HIP, Metal, experimental CUDA   |
+| POST   | `/v1/models/unload`    | Vulkan, HIP, Metal, experimental CUDA   |
 | POST   | `/v1/models/remove`    | Vulkan / Metal                          |
-| GET    | `/` or `/chat`         | Vulkan / Metal; current HIP source      |
+| GET    | `/` or `/chat`         | Vulkan, HIP and Metal                   |
 | GET    | `/stats`               | ROCm / CUDA                             |
 | POST   | `/generate`            | ROCm / CUDA; raw completion alias       |
 
@@ -135,11 +133,11 @@ Unavailable endpoints return 404; native endpoint coverage is version-specific.
 Set `stream` explicitly for both
 completion routes. The coverage matrix above describes their response defaults.
 
-## Development: HIP browser chat
+## HIP browser chat and model lifecycle
 
-Current HIP source builds serve the shared interface at `GET /` and `GET /chat`.
-Current HIP/CUDA source also supports switching among installed models from the
-startup model's directory and managed cache. It never accepts an arbitrary path
+HIP 0.1.2 serves browser chat at `GET /` and `GET /chat`. HIP 0.1.2 and current
+experimental CUDA support switching among installed models from the startup
+model's directory and managed cache. It never accepts an arbitrary path
 from an HTTP client. Known files use catalog IDs; generation also accepts the
 previous GGUF-basename alias. Unknown siblings remain unavailable for activation.
 
@@ -157,9 +155,8 @@ lease, so conflicting native management requests return 409 instead of freeing
 in-use resources. The built-in UI keeps a draft across unload/reload and offers
 these operations only when the running server advertises them.
 
-HIP sampling remains greedy. Native model downloads/removal and the published
-0.1.1 HIP/CUDA archives retain their existing coverage. These lifecycle changes
-are source development functionality, not a new release qualification.
+HIP sampling is greedy. Use the `zinc model` CLI to download or remove cached
+weights on HIP and CUDA.
 
 ## POST /v1/chat/completions
 
@@ -185,7 +182,7 @@ Generate a chat completion from a message list.
 
 | Field                   | Type             | Default          | Description                                                                                                                                                                                                            |
 | ----------------------- | ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                 | string           | current model    | Vulkan/Metal activate an installed managed model if different. Current HIP/CUDA source also activates installed candidates; stable 0.1.1 native builds keep the startup model.                                         |
+| `model`                 | string           | current model    | Activates an installed model if different, when the server advertises model switching.                                         |
 | `session_id`            | string           | empty            | Optional prompt-reuse key only when `/health` advertises `capabilities.chat_session_reuse`; other backends ignore it.                                                                                                  |
 | `messages`              | array            | required         | OpenAI-style messages. `content` may be a string, `null`, or an array of text content blocks. Non-text blocks are ignored.                                                                                             |
 | `max_completion_tokens` | integer or null  | 256              | Maximum generated tokens before context-budget clamping. Supported by modern OpenAI-compatible clients, including OpenCode 2.                                                                                          |
@@ -364,8 +361,8 @@ curl -N http://localhost:9090/v1/chat/completions \
 
 ### MTP capability and execution status
 
-**Development:** per-request MTP control and completion metadata below are in
-current source; the published 0.1.1 archives predate this contract.
+Per-request MTP control and completion metadata are available in HIP 0.1.2
+and current experimental CUDA.
 
 Native HIP/ROCm and experimental CUDA serving report `supports_mtp`,
 `mtp_default_enabled`, `mtp_request_control`, and `mtp_unavailable_reason` on
@@ -429,7 +426,7 @@ Generate from a raw text prompt without applying a chat template.
 
 | Field                          | Type    | Default          | Description                                                                                                                |
 | ------------------------------ | ------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `model`                        | string  | current model    | Vulkan/Metal and current HIP/CUDA source may activate installed models. Stable 0.1.1 native builds keep the startup model. |
+| `model`                        | string  | current model    | May activate an installed model when the server advertises model switching. |
 | `prompt`                       | string  | required         | Raw text prompt.                                                                                                           |
 | `max_tokens`                   | integer | 256              | Maximum generated tokens before context-budget clamping.                                                                   |
 | `temperature`                  | float   | accepted         | Parsed for compatibility but not applied by this endpoint yet.                                                             |
@@ -493,12 +490,10 @@ Stable 0.1.1 CUDA/ROCm builds return a minimal list containing the loaded model:
 }
 ```
 
-In stable 0.1.1 native builds, the ID is the file basename, including its extension. `context_length` is the
-capacity of one request slot. Parent directories are omitted. These backends
-do not expose managed catalog/download/activation routes in that release. Current
-native source adds installed-model discovery, activation and unload as described
-under [development support](#development-hip-browser-chat). Live discovery and generation passed after
-[GPU recovery](ROCM_AGENT_CONTEXT.md#remaining-hardware-validation).
+In 0.1.1 native builds, `id` is the file basename including its extension,
+and `context_length` is the capacity of one request slot. HIP 0.1.2 lists the
+installed candidates and exposes activation and unload as described under
+[HIP browser chat and model lifecycle](#hip-browser-chat-and-model-lifecycle).
 
 Vulkan/Metal builds provide the fuller response below.
 

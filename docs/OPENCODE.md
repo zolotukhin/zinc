@@ -2,11 +2,9 @@
 
 Connect OpenCode to a local ZINC server, configure an existing project, and run
 a bounded coding task with an independent test command. Use **Bun 1.4.4+** and
-**OpenCode 2.0.21**, the pin used by the
-[0.1.1 final-archive AMD cohort](releases/0.1.1-plan.md#final-archive-client-checks).
-The [Intel development-package replay](INTEL_OPENCODE_VALIDATION.md#november-9-full-catalog-opencode-replay)
-used 2.2.6; its client, source and task limits remain separate. CPU protocol
-checks cover both versions, but do not establish model task quality.
+**OpenCode 2.2.6**, the pin tested against the
+[Linux 0.1.2 archives](releases/0.1.2-plan.md#live-clients-browser-and-installer)
+on AMD HIP, AMD Vulkan and Intel Vulkan.
 
 ## Start the model server
 
@@ -24,7 +22,7 @@ Use Qwen3.5 9B as a smaller starting point. Check
 On the client machine, install the pinned client and download the standalone helper:
 
 ```bash
-bun add --global --trust @opencode/cli@2.0.21
+bun add --global --trust @opencode/cli@2.2.6
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 ```
 

@@ -5,8 +5,8 @@
 # ZINC
 
 Run GGUF language models on your own GPU. ZINC gives you a command line
-and an OpenAI-compatible API in one native binary. Vulkan and Metal builds
-also include browser chat.
+and an OpenAI-compatible API in one native binary. Linux HIP and Vulkan builds
+and the Metal preview also include browser chat.
 
 [![Tests](https://github.com/zolotukhin/zinc/actions/workflows/test.yml/badge.svg)](https://github.com/zolotukhin/zinc/actions/workflows/test.yml)
 [![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
@@ -22,21 +22,21 @@ also include browser chat.
 For published archives, runtime requirements and verified installation/rollback,
 see [binary releases](https://zolotukhin.ai/zinc/docs/getting-started/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
-[Linux 0.1.1](https://github.com/zolotukhin/zinc/releases/tag/v0.1.1)
+[Linux 0.1.2](https://github.com/zolotukhin/zinc/releases/tag/v0.1.2)
 is available for HIP/ROCm on AMD and Vulkan on Intel or as an AMD alternative.
 The exact published binaries pass all three GPU profiles and public installation checks; see the
-[release record](docs/releases/0.1.1-plan.md).
+[release record](docs/releases/0.1.2-plan.md).
 For AMD RDNA, use HIP/ROCm as the default path. Install the published Linux
 release without a source checkout:
 
 ```bash
-curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.1/install.sh -o install.sh
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.2/install.sh -o install.sh
 ```
 
 Inspect the downloaded script, then install and add the command to PATH:
 
 ```bash
-ZINC_VERSION=v0.1.1 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.2 ZINC_BACKEND=rocm bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -59,6 +59,9 @@ The example uses Qwen 3.5 9B. Check the
 before downloading, or run `zinc model list` to browse the catalog.
 You can also load an existing file with `-m /path/to/model.gguf`.
 
+For **Inkling 2 Mini** on the Radeon RX 9070 XT or Radeon AI PRO R9700, use the
+[Inkling development build and benchmark guide](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
+
 ## Choose your GPU path
 
 | Hardware                   | Backend                    | Setup                                                                           |
@@ -74,7 +77,7 @@ fallback between HIP/ROCm and Vulkan. Other RDNA cards need their own runtime,
 model and memory checks. On Intel, or when choosing AMD Vulkan, install explicitly:
 
 ```bash
-ZINC_VERSION=v0.1.1 ZINC_BACKEND=vulkan bash install.sh
+ZINC_VERSION=v0.1.2 ZINC_BACKEND=vulkan bash install.sh
 zinc --check
 ```
 
@@ -84,9 +87,9 @@ validated cards, operating systems, drivers, and current limitations.
 
 ## Use it your way
 
-**Browser chat** starts the UI and local API together. Current HIP source builds
-include installed-model switching and unload/reload; published 0.1.1 includes the UI on Vulkan,
-and Metal provides it as a preview. See the [version-specific guide](docs/RUNNING_ZINC.md#browser-chat).
+**Browser chat** starts the UI and local API together. Linux HIP and Vulkan
+support switching between installed models and unloading or reloading them.
+See the [browser chat guide](docs/RUNNING_ZINC.md#browser-chat).
 
 ```bash
 zinc chat --model-id qwen35-9b-q4k-m
@@ -130,7 +133,7 @@ Connect **OpenCode** to a running ZINC server with the
 chat and streaming tool calls, and runs headless tasks:
 
 ```bash
-bun add --global --trust @opencode/cli@2.0.21
+bun add --global --trust @opencode/cli@2.2.6
 curl -fL https://zolotukhin.ai/zinc/harnesses/setup-opencode.mjs -o setup-opencode.mjs
 bun setup-opencode.mjs --project ../my-project --model qwen35-9b-q4k-m \
   --context auto --output 2048 --steps 16

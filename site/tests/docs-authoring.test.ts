@@ -180,8 +180,8 @@ test('AMD onboarding chooses HIP first and preserves Intel and released UI bound
     ).toBe(true);
   }
   const rocm = await readFile(resolve(root, 'docs/ROCM.md'), 'utf8');
-  expect(rocm).toContain('## Development: browser chat on HIP');
-  expect(rocm).toContain('not in the published 0.1.1 archive');
+  expect(rocm).toContain('## Browser chat on HIP');
+  expect(rocm).toContain(`The stable ${STABLE_RELEASE} archive serves browser chat`);
   expect(rocm).toContain('not a model limit');
   expect(rocm).toContain('64K F32');
   const page = await readFile(resolve(root, 'site/src/pages/zinc/index.astro'), 'utf8');

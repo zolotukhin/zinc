@@ -12,7 +12,7 @@ Check `zinc --version` before applying backend-specific settings.
 
 ## Runtime prerequisites
 
-The stable 0.1.1 ROCm archive needs Linux x86_64 with **glibc 2.39+** and the
+The stable 0.1.2 ROCm archive needs Linux x86_64 with **glibc 2.39+** and the
 validated **ROCm 7.2.4** stack: HIP, hipRTC, hipBLAS, HIP headers and rocWMMA
 headers. Ubuntu 24.04 is the reference userspace. Even the prebuilt archive
 compiles embedded kernels at runtime, so runtime libraries alone are insufficient.
@@ -33,7 +33,7 @@ The release reference is the Radeon AI PRO R9700 (`gfx1201`) with Linux kernel
 a fixed build requirement. The running `amdgpu` driver, ROCr runtime and ROCm
 userspace must support the same GPU target. This evidence does not qualify
 every RDNA3/RDNA4 card. See the
-[exact release results](/zinc/validation/release-candidate-0.1.1-2026-11-16.json).
+[exact release results](/zinc/validation/release-candidate-0.1.2-2026-11-27.json).
 
 ## Select a GPU
 
@@ -56,27 +56,25 @@ context and `--parallel 1` initially. ROCm otherwise defaults to **2,048 tokens
 per slot**, even with `-c 0`. Multiple slots need separate cache capacity;
 Gemma 4 26B-A4B currently uses one slot regardless of a larger requested value.
 
-The stable 0.1.1 server provides CLI/HTTP chat, raw completions, health and loaded-model
-discovery. That release has no browser chat or hot model switching. Sampling is
-greedy; `temperature`, `top_p` and client `stop` strings do not change it.
-Set `stream` explicitly because ROCm defaults to SSE. The
-[API matrix](API.md#backend-coverage) is the canonical endpoint reference.
+The stable 0.1.2 server provides CLI and browser chat, HTTP chat and raw
+completions, health, and installed-model switching. Sampling is greedy. Set
+`stream` explicitly because ROCm defaults to SSE. The
+[API matrix](API.md#backend-coverage) lists endpoint coverage.
 
-## Development: browser chat on HIP
+## Browser chat on HIP
 
-Current source builds include `/` and `/chat` on the native HIP server.
-After a [ROCm source build](#build-from-source), start the loaded model with:
+The stable 0.1.2 archive serves browser chat at `/` and `/chat`. Start with an
+installed model.
 
 ```bash
-zinc chat --model-id qwen38-27b-q4k-m -c 65536 --parallel 1
+zinc chat --model-id qwen35-9b-q4k-m -c 4096 --parallel 1
 ```
 
 This interface supports installed-model switching and unload/reload when the
 server advertises them. Install weights with the model CLI first. Thinking and
 MTP controls follow the active model's capabilities; sampling remains greedy.
 Use `--no-browser` over SSH and forward the server port to your computer.
-This feature is not in the published 0.1.1 archive. A remote preview may serve
-an updated UI separately while using the same native HIP API.
+The [release record](/zinc/validation/release-candidate-0.1.2-2026-11-27.json) includes the R9700 browser and API checks.
 
 The [R9700 browser/API preview check](/zinc/validation/rocm-browser-chat-2026-11-17.json)
 records 64K F32 capacity, a 21,040-token synthetic retrieval and a fresh request

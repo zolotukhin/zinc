@@ -84,7 +84,7 @@ function clientGuidance(base: string): string[] {
     '4. Use the standalone helper linked from the client guide. Run its setup and check commands before a task; verify the outcome independently.',
     '',
     'Structured discovery (0.1.1+): zinc serve, --no-browser, --version --json, --check --json and GET /v1/capabilities are released features. Check zinc --help for the installed version. Discovery includes build identity, backend, active_model, context_length and capabilities. On older servers, use /health and /v1/models; absent capabilities are unknown.',
-    'Stable 0.1.1 HIP provides CLI/HTTP chat without browser UI or model switching. Current HIP source adds browser chat; current HIP/CUDA source advertises installed-model switching and unload. Enable controls through live capability discovery.',
+    'Stable Linux HIP and Vulkan include browser chat, installed-model switching and unload. HIP also offers request-level MTP for eligible loaded models. Enable controls through live capability discovery.',
     'Memory fit and protocol capabilities do not prove task quality. Never assume context size, model switching, tools or sampling support from a backend name alone.',
     '',
   ];
