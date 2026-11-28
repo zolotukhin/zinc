@@ -143,6 +143,30 @@ llama.cpp backends for that row.
 | R9700 | Incident Context | 91.3 | 35.9 | 62.3 | +46.5% |
 | R9700 | Long Coding Draft | 80.8 | 36.2 | 51.3 | +57.3% |
 
+### Tuning the RX 9070 XT for a 20% decode lead
+
+A fixed five-draft window let the DSpark prototype spend less time verifying
+proposals on the RX 9070 XT. The Incident Context result was 97.50 tok/s in
+the focused run and 96.95 tok/s in the full confirmation.
+The prototype setting is `ZINC_INKLING_DRAFT_WINDOW=5` with
+`ZINC_INKLING_DRAFT_ADAPTIVE=0`. The ordinary-decode confirmation used Q8
+activations and packed Q4_0 experts with graph replay disabled.
+
+Each pair below shows ZINC / llama.cpp decode tok/s. The denominator is
+the faster measured llama.cpp ROCm or Vulkan median for each row in the same
+draft mode. The second Vulkan DSpark run produced lower medians, so the table
+keeps the faster observed reference. The packed ordinary-decode preset bottomed out at +17.6% against the faster reference. The fixed-depth DSpark preset cleared the 20% floor in all four workloads.
+The R9700's minimum leads were +39.0% with drafting off and
++46.5% with adaptive DSpark.
+[Confirmation runs and original samples](/blog/inkling-2-mini-amd/benchmark-results.json)
+
+| RX 9070 XT workload | Drafting off | Lead | DSpark on | Lead |
+| --- | ---: | ---: | ---: | ---: |
+| Quick Chat | 62.33 / 50.90 | +22.5% | 101.57 / 61.09 | +66.3% |
+| Coding Review | 59.64 / 50.27 | +18.6% | 136.00 / 98.26 | +38.4% |
+| Incident Context | 59.65 / 50.72 | +17.6% | 96.95 / 80.71 | +20.1% |
+| Long Coding Draft | 60.02 / 51.00 | +17.7% | 73.72 / 47.79 | +54.3% |
+
 ## Did the answers stay coherent?
 
 In the experimental ROCm server, we issued the same prompts with greedy decoding and DSpark enabled and disabled. The visible text and token counts matched for both complete answers on both cards. The draft acceptance went from 140 of 236 proposals on the database question to 220 of 285 on the incident ledger. The database prompt asked why the system flushes a write-ahead log before it writes a data page.
