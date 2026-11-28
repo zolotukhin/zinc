@@ -1,0 +1,40 @@
+#version 460
+
+// Four rows by four consecutive Q4_0 blocks. The 16 packed quant vectors
+// become word-aligned and all 16 original half scales follow them.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer Weight { uint weights[]; };
+layout(push_constant) uniform Params {
+    uint blocks;
+    uint groups;
+} p;
+
+shared uint original[4608];
+
+uint half_bits(uint at) {
+    return (original[at >> 2u] >> ((at & 2u) * 8u)) & 65535u;
+}
+
+uint word_bits(uint at) {
+    uint low = original[at >> 2u];
+    return (at & 2u) == 0u ? low : (low >> 16u) | (original[(at >> 2u) + 1u] << 16u);
+}
+
+void main() {
+    uint group_index = gl_WorkGroupID.x + gl_WorkGroupID.z * gl_NumWorkGroups.x;
+    if (group_index >= p.groups) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint words = 18u * p.blocks;
+    uint offset = group_index * words;
+    for (uint i = tid; i < words; i += 64u) original[i] = weights[offset + i];
+    barrier();
+    for (uint i = tid; i < 4u * p.blocks; i += 64u) {
+        uint row = i / p.blocks;
+        uint block = i % p.blocks;
+        uint slot = row * 4u + block % 4u;
+        uint dst = offset + block / 4u * 72u;
+        uint src = i * 18u;
+        for (uint j = 0u; j < 4u; ++j) weights[dst + slot * 4u + j] = word_bits(src + 2u + j * 4u);
+        if ((slot & 1u) == 0u) weights[dst + 64u + slot / 2u] = half_bits(src) | (half_bits(src + 18u) << 16u);
+    }
+}

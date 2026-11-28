@@ -2758,6 +2758,7 @@ export function defaultMetalCases(modelRoot) {
 }
 
 function titleFromId(id) {
+  if (id === 'inkling-2-mini-q4-0') return 'Inkling 2 Mini Q4_0';
   if (id === 'gemma4-26b-a4b-q4k-m') return 'Gemma 4 26B-A4B MoE Q4_K_M';
   if (id === 'gemma4-31b-q4k-m') return 'Gemma 4 31B Q4_K_M';
   return id
@@ -2803,6 +2804,7 @@ export function canonicalModelIdFromPath(modelFile) {
 }
 
 export function guessFamily(id) {
+  if (id.startsWith('inkling-2-mini')) return 'Inkling 2';
   if (id.startsWith('muse-glimmer')) return 'Muse Glimmer';
   if (id.startsWith('gemma4')) return 'Gemma 4';
   if (id.startsWith('gemma')) return 'Gemma';
@@ -2822,6 +2824,7 @@ function guessQuant(id) {
 export function prefersChatPrompt(id) {
   return (
     id.startsWith('gemma') ||
+    id.startsWith('inkling-2-mini') ||
     id.startsWith('muse-glimmer') ||
     id.startsWith('qwen35') ||
     id.startsWith('qwen38')
@@ -3038,6 +3041,18 @@ async function discoverMetalCases(modelRoot) {
 
 export function defaultRdnaCases(modelRoot) {
   return [
+    {
+      id: 'inkling-2-mini-q4-0',
+      label: 'Inkling 2 Mini Q4_0',
+      family: 'Inkling 2',
+      quant: 'Q4_0',
+      model_path: path.join(modelRoot, 'Inkling-2-Mini-Q4_0.gguf'),
+      context_tokens: 4096,
+      prompt_mode: 'chat',
+      prompt: defaultPromptForModelId('inkling-2-mini-q4-0'),
+      max_tokens: defaultMaxTokensForModelId('inkling-2-mini-q4-0'),
+      notes: ['Inkling 2 Mini fixed-loop text inference'],
+    },
     {
       id: 'muse-glimmer-30b-q4k-m',
       label: 'Muse Glimmer 30B Q4_K_M',
@@ -4221,7 +4236,7 @@ async function buildCudaCreds(args) {
 
 export function defaultCudaCases(modelRoot) {
   return defaultRdnaCases(modelRoot)
-    .filter((entry) => entry.id !== 'qwen38-27b-q4k-m')
+    .filter((entry) => entry.id !== 'qwen38-27b-q4k-m' && entry.id !== 'inkling-2-mini-q4-0')
     .map((entry) => ({
       ...entry,
       notes: ['RTX 5090 (CUDA) comparison against llama.cpp server on the same host'],

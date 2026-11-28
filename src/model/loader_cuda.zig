@@ -22,6 +22,9 @@ const ModelConfig = config_mod.ModelConfig;
 const GGMLType = gguf.GGMLType;
 const shim = @import("../cuda/c.zig").shim;
 const cuda_buffer = @import("../cuda/buffer.zig");
+const inkling = @import("inkling.zig");
+const is_rocm = std.mem.eql(u8, @import("build_options").backend, "rocm");
+const weight_alignment = 256;
 
 const log = std.log.scoped(.loader_cuda);
 
@@ -55,6 +58,8 @@ pub const Model = struct {
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
     /// Open file handle backing the mapping; closed in `deinit`.
     mmap_file: ?std.Io.File,
+    weight_arena: ?cuda_buffer.CudaBuffer = null,
+    inkling_expert_layout: enum { original, blocked, invalid } = .original,
 
     /// Open + mmap the GGUF at `path`, parse it, extract the config, and upload
     /// every tensor to `ctx`. The mapping is retained for embedding lookups.
@@ -89,10 +94,20 @@ pub const Model = struct {
         var gf = try gguf.parse(mmap_data, allocator);
         errdefer gf.deinit();
 
-        const config = extractConfig(&gf);
+        const config = try inspectParsedConfig(&gf, true);
         if (config.architecture == .unknown) {
             log.err("Unsupported model architecture in {s}", .{path});
             return error.UnsupportedArchitecture;
+        }
+
+        var arena: ?cuda_buffer.CudaBuffer = null;
+        errdefer if (arena) |*allocation| cuda_buffer.freeBuffer(allocation);
+        if (config.architecture == .inkling2_loop) {
+            var bytes: usize = 0;
+            for (gf.tensors.items) |info| {
+                bytes = try std.math.add(usize, std.mem.alignForward(usize, bytes, weight_alignment), @intCast(info.sizeBytes()));
+            }
+            arena = try cuda_buffer.createBuffer(ctx, bytes);
         }
 
         // Pre-size the tensor list so its backing buffer never reallocates while
@@ -111,10 +126,22 @@ pub const Model = struct {
         // Upload every tensor host->device. uploadMmap is a single H2D copy from
         // the mapped file region into a fresh device-local allocation.
         var uploaded_bytes: u64 = 0;
+        var arena_offset: usize = 0;
         for (gf.tensors.items) |info| {
-            const src_off: usize = @intCast(gf.tensor_data_offset + info.offset);
+            const src_off: usize = @intCast(try std.math.add(u64, gf.tensor_data_offset, info.offset));
             const sz: usize = @intCast(info.sizeBytes());
-            const buf = try cuda_buffer.uploadMmap(ctx, mmap_data.ptr + src_off, sz);
+            if (sz == 0 or src_off > mmap_data.len or sz > mmap_data.len - src_off)
+                return error.InvalidTensorRange;
+            const source = mmap_data.ptr + src_off;
+            const buf = if (arena) |*allocation| blk: {
+                arena_offset = std.mem.alignForward(usize, arena_offset, weight_alignment);
+                var view = try cuda_buffer.aliasBuffer(allocation, arena_offset, sz);
+                errdefer cuda_buffer.freeBuffer(&view);
+                if (shim.cuda_copy_mmap(ctx, view.handle, source, sz) == 0)
+                    return error.CudaMmapUploadFailed;
+                arena_offset += sz;
+                break :blk view;
+            } else try cuda_buffer.uploadMmap(ctx, source, sz);
 
             tensors.appendAssumeCapacity(.{ .info = info, .gpu_buffer = buf });
             const slot = &tensors.items[tensors.items.len - 1];
@@ -137,6 +164,7 @@ pub const Model = struct {
             .tensor_map = tensor_map,
             .mmap_data = mmap_data,
             .mmap_file = file,
+            .weight_arena = arena,
         };
     }
 
@@ -191,6 +219,7 @@ pub const Model = struct {
         for (self.tensors.items) |*t| {
             cuda_buffer.freeBuffer(&t.gpu_buffer);
         }
+        if (self.weight_arena) |*allocation| cuda_buffer.freeBuffer(allocation);
         self.tensors.deinit(self.allocator);
         self.tensor_map.deinit();
 
@@ -242,7 +271,7 @@ pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspec
 
     var weights_bytes: u64 = 0;
     for (gf.tensors.items) |tensor| weights_bytes = try std.math.add(u64, weights_bytes, tensor.sizeBytes());
-    return .{ .config = extractConfigWithLogging(&gf, false), .weights_bytes = weights_bytes };
+    return .{ .config = try inspectParsedConfig(&gf, false), .weights_bytes = weights_bytes };
 }
 
 // ===========================================================================
@@ -466,8 +495,23 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     };
 }
 
-fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
-    return extractConfigWithLogging(gf, true);
+fn inspectParsedConfig(file: *const gguf.GGUFFile, log_metadata: bool) !ModelConfig {
+    const arch = file.getString("general.architecture") orelse "unknown";
+    if (!std.mem.eql(u8, arch, inkling.architecture)) return extractConfigWithLogging(file, log_metadata);
+    if (!is_rocm) return error.UnsupportedArchitecture;
+    const layout = try inkling.Layout.read(file);
+    var config = extractConfigWithLogging(file, false);
+    config.n_heads = layout.heads;
+    config.n_kv_heads = layout.kv_heads;
+    config.vocab_size = layout.vocab;
+    config.intermediate_dim = layout.expert_width;
+    config.n_nextn_layers = 0;
+    if (log_metadata) {
+        log.info("Inkling 2 Mini: {d} layers, {d} heads ({d} KV), {d} experts ({d} active)", .{
+            layout.layers, layout.heads, layout.kv_heads, layout.experts, layout.active,
+        });
+    }
+    return config;
 }
 
 // ===========================================================================

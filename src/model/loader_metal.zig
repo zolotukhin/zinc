@@ -565,6 +565,10 @@ pub fn load(
 
     const config = extractConfig(&gf);
 
+    if (config.architecture == .inkling2_loop) {
+        log.err("Inkling 2 Mini requires the ROCm or Vulkan backend", .{});
+        return error.UnsupportedArchitecture;
+    }
     if (config.architecture == .unknown) {
         log.err("Unsupported model architecture. Supported: qwen2, qwen2_moe, qwen35, mistral, mamba, jamba", .{});
         return error.UnsupportedArchitecture;

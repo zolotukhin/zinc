@@ -33,6 +33,8 @@ const std = @import("std");
 const host_io = @import("host_io");
 const scheduler = @import("../scheduler/scheduler.zig");
 const forwardgemma = @import("../compute/forward_cuda_gemma.zig");
+const is_rocm = std.mem.eql(u8, @import("build_options").backend, "rocm");
+const Inkling = if (is_rocm) @import("../compute/forward_inkling.zig").ForwardInkling else noreturn;
 const forwardcuda = @import("../compute/forward_cuda.zig");
 const prefill_policy = @import("../compute/prefill_policy.zig");
 const shim = @import("../cuda/c.zig").shim;
@@ -65,18 +67,20 @@ fn logMtpAcceptance(drafted: u64, accepted: u64, cycles: u64) void {
 pub const Forward = union(enum) {
     gemma: *forwardgemma.ForwardGemma,
     qwen: *forwardcuda.ForwardCuda,
+    inkling: if (is_rocm) *Inkling else noreturn,
 
     fn checkExecution(self: Forward) !void {
         const ctx = switch (self) {
             .gemma => |g| g.ctx,
             .qwen => |q| q.ctx,
+            .inkling => |model| if (comptime is_rocm) model.ctx else unreachable,
         };
         if (shim.cuda_execution_failed(ctx) != 0) return error.GpuExecutionFailed;
     }
 
     fn computedPrefillTokens(self: Forward, total: usize) usize {
         return total -| switch (self) {
-            .gemma => @as(usize, 0),
+            .gemma, .inkling => @as(usize, 0),
             .qwen => |q| q.last_prefill_cached,
         };
     }
@@ -85,12 +89,19 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => |g| try g.allocSlotKv(nslots, slot_ctx),
             .qwen => |q| try q.allocSlotState(nslots, slot_ctx),
+            .inkling => |model| {
+                if (comptime !is_rocm) unreachable;
+                // Inkling's forward pass already owns one fixed-size sequence.
+                if (nslots != 1 or slot_ctx != model.max_ctx) return error.InvalidParallelism;
+            },
         }
     }
     fn freeSlots(self: Forward) void {
         switch (self) {
             .gemma => |g| g.freeSlotKv(),
             .qwen => |q| q.freeSlotState(),
+            // ForwardInkling.deinit releases the single sequence's buffers.
+            .inkling => {},
         }
     }
     fn decodeBatch(self: Forward, tokens: []const u32, positions: []const u32, slots: []const u32, out: []u32) !void {
@@ -98,6 +109,7 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => |g| try g.decodeBatch(tokens, positions, slots, out),
             .qwen => |q| try q.decodeBatch(tokens, positions, slots, out),
+            .inkling => |model| if (comptime is_rocm) try model.decodeBatch(tokens, positions, slots, out) else unreachable,
         }
         try self.checkExecution();
     }
@@ -109,6 +121,7 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => {},
             .qwen => |q| try q.resetSlot(slot),
+            .inkling => |model| if (comptime is_rocm) try model.resetSlot(slot) else unreachable,
         }
         try self.checkExecution();
     }
@@ -119,6 +132,7 @@ pub const Forward = union(enum) {
         const tok = switch (self) {
             .gemma => |g| try g.prefillBatchedSlot(tokens, slot),
             .qwen => |q| try q.prefillBatchedSlot(tokens, slot),
+            .inkling => |model| if (comptime is_rocm) try model.prefillBatchedSlot(tokens, slot) else unreachable,
         };
         try self.checkExecution();
         return tok;
@@ -213,23 +227,26 @@ pub const ServeEngine = struct {
             .{ .unavailable_reason = "MTP currently requires exactly one request slot." }
         else switch (fwd) {
             .gemma => .{ .unavailable_reason = "This model architecture does not expose the supported NextN/MTP layer." },
-            .qwen => |q| blk: {
-                if (q.mtpUnavailableReason()) |reason| break :blk .{ .unavailable_reason = reason };
-                const default_enabled = q.mtpDefaultEnabled();
-                const previous = q.setMtpExecutionOverride(true);
-                defer _ = q.setMtpExecutionOverride(previous);
-                const prepared = q.mtpPrepare() catch |err| {
-                    log.warn("NextN/MTP setup failed ({s}); ordinary decode remains available", .{@errorName(err)});
-                    break :blk .{ .unavailable_reason = "MTP context preparation failed; ordinary decoding remains available." };
-                };
-                if (!prepared) break :blk .{ .unavailable_reason = "MTP context preparation did not produce a usable draft context." };
-                break :blk .{ .supports_mtp = true, .default_enabled = default_enabled, .unavailable_reason = "" };
-            },
+            .qwen => |q| prepareMtp(q),
+            .inkling => |model| if (comptime is_rocm) prepareMtp(model) else unreachable,
         };
         log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}, eot={?d}, mtp_supported={}, mtp_default={}", .{
             nslots, slot_ctx, eos, eot, capability.supports_mtp, capability.default_enabled,
         });
         return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos, .eot = eot, .slot_ctx = slot_ctx, .mtp_capability = capability };
+    }
+
+    fn prepareMtp(model: anytype) MtpCapability {
+        if (model.mtpUnavailableReason()) |reason| return .{ .unavailable_reason = reason };
+        const default_enabled = model.mtpDefaultEnabled();
+        const previous = model.setMtpExecutionOverride(true);
+        defer _ = model.setMtpExecutionOverride(previous);
+        const prepared = model.mtpPrepare() catch |err| {
+            log.warn("Draft setup failed ({s}); ordinary decode remains available", .{@errorName(err)});
+            return .{ .unavailable_reason = "Draft preparation failed; ordinary decoding remains available." };
+        };
+        if (!prepared) return .{ .unavailable_reason = "Draft preparation did not produce a usable context." };
+        return .{ .supports_mtp = true, .default_enabled = default_enabled, .unavailable_reason = "" };
     }
 
     pub fn mtpCapability(self: *const ServeEngine) MtpCapability {
@@ -440,10 +457,14 @@ pub const ServeEngine = struct {
     /// Reset and prefill the corresponding state at every request boundary.
     /// Every metadata update completes before finishSlot/failSlot wakes a reader.
     fn runMtpRequest(self: *ServeEngine, slot_id: u32, timer_opt: *?host_io.Timer) bool {
-        const q = switch (self.fwd) {
-            .qwen => |ptr| ptr,
-            .gemma => return false,
+        return switch (self.fwd) {
+            .qwen => |q| self.runMtpWith(q, slot_id, timer_opt),
+            .inkling => |model| if (comptime is_rocm) self.runMtpWith(model, slot_id, timer_opt) else unreachable,
+            .gemma => false,
         };
+    }
+
+    fn runMtpWith(self: *ServeEngine, q: anytype, slot_id: u32, timer_opt: *?host_io.Timer) bool {
         const req = &self.sched.slots[slot_id].?;
         const id = req.id;
         var result = self.requestMtpResult(id);
@@ -493,13 +514,14 @@ pub const ServeEngine = struct {
             self.recordPrefillTiming(id, computed_tokens, elapsed);
         }
         req.transition(.decoding) catch {};
-        var context = MtpDecodeContext{ .engine = self, .q = q, .slot_id = slot_id, .timer = timer_opt };
+        var context = MtpDecodeContext(@TypeOf(q.*)){ .engine = self, .q = q, .slot_id = slot_id, .timer = timer_opt };
         mtp_policy.runDecode(&context, .{
             .max_tokens = req.params.max_tokens,
             .initial_position = @intCast(req.prompt_tokens.len),
             .max_context = @min(self.slot_ctx, q.max_ctx),
             .eos = self.eos,
             .eot = self.eot,
+            .draft_limit = if (comptime @hasDecl(@TypeOf(q.*), "draftLimit")) q.draftLimit() else 3,
         }, seed, &result) catch |err| {
             log.err("request {d} MTP decoding failed: {s}", .{ id, @errorName(err) });
             result.fallback_reason = "MTP decoding failed after generation began.";
@@ -513,39 +535,42 @@ pub const ServeEngine = struct {
         return true;
     }
 
-    const MtpDecodeContext = struct {
-        engine: *ServeEngine,
-        q: *forwardcuda.ForwardCuda,
-        slot_id: u32,
-        timer: *?host_io.Timer,
+    fn MtpDecodeContext(comptime ForwardModel: type) type {
+        const CycleResult = @typeInfo(@TypeOf(ForwardModel.mtpCycle)).@"fn".return_type.?;
+        return struct {
+            engine: *ServeEngine,
+            q: *ForwardModel,
+            slot_id: u32,
+            timer: *?host_io.Timer,
 
-        pub fn isCancelled(self: *@This()) bool {
-            return self.engine.requestCancelled(self.engine.sched.slots[self.slot_id].?.id);
-        }
-
-        pub fn cycle(self: *@This(), seed: u32, pos: u32, budget: u32, eos: u32) !forwardcuda.MtpCycleResult {
-            const cycle_start = if (self.timer.*) |*tm| tm.read() else 0;
-            const result = try self.q.mtpCycle(seed, pos, budget, eos);
-            _ = self.engine.decode_steps.fetchAdd(1, .monotonic);
-            if (self.timer.*) |*tm| {
-                const elapsed = tm.read() - cycle_start;
-                _ = self.engine.decode_wall_ns.fetchAdd(elapsed, .monotonic);
-                self.engine.recordDecodeTimingCount(self.engine.sched.slots[self.slot_id].?.id, 0, elapsed);
+            pub fn isCancelled(self: *@This()) bool {
+                return self.engine.requestCancelled(self.engine.sched.slots[self.slot_id].?.id);
             }
-            if (self.engine.peak_batch.load(.monotonic) < 1) self.engine.peak_batch.store(1, .monotonic);
-            return result;
-        }
 
-        pub fn emit(self: *@This(), token: u32, is_decode: bool) !void {
-            const req = &self.engine.sched.slots[self.slot_id].?;
-            try req.appendToken(token);
-            try self.engine.publishChecked(req.id, token);
-            if (is_decode) {
-                _ = self.engine.decode_tokens.fetchAdd(1, .monotonic);
-                self.engine.recordDecodeTimingCount(req.id, 1, 0);
+            pub fn cycle(self: *@This(), seed: u32, pos: u32, budget: u32, eos: u32) CycleResult {
+                const cycle_start = if (self.timer.*) |*tm| tm.read() else 0;
+                const result = try self.q.mtpCycle(seed, pos, budget, eos);
+                _ = self.engine.decode_steps.fetchAdd(1, .monotonic);
+                if (self.timer.*) |*tm| {
+                    const elapsed = tm.read() - cycle_start;
+                    _ = self.engine.decode_wall_ns.fetchAdd(elapsed, .monotonic);
+                    self.engine.recordDecodeTimingCount(self.engine.sched.slots[self.slot_id].?.id, 0, elapsed);
+                }
+                if (self.engine.peak_batch.load(.monotonic) < 1) self.engine.peak_batch.store(1, .monotonic);
+                return result;
             }
-        }
-    };
+
+            pub fn emit(self: *@This(), token: u32, is_decode: bool) !void {
+                const req = &self.engine.sched.slots[self.slot_id].?;
+                try req.appendToken(token);
+                try self.engine.publishChecked(req.id, token);
+                if (is_decode) {
+                    _ = self.engine.decode_tokens.fetchAdd(1, .monotonic);
+                    self.engine.recordDecodeTimingCount(req.id, 1, 0);
+                }
+            }
+        };
+    }
 
     fn workerLoop(self: *ServeEngine) void {
         const fwd = self.fwd;
@@ -601,9 +626,9 @@ pub const ServeEngine = struct {
                 // A/B toggle: ZINC_BATCHED_PREFILL=0 disables (uses per-token fallback).
                 const cli_moe_short = switch (fwd) {
                     .qwen => |q| q.useCliMoeSlotPrefill(np),
-                    .gemma => false,
+                    .gemma, .inkling => false,
                 };
-                const use_batched = (np >= prefill_policy.batch_threshold or cli_moe_short) and
+                const use_batched = (np >= prefill_policy.batch_threshold or cli_moe_short or fwd == .inkling) and
                     (host_io.getenv("ZINC_BATCHED_PREFILL") == null or
                         !std.mem.eql(u8, host_io.getenv("ZINC_BATCHED_PREFILL").?, "0"));
                 const batched_tok = if (use_batched)

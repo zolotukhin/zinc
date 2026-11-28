@@ -1,0 +1,30 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { float weights[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params {
+    uint width;
+    uint out_stride;
+    uint out_offset;
+    float eps;
+    uint weighted;
+} p;
+
+#include "inkling_reduce.glsl"
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint src = gl_WorkGroupID.x * p.width;
+    uint dst = gl_WorkGroupID.x * p.out_stride + p.out_offset;
+    float ss = 0.0;
+    for (uint i = lane; i < p.width; i += 64u) ss = fma(x[src + i], x[src + i], ss);
+    float inv = inversesqrt(reduce_sum(ss) / float(p.width) + p.eps);
+    for (uint i = lane; i < p.width; i += 64u) {
+        y[dst + i] = x[src + i] * inv * (p.weighted != 0u ? weights[i] : 1.0);
+    }
+}

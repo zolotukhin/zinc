@@ -5959,7 +5959,9 @@ extern "C" __global__ void dmmv_q4k_btok27(const unsigned* a_u32, const float* x
 // small B. Same per-element Q6_K dequant as dmmv_q6k_fast; per-token local sum
 // then sum[t] += s (the proven dmmv_q4k_btok reduction pattern) → token-identical
 // to dmmv_q6k_fast on x[t]. x token-major [B,K], y token-major [B,M].
-template<int B>
+// Inkling verification carries each lane's running sum across blocks to
+// match the single-token output head's accumulation order.
+template<int B, bool scalar_order = false>
 __device__ __forceinline__ void dmmv_q6k_btok_impl(const unsigned char* a, const float* x, float* y, DmmvPush pc) {
     unsigned row = blockIdx.x;
     if (row >= pc.M) return;
@@ -5994,11 +5996,12 @@ __device__ __forceinline__ void dmmv_q6k_btok_impl(const unsigned char* a, const
         for (int t = 0; t < B; t++) {
             const float4* xv = (const float4*)(x + (unsigned)t * pc.K + xo);
             float4 bx0 = xv[xb], bx32 = xv[xb + 8u], bx64 = xv[xb + 16u], bx96 = xv[xb + 24u];
-            float s = 0.0f;
+            float s = scalar_order ? sum[t] : 0.0f;
             #pragma unroll
             for (unsigned li = 0; li < 4u; li++)
                 s += ds0 * q1[li] * (&bx0.x)[li] + ds2 * q2[li] * (&bx32.x)[li] + ds4 * q3[li] * (&bx64.x)[li] + ds6 * q4[li] * (&bx96.x)[li];
-            sum[t] += s;
+            if constexpr (scalar_order) sum[t] = s;
+            else sum[t] += s;
         }
     }
     #pragma unroll

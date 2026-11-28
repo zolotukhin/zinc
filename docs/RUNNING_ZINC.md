@@ -27,10 +27,34 @@ before increasing the window. Over SSH, use `--no-browser` and forward port 9090
 
 ## Inkling 2 Mini on AMD RDNA4
 
-Use the Inkling development build for the `inkling-2-mini-q4-0` managed model.
-The 16 GB Radeon RX 9070 XT and 32 GB Radeon AI PRO R9700 both ran the Q4_0
-checkpoint at 4,096 tokens with ROCm and Vulkan. See the
-[build commands and comparison with llama.cpp](/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
+Inkling is available in current source builds for Linux ROCm and Vulkan. The
+16 GB Radeon RX 9070 XT and 32 GB Radeon AI PRO R9700 both ran the Q4_0 text
+checkpoint at 4,096 tokens. Start with one request slot.
+
+### Build from source
+
+```bash
+ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+./zig-out/bin/zinc chat --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1
+```
+
+For Vulkan, build with `./scripts/zig.sh build -Dbackend=vulkan -Doptimize=ReleaseFast`
+and use the same model commands. [Vulkan prerequisites](DEVELOPMENT.md).
+
+On ROCm, download the [matching Q8_0 DSpark drafter](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/8078d149286eec7193795413b9e0643da6d11fa1/dspark-Inkling-2-Mini-Q8_0.gguf)
+and set its path before launching the server. A five-token draft window was
+faster in the RX 9070 XT measurements.
+
+```bash
+ZINC_INKLING_DRAFT_MODEL=/path/to/dspark-Inkling-2-Mini-Q8_0.gguf \
+  ZINC_INKLING_DRAFT_WINDOW=5 \
+  ./zig-out/bin/zinc chat --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1
+```
+
+Select MTP in browser chat or set `enable_mtp: true` on an API request.
+Use `ZINC_INKLING_DSPARK_DEFAULT=1` to enable it by default or to use it for
+terminal prompts. [Comparison with llama.cpp and long-context measurements](/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
 
 ## Terminal prompts
 

@@ -149,6 +149,16 @@ test "MTP decode never reads or emits beyond the remaining context" {
     try std.testing.expectEqual(@as(usize, 0), last.call_count);
 }
 
+test "MTP decode honors a verifier's wider window within its output budget" {
+    var ctx = FakeContext{ .scripted_cycles = &.{.{ .drafts = .{ 10, 11, 12 }, .n_drafted = 3, .n_accepted = 3, .next_token = 20 }} };
+    var stats = freshResult();
+    var bounds = limits(5);
+    bounds.draft_limit = 7;
+    try mtp.runDecode(&ctx, bounds, 5, &stats);
+    try std.testing.expectEqual(@as(u32, 4), ctx.calls[0].budget);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 10, 11, 12, 20 }, ctx.emitted());
+}
+
 test "MTP decode advances seed and position by target-committed tokens between cycles" {
     var ctx = FakeContext{ .scripted_cycles = &.{
         .{ .drafts = .{ 10, 998, 997 }, .n_drafted = 3, .n_accepted = 1, .next_token = 20 },

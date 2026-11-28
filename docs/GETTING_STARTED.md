@@ -134,7 +134,7 @@ missing or corrupt, preserve the version, check output and command for
 - [Start the API and connect an app](RUNNING_ZINC.md#start-the-api) on any backend.
 - Connect [OpenClaw](OPENCLAW.md) or [OpenCode](OPENCODE.md) with their standalone helpers.
 - [Choose another model or use an existing GGUF](RUNNING_ZINC.md#models-and-cache).
-- [Run Inkling 2 Mini on AMD RDNA4](RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4) with the development build.
+- [Run Inkling 2 Mini on AMD RDNA4](RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4) with a current Linux source build.
 
 ## Upgrade or roll back
 

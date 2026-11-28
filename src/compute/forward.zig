@@ -30890,7 +30890,7 @@ pub const InferenceEngine = struct {
         return best_idx;
     }
 
-    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random, final_logit_softcapping: f32, logit_scale: f32) u32 {
+    pub fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random, final_logit_softcapping: f32, logit_scale: f32) u32 {
         if (logits.len == 0) return 0;
         if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0, final_logit_softcapping, logit_scale);
         if (params.temperature <= 0.0001) {

@@ -1,0 +1,122 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Query { float q[]; };
+layout(set = 0, binding = 1, std430) readonly buffer RelativeQuery { float rel[]; };
+layout(set = 0, binding = 2, std430) readonly buffer RelativeBias { float bias[]; };
+layout(set = 0, binding = 3, std430) readonly buffer KeyCache { uint keys[]; };
+layout(set = 0, binding = 4, std430) readonly buffer ValueCache { uint values[]; };
+layout(set = 0, binding = 5, std430) writeonly buffer Partials { float partial[]; };
+layout(set = 0, binding = 6, std430) readonly buffer Step { uint step[]; };
+layout(set = 0, binding = 7, std430) readonly buffer Sink { float sink[]; };
+layout(set = 0, binding = 8, std430) readonly buffer Gate { float gate[]; };
+layout(set = 0, binding = 9, std430) writeonly buffer Output { float result[]; };
+layout(push_constant) uniform Params {
+    uint dim;
+    uint heads;
+    uint kv_heads;
+    uint capacity;
+    uint window;
+    uint relative_dim;
+    uint relative_extent;
+    uint tiles;
+} p;
+
+#include "inkling_reduce.glsl"
+#include "inkling_lanes.glsl"
+
+const uint tile = 128u;
+shared float scores[128];
+
+float score(uint q_index, uint kv_row, uint distance, uint lane, uint lanes) {
+    float dp = 0.0, relative = 0.0;
+    for (uint pair = lane; pair < (p.dim + 1u) / 2u; pair += lanes) {
+        uint i = 2u * pair;
+        vec2 k = unpackHalf2x16(keys[kv_row + pair]);
+        dp = fma(q[q_index * p.dim + i], k.x, dp);
+        if (i + 1u < p.dim) dp = fma(q[q_index * p.dim + i + 1u], k.y, dp);
+    }
+    if (distance < p.relative_extent) {
+        for (uint i = lane; i < p.relative_dim; i += lanes) {
+            relative = fma(rel[q_index * p.relative_dim + i], bias[distance * p.relative_dim + i], relative);
+        }
+    }
+    return dp * inversesqrt(float(p.dim)) + relative;
+}
+
+void main() {
+    bool shuffle_scores = can_shuffle(16u);
+    uint thread_id = shuffle_scores ? shuffle_lane() : gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    uint token = gl_WorkGroupID.y;
+    uint tile_id = gl_WorkGroupID.z;
+    uint position = step[0] + token;
+    uint history = p.window != 0u ? min(position + 1u, p.window) : position + 1u;
+    uint first = position + 1u - history + tile_id * tile;
+    uint n = first <= position ? min(tile, position + 1u - first) : 0u;
+    uint kv_head = head / (p.heads / p.kv_heads);
+    uint pairs = (p.dim + 1u) / 2u;
+    uint q_index = token * p.heads + head;
+    uint dst = (q_index * p.tiles + tile_id) * (p.dim + 2u);
+    const float negative_inf = uintBitsToFloat(0xff800000u);
+    if (n == 0u) {
+        if (thread_id == 0u) {
+            partial[dst + p.dim] = negative_inf;
+            partial[dst + p.dim + 1u] = 0.0;
+        }
+        return;
+    }
+
+    if (shuffle_scores) {
+        uint lane = thread_id & 15u;
+        for (uint i = thread_id / 16u; i < n; i += 4u) {
+            uint row = (((first + i) % p.capacity) * p.kv_heads + kv_head) * pairs;
+            float s = score(q_index, row, position - first - i, lane, 16u);
+            for (uint delta = 8u; delta != 0u; delta >>= 1u) s += subgroupShuffleXor(s, delta);
+            if (lane == 0u) scores[i] = s;
+        }
+    } else {
+        for (uint i = thread_id; i < n; i += 64u) {
+            uint row = (((first + i) % p.capacity) * p.kv_heads + kv_head) * pairs;
+            scores[i] = score(q_index, row, position - first - i, 0u, 1u);
+        }
+    }
+    barrier();
+    float maximum = negative_inf;
+    for (uint i = thread_id; i < n; i += 64u) maximum = max(maximum, scores[i]);
+    maximum = reduce_max(maximum);
+    if (p.tiles == 1u) maximum = max(maximum, sink[q_index]);
+    float mass = 0.0;
+    for (uint i = thread_id; i < n; i += 64u) {
+        scores[i] = exp(scores[i] - maximum);
+        mass += scores[i];
+    }
+    mass = reduce_sum(mass);
+    barrier();
+
+    if (thread_id < pairs) {
+        vec2 acc = vec2(0.0);
+        for (uint i = 0u; i < n; ++i) {
+            uint row = (((first + i) % p.capacity) * p.kv_heads + kv_head) * pairs;
+            acc = fma(vec2(scores[i]), unpackHalf2x16(values[row + thread_id]), acc);
+        }
+        uint channel = thread_id * 2u;
+        if (p.tiles == 1u) {
+            uint i = q_index * p.dim + channel;
+            float inv_mass = 1.0 / (mass + exp(sink[q_index] - maximum));
+            result[i] = acc.x * inv_mass / (1.0 + exp(-gate[i]));
+            if (channel + 1u < p.dim) result[i + 1u] = acc.y * inv_mass / (1.0 + exp(-gate[i + 1u]));
+        } else {
+            partial[dst + channel] = acc.x;
+            if (channel + 1u < p.dim) partial[dst + channel + 1u] = acc.y;
+        }
+    }
+    if (p.tiles != 1u && thread_id == 0u) {
+        partial[dst + p.dim] = maximum;
+        partial[dst + p.dim + 1u] = mass;
+    }
+}

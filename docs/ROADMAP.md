@@ -6,7 +6,7 @@ This is a lightweight public roadmap for contributors. It is not a guarantee of 
 
 Current priorities:
 
-- qualify Inkling 2 Mini for a future release using the [AMD development results](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/) and the [published 0.1.2 Linux checks](releases/0.1.2-plan.md) as a starting point
+- qualify the next Linux release's Inkling 2 Mini builds against llama.cpp v1.1.0 using the [AMD benchmark workloads](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/)
 - make the core Linux AMD path more stable on real hardware
 - keep source builds and packages reliable across the documented Linux and macOS targets
 - harden the OpenAI-compatible server path

@@ -71,7 +71,7 @@ All four backends return the same schema:
 | `schema_version` | `1`; clients must tolerate additive fields.                                                                                                                                                                       |
 | `build`          | `version`, `commit`, `target`, `optimize`, and compiled `backend`.                                                                                                                                                |
 | `backend`        | `vulkan`, `metal`, `rocm`, or `cuda`.                                                                                                                                                                             |
-| `active_model`   | Loaded ID matching `/v1/models`, or null when idle. HIP 0.1.2 uses catalog IDs for known models. Older native builds use GGUF basenames.                                                       |
+| `active_model`   | Loaded ID matching `/v1/models`, or null when idle. HIP 0.1.2 uses catalog IDs for known models. Older native builds use GGUF basenames.                                                                          |
 | `context_length` | Live capacity per request/slot, or null when idle.                                                                                                                                                                |
 | `capabilities`   | Boolean `chat_completions`, `text_completions`, `chat_streaming`, `text_streaming`, `model_management`, `model_switching`, `browser_ui`, `sampling`, and `chat_session_reuse`; `tool_calls` is `model_dependent`. |
 
@@ -182,7 +182,7 @@ Generate a chat completion from a message list.
 
 | Field                   | Type             | Default          | Description                                                                                                                                                                                                            |
 | ----------------------- | ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                 | string           | current model    | Activates an installed model if different, when the server advertises model switching.                                         |
+| `model`                 | string           | current model    | Activates an installed model if different, when the server advertises model switching.                                                                                                                                 |
 | `session_id`            | string           | empty            | Optional prompt-reuse key only when `/health` advertises `capabilities.chat_session_reuse`; other backends ignore it.                                                                                                  |
 | `messages`              | array            | required         | OpenAI-style messages. `content` may be a string, `null`, or an array of text content blocks. Non-text blocks are ignored.                                                                                             |
 | `max_completion_tokens` | integer or null  | 256              | Maximum generated tokens before context-budget clamping. Supported by modern OpenAI-compatible clients, including OpenCode 2.                                                                                          |
@@ -370,6 +370,10 @@ Native HIP/ROCm and experimental CUDA serving report `supports_mtp`,
 NextN model, one request slot, and successfully prepared GPU state. ROCm defaults
 on; CUDA defaults off. An explicit `ZINC_MTP=0` remains an operator kill switch.
 
+Current ROCm source builds also expose this control for
+[Inkling 2 Mini DSpark](RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4)
+when the server loads its companion GGUF. Inkling drafting defaults off.
+
 When `mtp_request_control` is true, chat and raw completions accept nullable
 `enable_mtp`: `true` requests MTP and returns 400 if unavailable; `false` selects
 ordinary decode for this request; omission or `null` follows the server default.
@@ -424,14 +428,14 @@ Generate from a raw text prompt without applying a chat template.
 }
 ```
 
-| Field                          | Type    | Default          | Description                                                                                                                |
-| ------------------------------ | ------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `model`                        | string  | current model    | May activate an installed model when the server advertises model switching. |
-| `prompt`                       | string  | required         | Raw text prompt.                                                                                                           |
-| `max_tokens`                   | integer | 256              | Maximum generated tokens before context-budget clamping.                                                                   |
-| `temperature`                  | float   | accepted         | Parsed for compatibility but not applied by this endpoint yet.                                                             |
-| `stream`                       | boolean | backend-specific | Enable SSE text chunks. Vulkan/Metal default to `false`; ROCm/CUDA to `true`.                                              |
-| `stream_options.include_usage` | boolean | `false`          | On Vulkan/Metal, append a separate usage event before `[DONE]` when streaming.                                             |
+| Field                          | Type    | Default          | Description                                                                    |
+| ------------------------------ | ------- | ---------------- | ------------------------------------------------------------------------------ |
+| `model`                        | string  | current model    | May activate an installed model when the server advertises model switching.    |
+| `prompt`                       | string  | required         | Raw text prompt.                                                               |
+| `max_tokens`                   | integer | 256              | Maximum generated tokens before context-budget clamping.                       |
+| `temperature`                  | float   | accepted         | Parsed for compatibility but not applied by this endpoint yet.                 |
+| `stream`                       | boolean | backend-specific | Enable SSE text chunks. Vulkan/Metal default to `false`; ROCm/CUDA to `true`.  |
+| `stream_options.include_usage` | boolean | `false`          | On Vulkan/Metal, append a separate usage event before `[DONE]` when streaming. |
 
 ### Response
 

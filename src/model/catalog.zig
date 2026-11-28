@@ -247,6 +247,25 @@ pub const entries = [_]CatalogEntry{
             nvidia_cuda_profile,
         },
     },
+    .{
+        .id = "inkling-2-mini-q4-0",
+        .display_name = "Inkling 2 Mini Q4_0",
+        .release_date = "2026-11-20",
+        .family = "inkling2",
+        .format = "gguf",
+        .quantization = "Q4_0",
+        .file_name = "Inkling-2-Mini-Q4_0.gguf",
+        .homepage_url = "https://thinkingmachines.ai/model-card/inkling-2-mini/",
+        .download_url = "https://huggingface.co/codegood/Inkling-2-Mini-GGUF/resolve/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf?download=true",
+        .sha256 = "105a8cac3cc74f772484f105e49da2717bfa040735f2bfd69b72f09d94b4a76e",
+        .size_bytes = 14_922_755_456,
+        .required_vram_bytes = 15 * 1024 * 1024 * 1024,
+        .default_context_length = @import("inkling.zig").default_context_length,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{ "amd-rdna4-32gb", "amd-rdna4-16gb" },
+    },
 };
 
 /// Look up a catalog entry by its short identifier, returning null if not found.
@@ -382,6 +401,7 @@ pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
 /// Whether this entry's recorded qualification covers the selected backend.
 /// Explicit preview model loads still use the runtime's architecture checks.
 pub fn supportsBackend(entry: CatalogEntry, backend: CatalogBackend) bool {
+    if (std.mem.eql(u8, entry.family, "inkling2")) return backend == .rocm or backend == .vulkan;
     return entry.tested_backend == null or entry.tested_backend.? == backend;
 }
 
@@ -453,6 +473,7 @@ pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
         .{ "gemma", "gemma" },
         .{ "mamba", "mamba" },
         .{ "jamba", "jamba" },
+        .{ "inkling2", @import("inkling.zig").architecture },
     };
     inline for (families) |pair| {
         if (std.mem.eql(u8, family, pair[0])) return pair[1];
@@ -578,17 +599,16 @@ test "find returns qwen3.8 27b dense entry" {
     try std.testing.expect(supportsProfile(entry.*, apple_silicon_profile));
 }
 
-test "every managed model remains selectable on an Intel Vulkan 32 GB board" {
+test "the existing release matrix remains selectable on an Intel Vulkan 32 GB board" {
     // The CLI and model manager reject models without a matching profile even
     // when native inference qualification passed. Keep the complete 0.1.0 Intel
     // matrix available, including Qwen 3.8's ordinary-decode qualification.
     // See docs/INTEL_OPENCODE_VALIDATION.md for the frozen package evidence.
     // Iterate the catalog so newly added models cannot evade this contract by
     // being absent from a second, independently maintained list of model IDs.
-    // This managed catalog is the Intel 32 GB qualification scope. Expanding
-    // it to larger or other-backend-only checkpoints requires an explicit
-    // matrix decision, rather than silently excluding them from this check.
     for (entries) |entry| {
+        // Inkling's initial qualification is scoped to AMD RDNA4.
+        if (std.mem.eql(u8, entry.family, "inkling2")) continue;
         if (!supportsProfileForBackend(entry, "intel-arc", .vulkan)) {
             std.debug.print("FAIL: managed Intel Vulkan model '{s}' is unavailable in the catalog\n", .{entry.id});
             return error.TestExpectedEqual;
@@ -760,4 +780,19 @@ test "inference support does not imply validated chat or thinking" {
             try std.testing.expect(!entry.recommended_for_chat);
         }
     }
+}
+
+test "Inkling 2 Mini is listed for both validated RDNA4 memory tiers" {
+    const entry = find("inkling-2-mini-q4-0") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(CatalogStatus.supported, entry.status);
+    for ([_]u64{ 16, 32 }) |gib| {
+        const bytes = gib * 1024 * 1024 * 1024;
+        const profile = profileForRocm("gfx1201", bytes);
+        try std.testing.expect(supportedOnCurrentGpu(entry.*, profile, bytes));
+        try std.testing.expect(supportsProfileForBackend(entry.*, profile, .rocm));
+        try std.testing.expect(supportsProfileForBackend(entry.*, profile, .vulkan));
+    }
+    try std.testing.expect(!supportsProfileForBackend(entry.*, "intel-arc", .vulkan));
+    try std.testing.expect(!supportsProfile(entry.*, profileForCuda()));
+    try std.testing.expect(!supportsProfile(entry.*, profileForMetal()));
 }

@@ -2074,14 +2074,14 @@ pub fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedC
     };
 }
 
-fn dropInjectedDefaultSystemForGemma(parsed: *ParsedChatRequest, is_gemma: bool) void {
-    if (!is_gemma or !parsed.injected_default_system) return;
+fn dropInjectedDefaultSystem(parsed: *ParsedChatRequest, template_owns_system: bool) void {
+    if (!template_owns_system or !parsed.injected_default_system) return;
     if (parsed.roles.len == 0 or parsed.contents.len == 0) return;
     if (!std.mem.eql(u8, parsed.roles[0], "system")) return;
     if (!std.mem.eql(u8, parsed.contents[0], default_chat_system_prompt)) return;
 
-    // Gemma chat templates already provide their own model turn scaffold.
-    // Keep user-supplied guidance, but do not add an invisible extra turn.
+    // Keep the model-specific template and any caller-supplied system turns.
+    // The fallback system prompt is intended for the generic chat path.
     parsed.roles = parsed.roles[1..];
     parsed.contents = parsed.contents[1..];
     parsed.injected_default_system = false;
@@ -2461,6 +2461,7 @@ pub fn normalizeStructuredAssistantOutput(
 ) ![]const u8 {
     const template_kind = tokenizer.detectTemplateKind();
     if (template_kind == .atem) return normalizeAtemAssistantOutput(text, thinking_enabled, buf);
+    if (template_kind == .inkling2) return normalizeInklingAssistantOutput(text, thinking_enabled, buf);
     if (template_kind != .openai_moe) return text;
 
     const analysis = extractHarmonyMessage(text, harmony_analysis_prefix);
@@ -2488,6 +2489,41 @@ pub fn normalizeStructuredAssistantOutput(
         pos += final.len;
     }
     return buf[0..pos];
+}
+
+fn normalizeInklingAssistantOutput(text: []const u8, thinking: bool, buf: []u8) ![]const u8 {
+    const model = "<|message_model|>";
+    const end = "<|end_message|>";
+    const thought = "<|content_thinking|>";
+    const final = "<|content_text|>";
+    var remaining = text;
+    var length: usize = 0;
+    while (std.mem.indexOf(u8, remaining, model)) |start| {
+        remaining = remaining[start + model.len ..];
+        const prefix = if (std.mem.startsWith(u8, remaining, final)) final else thought;
+        const reasoning = std.mem.startsWith(u8, remaining, thought);
+        if (!reasoning and !std.mem.startsWith(u8, remaining, final)) continue;
+        remaining = remaining[prefix.len..];
+        const close = std.mem.indexOf(u8, remaining, end);
+        if (!reasoning or thinking) {
+            const body = remaining[0 .. close orelse remaining.len];
+            const open_tag = if (reasoning) "<think>\n" else "";
+            const close_tag = if (reasoning and close != null) "\n</think>\n" else "";
+            const written = std.fmt.bufPrint(buf[length..], "{s}{s}{s}", .{ open_tag, body, close_tag }) catch return error.BufferTooSmall;
+            length += written.len;
+        }
+        remaining = remaining[(close orelse break) + end.len ..];
+    }
+    return buf[0..length];
+}
+
+test "Inkling streamed reasoning and answer stay prefix-stable" {
+    const thought = "<|message_model|><|content_thinking|>Consider";
+    const answer = thought ++ "<|end_message|><|message_model|><|content_text|>Paris<|end_message|>";
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("<think>\nConsider", try normalizeInklingAssistantOutput(thought, true, &buf));
+    try std.testing.expectEqualStrings("<think>\nConsider\n</think>\nParis", try normalizeInklingAssistantOutput(answer, true, &buf));
+    try std.testing.expectEqualStrings("Paris", try normalizeInklingAssistantOutput(answer, false, &buf));
 }
 
 fn sanitizeAnswerTail(text: []const u8) []const u8 {
@@ -2937,6 +2973,10 @@ fn ensureRequestedModelActive(
     return true;
 }
 
+fn findModelChatStopStart(is_inkling: bool, text: []const u8, stops: []const []const u8, thinking: bool, tools_active: bool) ?usize {
+    return if (is_inkling) findFirstStop(text, stops) else findChatGenerationStopStart(text, stops, thinking, tools_active);
+}
+
 fn handleChatCompletions(
     conn: *http.Connection,
     manager: *model_manager_mod.ModelManager,
@@ -2975,7 +3015,9 @@ fn handleChatCompletions(
     const engine = &resources.engine;
     const tokenizer = &resources.tokenizer;
     const model_name = resources.display_name;
-    dropInjectedDefaultSystemForGemma(&parsed, resources.model.config.architecture == .gemma);
+    const template_kind = tokenizer.detectTemplateKind();
+    const is_inkling = template_kind == .inkling2;
+    dropInjectedDefaultSystem(&parsed, resources.model.config.architecture == .gemma or is_inkling);
 
     // If the catalog marks this model's thinking as unstable, force-disable
     // visible thinking but still keep the tokenizer's no-thinking generation
@@ -3111,8 +3153,9 @@ fn handleChatCompletions(
     const seed_ns: i128 = host_io.nanoTimestamp();
     var req_id_buf: [32]u8 = undefined;
     const req_id = std.fmt.bufPrint(&req_id_buf, "chatcmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "chatcmpl-0";
-    const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
-    const is_atem = tokenizer.detectTemplateKind() == .atem;
+    const thinking_request = if (is_inkling and !skip_thinking_template) parsed.enable_thinking orelse true else parsed.enable_thinking;
+    const thinking_enabled = supportsEnabledThinking(tokenizer, thinking_request);
+    const structured_stream = template_kind == .atem or is_inkling;
     const tools_for_choice = if (parsed.tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else parsed.tools;
     const tools_active = tools_for_choice.len > 0 and tool_format.forTokenizer(tokenizer).supports_tools;
     const forced_tool_name = if (!tool_format.forTokenizer(tokenizer).usesJsonPrefill()) null else forcedSingleToolName(tools_for_choice, parsed.tool_choice);
@@ -3121,7 +3164,7 @@ fn handleChatCompletions(
     const seed_bits: u128 = @bitCast(seed_ns);
     var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
     const random = prng.random();
-    const cacheable_session = parsed.session_id.len > 0;
+    const cacheable_session = !is_inkling and parsed.session_id.len > 0;
 
     var state = forward_mod.DecodeState.init(allocator);
     defer state.deinit();
@@ -3182,7 +3225,7 @@ fn handleChatCompletions(
             , .{ req_id, ts, model_name }) catch return;
             conn.writeSseEvent(chunk) catch return;
         }
-        if (thinking_enabled and forced_tool_name == null) {
+        if (thinking_enabled and forced_tool_name == null and !is_inkling) {
             streamText(conn, thinking_prefix, req_id, ts, model_name) catch return;
         }
         if (conn.isPeerClosed()) return;
@@ -3419,11 +3462,11 @@ fn handleChatCompletions(
                 return tok.isEndOfGeneration(token);
             }
         }.check;
-        const stop_strs = try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
+        const stop_strs = if (is_inkling) parsed.stop else try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
         var gen_text_buf: [max_stream_text_bytes]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
-        var sent_visible_len: usize = if (is_atem and thinking_enabled and forced_tool_name == null) thinking_prefix.len else 0;
+        var sent_visible_len: usize = if (template_kind == .atem and thinking_enabled and forced_tool_name == null) thinking_prefix.len else 0;
         var visible_buf: [max_stream_text_bytes]u8 = undefined;
         var structured_stream_buf: [32768]u8 = undefined;
         var stopped = false;
@@ -3525,7 +3568,7 @@ fn handleChatCompletions(
                 }
 
                 // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
-                if (findChatGenerationStopStart(gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled, tools_active)) |stop_idx| {
+                if (findModelChatStopStart(is_inkling, gen_text_buf[0..gen_text_len], stop_strs, thinking_enabled, tools_active)) |stop_idx| {
                     gen_text_len = stop_idx;
                     const pending_start = @min(sent_text_len, gen_text_len);
                     const pending_text = gen_text_buf[pending_start..gen_text_len];
@@ -3538,7 +3581,7 @@ fn handleChatCompletions(
                                 streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
                                 sent_visible_len = visible.len;
                             }
-                        } else if (is_atem) {
+                        } else if (structured_stream) {
                             const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                             const cleaned_structured = trimTrailingChatArtifacts(completeUtf8Prefix(structured));
                             if (cleaned_structured.len > sent_visible_len) {
@@ -3583,7 +3626,7 @@ fn handleChatCompletions(
                             sent_visible_len = safe_visible;
                         }
                         sent_text_len = gen_text_len;
-                    } else if (is_atem) {
+                    } else if (structured_stream) {
                         const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                         const safe_visible = lastCompleteUtf8End(structured);
                         if (safe_visible > sent_visible_len) {
@@ -3638,7 +3681,7 @@ fn handleChatCompletions(
                         streamTextViaDetector(conn, visible[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, true) catch return;
                         sent_visible_len = visible.len;
                     }
-                } else if (is_atem) {
+                } else if (structured_stream) {
                     const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
                     const cleaned_structured = trimTrailingChatArtifacts(completeUtf8Prefix(structured));
                     if (cleaned_structured.len > sent_visible_len and forced_tool_name == null) {
@@ -3710,7 +3753,7 @@ fn handleChatCompletions(
         }
     } else {
         // Non-streaming: use same prefill+decode loop with stop detection
-        const stop_strs = try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
+        const stop_strs = if (is_inkling) parsed.stop else try combinedStopStrings(parsed.arena.allocator(), parsed.stop);
         var text_buf: std.ArrayList(u8) = .empty;
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
@@ -3737,7 +3780,7 @@ fn handleChatCompletions(
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
                 ns_gen += 1;
-                const hit = if (findChatGenerationStopStart(text_buf.items, stop_strs, thinking_enabled, tools_active)) |pos| blk: {
+                const hit = if (findModelChatStopStart(is_inkling, text_buf.items, stop_strs, thinking_enabled, tools_active)) |pos| blk: {
                     text_buf.shrinkRetainingCapacity(pos);
                     break :blk true;
                 } else false;
@@ -3749,7 +3792,7 @@ fn handleChatCompletions(
                 server_state.setActiveContextTokens(state.position);
                 state.generated_tokens.append(allocator, prev) catch {};
             }
-            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findChatGenerationStopStart(text_buf.items, stop_strs, thinking_enabled, tools_active) == null) {
+            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findModelChatStopStart(is_inkling, text_buf.items, stop_strs, thinking_enabled, tools_active) == null) {
                 finish_reason = .length;
             }
         }
@@ -4711,6 +4754,7 @@ fn fallbackModelName(model: *const Model) []const u8 {
         .gemma => "gemma",
         .gpt_oss => "gpt-oss-20b",
         .muse_glimmer => "muse-glimmer",
+        .inkling2_loop => "inkling-2-mini",
         .unknown => "zinc-model",
     };
 }
@@ -5860,7 +5904,7 @@ test "parseChatRequest prepends default system guidance when missing" {
     try std.testing.expectEqualStrings("user", parsed.roles[1]);
 }
 
-test "dropInjectedDefaultSystemForGemma removes only synthetic guidance" {
+test "dropInjectedDefaultSystem removes only synthetic guidance" {
     const body =
         \\{"messages":[{"role":"user","content":"hello"}]}
     ;
@@ -5868,7 +5912,7 @@ test "dropInjectedDefaultSystemForGemma removes only synthetic guidance" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.injected_default_system);
-    dropInjectedDefaultSystemForGemma(&parsed, true);
+    dropInjectedDefaultSystem(&parsed, true);
 
     try std.testing.expect(!parsed.injected_default_system);
     try std.testing.expectEqual(@as(usize, 1), parsed.roles.len);
@@ -5876,7 +5920,7 @@ test "dropInjectedDefaultSystemForGemma removes only synthetic guidance" {
     try std.testing.expectEqualStrings("hello", parsed.contents[0]);
 }
 
-test "dropInjectedDefaultSystemForGemma preserves explicit system guidance" {
+test "dropInjectedDefaultSystem preserves explicit system guidance" {
     const body =
         \\{"messages":[{"role":"system","content":"be terse"},{"role":"user","content":"hello"}]}
     ;
@@ -5884,7 +5928,7 @@ test "dropInjectedDefaultSystemForGemma preserves explicit system guidance" {
     defer parsed.deinit();
 
     try std.testing.expect(!parsed.injected_default_system);
-    dropInjectedDefaultSystemForGemma(&parsed, true);
+    dropInjectedDefaultSystem(&parsed, true);
 
     try std.testing.expectEqual(@as(usize, 2), parsed.roles.len);
     try std.testing.expectEqualStrings("system", parsed.roles[0]);

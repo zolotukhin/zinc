@@ -1,0 +1,44 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Keys { float keys[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Values { float values[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer KeyCache { uint key_cache[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer ValueCache { uint value_cache[]; };
+layout(set = 0, binding = 4, std430) readonly buffer Step { uint step[]; };
+layout(push_constant) uniform Params {
+    uint dim;
+    uint heads;
+    uint capacity;
+    float clip;
+    float eps;
+} p;
+
+#include "inkling_reduce.glsl"
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    uint token = gl_WorkGroupID.y;
+    uint src = (token * p.heads + head) * p.dim;
+    uint pairs = (p.dim + 1u) / 2u;
+    uint dst = (((step[0] + token) % p.capacity) * p.heads + head) * pairs;
+    vec2 k = vec2(0.0), v = vec2(0.0);
+    if (lane * 2u < p.dim) {
+        k.x = keys[src + 2u * lane];
+        v.x = values[src + 2u * lane];
+    }
+    if (lane * 2u + 1u < p.dim) {
+        k.y = keys[src + 2u * lane + 1u];
+        v.y = values[src + 2u * lane + 1u];
+    }
+    float k_scale = p.clip / max(p.clip, sqrt(reduce_sum(dot(k, k))));
+    float v_scale = inversesqrt(reduce_sum(dot(v, v)) / float(p.dim) + p.eps);
+    if (lane < pairs) {
+        key_cache[dst + lane] = packHalf2x16(k * k_scale);
+        value_cache[dst + lane] = packHalf2x16(v * v_scale);
+    }
+}
