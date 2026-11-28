@@ -4,6 +4,9 @@ import Breadcrumbs from '../../components/Breadcrumbs.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import { topicHubs } from '../../data/topic-hubs';
 
+const listedTopics = topicHubs.filter((hub) => hub.listed !== false);
+const description = 'Guides for Inkling 2 Mini on AMD, Qwen 3.8, OpenClaw, OpenCode, RDNA4 GPUs, and KV cache quantization.';
+
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const breadcrumbItems = [
   { name: 'Home', href: '/' },
@@ -16,11 +19,11 @@ const jsonLd = {
     {
       '@type': 'CollectionPage',
       name: 'Local LLM Inference Topics',
-      description: 'Evergreen guides for ZINC, OpenClaw with local models, OpenCode, Qwen 3.8, Gemma 4, AMD RDNA4, and KV cache quantization.',
+      description,
       url: `${siteUrl}/topics/`,
       mainEntity: {
         '@type': 'ItemList',
-        itemListElement: topicHubs.map((hub, index) => ({
+        itemListElement: listedTopics.map((hub, index) => ({
           '@type': 'ListItem',
           position: index + 1,
           name: hub.title,
@@ -35,8 +38,8 @@ const jsonLd = {
 
 <BaseLayout
   title="Local LLM Inference Topics"
-  description="Evergreen guides for ZINC topics: OpenClaw with local models, OpenCode, Qwen 3.8 local inference, Gemma 4, AMD RDNA4 GPUs, and KV cache quantization."
-  keywords="local LLM inference topics, OpenClaw local models, OpenClaw AMD GPU, Qwen 3.8 local inference, Gemma 4 local inference, AMD RDNA4 LLM inference, OpenCode local coding, OpenCode Qwen, KV cache quantization, ZINC guides"
+  description={description}
+  keywords="local LLM inference topics, OpenClaw local models, OpenClaw AMD GPU, Qwen 3.8 local inference, Inkling 2 Mini AMD, Inkling 2 Mini RX 9070 XT, Inkling 2 Mini R9700, AMD RDNA4 LLM inference, OpenCode local coding, OpenCode Qwen, KV cache quantization, ZINC guides"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
@@ -48,7 +51,7 @@ const jsonLd = {
   </section>
 
   <section class="topic-grid" aria-label="Topic guides">
-    {topicHubs.map((hub) => (
+    {listedTopics.map((hub) => (
       <a href={`/topics/${hub.slug}/`} class="topic-card">
         <span>{hub.shortTitle}</span>
         <strong>{hub.title}</strong>

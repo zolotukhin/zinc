@@ -16,6 +16,7 @@ export type TopicHubBriefItem = {
 
 type TopicHubBase = {
   slug: string;
+  listed?: boolean;
   title: string;
   shortTitle: string;
   description: string;
@@ -291,7 +292,65 @@ export const topicHubs: TopicHub[] = [
     ],
   },
   {
+    slug: 'inkling-2-mini',
+    title: 'Inkling 2 Mini on AMD',
+    shortTitle: 'Inkling 2 Mini',
+    description: 'Run Inkling 2 Mini Q4_0 on the AMD Radeon RX 9070 XT or Radeon AI PRO R9700. Compare prefill, decode, DSpark, and measured context limits.',
+    keywords: 'Inkling 2 Mini, Inkling 2 Mini AMD, Inkling 2 Mini RX 9070 XT, Inkling 2 Mini R9700, Inkling 2 Mini GGUF, Inkling 2 Mini ROCm, Inkling 2 Mini Vulkan, Inkling 2 Mini DSpark',
+    summary: 'Run Thinking Machines Lab’s Inkling 2 Mini on AMD RDNA4. See same-checkpoint prefill and decode comparisons with llama.cpp, plus context tests on the 16 GB RX 9070 XT and 32 GB Radeon AI PRO R9700.',
+    updated: '2026-11-27',
+    practicalAnswer: 'Use the Inkling development build and pull the managed model inkling-2-mini-q4-0. Start with one request slot and a 4,096-token context on either card. Use ROCm for the fastest measured ZINC decode. The setup guide also covers Vulkan.',
+    bestUse: 'Start here to choose a context budget, run the pinned GGUF, or compare ZINC and llama.cpp on the same AMD card.',
+    status: [
+      { label: 'Radeon RX 9070 XT', detail: 'The 16 GB card ran the 13.9 GiB Q4_0 checkpoint and a Q8_0 DSpark drafter at a 4,096-token context. A separate DSpark memory probe left 271 MiB free.' },
+      { label: 'Radeon AI PRO R9700', detail: 'The 32 GB card recovered all three planted codes from a 62,591-token prompt in a 65,536-token window. Prefill took about 255 seconds.' },
+    ],
+    actionPlan: [
+      { label: 'Use the Inkling development checkout', detail: 'Follow the AMD setup guide to build the ROCm or Vulkan backend and pull the checksum-pinned GGUF.' },
+      { label: 'Start with a 4K window', detail: 'Use one request slot and verify a complete response before increasing context or trying the experimental DSpark path.' },
+    ],
+    checklist: [
+      { label: 'Match the weights', detail: 'Use the same Q4_0 target GGUF in both engines and the same Q8_0 drafter when comparing DSpark.' },
+      { label: 'Record draft settings', detail: 'The tuned RX 9070 XT run used five fixed drafts. The R9700 used adaptive depth up to seven.' },
+    ],
+    measurements: [
+      { label: 'RX 9070 XT at 4K', detail: 'On the incident-analysis prompt with DSpark, ZINC ROCm measured 743.58 prefill and 96.95 decode tok/s. llama.cpp Vulkan measured 373.47 prefill and 80.71 decode tok/s.' },
+      { label: 'R9700 at 4K', detail: 'On the same prompt with DSpark, ZINC ROCm measured 742.40 prefill and 91.35 decode tok/s. llama.cpp Vulkan measured 495.60 prefill and 62.34 decode tok/s.' },
+      { label: 'Drafting off and ROCm reference', detail: 'The benchmark article lists both cards with drafting off and on, and includes reference builds of llama.cpp v1.1.0 for ROCm and Vulkan.' },
+    ],
+    articleIdeas: [
+      { label: 'Compare the cards', detail: 'Use the full benchmark table to compare the same 4,096-token setup before looking at the R9700’s separate long-context runs.' },
+    ],
+    pitfalls: [
+      { label: 'Configured window versus prompt length', detail: 'The largest R9700 window that loaded was 401,408 tokens. The prompt in that run was 3,167 tokens. The successful long recall test used 62,591 input tokens.' },
+      { label: 'Long-context recall varies by prompt', detail: 'A separate 64,870-token filler prompt recovered zero of the three codes. The long prompts used raw completions because the prototype’s chat formatter reached its buffer limit.' },
+    ],
+    whatMatters: [
+      'Inkling stores 24 layers and runs the middle 12 three times, for 48 layer visits per generated token.',
+      'The published speed comparisons use the same GGUF, prompt and output budgets, one request slot, and medians from three runs after a warmup.',
+    ],
+    readNext: [
+      {
+        title: 'Inkling 2 Mini benchmarks on the RX 9070 XT and R9700',
+        href: '/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/',
+        description: 'Same-checkpoint ROCm and Vulkan results, DSpark tuning, VRAM, and the R9700 long-context tests.',
+      },
+    ],
+    docs: [
+      { title: 'Run Inkling 2 Mini on AMD RDNA4', href: '/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4', description: 'Development build instructions and the managed model ID.' },
+      { title: 'Exact Inkling 2 Mini Q4_0 GGUF', href: 'https://huggingface.co/codegood/Inkling-2-Mini-GGUF/blob/7d95146e8e432955d714c17db9a3d9703cd53263/Inkling-2-Mini-Q4_0.gguf', description: 'Revision-pinned checkpoint used in the measurements.' },
+      { title: 'Inkling 2 Mini model card', href: 'https://thinkingmachines.ai/model-card/inkling-2-mini/', description: 'The model’s looped architecture, input modalities, and published evaluations.' },
+    ],
+    related: ['amd-rdna4-llm-inference', 'qwen3-8-local-inference', 'kv-cache-quantization'],
+    faqs: [
+      { question: 'Does Inkling 2 Mini fit on a 16 GB RX 9070 XT?', answer: 'Yes. The 13.9 GiB Q4_0 GGUF ran on the RX 9070 XT at a 4,096-token context, including in a separate test with the DSpark drafter.' },
+      { question: 'What is the ZINC model ID for Inkling 2 Mini?', answer: 'The Inkling development build uses inkling-2-mini-q4-0 for the pinned Q4_0 checkpoint.' },
+      { question: 'How much Inkling 2 Mini context was tested on the R9700?', answer: 'The R9700 recovered all three planted codes with a 62,591-token prompt and a 65,536-token window. It also loaded a separate 401,408-token window with a 3,167-token prompt.' },
+    ],
+  },
+  {
     slug: 'gemma-local-inference',
+    listed: false,
     title: 'Gemma 4 Local Inference',
     shortTitle: 'Gemma 4',
     description: 'A clean guide to Gemma 4 local inference: model fit, MoE vs dense variants, sliding-window attention, asymmetric GQA, Vulkan, Metal, and ZINC.',

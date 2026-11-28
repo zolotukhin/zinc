@@ -1,6 +1,7 @@
 const topicTagRules: Record<string, string[]> = {
   'amd-rdna4-llm-inference': ['rdna4', 'r9700', 'rx-9070-xt'],
   'gemma-local-inference': ['gemma', 'gemma4'],
+  'inkling-2-mini': ['inkling-2-mini'],
   'kv-cache-quantization': ['kv-cache', 'turboquant'],
   'openclaw-local-models': ['openclaw'],
   'opencode-local-coding': ['opencode'],
