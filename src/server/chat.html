@@ -198,9 +198,26 @@ svg { width: 20px; height: 20px; flex-shrink: 0; }
 #b:disabled { background: #363d2e; color: #7d8773; cursor: default; transform: none; }
 #b.stop { color: #ecdac7; background: #614830; border-color: #8e6b49; }
 #b.stop:hover { background: #785839; }
-.composer-footer { max-width: var(--chat-width); margin: 10px auto 0; display: flex; justify-content: space-between; gap: 14px; padding: 0 4px; line-height: 1.5; min-height: 16px; }
+.composer-footer {
+  max-width: var(--chat-width);
+  margin: 10px auto 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 0 4px;
+  line-height: 1.5;
+  min-height: 16px;
+}
+#context-usage {
+  color: #adb6a3;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .hint { color: #7d8775; font-size: 10px; }
-#stats { text-align: right; font-variant-numeric: tabular-nums; font-size: 10px; }
+#stats { margin-left: auto; text-align: right; font-variant-numeric: tabular-nums; font-size: 10px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (min-width: 1024px) {
   :root { --chat-width: 960px; }
@@ -288,7 +305,11 @@ svg { width: 20px; height: 20px; flex-shrink: 0; }
 <div class="composer-right"><span class="composer-key" aria-hidden="true">↵ to send</span><button id="b" type="button" onclick="send()" title="Send message" aria-label="Send message"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
 </div>
 </div>
-<div class="composer-footer"><span class="hint" id="hint">Enter to send · Shift+Enter for a new line</span><span id="stats" class="stats"></span></div>
+<div class="composer-footer">
+  <span class="hint" id="hint">Enter to send · Shift+Enter for a new line</span>
+  <output id="context-usage" title="Context used by the last completed reply, including prompt and generated tokens." hidden></output>
+  <span id="stats" class="stats"></span>
+</div>
 <span id="composer-status" class="sr-only" role="status" aria-live="polite"></span>
 </footer>
 <script>
@@ -482,6 +503,7 @@ function updateEmptyState(){
 }
 const chatStateKey='zinc.chat.state.v3';
 const chatPrefsKey='zinc.chat.prefs.v1';
+let contextUsage = null;
 let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false,models=[],modelPollTimer=null,healthPollTimer=null;
 let chatSessionId='',userScrolledUp=false;
 M.addEventListener('scroll',function(){
@@ -576,7 +598,12 @@ function readChatState(){
     let messages=Array.isArray(parsed.messages)?parsed.messages.map(sanitizeMessage).filter(Boolean).filter(m=>!(m.role==='assistant'&&m.partial)).slice(-128):[];
     let input=typeof parsed.input==='string'?parsed.input.slice(0,8000):'';
     let sessionId=typeof parsed.sessionId==='string'&&parsed.sessionId?parsed.sessionId:newChatSessionId();
-    return{messages,input,sessionId};
+    const usage = parsed.contextUsage;
+    const contextUsage =
+      typeof usage?.model === 'string' && Number.isSafeInteger(usage.tokens) && usage.tokens > 0
+        ? { model: usage.model, tokens: usage.tokens }
+        : null;
+    return { messages, input, sessionId, contextUsage };
   }catch(e){return{messages:[],input:'',sessionId:newChatSessionId()}}
 }
 
@@ -605,7 +632,7 @@ function scheduleChatStateSave(delay=300){
 }
 function saveChatState(){
   if(chatSaveTimer!==null){clearTimeout(chatSaveTimer);chatSaveTimer=null}
-  writeStorage(chatStateKey,JSON.stringify({messages:H.slice(-128),input:(I.value||'').slice(0,8000),sessionId:chatSessionId||newChatSessionId()}));
+  writeStorage(chatStateKey,JSON.stringify({messages:H.slice(-128),contextUsage:contextUsage ?? undefined,input:(I.value||'').slice(0,8000),sessionId:chatSessionId||newChatSessionId()}));
 }
 
 function showEmptyState(){
@@ -676,6 +703,8 @@ function setModelTag(name){
 
 function resetConversation(note){
   H=[];
+  contextUsage = null;
+  updateContextUsage();
   const mtpStatus=document.getElementById('mtp-last-status');
   if(mtpStatus)mtpStatus.textContent='';
   chatSessionId=newChatSessionId();
@@ -988,7 +1017,8 @@ async function fetchRecoveredAnswer(model,messages,signal,mtpSetting){
   return{
     content:stripTrailingArtifacts(stripInlineTransportArtifacts(content)),
     finishReason:choice?.finish_reason||'stop',
-    mtp:normalizeMtpResult(body.mtp)
+    mtp:normalizeMtpResult(body.mtp),
+    contextTokens: reportedContextTokens(body.usage),
   };
 }
 
@@ -1034,6 +1064,7 @@ function renderConversation(){
 function restoreChatState(){
   let state=readChatState();
   H=state.messages;
+  contextUsage = state.contextUsage ?? null;
   chatSessionId=state.sessionId||newChatSessionId();
   renderConversation();
   I.value=state.input;
@@ -1299,7 +1330,35 @@ function esc(s){
   return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function reportedContextTokens(usage) {
+  const tokens = usage?.total_tokens;
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : null;
+}
+
+function updateContextUsage() {
+  const indicator = document.getElementById('context-usage');
+  if (!indicator) return;
+  const model = activeModel();
+  const capacity = model?.context_length;
+  indicator.hidden = !Number.isSafeInteger(capacity) || capacity <= 0;
+  if (indicator.hidden) return;
+
+  const used = !H.length ? 0 : contextUsage?.model === model.id ? contextUsage.tokens : null;
+  const limit = capacity.toLocaleString() + ' tokens';
+  let label = 'Context limit ' + limit;
+  if (used !== null) {
+    const percent = (used / capacity) * 100;
+    const percentage =
+      percent > 0 && percent < 0.1
+        ? '<0.1%'
+        : percent.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%';
+    label = 'Context ' + used.toLocaleString() + ' / ' + limit + ' (' + percentage + ')';
+  }
+  if (indicator.textContent !== label) indicator.textContent = label;
+}
+
 function updateComposerState(){
+  updateContextUsage();
   const needsModel=modelsReady&&!activeModel();
   B.disabled=!isGenerating&&(!I.value.trim()||modelActionPending||needsModel);
   const status=document.getElementById('composer-status');
@@ -2053,6 +2112,7 @@ async function send(){
   let requestMessages=[];
   let errorMessage='';
   let mtpResult=null;
+  let contextTokens = null;
   let displayStopped=false;
   const requestMtpSetting=mtpRequestSetting();
   let sawFinishReason=false;
@@ -2096,6 +2156,7 @@ async function send(){
         if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break stream;
         try{
           const event=JSON.parse(p);
+          contextTokens = reportedContextTokens(event.usage) ?? contextTokens;
           const reportedMtp=normalizeMtpResult(event.mtp);
           if(reportedMtp)mtpResult=reportedMtp;
           if(event.error){errorMessage=event.error.message||'Generation failed';finishReason='error';sawFinishReason=true;try{await rd.cancel()}catch(_e){}break stream}
@@ -2227,6 +2288,7 @@ async function send(){
       let recovered=await fetchRecoveredAnswer(selectedModelId,requestMessages,activeController.signal,requestMtpSetting);
       if(recovered.mtp)mtpResult=recovered.mtp;
       if(recovered.content){
+        contextTokens = recovered.contextTokens;
         raw=raw+(raw.endsWith('\n')?'':'\n')+'</think>\n'+recovered.content;
         finalView=normalizeDisplayView(splitDisplayContent(raw,false));
         cleanAnswer=finalView.answer;
@@ -2243,7 +2305,11 @@ async function send(){
     clearStallTimer();
   }
   liveReasoningOpen=bbl.querySelector('.reasoning-block')?.open??liveReasoningOpen;
-  activeController=null;stopRequested=false;setGenerating(false);
+  activeController=null;stopRequested=false;
+  if (!stopped && !errorMessage && sawFinishReason) {
+    contextUsage = contextTokens === null ? null : { model: selectedModelId, tokens: contextTokens };
+  }
+  setGenerating(false);
   if(document.activeElement===I||document.activeElement===B)I.focus({preventScroll:true});
   let notice=stopped?null:completionNotice({
     hasAnswer:!!cleanAnswer,

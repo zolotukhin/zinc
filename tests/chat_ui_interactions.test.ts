@@ -108,7 +108,7 @@ function harness(fetchMock: (url: string, options?: any) => Promise<any> = async
   let nextTimer = 1;
   let writes = 0;
   const factory = new Function("document", "location", "localStorage", "window", "setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame", "fetch", `${source}
-    return {md, send, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, completeAssistantHtml, assistantHtmlFromRaw, restoreChatState, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
+    return {md, send, clearConversation, stopGeneration, setGenerating, updateComposerState, updateMtpUi, mtpEnabledForRequest, updateLiveAssistant, completeAssistantHtml, assistantHtmlFromRaw, restoreChatState, updateStreamMarkdown, markdownCommitBoundary, scheduleRender, flushPendingRender, scheduleChatStateSave, saveChatState, autoScroll,
       replaceSend(fn){send=fn}, replaceStop(fn){stopGeneration=fn}, setHistory(value){H=value}, setModels(value){models=value}, generating(){return isGenerating}, history(){return H}};`);
   const api = factory(
     {getElementById: getElement, createElement: () => new Element(), querySelectorAll: () => []},
@@ -526,4 +526,53 @@ test("final answer recovery stays locked and can be stopped without losing the n
   expect(api.history().find((message: any) => message.role === "assistant").reasoning_open).toBe(false);
   expect(recoveryBubble.querySelector(".reasoning-block")).toBe(recoveryReasoning);
   expect(recoveryReasoning.open).toBe(false);
+});
+
+test('context shows server-reported use, survives reload, and resets with the conversation', async () => {
+  const storage = new Map<string, string>();
+  const model = { id: 'context-model', active: true, context_length: 4096 };
+  const events = [
+    { choices: [{ delta: { content: 'Ready.' } }] },
+    { choices: [{ delta: {}, finish_reason: 'length' }] },
+    { choices: [], usage: { prompt_tokens: 900, completion_tokens: 124, total_tokens: 1024 } },
+  ];
+  const stream = events.map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join('');
+  const ui = harness(async () => new Response(stream + 'data: [DONE]\n\n'), storage);
+  const indicator = ui.getElement('context-usage');
+  const limit = (4096).toLocaleString() + ' tokens';
+  const used = (1024).toLocaleString();
+  ui.api.setModels([model]);
+  ui.api.updateComposerState();
+  expect(indicator.hidden).toBe(false);
+  expect(indicator.textContent).toBe('Context 0 / ' + limit + ' (0%)');
+
+  ui.getElement('i').value = 'Check context.';
+  await ui.api.send();
+  expect(indicator.textContent).toBe('Context ' + used + ' / ' + limit + ' (25%)');
+
+  const restored = harness(undefined, storage);
+  const restoredIndicator = restored.getElement('context-usage');
+  restored.api.setModels([model]);
+  restored.api.restoreChatState();
+  expect(restoredIndicator.textContent).toBe(indicator.textContent);
+  restored.api.setModels([{ id: 'different-model', active: true, context_length: 2048 }]);
+  restored.api.updateComposerState();
+  const nextLimit = (2048).toLocaleString() + ' tokens';
+  expect(restoredIndicator.textContent).toBe('Context limit ' + nextLimit);
+
+  restored.api.clearConversation();
+  expect(restoredIndicator.textContent).toBe('Context 0 / ' + nextLimit + ' (0%)');
+  restored.api.setModels([]);
+  restored.api.updateComposerState();
+  expect(restoredIndicator.hidden).toBe(true);
+});
+
+test('restoring chat history without a usage report shows the context limit', () => {
+  const storage = new Map([
+    ['zinc.chat.state.v3', JSON.stringify({ messages: [{ role: 'user', content: 'Old message' }] })],
+  ]);
+  const { api, getElement } = harness(undefined, storage);
+  api.setModels([{ id: 'context-model', active: true, context_length: 4096 }]);
+  api.restoreChatState();
+  expect(getElement('context-usage').textContent).toBe('Context limit ' + (4096).toLocaleString() + ' tokens');
 });
