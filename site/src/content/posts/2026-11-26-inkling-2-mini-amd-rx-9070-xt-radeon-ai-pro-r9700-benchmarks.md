@@ -120,6 +120,29 @@ The coding-review workload benefited the most on both cards. The 256-token Long 
 
 The native prototype peaked at **16,033 MiB** of device memory on the RX 9070 XT and **15,795 MiB** on the R9700 in a separate memory probe. The drafter weighs about 504 MB on disk. The 16 GB card had about 271 MiB between the observed peak and the driver's reported capacity. The depth sweep in the measurement file shows how the reference server's memory use and decode speed changed at depths 0, 1, 2, 3, and 7. [Benchmark data](/blog/inkling-2-mini-amd/benchmark-results.json)
 
+### DSpark against llama.cpp v1.1.0
+
+A second comparison built the v1.1.0 release for both ROCm and Vulkan. All
+three servers used the same Q4_0 target, Q8_0 draft, 4,096-token context,
+one request slot and the four workloads above. ZINC used adaptive depth
+up to seven. llama.cpp used a fixed depth of seven and a 256-token
+microbatch. The servers reported accepted draft tokens for each workload.
+The table shows median decode throughput in tokens per second, with the same
+one warmup and three measured requests. The lead uses the faster of the two
+llama.cpp backends for that row.
+[Full timings and draft acceptance](/blog/inkling-2-mini-amd/benchmark-results.json)
+
+| GPU | Workload | ZINC ROCm DSpark | llama.cpp ROCm DSpark | llama.cpp Vulkan DSpark | ZINC lead |
+| --- | --- | ---: | ---: | ---: | ---: |
+| RX 9070 XT | Quick Chat | 97.6 | 8.9 | 61.1 | +59.8% |
+| RX 9070 XT | Coding Review | 140.4 | 29.4 | 98.3 | +42.9% |
+| RX 9070 XT | Incident Context | 92.0 | 21.0 | 80.7 | +13.9% |
+| RX 9070 XT | Long Coding Draft | 80.8 | 24.7 | 47.8 | +69.1% |
+| R9700 | Quick Chat | 99.1 | 26.0 | 48.4 | +105.0% |
+| R9700 | Coding Review | 144.5 | 62.1 | 94.4 | +53.0% |
+| R9700 | Incident Context | 91.3 | 35.9 | 62.3 | +46.5% |
+| R9700 | Long Coding Draft | 80.8 | 36.2 | 51.3 | +57.3% |
+
 ## Did the answers stay coherent?
 
 In the experimental ROCm server, we issued the same prompts with greedy decoding and DSpark enabled and disabled. The visible text and token counts matched for both complete answers on both cards. The draft acceptance went from 140 of 236 proposals on the database question to 220 of 285 on the incident ledger. The database prompt asked why the system flushes a write-ahead log before it writes a data page.
