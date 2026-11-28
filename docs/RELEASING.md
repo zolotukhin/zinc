@@ -2,7 +2,10 @@
 
 Linux releases cover Vulkan on R9700 and Intel Xe2, plus ROCm on R9700. The workflow builds two release archives, certifies those exact bytes on three hardware profiles, and promotes them after protected publication approval. Metal remains an unsigned preview. The target registry, selected `release` scope, model pins and ABI requirements live in [config/release/targets.json](https://github.com/zolotukhin/zinc/blob/main/config/release/targets.json).
 
-[Linux 0.1.2 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.2).
+[Linux 0.1.3 is published](https://github.com/zolotukhin/zinc/releases/tag/v0.1.3)
+with Inkling 2 Mini for AMD RDNA4. The [v0.1.3 validation report](/zinc/validation/release-candidate-0.1.3.json)
+identifies the certified archive bytes and hardware checks.
+
 The [0.1.2 release record](releases/0.1.2-plan.md) covers the certified Radeon
 and Intel archives, the lifecycle, client and upgrade checks, and the
 successful public downloads and clean installations.

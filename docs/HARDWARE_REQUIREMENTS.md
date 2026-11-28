@@ -8,14 +8,14 @@ published release qualification from broader source support.
 
 | Platform and GPU                      | Backend                                                             | Evidence and limits                                                                          |
 | ------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Linux x86_64, AMD Radeon AI PRO R9700 | **HIP / ROCm preferred**; Vulkan alternative                        | Both have stable 0.1.2 archives and qualified model/context rows.                            |
-| Linux x86_64, Intel Arc Pro B70 / Xe2 | Vulkan                                                              | Stable 0.1.2 qualification; other Arc cards need their own fit and driver checks.            |
+| Linux x86_64, AMD Radeon AI PRO R9700 | **HIP / ROCm preferred**; Vulkan alternative                        | Both have stable 0.1.3 archives and qualified model/context rows.                            |
+| Linux x86_64, Intel Arc Pro B70 / Xe2 | Vulkan                                                              | Stable 0.1.3 qualification; other Arc cards need their own fit and driver checks.            |
 | Other AMD RDNA3/RDNA4 and Strix Halo  | HIP / ROCm where the native target is supported; Vulkan alternative | Outside the stable launch matrix. Check the runtime target and model fit on the actual card. |
-| Apple Silicon M1–M5                   | Metal                                                               | Source backend and unsigned preview; no stable 0.1.2 Mac binary.                             |
+| Apple Silicon M1–M5                   | Metal                                                               | Source backend and unsigned preview; no stable 0.1.3 Mac binary.                             |
 | NVIDIA RTX 4090/5090, Linux or WSL2   | CUDA                                                                | Experimental source backend; outside stable qualification.                                   |
 
 The [release requirements](GETTING_STARTED.md#choose-your-backend) specify OS/ABI
-floors. The [published validation](/zinc/validation/release-candidate-0.1.2-2026-11-27.json)
+floors. The [published validation](/zinc/validation/release-candidate-0.1.3.json)
 records tested drivers, model files, contexts and precision. An OS meeting an
 archive's glibc floor does not establish GPU driver compatibility.
 

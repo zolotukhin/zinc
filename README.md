@@ -12,7 +12,7 @@ and the Metal preview also include browser chat.
 [![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Try Inkling 2 Mini](#build-inkling-2-mini-on-amd-rdna4) ·
+[Try Inkling 2 Mini](#inkling-2-mini-on-amd-rdna4) ·
 [Install stable ZINC](https://zolotukhin.ai/zinc/docs/getting-started/) ·
 [Documentation](https://zolotukhin.ai/zinc/docs/) ·
 [Benchmarks](https://zolotukhin.ai/zinc/benchmarks/) ·
@@ -20,33 +20,28 @@ and the Metal preview also include browser chat.
 
 ## Use it your way
 
-### Build Inkling 2 Mini on AMD RDNA4
+### Inkling 2 Mini on AMD RDNA4
 
 Start with **Inkling 2 Mini Q4_0** on the Radeon RX 9070 XT or Radeon AI PRO
 R9700. Both cards were tested at 4,096 tokens on ROCm and Vulkan. ROCm had
 higher decode throughput on both cards. [AMD benchmarks and setup](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
 
-Build the current source on Linux with the ROCm development libraries, then
-pull Inkling from the managed catalog. The build wrapper uses the pinned Zig
-0.17.1 toolchain.
+Install [ZINC v0.1.3 for Linux](#install-stable-linux) and pull the managed checkpoint.
 
 ```bash
-git clone https://github.com/zolotukhin/zinc.git
-cd zinc
-ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
-./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+zinc model pull inkling-2-mini-q4-0
 ```
 
 **Browser chat** starts the UI and local API together. Open `http://127.0.0.1:9090/`.
 
 ```bash
-./zig-out/bin/zinc chat --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1
+zinc chat --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1
 ```
 
 **One prompt** from the terminal.
 
 ```bash
-./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+zinc --model-id inkling-2-mini-q4-0 --context 4096 \
   --chat --prompt "Explain a ring buffer." -n 256
 ```
 
@@ -60,21 +55,21 @@ server is running. [API guide](https://zolotukhin.ai/zinc/docs/api/).
 For published archives, runtime requirements and verified installation/rollback,
 see [binary releases](https://zolotukhin.ai/zinc/docs/getting-started/) and
 [GitHub Releases](https://github.com/zolotukhin/zinc/releases).
-[Linux 0.1.2](https://github.com/zolotukhin/zinc/releases/tag/v0.1.2)
+[Linux 0.1.3](https://github.com/zolotukhin/zinc/releases/tag/v0.1.3)
 is available for HIP/ROCm on AMD and Vulkan on Intel or as an AMD alternative.
 The exact published binaries pass all three GPU profiles and public installation checks; see the
-[release record](docs/releases/0.1.2-plan.md).
+[release validation](https://github.com/zolotukhin/zinc/releases/download/v0.1.3/validation.json).
 For AMD RDNA, use HIP/ROCm as the default path. Install the published Linux
 release without a source checkout:
 
 ```bash
-curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.2/install.sh -o install.sh
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.3/install.sh -o install.sh
 ```
 
 Inspect the downloaded script, then install and add the command to PATH:
 
 ```bash
-ZINC_VERSION=v0.1.2 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.3 ZINC_BACKEND=rocm bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -88,11 +83,11 @@ Then check your GPU, download a model, and start the API:
 
 ```bash
 zinc --check
-zinc model pull qwen35-9b-q4k-m
-zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1
+zinc model pull inkling-2-mini-q4-0
+zinc serve --model-id inkling-2-mini-q4-0 -c 4096 --parallel 1
 ```
 
-The stable installer example uses Qwen 3.5 9B. Check the
+For a smaller checkpoint, try Qwen 3.5 9B. Check the
 [memory requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)
 before downloading, or run `zinc model list` to browse the catalog.
 You can also load an existing file with `-m /path/to/model.gguf`.
@@ -112,7 +107,7 @@ fallback between HIP/ROCm and Vulkan. Other RDNA cards need their own runtime,
 model and memory checks. On Intel, or when choosing AMD Vulkan, install explicitly:
 
 ```bash
-ZINC_VERSION=v0.1.2 ZINC_BACKEND=vulkan bash install.sh
+ZINC_VERSION=v0.1.3 ZINC_BACKEND=vulkan bash install.sh
 zinc --check
 ```
 

@@ -4,7 +4,12 @@ import { resolve, sep } from 'node:path';
 // Both packages are already declared and locked in site/package.json and site/bun.lock.
 import { chromium } from 'playwright';
 import axe from 'axe-core';
-import { STABLE_RELEASE, STABLE_VALIDATION_PATH } from '../src/lib/docs-release-status';
+import {
+  CLIENT_VALIDATION_PATH,
+  CLIENT_VALIDATION_RELEASE,
+  STABLE_RELEASE,
+  STABLE_VALIDATION_PATH,
+} from '../src/lib/docs-release-status';
 
 // Exercise the built onboarding pages without starting a client or loading a model.
 const dist = resolve(import.meta.dir, '../dist');
@@ -45,10 +50,13 @@ try {
     await Bun.file(resolve(import.meta.dir, `../public${evidencePath}`)).json(),
   );
   const releaseEvidence = await (await fetch(`${base}${STABLE_VALIDATION_PATH}`)).json();
-  assert.equal(releaseEvidence.published, true);
+  assert.equal(releaseEvidence.status, 'passed');
   assert.equal(releaseEvidence.version, STABLE_RELEASE);
+  const clientEvidence = await (await fetch(`${base}${CLIENT_VALIDATION_PATH}`)).json();
+  assert.equal(clientEvidence.published, true);
+  assert.equal(clientEvidence.version, CLIENT_VALIDATION_RELEASE);
   const clientPins = [
-    ...new Set(releaseEvidence.supplementary.actual_clients.map((row: any) => row.opencode)),
+    ...new Set(clientEvidence.supplementary.actual_clients.map((row: any) => row.opencode)),
   ];
   assert.equal(clientPins.length, 1);
 
@@ -80,7 +88,7 @@ try {
         assert.ok(
           installCode.includes(`ZINC_VERSION=v${STABLE_RELEASE} ZINC_BACKEND=rocm bash install.sh`),
         );
-        assert.match(installCode, /zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1/);
+        assert.match(installCode, /zinc serve --model-id inkling-2-mini-q4-0 -c 4096 --parallel 1/);
         const platforms = page.locator('.platform');
         assert.match(await platforms.first().innerText(), /HIP \/ ROCm.*preferred/);
         assert.match(await platforms.nth(1).innerText(), /Vulkan.*alternative/);
@@ -100,9 +108,12 @@ try {
         const claw = section.locator('[data-coding-harness="openclaw"]');
         assert.match(await claw.innerText(), /24\.16\+.*24\.x.*26\.1\+/);
         assert.match(await claw.innerText(), /independently run your project's tests/);
-        assert.match(await claw.innerText(), /starter passed the Vulkan API checks and scored 0\/12/);
+        assert.match(
+          await claw.innerText(),
+          /starter passed the Vulkan API checks and scored 0\/12/,
+        );
         assert.match(await claw.innerText(), /AMD HIP, AMD Vulkan and Intel Vulkan/);
-        const counts = releaseEvidence.supplementary.actual_client_counts;
+        const counts = clientEvidence.supplementary.actual_client_counts;
         assert.ok(
           (await claw.innerText()).includes(
             `${counts.openclaw_tasks_passed}/${counts.openclaw_tasks_total}`,

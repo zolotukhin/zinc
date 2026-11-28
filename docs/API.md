@@ -370,7 +370,7 @@ Native HIP/ROCm and experimental CUDA serving report `supports_mtp`,
 NextN model, one request slot, and successfully prepared GPU state. ROCm defaults
 on; CUDA defaults off. An explicit `ZINC_MTP=0` remains an operator kill switch.
 
-Current ROCm source builds also expose this control for
+ROCm builds from ZINC 0.1.3 onward also expose this control for
 [Inkling 2 Mini DSpark](RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4)
 when the server loads its companion GGUF. Inkling drafting defaults off.
 

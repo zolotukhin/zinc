@@ -10,7 +10,7 @@ or [manual verification](#verify-a-manual-download).
 
 ## Choose your backend
 
-[Stable 0.1.2](https://github.com/zolotukhin/zinc/releases/tag/v0.1.2)
+[Stable 0.1.3](https://github.com/zolotukhin/zinc/releases/tag/v0.1.3)
 provides two **Linux x86_64** downloads. Each executable contains one backend.
 
 | Choose                                  | Qualified release hardware                       | Runtime requirements                                                      | Interfaces                  |
@@ -25,7 +25,7 @@ headers; use the [ROCm prerequisites](ROCM.md#runtime-prerequisites).
 These are the release's tested GPU profiles, not a promise for every card with
 the same architecture. Other AMD GPUs, Metal previews and experimental CUDA
 have separate [hardware and release limits](HARDWARE_REQUIREMENTS.md).
-There is no stable 0.1.2 archive for macOS, Linux ARM64, musl/Alpine or Windows.
+There is no stable 0.1.3 archive for macOS, Linux ARM64, musl/Alpine or Windows.
 Apple Silicon users should follow [preview or source installation](#build-from-source).
 
 ## Install ZINC
@@ -33,19 +33,19 @@ Apple Silicon users should follow [preview or source installation](#build-from-s
 Download the release installer and review it:
 
 ```bash
-curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.2/install.sh -o install.sh
+curl -fL https://github.com/zolotukhin/zinc/releases/download/v0.1.3/install.sh -o install.sh
 ```
 
 For **AMD RDNA**, select the native **HIP / ROCm** archive:
 
 ```bash
-ZINC_VERSION=v0.1.2 ZINC_BACKEND=rocm bash install.sh
+ZINC_VERSION=v0.1.3 ZINC_BACKEND=rocm bash install.sh
 ```
 
 For **Intel Arc**, or the alternative **AMD Vulkan** path:
 
 ```bash
-ZINC_VERSION=v0.1.2 ZINC_BACKEND=vulkan bash install.sh
+ZINC_VERSION=v0.1.3 ZINC_BACKEND=vulkan bash install.sh
 ```
 
 Then make the command available in this shell:
@@ -60,7 +60,7 @@ The installer needs Bash, curl, tar and standard system utilities. It checks
 file integrity, architecture and runtime compatibility before activating the
 installation. The version output identifies the selected backend.
 
-Use the explicit backend above with the published 0.1.2 installer. The current
+Use the explicit backend above with the published 0.1.3 installer. The current
 source installer selects HIP on AMD-only Linux machines and checks
 runtime-compilation headers before every HIP install. It selects Vulkan on Intel or
 GPU-less hosts and requires a choice on mixed-vendor machines. Rollback uses
@@ -134,7 +134,7 @@ missing or corrupt, preserve the version, check output and command for
 - [Start the API and connect an app](RUNNING_ZINC.md#start-the-api) on any backend.
 - Connect [OpenClaw](OPENCLAW.md) or [OpenCode](OPENCODE.md) with their standalone helpers.
 - [Choose another model or use an existing GGUF](RUNNING_ZINC.md#models-and-cache).
-- [Run Inkling 2 Mini on AMD RDNA4](RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4) with a current Linux source build.
+- [Run Inkling 2 Mini on AMD RDNA4](RUNNING_ZINC.md#inkling-2-mini-on-amd-rdna4).
 
 ## Upgrade or roll back
 
@@ -149,14 +149,14 @@ Restore the previous installation with:
 bash install.sh --rollback
 ```
 
-The installer switches the executable and matching runtime assets together.
-Cached models stay in place. The certified 0.1.2 archives passed
-[installation, upgrade and rollback checks](/zinc/validation/release-candidate-0.1.2-2026-11-27.json).
+The installer switches the executable and matching runtime assets together and
+keeps cached models. The v0.1.3 publication workflow tests a clean install of
+each [certified archive](/zinc/validation/release-candidate-0.1.3.json).
 
 ## Verify a manual download
 
 Download the chosen archive and `SHA256SUMS.txt` from the
-[same release](https://github.com/zolotukhin/zinc/releases/tag/v0.1.2).
+[same release](https://github.com/zolotukhin/zinc/releases/tag/v0.1.3).
 Compare the archive's `sha256sum` with its entry, then extract it into its own
 directory. Keep `bin/` and `share/` together: the Vulkan executable needs the
 matching `share/zinc/shaders/` assets.
@@ -165,13 +165,13 @@ The release also publishes `release-manifest.json`, `release-policy.json`,
 `validation.json` and `provenance.jsonl`. For independent provenance verification:
 
 ```bash
-gh attestation verify zinc-v0.1.2-linux-x86_64-vulkan.tar.gz \
+gh attestation verify zinc-v0.1.3-linux-x86_64-vulkan.tar.gz \
   --bundle provenance.jsonl --repo zolotukhin/zinc \
   --signer-workflow zolotukhin/zinc/.github/workflows/release-candidate.yml \
   --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
-The [published validation](/zinc/validation/release-candidate-0.1.2-2026-11-27.json)
+The [published validation](/zinc/validation/release-candidate-0.1.3.json)
 records exact GPU, driver, model and context combinations. See
 [release engineering](RELEASING.md) for the publishing process.
 

@@ -5,7 +5,7 @@ import TerminalWindow from '../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import benchmarkData from '../../data/zinc-performance.json';
 import pinnedZigVersion from '../../../../.zig-version?raw';
-import { STABLE_RELEASE, STABLE_VALIDATION_PATH } from '../../lib/docs-release-status';
+import { CLIENT_VALIDATION_PATH, CLIENT_VALIDATION_RELEASE, STABLE_RELEASE } from '../../lib/docs-release-status';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const compilerVersion = pinnedZigVersion.trim();
@@ -131,9 +131,9 @@ ZINC_VERSION=v${STABLE_RELEASE} ZINC_BACKEND=rocm bash install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
 zinc --check
-zinc model pull qwen35-9b-q4k-m
-zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1`} />
-      <p class="caption">This stable HIP example serves Qwen 3.5 9B through the API. Stable {STABLE_RELEASE} includes browser chat on HIP and Vulkan. See <a href="/zinc/docs/running-zinc/#browser-chat">browser options</a>, <a href="/zinc/docs/hardware-requirements/">memory requirements</a> and <code>zinc model list</code>.</p>
+zinc model pull inkling-2-mini-q4-0
+zinc serve --model-id inkling-2-mini-q4-0 -c 4096 --parallel 1`} />
+      <p class="caption">This HIP example serves Inkling 2 Mini at 4,096 tokens. See <a href="/zinc/docs/running-zinc/#inkling-2-mini-on-amd-rdna4">browser chat and DSpark</a> or <a href="/zinc/docs/hardware-requirements/">memory requirements</a>.</p>
     </div>
   </section>
 
@@ -178,7 +178,7 @@ node setup-openclaw.mjs run --project ../my-project -- \\
   "Fix the failing tests and run them."`} />
         <p class="caption"><code>check</code> validates the config and server; it does not prove coding ability. Review the resulting diff and independently run your project's tests after each task.</p>
         <p class="harness-links"><a href="/zinc/docs/openclaw/">OpenClaw setup guide →</a> <a href="/zinc/harnesses/setup-openclaw.mjs" download="setup-openclaw.mjs">Download helper ↓</a></p>
-        <p class="caption">The {STABLE_RELEASE} archives passed 53/54 first-pass OpenClaw tasks across six larger models on AMD HIP, AMD Vulkan and Intel Vulkan. The Intel timeout passed on retry with a longer deadline. The starter passed the Vulkan API checks and scored 0/12 across both coding clients. <a href={STABLE_VALIDATION_PATH}>Release validation</a></p>
+        <p class="caption">The {CLIENT_VALIDATION_RELEASE} archives passed 53/54 first-pass OpenClaw tasks across six larger models on AMD HIP, AMD Vulkan and Intel Vulkan. The Intel timeout passed on retry with a longer deadline. The starter passed the Vulkan API checks and scored 0/12 across both coding clients. <a href={CLIENT_VALIDATION_PATH}>Client validation</a></p>
       </article>
       <article class="harness-client terminal-wrap" aria-labelledby="opencode-heading" data-coding-harness="opencode">
         <h3 id="opencode-heading">OpenCode</h3>

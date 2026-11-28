@@ -12,7 +12,7 @@ Check `zinc --version` before applying backend-specific settings.
 
 ## Runtime prerequisites
 
-The stable 0.1.2 ROCm archive needs Linux x86_64 with **glibc 2.39+** and the
+The stable 0.1.3 ROCm archive needs Linux x86_64 with **glibc 2.39+** and the
 validated **ROCm 7.2.4** stack: HIP, hipRTC, hipBLAS, HIP headers and rocWMMA
 headers. Ubuntu 24.04 is the reference userspace. Even the prebuilt archive
 compiles embedded kernels at runtime, so runtime libraries alone are insufficient.
@@ -33,7 +33,7 @@ The release reference is the Radeon AI PRO R9700 (`gfx1201`) with Linux kernel
 a fixed build requirement. The running `amdgpu` driver, ROCr runtime and ROCm
 userspace must support the same GPU target. This evidence does not qualify
 every RDNA3/RDNA4 card. See the
-[exact release results](/zinc/validation/release-candidate-0.1.2-2026-11-27.json).
+[exact release results](/zinc/validation/release-candidate-0.1.3.json).
 
 ## Select a GPU
 
@@ -52,18 +52,18 @@ the best visible native device.
 ## Serving limits
 
 Use the [shared server recipe](RUNNING_ZINC.md#start-the-api) with an explicit
-context and `--parallel 1` initially. ROCm otherwise defaults to **2,048 tokens
-per slot**, even with `-c 0`. Multiple slots need separate cache capacity;
-Gemma 4 26B-A4B currently uses one slot regardless of a larger requested value.
+context and `--parallel 1` initially. Most ROCm models default to **2,048 tokens
+per slot**, even with `-c 0`. Managed Inkling defaults to 4,096 tokens. Inkling
+and Gemma 4 26B-A4B use one slot.
 
-The stable 0.1.2 server provides CLI and browser chat, HTTP chat and raw
+The stable 0.1.3 server provides CLI and browser chat, HTTP chat and raw
 completions, health, and installed-model switching. Sampling is greedy. Set
 `stream` explicitly because ROCm defaults to SSE. The
 [API matrix](API.md#backend-coverage) lists endpoint coverage.
 
 ## Browser chat on HIP
 
-The stable 0.1.2 archive serves browser chat at `/` and `/chat`. Start with an
+The stable 0.1.3 archive serves browser chat at `/` and `/chat`. Start with an
 installed model.
 
 ```bash
@@ -74,7 +74,7 @@ This interface supports installed-model switching and unload/reload when the
 server advertises them. Install weights with the model CLI first. Thinking and
 MTP controls follow the active model's capabilities; sampling remains greedy.
 Use `--no-browser` over SSH and forward the server port to your computer.
-The [release record](/zinc/validation/release-candidate-0.1.2-2026-11-27.json) includes the R9700 browser and API checks.
+The [release record](/zinc/validation/release-candidate-0.1.3.json) includes the R9700 browser and API checks.
 
 The [R9700 browser/API preview check](/zinc/validation/rocm-browser-chat-2026-11-17.json)
 records 64K F32 capacity, a 21,040-token synthetic retrieval and a fresh request

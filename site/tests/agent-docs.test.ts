@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { renderLlmsTxt, renderLlmsFullTxt } from '../src/lib/agent-docs';
 import {
+  CLIENT_VALIDATION_PATH,
+  CLIENT_VALIDATION_RELEASE,
   docsReleaseStatus,
   STABLE_RELEASE,
   STABLE_VALIDATION_PATH,
@@ -11,6 +13,9 @@ import type { ZigApiIndex } from '../src/lib/zig-api-loader';
 
 const publishedRelease = await Bun.file(
   resolve(import.meta.dir, '../public' + STABLE_VALIDATION_PATH),
+).json();
+const clientValidation = await Bun.file(
+  resolve(import.meta.dir, '../public' + CLIENT_VALIDATION_PATH),
 ).json();
 
 const index = {
@@ -22,17 +27,20 @@ const index = {
   lastmod: '2026-11-15',
 } as unknown as ZigApiIndex;
 
-test('stable client guidance follows the published maintenance certificate', () => {
-  expect(publishedRelease.published).toBe(true);
-  expect(publishedRelease.status).toBe('published');
+test('stable installation guidance follows the published GPU certificate', () => {
+  expect(publishedRelease.status).toBe('passed');
   expect(STABLE_RELEASE).toBe(publishedRelease.version);
-  expect(publishedRelease.publication.status).toBe('passed');
-  expect(publishedRelease.publication.public_install_jobs).toHaveLength(2);
+  expect(publishedRelease.profiles.map((row: { profile: string }) => row.profile).sort()).toEqual([
+    'rocm-rdna4',
+    'vulkan-intel-xe2',
+    'vulkan-rdna4',
+  ]);
 });
 
 test('active OpenCode install recipes match the final-archive client cohort', async () => {
+  expect(clientValidation.version).toBe(CLIENT_VALIDATION_RELEASE);
   const pins = [
-    ...new Set(publishedRelease.supplementary.actual_clients.map((row: any) => row.opencode)),
+    ...new Set(clientValidation.supplementary.actual_clients.map((row: any) => row.opencode)),
   ];
   expect(pins).toHaveLength(1);
   for (const name of ['README.md', 'docs/OPENCODE.md', 'site/src/pages/zinc/index.astro']) {
