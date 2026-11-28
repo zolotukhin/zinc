@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { smokeInstalledCli } from './smoke_installed_cli.mjs';
 
+// The rejection case can launch six processes, each with a 15-second deadline.
+const SMOKE_TEST_TIMEOUT_MS = 120_000;
+
 async function fixture(schema = 1) {
   const directory = await mkdtemp(join(tmpdir(), 'zinc cli fixture '));
   await mkdir(join(directory, 'bin'));
@@ -28,28 +31,36 @@ else process.exit(5);
   return directory;
 }
 
-test('installed CLI smoke uses an empty cwd, copies assets and leaves the original package intact', async () => {
-  const directory = await fixture();
-  try {
-    const original = await readFile(join(directory, 'bin/zinc'));
-    const result = await smokeInstalledCli(directory);
-    expect(result.isolated_cli).toBe('pass');
-    expect(result.assets).toBe('pass');
-    expect(await readFile(join(directory, 'bin/zinc'))).toEqual(original);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+test(
+  'installed CLI smoke uses an empty cwd, copies assets and leaves the original package intact',
+  async () => {
+    const directory = await fixture();
+    try {
+      const original = await readFile(join(directory, 'bin/zinc'));
+      const result = await smokeInstalledCli(directory);
+      expect(result.isolated_cli).toBe('pass');
+      expect(result.assets).toBe('pass');
+      expect(await readFile(join(directory, 'bin/zinc'))).toEqual(original);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  SMOKE_TEST_TIMEOUT_MS,
+);
 
-test('installed CLI smoke rejects a different JSON contract and incomplete runtime assets', async () => {
-  const invalid = await fixture(99);
-  const missing = await fixture();
-  try {
-    await expect(smokeInstalledCli(invalid)).rejects.toThrow();
-    await rm(join(missing, 'share'), { recursive: true });
-    await expect(smokeInstalledCli(missing)).rejects.toThrow();
-  } finally {
-    await rm(invalid, { recursive: true, force: true });
-    await rm(missing, { recursive: true, force: true });
-  }
-});
+test(
+  'installed CLI smoke rejects a different JSON contract and incomplete runtime assets',
+  async () => {
+    const invalid = await fixture(99);
+    const missing = await fixture();
+    try {
+      await expect(smokeInstalledCli(invalid)).rejects.toThrow();
+      await rm(join(missing, 'share'), { recursive: true });
+      await expect(smokeInstalledCli(missing)).rejects.toThrow();
+    } finally {
+      await rm(invalid, { recursive: true, force: true });
+      await rm(missing, { recursive: true, force: true });
+    }
+  },
+  SMOKE_TEST_TIMEOUT_MS,
+);
