@@ -31,6 +31,8 @@ Inkling is available in current source builds for Linux ROCm and Vulkan. The
 16 GB Radeon RX 9070 XT and 32 GB Radeon AI PRO R9700 both ran the Q4_0 text
 checkpoint at 4,096 tokens. Start with one request slot.
 
+### Build from source
+
 ```bash
 ROCM_PATH=/opt/rocm ./scripts/zig.sh build -Dbackend=rocm -Doptimize=ReleaseFast
 ./zig-out/bin/zinc model pull inkling-2-mini-q4-0

@@ -37,7 +37,6 @@ pub const ModelInspection = struct {
     kv_dimension_sum: ?u64 = null,
     tensor_count: u64,
     metadata_count: usize,
-    inkling_layout: ?inkling.Layout = null,
 };
 
 /// A tensor descriptor paired with the GPU buffer that stores its contents.
@@ -615,7 +614,6 @@ pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspec
         .kv_dimension_sum = inspectionKvDimensionSum(&gf, config),
         .tensor_count = gf.tensor_count,
         .metadata_count = gf.metadata.count(),
-        .inkling_layout = inkling_layout,
     };
 }
 

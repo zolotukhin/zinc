@@ -12,7 +12,7 @@ and the Metal preview also include browser chat.
 [![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Try Inkling 2 Mini](#inkling-2-mini-on-amd-rdna4) ·
+[Try Inkling 2 Mini](#build-inkling-2-mini-on-amd-rdna4) ·
 [Install stable ZINC](https://zolotukhin.ai/zinc/docs/getting-started/) ·
 [Documentation](https://zolotukhin.ai/zinc/docs/) ·
 [Benchmarks](https://zolotukhin.ai/zinc/benchmarks/) ·
@@ -20,7 +20,7 @@ and the Metal preview also include browser chat.
 
 ## Use it your way
 
-### Inkling 2 Mini on AMD RDNA4
+### Build Inkling 2 Mini on AMD RDNA4
 
 Start with **Inkling 2 Mini Q4_0** on the Radeon RX 9070 XT or Radeon AI PRO
 R9700. Both cards were tested at 4,096 tokens on ROCm and Vulkan. ROCm had

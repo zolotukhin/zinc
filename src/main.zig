@@ -2200,6 +2200,7 @@ const AcceleratorManager = struct {
         const cfg = inspection.config;
         switch (cfg.architecture) {
             .qwen35, .qwen2_moe, .gemma, .muse_glimmer => {},
+            .inkling2_loop => if (comptime !gpu.is_rocm) return error.UnsupportedModelArchitecture,
             else => return error.UnsupportedModelArchitecture,
         }
         const format = @import("compute/kv_storage.zig").Format.parse(host_io.getenv("ZINC_KV_CACHE")) catch return error.UnsupportedKvCacheConfiguration;
