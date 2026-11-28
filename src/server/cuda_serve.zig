@@ -89,13 +89,14 @@ pub const Forward = union(enum) {
         switch (self) {
             .gemma => |g| try g.allocSlotKv(nslots, slot_ctx),
             .qwen => |q| try q.allocSlotState(nslots, slot_ctx),
-            .inkling => |model| if (comptime is_rocm) try model.allocSlots(nslots, slot_ctx) else unreachable,
+            .inkling => |model| if (comptime is_rocm) try model.validateServeSlots(nslots, slot_ctx) else unreachable,
         }
     }
     fn freeSlots(self: Forward) void {
         switch (self) {
             .gemma => |g| g.freeSlotKv(),
             .qwen => |q| q.freeSlotState(),
+            // ForwardInkling.deinit releases the single sequence's buffers.
             .inkling => {},
         }
     }

@@ -4710,7 +4710,15 @@ test "Muse Glimmer CLI auto-chat uses ATEM end-of-turn token" {
     try std.testing.expectEqual(tok.eosId(), cliGenerationStopId(&tok, false));
 }
 
-test "shouldAutoChatCliPrompt leaves non-gemma templates raw" {
+test "Inkling CLI auto-chat preserves an already formatted prompt" {
+    var tok = makeTestTokenizer("<|message_model|><|content_model_end_sampling|>");
+    defer tok.token_to_id.deinit();
+
+    try std.testing.expect(shouldAutoChatCliPrompt(&tok, "Hello"));
+    try std.testing.expect(!shouldAutoChatCliPrompt(&tok, "<|message_user|><|content_text|>Hello<|end_message|>"));
+}
+
+test "shouldAutoChatCliPrompt leaves ChatML templates raw" {
     var tok = makeTestTokenizer("<|im_start|>assistant\n");
     defer tok.token_to_id.deinit();
 

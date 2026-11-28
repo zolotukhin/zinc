@@ -34,7 +34,7 @@ const CudaBuffer = buffer.CudaBuffer;
 const CudaPipeline = pipeline.CudaPipeline;
 const LoadedTensor = loader.LoadedTensor;
 
-const KERNELS_CU = @embedFile("../shaders/cuda/kernels.cu");
+const KERNELS_CU = @import("cuda_kernels.zig").source;
 const is_rocm = std.mem.eql(u8, build_options.backend, "rocm");
 
 // ---- kernel push-constant structs (must byte-match kernels.cu) --------------

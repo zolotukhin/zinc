@@ -30,7 +30,7 @@ const is_rocm = std.mem.eql(u8, build_options.backend, "rocm");
 const dmmv_fast_block: u32 = 64;
 
 /// The CUDA kernel library, bundled into the binary and NVRTC-compiled on load.
-const KERNELS_CU = @embedFile("../shaders/cuda/kernels.cu");
+const KERNELS_CU = @import("cuda_kernels.zig").source;
 const launch_sizes = @import("launch_sizes.zig");
 const kv_storage = @import("kv_storage.zig");
 const prefill_policy = @import("prefill_policy.zig");

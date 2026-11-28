@@ -35,7 +35,8 @@ void main() {
         uint i = first + t * stride + p.dim;
         sum = fma(exp(partial[i] - high), partial[i + 1u], sum);
     }
-    float inverse_mass = 1.0 / (reduce_sum(sum) + exp(sink[query] - high));
+    float mass = reduce_sum(sum) + exp(sink[query] - high);
+    float inverse_mass = mass > 0.0 ? 1.0 / mass : 0.0;
 
     for (uint i = lane; i < p.dim; i += 64u) {
         float weighted = 0.0;

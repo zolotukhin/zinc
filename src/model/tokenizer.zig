@@ -2501,6 +2501,31 @@ test "Inkling renders the effort after system messages and before the user" {
     );
 }
 
+test "Inkling encodes special markers, direct vocabulary entries and merged text" {
+    const vocab = [_][]const u8{ "<|message_user|>", "Hello", "h", "i", "hi", "<0x7A>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{.{ .first = "h", .second = "i", .rank = 0 }},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 0,
+        .prepend_bos = false,
+        .pretokenizer = .inkling2,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+    for (vocab, 0..) |text, id| try tok.token_to_id.put(text, @intCast(id));
+
+    const direct = try tok.encodeWithSpecialTokens("<|message_user|>Hello", std.testing.allocator);
+    defer std.testing.allocator.free(direct);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, direct);
+
+    const merged = try tok.encodeWithSpecialTokens("<|message_user|>hiz", std.testing.allocator);
+    defer std.testing.allocator.free(merged);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 4, 5 }, merged);
+}
+
 test "applyChatTemplate openai_moe defaults generation to final channel" {
     var tok = Tokenizer{
         .vocab = &.{},

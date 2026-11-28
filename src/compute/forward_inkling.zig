@@ -559,7 +559,8 @@ pub const ForwardInkling = struct {
         self.allocator.free(self.layers);
     }
 
-    pub fn allocSlots(self: *const ForwardInkling, count: u32, ctx: u32) !void {
+    /// The forward pass owns one sequence's buffers from init through deinit.
+    pub fn validateServeSlots(self: *const ForwardInkling, count: u32, ctx: u32) !void {
         if (count != 1 or ctx != self.max_ctx) return error.InvalidParallelism;
     }
 
