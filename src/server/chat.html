@@ -1087,7 +1087,9 @@
         margin: 10px auto 0;
         display: flex;
         justify-content: space-between;
-        gap: 14px;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 2px 14px;
         padding: 0 4px;
         line-height: 1.5;
         min-height: 16px;
@@ -1096,7 +1098,14 @@
         color: #7d8775;
         font-size: 10px;
       }
+      #context-usage {
+        color: #adb6a3;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
       #stats {
+        margin-left: auto;
         text-align: right;
         font-variant-numeric: tabular-nums;
         font-size: 10px;
@@ -1411,8 +1420,9 @@
         </div>
       </div>
       <div class="composer-footer">
-        <span class="hint" id="hint">Enter to send · Shift+Enter for a new line</span
-        ><span id="stats" class="stats"></span>
+        <span class="hint" id="hint">Enter to send · Shift+Enter for a new line</span>
+        <output id="context-usage" title="Context used by the last completed reply, including prompt and generated tokens." hidden></output>
+        <span id="stats" class="stats"></span>
       </div>
       <span id="composer-status" class="sr-only" role="status" aria-live="polite"></span>
     </footer>
@@ -1747,6 +1757,7 @@
         modelPollTimer = null,
         healthPollTimer = null;
       let chatSessionId = '',
+        contextUsage = null,
         userScrolledUp = false;
       M.addEventListener(
         'scroll',
@@ -1869,7 +1880,12 @@
             typeof parsed.sessionId === 'string' && parsed.sessionId
               ? parsed.sessionId
               : newChatSessionId();
-          return { messages, input, sessionId };
+          const usage = parsed.contextUsage;
+          const contextUsage =
+            typeof usage?.model === 'string' && Number.isSafeInteger(usage.tokens) && usage.tokens > 0
+              ? { model: usage.model, tokens: usage.tokens }
+              : null;
+          return { messages, input, sessionId, contextUsage };
         } catch (e) {
           return { messages: [], input: '', sessionId: newChatSessionId() };
         }
@@ -1922,6 +1938,7 @@
           chatStateKey,
           JSON.stringify({
             messages: H.slice(-128),
+            contextUsage: contextUsage ?? undefined,
             input: (I.value || '').slice(0, 8000),
             sessionId: chatSessionId || newChatSessionId(),
           }),
@@ -2009,6 +2026,8 @@
 
       function resetConversation(note) {
         H = [];
+        contextUsage = null;
+        updateContextUsage();
         const mtpStatus = document.getElementById('mtp-last-status');
         if (mtpStatus) mtpStatus.textContent = '';
         chatSessionId = newChatSessionId();
@@ -2408,6 +2427,7 @@
           content: stripTrailingArtifacts(stripInlineTransportArtifacts(content)),
           finishReason: choice?.finish_reason || 'stop',
           mtp: normalizeMtpResult(body.mtp),
+          contextTokens: reportedContextTokens(body.usage),
         };
       }
 
@@ -2469,6 +2489,7 @@
       function restoreChatState() {
         let state = readChatState();
         H = state.messages;
+        contextUsage = state.contextUsage ?? null;
         chatSessionId = state.sessionId || newChatSessionId();
         renderConversation();
         I.value = state.input;
@@ -2893,7 +2914,35 @@
         return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       }
 
+      function reportedContextTokens(usage) {
+        const tokens = usage?.total_tokens;
+        return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : null;
+      }
+
+      function updateContextUsage() {
+        const indicator = document.getElementById('context-usage');
+        if (!indicator) return;
+        const model = activeModel();
+        const capacity = model?.context_length;
+        indicator.hidden = !Number.isSafeInteger(capacity) || capacity <= 0;
+        if (indicator.hidden) return;
+
+        const used = !H.length ? 0 : contextUsage?.model === model.id ? contextUsage.tokens : null;
+        const limit = capacity.toLocaleString() + ' tokens';
+        let label = 'Context limit ' + limit;
+        if (used !== null) {
+          const percent = (used / capacity) * 100;
+          const percentage =
+            percent > 0 && percent < 0.1
+              ? '<0.1%'
+              : percent.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%';
+          label = 'Context ' + used.toLocaleString() + ' / ' + limit + ' (' + percentage + ')';
+        }
+        if (indicator.textContent !== label) indicator.textContent = label;
+      }
+
       function updateComposerState() {
+        updateContextUsage();
         const needsModel = modelsReady && !activeModel();
         B.disabled = !isGenerating && (!I.value.trim() || modelActionPending || needsModel);
         const status = document.getElementById('composer-status');
@@ -3889,6 +3938,7 @@
         let requestMessages = [];
         let errorMessage = '';
         let mtpResult = null;
+        let contextTokens = null;
         let displayStopped = false;
         const requestMtpSetting = mtpRequestSetting();
         let sawFinishReason = false;
@@ -3964,6 +4014,7 @@
               if (p === '[DONE]') break stream;
               try {
                 const event = JSON.parse(p);
+                contextTokens = reportedContextTokens(event.usage) ?? contextTokens;
                 const reportedMtp = normalizeMtpResult(event.mtp);
                 if (reportedMtp) mtpResult = reportedMtp;
                 if (event.error) {
@@ -4151,6 +4202,7 @@
             );
             if (recovered.mtp) mtpResult = recovered.mtp;
             if (recovered.content) {
+              contextTokens = recovered.contextTokens;
               raw = raw + (raw.endsWith('\n') ? '' : '\n') + '</think>\n' + recovered.content;
               finalView = normalizeDisplayView(splitDisplayContent(raw, false));
               cleanAnswer = finalView.answer;
@@ -4171,6 +4223,9 @@
         liveReasoningOpen = bbl.querySelector('.reasoning-block')?.open ?? liveReasoningOpen;
         activeController = null;
         stopRequested = false;
+        if (!stopped && !errorMessage && sawFinishReason) {
+          contextUsage = contextTokens === null ? null : { model: selectedModelId, tokens: contextTokens };
+        }
         setGenerating(false);
         if (document.activeElement === I || document.activeElement === B)
           I.focus({ preventScroll: true });
