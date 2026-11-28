@@ -9,6 +9,7 @@ import { STABLE_RELEASE } from '../../lib/docs-release-status';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const compilerVersion = pinnedZigVersion.trim();
+const discordInvite = 'https://discord.gg/QRUgWH2aGV';
 const breadcrumbItems = [{ name: 'Home', href: '/' }, { name: 'ZINC' }];
 const target = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
@@ -63,6 +64,7 @@ const description = 'Run GGUF language models with native HIP / ROCm on AMD RDNA
       <div class="actions">
         <a href="/zinc/docs/getting-started/" class="button primary">Get started <span aria-hidden="true">→</span></a>
         <a href="https://github.com/zolotukhin/zinc" class="button">View on GitHub <span aria-hidden="true">↗</span></a>
+        <a href={discordInvite} class="button">Join Discord <span aria-hidden="true">↗</span></a>
       </div>
       <p class="build-note">One native binary · Zig {compilerVersion} · MIT licensed</p>
     </div>
@@ -193,7 +195,7 @@ bun setup-opencode.mjs run --project ../my-project \\
       <a href="/zinc/docs/openclaw/">Set up OpenClaw <span aria-hidden="true">→</span></a>
       <a href="/zinc/docs/opencode/">Set up OpenCode <span aria-hidden="true">→</span></a>
       <a href="/zinc/docs/development/">Build and contribute <span aria-hidden="true">→</span></a>
-      <a href="https://discord.gg/QRUgWH2aGV">Join the community <span aria-hidden="true">↗</span></a>
+      <a href={discordInvite}>Join Discord <span aria-hidden="true">↗</span></a>
     </nav>
   </section>
 </BaseLayout>
