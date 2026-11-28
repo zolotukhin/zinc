@@ -12,12 +12,48 @@ and the Metal preview also include browser chat.
 [![Zig 0.17.1](https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=white)](.zig-version)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Get started](https://zolotukhin.ai/zinc/docs/getting-started/) ·
+[Try Inkling 2 Mini](#inkling-2-mini-development-build) ·
+[Install stable ZINC](https://zolotukhin.ai/zinc/docs/getting-started/) ·
 [Documentation](https://zolotukhin.ai/zinc/docs/) ·
 [Benchmarks](https://zolotukhin.ai/zinc/benchmarks/) ·
 [Discord](https://discord.gg/QRUgWH2aGV)
 
-## Get running
+## Use it your way
+
+### Inkling 2 Mini development build
+
+Start with **Inkling 2 Mini Q4_0** on the Radeon RX 9070 XT or Radeon AI PRO
+R9700. Both cards were tested at 4,096 tokens on ROCm and Vulkan. ROCm had
+higher decode throughput on both cards. [AMD benchmarks and setup](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
+
+On Linux, use Zig 0.15.2 and the ROCm development libraries. Build the pinned
+checkout and pull Inkling from the managed catalog.
+
+```bash
+git clone --branch fix/qwen-smoke-token-anchor https://github.com/zolotukhin/zinc.git zinc-inkling
+cd zinc-inkling
+git checkout --detach 88360b9fda3c23cd32b799c36dfe347b0d36ac67
+ROCM_PATH=/opt/rocm zig build -Dbackend=rocm -Doptimize=ReleaseFast
+./zig-out/bin/zinc model pull inkling-2-mini-q4-0
+```
+
+**Browser chat** starts the UI and local API together. Open `http://127.0.0.1:9090/`.
+
+```bash
+./zig-out/bin/zinc chat --model-id inkling-2-mini-q4-0 --context 4096 --parallel 1
+```
+
+**One prompt** from the terminal.
+
+```bash
+./zig-out/bin/zinc --model-id inkling-2-mini-q4-0 --context 4096 \
+  --chat --prompt "Explain a ring buffer." -n 256
+```
+
+**An existing app** can connect to `http://127.0.0.1:9090/v1` while the chat
+server is running. [API guide](https://zolotukhin.ai/zinc/docs/api/).
+
+## Install stable Linux
 
 For published archives, runtime requirements and verified installation/rollback,
 see [binary releases](https://zolotukhin.ai/zinc/docs/getting-started/) and
@@ -54,13 +90,10 @@ zinc model pull qwen35-9b-q4k-m
 zinc serve --model-id qwen35-9b-q4k-m -c 16384 --parallel 1
 ```
 
-The example uses Qwen 3.5 9B. Check the
+The stable installer example uses Qwen 3.5 9B. Check the
 [memory requirements](https://zolotukhin.ai/zinc/docs/hardware-requirements/)
 before downloading, or run `zinc model list` to browse the catalog.
 You can also load an existing file with `-m /path/to/model.gguf`.
-
-For **Inkling 2 Mini** on the Radeon RX 9070 XT or Radeon AI PRO R9700, use the
-[Inkling development build and benchmark guide](https://zolotukhin.ai/blog/2026-11-26-inkling-2-mini-amd-rx-9070-xt-radeon-ai-pro-r9700-benchmarks/).
 
 ## Choose your GPU path
 
@@ -84,30 +117,6 @@ zinc --check
 Model coverage and performance vary by backend. The
 [hardware guide](https://zolotukhin.ai/zinc/docs/hardware-requirements/) lists
 validated cards, operating systems, drivers, and current limitations.
-
-## Use it your way
-
-**Browser chat** starts the UI and local API together. Linux HIP and Vulkan
-support switching between installed models and unloading or reloading them.
-See the [browser chat guide](docs/RUNNING_ZINC.md#browser-chat).
-
-```bash
-zinc chat --model-id qwen35-9b-q4k-m
-```
-
-**One prompt** from the terminal:
-
-```bash
-zinc --model-id qwen35-9b-q4k-m --chat --prompt "Explain a ring buffer."
-```
-
-**An existing app** can connect to `http://localhost:9090/v1` while the server
-is running. The [API guide](https://zolotukhin.ai/zinc/docs/api/) has curl and
-SDK examples; [endpoint coverage differs by backend](https://zolotukhin.ai/zinc/docs/api/#backend-coverage).
-
-The managed catalog includes Qwen, Gemma, and other tested model families.
-See [model selection](https://zolotukhin.ai/zinc/docs/getting-started/#models-in-current-work)
-for checkpoints, memory needs, and the exact Muse Glimmer GGUF used in testing.
 
 ## Connect harnesses
 

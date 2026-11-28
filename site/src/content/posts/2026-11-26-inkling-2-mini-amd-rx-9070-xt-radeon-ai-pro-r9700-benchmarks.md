@@ -48,7 +48,7 @@ Inkling mixes sliding attention with full attention. For this checkpoint, the sl
 
 ## RX 9070 XT and R9700 benchmark results
 
-Each cell shows **prefill / decode** in tokens per second. Prefill processes the submitted prompt. Decode emits new tokens. Each value is a median of three runs after one warmup. Both engines ran a reusable server with one sequence on the same card, with an identical Q4_0 checkpoint, a 4,096-token context, and the same chat workloads. The table uses the llama.cpp run paired with Vulkan. The measurement file retains the separately paired ROCm comparison. The baseline is the Vulkan build from the llama.cpp v1.1.0 release tag. The downloadable measurements include response latency, end-to-end throughput, token counts, and run ranges. [llama.cpp v1.1.0 release](https://github.com/ggml-org/llama.cpp/releases/tag/v1.1.0) · [Benchmark data](/blog/inkling-2-mini-amd/benchmark-results.json)
+Each cell shows **prefill / decode** in tokens per second. Prefill processes the submitted prompt. Decode emits new tokens. Each value is a median of three runs after one warmup. Both engines ran a reusable server with one sequence on the same card, with an identical Q4_0 checkpoint, a 4,096-token context, and the same chat workloads. The tables use llama.cpp Vulkan as the common reference for both ZINC backends. The measurement file retains each independently paired Vulkan reference run. The ROCm column therefore measures ZINC ROCm against llama.cpp Vulkan. The baseline is the Vulkan build from the llama.cpp v1.1.0 release tag. The downloadable measurements include response latency, end-to-end throughput, token counts, and run ranges. [llama.cpp v1.1.0 release](https://github.com/ggml-org/llama.cpp/releases/tag/v1.1.0) · [Benchmark data](/blog/inkling-2-mini-amd/benchmark-results.json)
 
 ### Radeon RX 9070 XT, 16 GB
 
@@ -68,7 +68,9 @@ Each cell shows **prefill / decode** in tokens per second. Prefill processes the
 | Incident Context | 336 → 128 | 742.5 / 63.8 | 298.0 / 34.7 | 712.3 / 45.5 |
 | Long Coding Draft | 73 → 256 | 582.9 / 64.3 | 280.6 / 34.9 | 262.4 / 45.7 |
 
-![Grouped chart comparing median quick-chat and extended decode rates for Inkling 2 Mini on the RX 9070 XT and Radeon AI PRO R9700](/blog/inkling-2-mini-amd/decode-throughput.png)
+<figure class="diagram-card diagram-wide">
+  <img src="/blog/inkling-2-mini-amd/decode-throughput.png" width="1890" height="750" loading="lazy" decoding="async" alt="Grouped chart comparing median quick-chat and extended decode rates for Inkling 2 Mini on the RX 9070 XT and Radeon AI PRO R9700" />
+</figure>
 
 Quick Chat makes the difference between prefill and decode easy to see. On the RX 9070 XT, ZINC ROCm processed the 53-token prompt at 698.8 tok/s and decoded at 62.4 tok/s. The baseline managed 153.0 and 50.9 tok/s respectively. Median request latency went from 2.39 s to 1.79 s. On the R9700, the largest prompt in the speed matrix was already processed at 713.7 tok/s by llama.cpp, so ZINC's 742.5 tok/s gave it a much smaller prefill lead. Decode still came in at 63.8 against 46.0 tok/s.
 
